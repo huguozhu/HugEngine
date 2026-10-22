@@ -80,7 +80,7 @@ public:
     /// 注入共享的前帧 HDR 辐射度组件（非拥有）。须在 Initialize 之前调用。
     void SetRadianceHistory(GIRadianceHistory* radiance) { m_Radiance = radiance; }
     // 探针数据缓冲（供 Lighting Pass 绑定，每帧更新后为最新 blend 结果）
-    rhi::IRHIBuffer* GetProbeBuffer() const { return m_ProbeBuffer.get(); }
+    rhi::IRHIBuffer* GetProbeBuffer() const { return m_Device->ResolveBuffer(m_ProbeBuffer); }
 
     /// 每个探针的球面采样数（DDGI.comp 的 SH 投影次数）。
     /// 必须与 DDGI_Trace pass 的采样数一致：光追 march 的射线结果按
@@ -101,7 +101,7 @@ public:
     }
 
     // 探针网格参数 UBO（供 Lighting Pass / RT GI 采样 DDGI 时读取网格参数，替代 shader 硬编码常量）
-    rhi::IRHIBuffer* GetGridUniform() const { return m_GridUniform.get(); }
+    rhi::IRHIBuffer* GetGridUniform() const { return m_Device->ResolveBuffer(m_GridUniform); }
 
     // 探针网格参数
     u32 gridX = 8, gridY = 4, gridZ = 8;
@@ -180,14 +180,14 @@ private:
     bool m_Ready = false;
 
     // Compute Pipeline
-    std::unique_ptr<rhi::IRHIPipelineState> m_PSO;
+    rhi::RHIPipelineStateHandle m_PSO{};   // A-3
     rhi::DescriptorSetLayoutHandle m_Layout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_Set    = rhi::kInvalidSet;
 
     // 探针数据（SSBO：每探针 4×float4 的 SH，当前帧 blend 结果）
-    std::unique_ptr<rhi::IRHIBuffer> m_ProbeBuffer;
+    rhi::RHIBufferHandle m_ProbeBuffer{};   // A-3
     // 上一帧探针历史（SSBO，时间混合源）
-    std::unique_ptr<rhi::IRHIBuffer> m_ProbeHistory;
+    rhi::RHIBufferHandle m_ProbeHistory{};   // A-3
     // 步骤 31：Screen Probe 输入的绑定与逐帧统计
     bool  m_ScreenProbeEnabled = false;
     rhi::IRHIBuffer* m_ScreenProbeBuffer = nullptr;   // 非拥有（Lumen 持有）
@@ -195,7 +195,7 @@ private:
     float4x4 m_ScreenViewProj = float4x4(1.0f);
     u32   m_ScreenCellsX = 0, m_ScreenCellsY = 0, m_ScreenW = 0, m_ScreenH = 0;
     float m_ScreenMaxMatchDistance = 0.0f;
-    std::unique_ptr<rhi::IRHIBuffer> m_StatsBuffer;
+    rhi::RHIBufferHandle m_StatsBuffer{};   // A-3
     void* m_StatsMapped = nullptr;
     u32   m_StatsFrame = 0;
     float m_ProbeRelChange = 0.0f;
@@ -213,11 +213,11 @@ private:
     u32 m_TracedSamples = 0;
 
     // 探针网格参数 Uniform Buffer
-    std::unique_ptr<rhi::IRHIBuffer> m_GridUniform;
+    rhi::RHIBufferHandle m_GridUniform{};   // A-3
 
     // 采样器
-    std::unique_ptr<rhi::IRHISampler> m_PointSampler;    // 点采样（GBuffer 读取）
-    std::unique_ptr<rhi::IRHISampler> m_LinearSampler;   // 线性采样（RSM 等读取）
+    rhi::RHISamplerHandle m_PointSampler{};   // A-3    // 点采样（GBuffer 读取）
+    rhi::RHISamplerHandle m_LinearSampler{};   // A-3   // 线性采样（RSM 等读取）
 
     // 前帧 HDR 辐射度：改为消费共享组件（GIRadianceHistory），不再自有一份纹理与下采样
     // pass——多个 GI 源各拷一份等于每帧多付几次全屏下采样，正是 §3.5 反对的

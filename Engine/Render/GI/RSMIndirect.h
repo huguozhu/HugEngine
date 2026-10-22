@@ -53,10 +53,10 @@ public:
     /// 绘制半分辨率的 RSM 间接光辐照度（调用方负责 Begin/EndOffscreenPass）
     void Render(rhi::IRHICommandList* cmd);
 
-    rhi::IRHITexture* GetOutput()  const { return m_Output.get(); }
-    rhi::IRHISampler* GetSampler() const { return m_LinearSampler.get(); }   // 升采样用线性 clamp
-    u32 GetOutputWidth()  const { return m_Output ? m_Output->GetWidth()  : 0u; }
-    u32 GetOutputHeight() const { return m_Output ? m_Output->GetHeight() : 0u; }
+    rhi::IRHITexture* GetOutput()  const { return m_Device->ResolveTexture(m_Output); }
+    rhi::IRHISampler* GetSampler() const { return m_Device->ResolveSampler(m_LinearSampler); }   // 升采样用线性 clamp
+    u32 GetOutputWidth()  const { return m_Output.IsValid() ? m_Device->ResolveTexture(m_Output)->GetWidth()  : 0u; }
+    u32 GetOutputHeight() const { return m_Output.IsValid() ? m_Device->ResolveTexture(m_Output)->GetHeight() : 0u; }
     bool IsReady() const { return m_Ready; }
 
     /// 半分辨率系数（默认 1/2；任务 30 的半分辨率保真度 A/B 会临时改成 1 再改回）
@@ -77,14 +77,14 @@ private:
     rhi::IRHIDevice* m_Device = nullptr;
     u32 m_Width = 0, m_Height = 0;
 
-    std::unique_ptr<rhi::IRHIPipelineState> m_PSO;
+    rhi::RHIPipelineStateHandle m_PSO{};   // A-3
     rhi::DescriptorSetLayoutHandle m_Layout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_Set    = rhi::kInvalidSet;
 
     std::unique_ptr<rhi::IRHIBuffer>  m_ParamsUBO;
-    std::unique_ptr<rhi::IRHITexture> m_Output;
-    std::unique_ptr<rhi::IRHISampler> m_PointSampler;    // GBuffer 读取
-    std::unique_ptr<rhi::IRHISampler> m_LinearSampler;   // RSM 贴图读取 + 升采样
+    rhi::RHITextureHandle m_Output{};   // A-3
+    rhi::RHISamplerHandle m_PointSampler{};   // A-3    // GBuffer 读取
+    rhi::RHISamplerHandle m_LinearSampler{};   // A-3   // RSM 贴图读取 + 升采样
 
     rhi::IRHITexture* m_Depth    = nullptr;
     rhi::IRHITexture* m_WorldPos = nullptr;

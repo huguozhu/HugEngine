@@ -38,12 +38,12 @@ bool RSMIndirect::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     rhi::SamplerDesc psd;
     psd.minFilter = psd.magFilter = rhi::FilterMode::Nearest;
     psd.addressU  = psd.addressV  = rhi::AddressMode::ClampToEdge;
-    m_PointSampler = device->CreateSampler(psd);
+    m_PointSampler = device->CreateSamplerHandle(psd);
 
     rhi::SamplerDesc lsd;
     lsd.minFilter = lsd.magFilter = rhi::FilterMode::Linear;
     lsd.addressU  = lsd.addressV  = rhi::AddressMode::ClampToEdge;
-    m_LinearSampler = device->CreateSampler(lsd);
+    m_LinearSampler = device->CreateSamplerHandle(lsd);
 
     // ---- 管线：全屏三角 → 半分辨率 RSM 间接光 ----
     rhi::ShaderBytecode vs, fs;
@@ -65,7 +65,7 @@ bool RSMIndirect::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     psoDesc.colorFormats[0]      = rhi::Format::RGBA16_FLOAT;
     psoDesc.descriptorSetLayouts = {m_Layout};
     psoDesc.debugName            = "RSM_Indirect";
-    m_PSO = device->CreatePipelineState(psoDesc);
+    m_PSO = device->CreatePipelineStateHandle(psoDesc);
 
     CreateOutput(width, height);
     m_Ready = true;
@@ -75,11 +75,11 @@ bool RSMIndirect::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
 }
 
 void RSMIndirect::Shutdown() {
-    m_PSO.reset();
-    m_Output.reset();
+    m_Device->DestroyPipelineStateHandle(m_PSO); m_PSO = {};
+    m_Device->DestroyTextureHandle(m_Output); m_Output = {};
     m_ParamsUBO.reset();
-    m_PointSampler.reset();
-    m_LinearSampler.reset();
+    m_Device->DestroySamplerHandle(m_PointSampler); m_PointSampler = {};
+    m_Device->DestroySamplerHandle(m_LinearSampler); m_LinearSampler = {};
     if (m_Device && m_Layout != rhi::kInvalidLayout) {
         m_Device->DestroyDescriptorSetLayout(m_Layout);
         m_Layout = rhi::kInvalidLayout;
@@ -106,7 +106,7 @@ void RSMIndirect::CreateOutput(u32 width, u32 height) {
     td.mipLevels   = 1;
     td.arrayLayers = 1;
     td.usage       = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::RenderTarget;
-    m_Output = m_Device->CreateTexture(td);
+    m_Output = m_Device->CreateTextureHandle(td);
 }
 
 void RSMIndirect::SetInputs(rhi::IRHITexture* depth, rhi::IRHITexture* worldPos, rhi::IRHITexture* normal) {
@@ -115,9 +115,9 @@ void RSMIndirect::SetInputs(rhi::IRHITexture* depth, rhi::IRHITexture* worldPos,
     m_Normal   = normal;
     // 纹理每帧可能变化，逐个重绑（代价是一条描述符写，与 SSGI 的做法一致）
     if (m_Device) {
-        if (m_Depth)    m_Device->UpdateDescriptorSet(m_Set, kBindDepth,    rhi::DescriptorType::CombinedImageSampler, m_Depth,    m_PointSampler.get());
-        if (m_WorldPos) m_Device->UpdateDescriptorSet(m_Set, kBindWorldPos, rhi::DescriptorType::CombinedImageSampler, m_WorldPos, m_PointSampler.get());
-        if (m_Normal)   m_Device->UpdateDescriptorSet(m_Set, kBindNormal,   rhi::DescriptorType::CombinedImageSampler, m_Normal,   m_PointSampler.get());
+        if (m_Depth)    m_Device->UpdateDescriptorSet(m_Set, kBindDepth,    rhi::DescriptorType::CombinedImageSampler, m_Depth,    m_Device->ResolveSampler(m_PointSampler));
+        if (m_WorldPos) m_Device->UpdateDescriptorSet(m_Set, kBindWorldPos, rhi::DescriptorType::CombinedImageSampler, m_WorldPos, m_Device->ResolveSampler(m_PointSampler));
+        if (m_Normal)   m_Device->UpdateDescriptorSet(m_Set, kBindNormal,   rhi::DescriptorType::CombinedImageSampler, m_Normal,   m_Device->ResolveSampler(m_PointSampler));
     }
 }
 
@@ -129,9 +129,9 @@ void RSMIndirect::SetRSM(rhi::IRHITexture* positionMap, rhi::IRHITexture* normal
     m_RSMNrm = normalMap;
     m_RSMRad = radianceMap;
     if (!m_Device) return;
-    if (m_RSMPos) m_Device->UpdateDescriptorSet(m_Set, kBindRSMPos,   rhi::DescriptorType::CombinedImageSampler, m_RSMPos, m_LinearSampler.get());
-    if (m_RSMNrm) m_Device->UpdateDescriptorSet(m_Set, kBindRSMNrm,   rhi::DescriptorType::CombinedImageSampler, m_RSMNrm, m_LinearSampler.get());
-    if (m_RSMRad) m_Device->UpdateDescriptorSet(m_Set, kBindRadiance, rhi::DescriptorType::CombinedImageSampler, m_RSMRad, m_LinearSampler.get());
+    if (m_RSMPos) m_Device->UpdateDescriptorSet(m_Set, kBindRSMPos,   rhi::DescriptorType::CombinedImageSampler, m_RSMPos, m_Device->ResolveSampler(m_LinearSampler));
+    if (m_RSMNrm) m_Device->UpdateDescriptorSet(m_Set, kBindRSMNrm,   rhi::DescriptorType::CombinedImageSampler, m_RSMNrm, m_Device->ResolveSampler(m_LinearSampler));
+    if (m_RSMRad) m_Device->UpdateDescriptorSet(m_Set, kBindRadiance, rhi::DescriptorType::CombinedImageSampler, m_RSMRad, m_Device->ResolveSampler(m_LinearSampler));
 
     struct alignas(16) {
         float4x4 lightViewProj;
@@ -147,19 +147,19 @@ void RSMIndirect::SetRSM(rhi::IRHITexture* positionMap, rhi::IRHITexture* normal
 }
 
 void RSMIndirect::PreBind(rhi::IRHICommandList* cmd) {
-    if (!m_Ready || !m_PSO || !m_Output) return;
+    if (!m_Ready || !m_PSO.IsValid() || !m_Output.IsValid()) return;
     // 见头文件：绑管线必须早于 BeginOffscreenPass
-    cmd->SetPipeline(m_PSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
     // 视口用输出纹理实际尺寸（半分辨率），与渲染目标一致
-    const u32 ow = m_Output->GetWidth();
-    const u32 oh = m_Output->GetHeight();
+    const u32 ow = m_Device->ResolveTexture(m_Output)->GetWidth();
+    const u32 oh = m_Device->ResolveTexture(m_Output)->GetHeight();
     cmd->SetViewport({0, (float)oh, (float)ow, -(float)oh, 0, 1});
     cmd->SetScissor({0, 0, ow, oh});
 }
 
 void RSMIndirect::Render(rhi::IRHICommandList* cmd) {
-    if (!m_Ready || !m_PSO || !m_Output) return;
+    if (!m_Ready || !m_PSO.IsValid() || !m_Output.IsValid()) return;
     if (!m_Depth || !m_WorldPos || !m_Normal || !m_RSMPos || !m_RSMNrm || !m_RSMRad) return;
     cmd->Draw(3);   // 全屏三角（顶点着色器覆盖整个视口 ⇒ 每个像素都被写）
 }

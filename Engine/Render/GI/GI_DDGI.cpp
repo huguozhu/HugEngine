@@ -45,8 +45,8 @@ bool GI_DDGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     rhi::BufferDesc probeDesc;
     probeDesc.size  = bufferSize;
     probeDesc.usage = rhi::BufferUsage::Storage;
-    m_ProbeBuffer  = device->CreateBuffer(probeDesc);
-    m_ProbeHistory = device->CreateBuffer(probeDesc);
+    m_ProbeBuffer  = device->CreateBufferHandle(probeDesc);
+    m_ProbeHistory = device->CreateBufferHandle(probeDesc);
     m_ProbeBufferCount = probeCount;   // 网格拟合改变探针数时按此判断要不要重建
 
     // ---- 探针网格参数 Uniform Buffer（CPU 可写，每帧更新） ----
@@ -54,7 +54,7 @@ bool GI_DDGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     uniformDesc.size      = sizeof(ProbeGridUniform);
     uniformDesc.usage     = rhi::BufferUsage::Uniform;
     uniformDesc.cpuAccess = true;  // 每帧 Map/Unmap 更新
-    m_GridUniform = device->CreateBuffer(uniformDesc);
+    m_GridUniform = device->CreateBufferHandle(uniformDesc);
 
     // 一次性写入默认网格参数，确保 DDGI 未启用时 Lighting Pass 采样到的 UBO 内容有效
     // （避免 gridSize.w=0 导致 SampleDDGI 中 (worldPos-origin)/cellSize 除零）
@@ -65,20 +65,20 @@ bool GI_DDGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         init.cameraPos  = float4(0, 0, 0, 0);
         init.params     = float4(1.0f, 32.0f, 0.0f, 0.0f);
         init.viewProj   = float4x4(1.0f);
-        void* mapped = m_GridUniform->Map();
-        if (mapped) { memcpy(mapped, &init, sizeof(ProbeGridUniform)); m_GridUniform->Unmap(); }
+        void* mapped = m_Device->ResolveBuffer(m_GridUniform)->Map();
+        if (mapped) { memcpy(mapped, &init, sizeof(ProbeGridUniform)); m_Device->ResolveBuffer(m_GridUniform)->Unmap(); }
     }
 
     // ---- 采样器 ----
     rhi::SamplerDesc psd;
     psd.minFilter  = psd.magFilter = rhi::FilterMode::Nearest;
     psd.addressU   = psd.addressV   = rhi::AddressMode::ClampToEdge;
-    m_PointSampler = device->CreateSampler(psd);
+    m_PointSampler = device->CreateSamplerHandle(psd);
 
     rhi::SamplerDesc lsd;
     lsd.minFilter  = lsd.magFilter = rhi::FilterMode::Linear;
     lsd.addressU   = lsd.addressV   = rhi::AddressMode::ClampToEdge;
-    m_LinearSampler = device->CreateSampler(lsd);
+    m_LinearSampler = device->CreateSamplerHandle(lsd);
 
     // ---- 前帧 HDR 纹理与下采样 PSO 已抽到共享组件 GIRadianceHistory ----
     // （原先此处创建 m_PrevHDR + m_DownsamplePSO；多个 GI 源共用一份，避免重复下采样）
@@ -117,11 +117,11 @@ bool GI_DDGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     {
         rhi::BufferDesc sbd;
         sbd.size = sizeof(u32) * 8u; sbd.usage = rhi::BufferUsage::Storage; sbd.cpuAccess = true;
-        m_StatsBuffer = device->CreateBuffer(sbd);
-        m_StatsMapped = m_StatsBuffer ? m_StatsBuffer->Map() : nullptr;
-        if (m_StatsBuffer) {
+        m_StatsBuffer = device->CreateBufferHandle(sbd);
+        m_StatsMapped = m_StatsBuffer.IsValid() ? m_Device->ResolveBuffer(m_StatsBuffer)->Map() : nullptr;
+        if (m_StatsBuffer.IsValid()) {
             device->UpdateDescriptorSet(m_Set, kDDGIBindStats, rhi::DescriptorType::StorageBuffer,
-                                        m_StatsBuffer.get());
+                                        m_Device->ResolveBuffer(m_StatsBuffer));
         }
     }
 
@@ -129,7 +129,7 @@ bool GI_DDGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     BindRadianceHistory();
 
     // 预绑定不变的 binding：uniform buffer（每帧只需 Map/Unmap 更新内容）
-    device->UpdateDescriptorSet(m_Set, kDDGIBindGridParams, rhi::DescriptorType::UniformBuffer, m_GridUniform.get());
+    device->UpdateDescriptorSet(m_Set, kDDGIBindGridParams, rhi::DescriptorType::UniformBuffer, m_Device->ResolveBuffer(m_GridUniform));
 
     // ---- Compute PSO ----
     rhi::ShaderBytecode cs;
@@ -142,9 +142,9 @@ bool GI_DDGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     psoDesc.computeShader        = &cs;
     psoDesc.descriptorSetLayouts = {m_Layout};
     psoDesc.debugName            = "DDGI";
-    m_PSO = device->CreatePipelineState(psoDesc);
+    m_PSO = device->CreatePipelineStateHandle(psoDesc);
 
-    if (!m_PSO) {
+    if (!m_PSO.IsValid()) {
         HE_CORE_ERROR("GI_DDGI: Compute PSO creation failed");
         return false;
     }
@@ -160,12 +160,12 @@ void GI_DDGI::Shutdown() {
     if (m_Device && m_Layout != rhi::kInvalidLayout) {
         m_Device->DestroyDescriptorSetLayout(m_Layout);
     }
-    m_PSO.reset();
-    m_ProbeBuffer.reset();
-    m_ProbeHistory.reset();
-    m_GridUniform.reset();
-    m_PointSampler.reset();
-    m_LinearSampler.reset();
+    m_Device->DestroyPipelineStateHandle(m_PSO); m_PSO = {};
+    m_Device->DestroyBufferHandle(m_ProbeBuffer); m_ProbeBuffer = {};
+    m_Device->DestroyBufferHandle(m_ProbeHistory); m_ProbeHistory = {};
+    m_Device->DestroyBufferHandle(m_GridUniform); m_GridUniform = {};
+    m_Device->DestroySamplerHandle(m_PointSampler); m_PointSampler = {};
+    m_Device->DestroySamplerHandle(m_LinearSampler); m_LinearSampler = {};
     m_Radiance = nullptr;              // 非拥有，仅清引用
     m_RadianceGeneration = 0;
     m_Device = nullptr;
@@ -186,15 +186,15 @@ void GI_DDGI::SetGBufferInputs(rhi::IRHITexture* depth, rhi::IRHITexture* normal
     // 更新描述符集中 GBuffer 绑定（每帧纹理可能变化）
     if (m_Albedo && m_Device) {
         m_Device->UpdateDescriptorSet(m_Set, kDDGIBindAlbedo, rhi::DescriptorType::CombinedImageSampler,
-            m_Albedo, m_PointSampler.get());
+            m_Albedo, m_Device->ResolveSampler(m_PointSampler));
     }
     if (m_Normal && m_Device) {
         m_Device->UpdateDescriptorSet(m_Set, kDDGIBindNormal, rhi::DescriptorType::CombinedImageSampler,
-            m_Normal, m_PointSampler.get());
+            m_Normal, m_Device->ResolveSampler(m_PointSampler));
     }
     if (m_Depth && m_Device) {
         m_Device->UpdateDescriptorSet(m_Set, kDDGIBindDepth, rhi::DescriptorType::CombinedImageSampler,
-            m_Depth, m_PointSampler.get());
+            m_Depth, m_Device->ResolveSampler(m_PointSampler));
     }
 }
 
@@ -232,8 +232,8 @@ void GI_DDGI::Render(rhi::IRHICommandList* cmd) {
         rhi::BufferDesc probeDesc;
         probeDesc.size  = (u64)probeCount * kFloats4PerProbe * sizeof(float4);
         probeDesc.usage = rhi::BufferUsage::Storage;
-        m_ProbeBuffer  = m_Device->CreateBuffer(probeDesc);
-        m_ProbeHistory = m_Device->CreateBuffer(probeDesc);
+        m_ProbeBuffer  = m_Device->CreateBufferHandle(probeDesc);
+        m_ProbeHistory = m_Device->CreateBufferHandle(probeDesc);
         m_ProbeBufferCount = probeCount;
         m_HistoryValid = false;   // 新缓冲是未初始化显存：本帧必须按"无历史"更新（见成员注释）
         HE_CORE_INFO("DDGI 探针缓冲已按新网格重建：{} 个探针", probeCount);
@@ -262,8 +262,8 @@ void GI_DDGI::Render(rhi::IRHICommandList* cmd) {
     static const u32 kNumSamples = kSamplesPerProbe;
 
     // 更新 descriptor set：绑定当前输出缓冲和历史缓冲（每帧因 swap 而变化）
-    m_Device->UpdateDescriptorSet(m_Set, kDDGIBindProbes, rhi::DescriptorType::StorageBuffer, m_ProbeBuffer.get());
-    m_Device->UpdateDescriptorSet(m_Set, kDDGIBindHistory, rhi::DescriptorType::StorageBuffer, m_ProbeHistory.get());
+    m_Device->UpdateDescriptorSet(m_Set, kDDGIBindProbes, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_ProbeBuffer));
+    m_Device->UpdateDescriptorSet(m_Set, kDDGIBindHistory, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_ProbeHistory));
     // 光追 march 的射线辐射度（任务 17）：由帧图在本帧的 DDGI_Trace pass 之后注入；
     // 未注入时保持上一次绑定，但 u_Flags.w=0 ⇒ 着色器根本不采样它（与 §9.2-T 同一约定：
     // "没用到的绑定"不会读，只是不能让"用了却没绑"发生）。
@@ -301,14 +301,14 @@ void GI_DDGI::Render(rhi::IRHICommandList* cmd) {
                                        kScreenProbeSymmetricScale, 0.0f);
     ++updatePhase;
 
-    void* mapped = m_GridUniform->Map();
+    void* mapped = m_Device->ResolveBuffer(m_GridUniform)->Map();
     if (mapped) {
         memcpy(mapped, &uniforms, sizeof(ProbeGridUniform));
-        m_GridUniform->Unmap();
+        m_Device->ResolveBuffer(m_GridUniform)->Unmap();
     }
 
     // ---- Compute Dispatch ----
-    cmd->SetPipeline(m_PSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
     // Dispatch 调试 marker（RenderDoc 定位用）
     char label[64];
@@ -317,7 +317,7 @@ void GI_DDGI::Render(rhi::IRHICommandList* cmd) {
     cmd->Dispatch(DispatchGroupCount(probeCount), 1, 1);
 
     // 交换当前帧与历史帧缓冲（下一帧用本次结果作为历史）
-    m_ProbeBuffer.swap(m_ProbeHistory);
+    std::swap(m_ProbeBuffer, m_ProbeHistory);   // A-3：句柄互换
     m_HistoryValid = true;
 
     // 全局 Barrier：确保 Compute Shader 所有 UAV 写入完成后，后续 Fragment Shader 可读取
@@ -371,9 +371,9 @@ void GI_DDGI::SetRSM(rhi::IRHITexture* pos, rhi::IRHITexture* radiance, const fl
     m_RSMLightViewProj = lightViewProj;
     if (m_Device && pos && radiance) {
         m_Device->UpdateDescriptorSet(m_Set, kDDGIBindRSMPosition, rhi::DescriptorType::CombinedImageSampler,
-            pos, m_LinearSampler.get());
+            pos, m_Device->ResolveSampler(m_LinearSampler));
         m_Device->UpdateDescriptorSet(m_Set, kDDGIBindRSMRadiance, rhi::DescriptorType::CombinedImageSampler,
-            radiance, m_LinearSampler.get());
+            radiance, m_Device->ResolveSampler(m_LinearSampler));
     }
 }
 
