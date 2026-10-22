@@ -101,8 +101,8 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         d.size      = sizeof(NaniteFakeCluster) * kNaniteMaxFakeClusters;
         d.usage     = rhi::BufferUsage::Storage;
         d.cpuAccess = true;   // CPU 每帧上传假簇
-        m_FakeClusterBuf = m_Device->CreateBuffer(d);
-        if (!m_FakeClusterBuf) { HE_CORE_ERROR("NaniteCull: 假簇输入缓冲创建失败"); return false; }
+        m_FakeClusterBuf = m_Device->CreateBufferHandle(d);   // A-3
+        if (!m_FakeClusterBuf.IsValid()) { HE_CORE_ERROR("NaniteCull: 假簇输入缓冲创建失败"); return false; }
     }
     {
         rhi::BufferDesc d;
@@ -110,8 +110,8 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         // Indirect：vkCmdDrawIndexedIndirectCount 要求命令缓冲带 INDIRECT_BUFFER usage
         d.usage     = rhi::BufferUsage::Storage | rhi::BufferUsage::Indirect;
         d.cpuAccess = true;   // 每帧填哨兵 + dump 帧读回
-        m_IndirectCmdBuf = m_Device->CreateBuffer(d);
-        if (!m_IndirectCmdBuf) { HE_CORE_ERROR("NaniteCull: 间接命令缓冲创建失败"); return false; }
+        m_IndirectCmdBuf = m_Device->CreateBufferHandle(d);   // A-3
+        if (!m_IndirectCmdBuf.IsValid()) { HE_CORE_ERROR("NaniteCull: 间接命令缓冲创建失败"); return false; }
     }
     {
         rhi::BufferDesc d;
@@ -119,16 +119,16 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         // 计数缓冲同时是 `DrawIndexedIndirectCount` 的 countBuffer ⇒ 必须带 INDIRECT usage
         d.usage     = rhi::BufferUsage::Storage | rhi::BufferUsage::Indirect;
         d.cpuAccess = true;   // 每帧清零 + dump 帧读回
-        m_CountBuf = m_Device->CreateBuffer(d);
-        if (!m_CountBuf) { HE_CORE_ERROR("NaniteCull: 计数缓冲创建失败"); return false; }
+        m_CountBuf = m_Device->CreateBufferHandle(d);   // A-3
+        if (!m_CountBuf.IsValid()) { HE_CORE_ERROR("NaniteCull: 计数缓冲创建失败"); return false; }
     }
     {
         rhi::BufferDesc d;
         d.size      = sizeof(u32);
         d.usage     = rhi::BufferUsage::Storage;
         d.cpuAccess = true;   // 每帧清零 + dump 帧读回
-        m_RasterCountBuf = m_Device->CreateBuffer(d);
-        if (!m_RasterCountBuf) { HE_CORE_ERROR("NaniteCull: 光栅化簇计数缓冲创建失败"); return false; }
+        m_RasterCountBuf = m_Device->CreateBufferHandle(d);   // A-3
+        if (!m_RasterCountBuf.IsValid()) { HE_CORE_ERROR("NaniteCull: 光栅化簇计数缓冲创建失败"); return false; }
     }
 
     // ── 1b. 【任务 13】实例剔除的四个自持缓冲（与任务 3 的四条完全独立）──
@@ -137,24 +137,24 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         d.size      = sizeof(NaniteInstanceGpuObject) * kNaniteMaxTestInstances;
         d.usage     = rhi::BufferUsage::Storage;
         d.cpuAccess = true;   // CPU 每帧上传合成实例表
-        m_InstanceBuf = m_Device->CreateBuffer(d);
-        if (!m_InstanceBuf) { HE_CORE_ERROR("NaniteCull: 实例表缓冲创建失败"); return false; }
+        m_InstanceBuf = m_Device->CreateBufferHandle(d);   // A-3
+        if (!m_InstanceBuf.IsValid()) { HE_CORE_ERROR("NaniteCull: 实例表缓冲创建失败"); return false; }
     }
     {
         rhi::BufferDesc d;
         d.size      = sizeof(NaniteInstanceSphere) * kNaniteMaxTestInstances;
         d.usage     = rhi::BufferUsage::Storage;
         d.cpuAccess = true;   // CPU 每帧上传包围球
-        m_InstanceSphereBuf = m_Device->CreateBuffer(d);
-        if (!m_InstanceSphereBuf) { HE_CORE_ERROR("NaniteCull: 包围球缓冲创建失败"); return false; }
+        m_InstanceSphereBuf = m_Device->CreateBufferHandle(d);   // A-3
+        if (!m_InstanceSphereBuf.IsValid()) { HE_CORE_ERROR("NaniteCull: 包围球缓冲创建失败"); return false; }
     }
     {
         rhi::BufferDesc d;
         d.size      = sizeof(u32) * kNaniteMaxTestInstances;
         d.usage     = rhi::BufferUsage::Storage;
         d.cpuAccess = true;   // 启动时填哨兵 + dump 帧读回可见列表（每帧不再重置，见 ResetInstanceCullBuffers）
-        m_VisibleInstanceBuf = m_Device->CreateBuffer(d);
-        if (!m_VisibleInstanceBuf) { HE_CORE_ERROR("NaniteCull: 可见实例列表创建失败"); return false; }
+        m_VisibleInstanceBuf = m_Device->CreateBufferHandle(d);   // A-3
+        if (!m_VisibleInstanceBuf.IsValid()) { HE_CORE_ERROR("NaniteCull: 可见实例列表创建失败"); return false; }
     }
     {
         rhi::BufferDesc d;
@@ -163,8 +163,8 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         // 说明：`ToVkBufferUsage` 对**所有**缓冲都硬编码了 TRANSFER_DST，这里显式写出只为表达意图。
         d.usage     = rhi::BufferUsage::Storage | rhi::BufferUsage::TransferDst;
         d.cpuAccess = true;   // 启动时写 0 + dump 帧读回可见计数
-        m_VisibleInstanceCountBuf = m_Device->CreateBuffer(d);
-        if (!m_VisibleInstanceCountBuf) { HE_CORE_ERROR("NaniteCull: 可见实例计数缓冲创建失败"); return false; }
+        m_VisibleInstanceCountBuf = m_Device->CreateBufferHandle(d);   // A-3
+        if (!m_VisibleInstanceCountBuf.IsValid()) { HE_CORE_ERROR("NaniteCull: 可见实例计数缓冲创建失败"); return false; }
     }
     {
         // 【任务 15】可见实例掩码（Phase 1 → Phase 2 的接线；每线程写 0/1，**不需要清零**）
@@ -195,9 +195,9 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     };
     m_Layout = m_Device->CreateDescriptorSetLayout(layout);
     m_Set    = m_Device->AllocateDescriptorSet(m_Layout);
-    m_Device->UpdateDescriptorSet(m_Set, 0, rhi::DescriptorType::StorageBuffer, m_FakeClusterBuf.get());
-    m_Device->UpdateDescriptorSet(m_Set, 1, rhi::DescriptorType::StorageBuffer, m_IndirectCmdBuf.get());
-    m_Device->UpdateDescriptorSet(m_Set, 2, rhi::DescriptorType::StorageBuffer, m_CountBuf.get());
+    m_Device->UpdateDescriptorSet(m_Set, 0, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_FakeClusterBuf));
+    m_Device->UpdateDescriptorSet(m_Set, 1, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_IndirectCmdBuf));
+    m_Device->UpdateDescriptorSet(m_Set, 2, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_CountBuf));
 
     // ── 3. compute PSO ──
     m_CS.stage      = rhi::ShaderStage::Compute;
@@ -230,10 +230,10 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         };
         m_InstanceCullLayout = m_Device->CreateDescriptorSetLayout(cullLayout);
         m_InstanceCullSet    = m_Device->AllocateDescriptorSet(m_InstanceCullLayout);
-        m_Device->UpdateDescriptorSet(m_InstanceCullSet, 0, rhi::DescriptorType::StorageBuffer, m_InstanceBuf.get());
-        m_Device->UpdateDescriptorSet(m_InstanceCullSet, 1, rhi::DescriptorType::StorageBuffer, m_InstanceSphereBuf.get());
-        m_Device->UpdateDescriptorSet(m_InstanceCullSet, 2, rhi::DescriptorType::StorageBuffer, m_VisibleInstanceBuf.get());
-        m_Device->UpdateDescriptorSet(m_InstanceCullSet, 3, rhi::DescriptorType::StorageBuffer, m_VisibleInstanceCountBuf.get());
+        m_Device->UpdateDescriptorSet(m_InstanceCullSet, 0, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_InstanceBuf));
+        m_Device->UpdateDescriptorSet(m_InstanceCullSet, 1, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_InstanceSphereBuf));
+        m_Device->UpdateDescriptorSet(m_InstanceCullSet, 2, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_VisibleInstanceBuf));
+        m_Device->UpdateDescriptorSet(m_InstanceCullSet, 3, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_VisibleInstanceCountBuf));
         m_Device->UpdateDescriptorSet(m_InstanceCullSet, 4, rhi::DescriptorType::StorageBuffer, m_VisibleMaskBuf.get());
 
         m_InstanceCullCS.stage      = rhi::ShaderStage::Compute;
@@ -384,7 +384,7 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         m_Device->UpdateDescriptorSet(m_BVHSet, 0, rhi::DescriptorType::StorageBuffer, m_BVHNodeBuf.get());
         m_Device->UpdateDescriptorSet(m_BVHSet, 1, rhi::DescriptorType::StorageBuffer, m_BVHLeafBuf.get());
         m_Device->UpdateDescriptorSet(m_BVHSet, 2, rhi::DescriptorType::StorageBuffer, m_BVHSphereBuf.get());
-        m_Device->UpdateDescriptorSet(m_BVHSet, 3, rhi::DescriptorType::StorageBuffer, m_InstanceBuf.get());
+        m_Device->UpdateDescriptorSet(m_BVHSet, 3, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_InstanceBuf));
         m_Device->UpdateDescriptorSet(m_BVHSet, 4, rhi::DescriptorType::StorageBuffer, m_VisibleClusterBuf.get());
         m_Device->UpdateDescriptorSet(m_BVHSet, 5, rhi::DescriptorType::StorageBuffer, m_VisibleClusterCountBuf.get());
         m_Device->UpdateDescriptorSet(m_BVHSet, 6, rhi::DescriptorType::StorageBuffer, m_VisibleMaskBuf.get());
@@ -534,16 +534,16 @@ void NaniteCull::Shutdown() {
     if (m_Device && m_HiZBuildLayout != rhi::kInvalidLayout)
         m_Device->DestroyDescriptorSetLayout(m_HiZBuildLayout);
 
-    m_FakeClusterBuf.reset();
-    m_IndirectCmdBuf.reset();
-    m_CountBuf.reset();
-    m_RasterCountBuf.reset();
+    m_Device->DestroyBufferHandle(m_FakeClusterBuf); m_FakeClusterBuf = {};
+    m_Device->DestroyBufferHandle(m_IndirectCmdBuf); m_IndirectCmdBuf = {};
+    m_Device->DestroyBufferHandle(m_CountBuf); m_CountBuf = {};
+    m_Device->DestroyBufferHandle(m_RasterCountBuf); m_RasterCountBuf = {};
 
     // 【任务 13】实例剔除资源一并释放
-    m_InstanceBuf.reset();
-    m_InstanceSphereBuf.reset();
-    m_VisibleInstanceBuf.reset();
-    m_VisibleInstanceCountBuf.reset();
+    m_Device->DestroyBufferHandle(m_InstanceBuf); m_InstanceBuf = {};
+    m_Device->DestroyBufferHandle(m_InstanceSphereBuf); m_InstanceSphereBuf = {};
+    m_Device->DestroyBufferHandle(m_VisibleInstanceBuf); m_VisibleInstanceBuf = {};
+    m_Device->DestroyBufferHandle(m_VisibleInstanceCountBuf); m_VisibleInstanceCountBuf = {};
     m_VisibleMaskBuf.reset();
     m_TestInstances.clear();
     m_TestSpheres.clear();
@@ -617,24 +617,24 @@ void NaniteCull::ResetFrameBuffers() {
     // 两帧原子累加叠加（任务 13 实测恰为 2 倍）。这里保留主机写只是因为"启动时还没有任何已提交的
     // GPU 工作"，主机写是安全的。
     // 计数清零：GPU 的 InterlockedAdd 从 0 开始，最终值 = 实际写入的命令条数
-    if (void* p = m_CountBuf ? m_CountBuf->Map() : nullptr) {
+    if (void* p = m_CountBuf.IsValid() ? m_Device->ResolveBuffer(m_CountBuf)->Map() : nullptr) {
         *static_cast<u32*>(p) = 0u;
-        m_CountBuf->Unmap();
+        if (auto* ub = m_Device->ResolveBuffer(m_CountBuf)) ub->Unmap();
     }
     // 光栅化簇计数清零（绘制端每帧重新累加）
-    if (void* p = m_RasterCountBuf ? m_RasterCountBuf->Map() : nullptr) {
+    if (void* p = m_RasterCountBuf.IsValid() ? m_Device->ResolveBuffer(m_RasterCountBuf)->Map() : nullptr) {
         *static_cast<u32*>(p) = 0u;
-        m_RasterCountBuf->Unmap();
+        if (auto* ub = m_Device->ResolveBuffer(m_RasterCountBuf)) ub->Unmap();
     }
     // 间接命令缓冲填哨兵：读回时"非哨兵且字段合法"的条目数即 GPU 真正写过的命令数
-    if (void* p = m_IndirectCmdBuf ? m_IndirectCmdBuf->Map() : nullptr) {
+    if (void* p = m_IndirectCmdBuf.IsValid() ? m_Device->ResolveBuffer(m_IndirectCmdBuf)->Map() : nullptr) {
         std::memset(p, 0xFF, sizeof(NaniteIndirectCommand) * kNaniteMaxFakeClusters);
-        m_IndirectCmdBuf->Unmap();
+        if (auto* ub = m_Device->ResolveBuffer(m_IndirectCmdBuf)) ub->Unmap();
     }
 }
 
 void NaniteCull::UploadFakeClusters() {
-    void* p = m_FakeClusterBuf ? m_FakeClusterBuf->Map() : nullptr;
+    void* p = m_FakeClusterBuf.IsValid() ? m_Device->ResolveBuffer(m_FakeClusterBuf)->Map() : nullptr;
     if (!p) return;
     auto* clusters = static_cast<NaniteFakeCluster*>(p);
     for (u32 i = 0; i < m_FakeClusterCount; ++i) {
@@ -643,7 +643,7 @@ void NaniteCull::UploadFakeClusters() {
         clusters[i].triangleCount = 1u;     // 每簇 1 个三角形
         clusters[i]._pad          = 0u;
     }
-    m_FakeClusterBuf->Unmap();
+    if (auto* ub = m_Device->ResolveBuffer(m_FakeClusterBuf)) ub->Unmap();
 }
 
 void NaniteCull::RecordCullPass(rhi::IRHICommandList* cmd) {
@@ -662,11 +662,11 @@ void NaniteCull::RecordCullPass(rhi::IRHICommandList* cmd) {
     if (!cmd || !m_ClearZeroBuf) return;   // 防御：Initialize 未成功时不发拷贝/屏障
 
     // ① 三个每帧重置（全部在命令缓冲内；源缓冲在 Initialize 里写好 0 / 0xFF）
-    cmd->CopyBuffer(m_ClearZeroBuf.get(), m_CountBuf.get(),
+    cmd->CopyBuffer(m_ClearZeroBuf.get(), m_Device->ResolveBuffer(m_CountBuf),
                     sizeof(u32), kNaniteZeroSlotFakeCount, 0u);
-    cmd->CopyBuffer(m_ClearZeroBuf.get(), m_RasterCountBuf.get(),
+    cmd->CopyBuffer(m_ClearZeroBuf.get(), m_Device->ResolveBuffer(m_RasterCountBuf),
                     sizeof(u32), kNaniteZeroSlotFakeRaster, 0u);
-    cmd->CopyBuffer(m_ClearZeroBuf.get(), m_IndirectCmdBuf.get(),
+    cmd->CopyBuffer(m_ClearZeroBuf.get(), m_Device->ResolveBuffer(m_IndirectCmdBuf),
                     kNaniteIndirectSentinelBytes,
                     kNaniteZeroSourceBytes,   // 0xFF 段紧跟在 0 段之后
                     0u);
@@ -828,17 +828,17 @@ void NaniteCull::ResetInstanceCullBuffers() {
     // 【只在 `Initialize` 调一次：这是**启动时的初值**，不是每帧的清零】
     // 每帧的清零必须走命令缓冲（见 `RecordInstanceCullPass` 里的 4B 拷贝），原因见那里的注释。
     // 可见计数清零：GPU 的 InterlockedAdd 从 0 开始，最终值 = 实际写入的可见实例数
-    if (void* p = m_VisibleInstanceCountBuf ? m_VisibleInstanceCountBuf->Map() : nullptr) {
+    if (void* p = m_VisibleInstanceCountBuf.IsValid() ? m_Device->ResolveBuffer(m_VisibleInstanceCountBuf)->Map() : nullptr) {
         *static_cast<u32*>(p) = 0u;
-        m_VisibleInstanceCountBuf->Unmap();
+        if (auto* ub = m_Device->ResolveBuffer(m_VisibleInstanceCountBuf)) ub->Unmap();
     }
     // 可见列表填哨兵：让"未写过的槽位"在调试时一眼可辨。
     // 【注意】每帧**不再**重置列表：读回只取 `[0, 计数)`，而这些槽位必定由**同一次派发**写入
     //   （计数与列表写在同一个着色器里），因此列表不需要逐帧清 —— 这同时消掉了"主机 memset
     //   与 GPU 派发竞争"的隐患（清早了/清晚了都会让读回读到被抹掉的槽位）。
-    if (void* p = m_VisibleInstanceBuf ? m_VisibleInstanceBuf->Map() : nullptr) {
+    if (void* p = m_VisibleInstanceBuf.IsValid() ? m_Device->ResolveBuffer(m_VisibleInstanceBuf)->Map() : nullptr) {
         std::memset(p, 0xFF, sizeof(u32) * kNaniteMaxTestInstances);
-        m_VisibleInstanceBuf->Unmap();
+        if (auto* ub = m_Device->ResolveBuffer(m_VisibleInstanceBuf)) ub->Unmap();
     }
     // 【任务 15】可见性掩码填哨兵（只在启动时；每帧 Phase 1 会对**每个**实例显式写 0/1 ⇒ 无需清零）
     if (void* p = m_VisibleMaskBuf ? m_VisibleMaskBuf->Map() : nullptr) {
@@ -849,15 +849,15 @@ void NaniteCull::ResetInstanceCullBuffers() {
 
 void NaniteCull::UploadInstanceCullInputs() {
     if (m_TestInstanceCount > 0u) {
-        if (void* p = m_InstanceBuf ? m_InstanceBuf->Map() : nullptr) {
+        if (void* p = m_InstanceBuf.IsValid() ? m_Device->ResolveBuffer(m_InstanceBuf)->Map() : nullptr) {
             std::memcpy(p, m_TestInstances.data(),
                         sizeof(NaniteInstanceGpuObject) * m_TestInstanceCount);
-            m_InstanceBuf->Unmap();
+            if (auto* ub = m_Device->ResolveBuffer(m_InstanceBuf)) ub->Unmap();
         }
-        if (void* p = m_InstanceSphereBuf ? m_InstanceSphereBuf->Map() : nullptr) {
+        if (void* p = m_InstanceSphereBuf.IsValid() ? m_Device->ResolveBuffer(m_InstanceSphereBuf)->Map() : nullptr) {
             std::memcpy(p, m_TestSpheres.data(),
                         sizeof(NaniteInstanceSphere) * m_TestInstanceCount);
-            m_InstanceSphereBuf->Unmap();
+            if (auto* ub = m_Device->ResolveBuffer(m_InstanceSphereBuf)) ub->Unmap();
         }
     }
 }
@@ -911,7 +911,7 @@ void NaniteCull::RecordInstanceCullPass(rhi::IRHICommandList* cmd) {
     //   修法改掉（见 `RecordCullPass`）；本文件里剩下的每帧主机写只有"内容逐帧相同的输入表"。
     // 【为什么用拷贝而不是 `vkCmdFillBuffer`】RHI 目前只暴露 `CopyBuffer`（任务 12 已用它做上传），
     //   不为本任务扩 RHI 面；4B 拷贝的源缓冲常驻 0，语义与 fill 等价。
-    cmd->CopyBuffer(m_ClearZeroBuf.get(), m_VisibleInstanceCountBuf.get(),
+    cmd->CopyBuffer(m_ClearZeroBuf.get(), m_Device->ResolveBuffer(m_VisibleInstanceCountBuf),
                     sizeof(u32), kNaniteZeroSlotVisibleInstances, 0u);
     // 拷贝写发生在 Transfer 阶段：到计算着色器读之间补一次**真实内存屏障**
     //（`PipelineBarrier` 无资源重载发的是 `VkMemoryBarrier`，不是仅执行依赖）

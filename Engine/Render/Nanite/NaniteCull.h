@@ -300,12 +300,12 @@ public:
     void RecordInstanceCullPass(rhi::IRHICommandList* cmd);
 
     // ── 实例剔除的读回访问（模块内部与 `NaniteRenderer::LogCull3Readback` 使用）──
-    [[nodiscard]] rhi::IRHIBuffer* GetVisibleInstanceBuffer()      const { return m_VisibleInstanceBuf.get(); }
-    [[nodiscard]] rhi::IRHIBuffer* GetVisibleInstanceCountBuffer() const { return m_VisibleInstanceCountBuf.get(); }
+    [[nodiscard]] rhi::IRHIBuffer* GetVisibleInstanceBuffer()      const { return m_Device->ResolveBuffer(m_VisibleInstanceBuf); }
+    [[nodiscard]] rhi::IRHIBuffer* GetVisibleInstanceCountBuffer() const { return m_Device->ResolveBuffer(m_VisibleInstanceCountBuf); }
     /// 【§14.8 任务 18】本帧的实例表（128B/条 `NaniteInstanceGpuObject` 契约）。
     /// 软光栅按可见簇引用的 `instance` 取它的**平移列**（`localToWorld[12..14]`）把网格空间的
     /// 簇顶点搬到世界空间；表内容由 Phase 1 的 `UploadInstanceCullInputs` 写入。
-    [[nodiscard]] rhi::IRHIBuffer* GetInstanceBuffer()             const { return m_InstanceBuf.get(); }
+    [[nodiscard]] rhi::IRHIBuffer* GetInstanceBuffer()             const { return m_Device->ResolveBuffer(m_InstanceBuf); }
     /// CPU 参考剔除的可见实例下标（升序）—— 最近一次 `RecordInstanceCullPass` 的结果
     [[nodiscard]] const std::vector<u32>& GetCpuVisibleInstances() const { return m_CpuVisibleInstances; }
     /// 本帧合成实例条数（= 最近一次 `SetInstanceCullFrame` 的钳制后入参）
@@ -474,10 +474,10 @@ public:
     void RecordCullPass(rhi::IRHICommandList* cmd);
 
     // ── 绘制端 / 读回所需的缓冲访问（模块内部使用，外部不得越过 NaniteRenderer）──
-    [[nodiscard]] rhi::IRHIBuffer* GetFakeClusterBuffer()  const { return m_FakeClusterBuf.get(); }
-    [[nodiscard]] rhi::IRHIBuffer* GetIndirectCmdBuffer()  const { return m_IndirectCmdBuf.get(); }
-    [[nodiscard]] rhi::IRHIBuffer* GetCountBuffer()        const { return m_CountBuf.get(); }
-    [[nodiscard]] rhi::IRHIBuffer* GetRasterCountBuffer()  const { return m_RasterCountBuf.get(); }
+    [[nodiscard]] rhi::IRHIBuffer* GetFakeClusterBuffer()  const { return m_Device->ResolveBuffer(m_FakeClusterBuf); }
+    [[nodiscard]] rhi::IRHIBuffer* GetIndirectCmdBuffer()  const { return m_Device->ResolveBuffer(m_IndirectCmdBuf); }
+    [[nodiscard]] rhi::IRHIBuffer* GetCountBuffer()        const { return m_Device->ResolveBuffer(m_CountBuf); }
+    [[nodiscard]] rhi::IRHIBuffer* GetRasterCountBuffer()  const { return m_Device->ResolveBuffer(m_RasterCountBuf); }
     [[nodiscard]] u32 GetMaxFakeClusters() const { return kNaniteMaxFakeClusters; }
 
 private:
@@ -504,10 +504,10 @@ private:
     u32 m_FakeClusterCount = 6;
 
     // ── 任务 3 自持的四个缓冲 ──
-    std::unique_ptr<rhi::IRHIBuffer> m_FakeClusterBuf;  // 假簇输入（Storage，CPU 每帧写）
-    std::unique_ptr<rhi::IRHIBuffer> m_IndirectCmdBuf;  // 间接命令（Storage|Indirect，GPU 写）
-    std::unique_ptr<rhi::IRHIBuffer> m_CountBuf;        // 命令条数（Storage|Indirect，GPU 原子写）
-    std::unique_ptr<rhi::IRHIBuffer> m_RasterCountBuf;  // 已光栅化簇数（Storage，片元原子写）
+    rhi::RHIBufferHandle m_FakeClusterBuf{};   // A-3  // 假簇输入（Storage，CPU 每帧写）
+    rhi::RHIBufferHandle m_IndirectCmdBuf{};   // A-3  // 间接命令（Storage|Indirect，GPU 写）
+    rhi::RHIBufferHandle m_CountBuf{};   // A-3        // 命令条数（Storage|Indirect，GPU 原子写）
+    rhi::RHIBufferHandle m_RasterCountBuf{};   // A-3  // 已光栅化簇数（Storage，片元原子写）
 
     // ── compute 管线 ──
     rhi::ShaderBytecode m_CS;   // Nanite_Cull.comp.spv
@@ -523,13 +523,13 @@ private:
     u32 m_TestInstanceCount = 0;
 
     // ── 四个自持缓冲（容量都是 `kNaniteMaxTestInstances`）──
-    std::unique_ptr<rhi::IRHIBuffer> m_InstanceBuf;             // 128B 实例表（Storage，CPU 每帧写）
-    std::unique_ptr<rhi::IRHIBuffer> m_InstanceSphereBuf;       // 16B 包围球（Storage，CPU 每帧写）
-    std::unique_ptr<rhi::IRHIBuffer> m_VisibleInstanceBuf;      // 可见实例列表（Storage，GPU 原子压缩写）
-    std::unique_ptr<rhi::IRHIBuffer> m_VisibleInstanceCountBuf; // 可见实例计数（Storage|TransferDst，GPU 原子写）
+    rhi::RHIBufferHandle m_InstanceBuf{};   // A-3             // 128B 实例表（Storage，CPU 每帧写）
+    rhi::RHIBufferHandle m_InstanceSphereBuf{};   // A-3       // 16B 包围球（Storage，CPU 每帧写）
+    rhi::RHIBufferHandle m_VisibleInstanceBuf{};   // A-3      // 可见实例列表（Storage，GPU 原子压缩写）
+    rhi::RHIBufferHandle m_VisibleInstanceCountBuf{};   // A-3 // 可见实例计数（Storage|TransferDst，GPU 原子写）
     /// 【任务 13】计数清零的**源**缓冲（常驻 0，TransferSrc）：
     ///   每帧开头的"计数清零"是命令缓冲内的 4B 拷贝（GPU 有序），而不是录制期的主机写。
-    std::unique_ptr<rhi::IRHIBuffer> m_VisibleCountClearBuf;
+    rhi::RHIBufferHandle m_VisibleCountClearBuf{};   // A-3
 
     // ── 实例剔除 compute 管线 ──
     rhi::ShaderBytecode m_InstanceCullCS;   // Nanite_InstanceCull.comp.spv
