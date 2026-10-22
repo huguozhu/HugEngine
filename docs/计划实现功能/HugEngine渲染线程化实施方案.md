@@ -2499,3 +2499,26 @@ A-5（ImGui/PSO 命令化）、T2.6、T3.3/T3.4、T5.1~T5.3、L4-3。
 与 A-3 相同的四条（A/B 20/20、0 新 VUID、0 断言、干净退出）。PSO 入队属于**创建时机**变化，
 不影响每帧绘制指令 ⇒ 转储应当逐字节一致。
 
+#### 16.7.4 实测教训：异步 PSO 队列要求 desc 内指针比入队更长寿（2026-10-22）
+
+把 `LightingPass` 的 PSO 改成 `EnqueuePSOCreateHandle` 后**立即崩溃**：
+
+```
+#2 HashPipelineStateDesc  VulkanPipeline.cpp:82     ← 解引用 desc.pixelShader
+#3 CreateVulkanPipeline   VulkanPipeline.cpp:399
+#5 VulkanDevice::ProcessPSOCreateQueue  VulkanDevice.cpp:1498
+#6 DeferredPipeline::NextFrame          DeferredPipeline.cpp:623
+异常码 0xC0000005 EXCEPTION_ACCESS_VIOLATION
+```
+
+原因：`EnsurePSO()` 里是临时拼 desc 的写法 —— `lDesc.pixelShader = &lFS;`（`&lFS` 是**栈上局部指针**的地址）。
+句柄版队列把"真正创建"推迟到下一帧的 `ProcessPSOCreateQueue`，此时 `EnsurePSO` 早已返回 ⇒ 指针悬空。
+
+**结论（写入纪律）**：`EnqueuePSOCreateHandle` 只适用于 **desc 内所有 `ShaderModule*`/布局指针的生命周期
+都长于入队**的调用点。`LightingPass`、`GBufferRenderer` 这类"在创建函数里临时拼 desc"的地方**不满足**，
+不能直接接异步队列 —— 这正是原队列长期没有生产者的真实原因，而不是"忘了接"。
+
+**处置**：本轮已回退该改动（`6d944ae` 只保留基础设施）。若将来要让队列真正运转，前置条件是：
+把相关 pass 的 shader 模块改成**成员持有**（`m_VS`/`m_FS` 而非局部变量），再接入异步创建。
+收益仅是"摊平首帧峰值"，成本是给所有 PSO 创建点加生命周期约束 ⇒ 暂不推进，记为独立小项目。
+
