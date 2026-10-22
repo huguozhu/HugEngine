@@ -18,4 +18,6 @@ target_compile_definitions(03.Sponza-Forward PRIVATE
 )
 
 # 依赖 CompileShaders 确保 EmbeddedShaders.h 已生成
+# 样例共用头文件（相机输入等），见 Samples/Common/
+target_include_directories(03.Sponza-Forward PRIVATE ${CMAKE_SOURCE_DIR}/Samples/Common)
 add_dependencies(03.Sponza-Forward CompileShaders)

@@ -3,4 +3,6 @@
 add_executable(07.Nanite 07.Nanite.cpp)
 target_link_libraries(07.Nanite PRIVATE HugEngineCore HugEngineRHI HugEngineShader HugEngineScene HugEngineRender HugEngineEditor HugEngineAsset stb)
 target_compile_definitions(07.Nanite PRIVATE HUGE_CONTENT_DIR="${CMAKE_SOURCE_DIR}/Content/")
+# 样例共用头文件（相机输入等），见 Samples/Common/
+target_include_directories(07.Nanite PRIVATE ${CMAKE_SOURCE_DIR}/Samples/Common)
 add_dependencies(07.Nanite CompileShaders)

@@ -44,6 +44,7 @@
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
+#include "CameraInput.h"   // 样例共用：鼠标/键盘控制相机
 
 // stb_image — 纹理解码
 #define STB_IMAGE_IMPLEMENTATION
@@ -577,9 +578,7 @@ int main() {
     HE_CORE_INFO("相机动画已创建: {} 秒圆形路径", 6.0f);
 
     // 鼠标状态
-    bool   rightMouseDown = false;
     bool   animCameraMode = false; // T 键切换：动画相机模式（默认关闭）
-    double lastMouseX = 0.0, lastMouseY = 0.0;
 
     // ============================================================
     // 9. 窗口调整回调
@@ -654,53 +653,21 @@ int main() {
         // --- 相机控制 ---
         {
             // 右键拖拽旋转
-            bool mouseDown = glfwGetMouseButton(glfwWin, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
-
-            if (mouseDown && !rightMouseDown) {
-                rightMouseDown = true;
-                glfwGetCursorPos(glfwWin, &lastMouseX, &lastMouseY);
-                glfwSetInputMode(glfwWin, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-            } else if (!mouseDown && rightMouseDown) {
-                rightMouseDown = false;
-                glfwSetInputMode(glfwWin, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-            } else if (mouseDown && rightMouseDown) {
-                double cx, cy;
-                glfwGetCursorPos(glfwWin, &cx, &cy);
-                float dx = static_cast<float>(cx - lastMouseX);
-                float dy = static_cast<float>(cy - lastMouseY);
-                lastMouseX = cx;
-                lastMouseY = cy;
-
-                camCtrl.Rotate(dx * 0.003f, -dy * 0.003f);
-            }
-
-            // T 键切换动画/手动相机模式
-            static bool tWasDown = false;
-            bool tDown = glfwGetKey(glfwWin, GLFW_KEY_T) == GLFW_PRESS;
-            if (tDown && !tWasDown) animCameraMode = !animCameraMode;
-            tWasDown = tDown;
-
-            // 动画相机模式：动画播放时从 AnimationComponent 同步位置
+            // 相机输入统一在 Samples/Common/CameraInput.h（六个样例共用，手感一致）；
+            // 这里只保留样例自己的策略：T 键切换"动画相机 / 手动相机"。
+            // 动画相机模式：先按 AnimationComponent 覆盖位置/朝向，再让输入叠加（与旧顺序一致）。
             if (animCameraMode && camAnim->playing) {
-                auto* camTf = world.GetComponent<TransformComponent>(camAnimEntity);
-                if (camTf) {
+                if (auto* camTf = world.GetComponent<TransformComponent>(camAnimEntity)) {
                     camCtrl.SetPosition(camTf->position);
-                    float3 toOrigin = glm::normalize(float3(0, 200, 0) - camTf->position);
+                    const float3 toOrigin = glm::normalize(float3(0, 200, 0) - camTf->position);
                     camCtrl.SetOrientationFromForward(toOrigin);
                 }
             }
-
-            // 键盘移动
-            render::CameraController::MoveInput moveIn;
-            moveIn.forward  = glfwGetKey(glfwWin, GLFW_KEY_W) == GLFW_PRESS;
-            moveIn.backward = glfwGetKey(glfwWin, GLFW_KEY_S) == GLFW_PRESS;
-            moveIn.left     = glfwGetKey(glfwWin, GLFW_KEY_A) == GLFW_PRESS;
-            moveIn.right    = glfwGetKey(glfwWin, GLFW_KEY_D) == GLFW_PRESS;
-            moveIn.up       = glfwGetKey(glfwWin, GLFW_KEY_E) == GLFW_PRESS;
-            moveIn.down     = glfwGetKey(glfwWin, GLFW_KEY_Q) == GLFW_PRESS;
-            moveIn.sprint   = glfwGetKey(glfwWin, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS;
-
-            camCtrl.Update(deltaTime, moveIn);
+            static he::samples::CameraInput camInput;   // 跨帧保存右键/光标状态
+            if (camInput.Update(glfwWin, camCtrl, deltaTime, {.toggleKey = GLFW_KEY_T})) {
+                animCameraMode = !animCameraMode;
+                camInput.Reset();   // 切回手动时丢弃过期光标坐标，避免视角跳一下
+            }
         }
 
 
