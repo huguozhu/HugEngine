@@ -198,7 +198,7 @@ private:
     rhi::RHIBufferHandle m_PageTable{};   // A-3      ///< 页表（**只由 CPU 写**，每帧重写）
     /// 反馈环：`feedbackLatency` 个缓冲。帧 N 用 `N % L` 槽，同时读的也是它
     /// （它上一次被写是帧 N-L —— 这正是"延迟恰好等于常量"的实现方式）。
-    std::vector<std::unique_ptr<rhi::IRHIBuffer>> m_FeedbackRing;
+    std::vector<rhi::RHIBufferHandle> m_FeedbackRing;   // A-3
 
     // ── CPU 侧驻留状态 ──
     std::vector<u32> m_SlotOfPage;          ///< 页 → 槽（`kInvalidNanitePageSlot` = 未驻留）

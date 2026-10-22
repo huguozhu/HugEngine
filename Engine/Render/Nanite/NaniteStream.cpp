@@ -42,6 +42,10 @@ bool NaniteStream::Initialize(rhi::IRHIDevice* device) {
 }
 
 void NaniteStream::Shutdown() {
+    // A-3: handles are not freed by vector destruction
+    if (m_Device) {
+        for (auto& h : m_FeedbackRing) m_Device->DestroyBufferHandle(h);
+    }
     m_FeedbackRing.clear();
     // A-3：Initialize 在设置 m_Device 之前就会调 Shutdown 做一次清理 ⇒ 这里必须判空
     if (m_Device) {
@@ -218,6 +222,10 @@ bool NaniteStream::CreateResources() {
     // ── 4. 反馈环：`latency` 个缓冲（帧 N 用槽 N % L；CPU 在帧 N 读的正是它 —— 它上一次被写
     //      是帧 N-L ⇒ **延迟恰好等于常量**，不需要任何额外的时间戳机制）──
     {
+        // A-3: handles are not freed by vector destruction
+        if (m_Device) {
+            for (auto& h : m_FeedbackRing) m_Device->DestroyBufferHandle(h);
+        }
         m_FeedbackRing.clear();
         m_FeedbackRing.reserve(m_Config.feedbackLatency);
         // 【缓冲大小 = 头 2 + 环 1024 + **戳记 pageCount**】戳记数组（GPU 独占写）用来把
@@ -230,9 +238,9 @@ bool NaniteStream::CreateResources() {
             d.usage       = rhi::BufferUsage::Storage;   // shader 侧是 RWStructuredBuffer
             d.cpuAccess   = true;                        // CPU 读回请求 + 每帧清空
             d.initialData = zero.data();
-            auto buf = m_Device->CreateBuffer(d);
-            if (!buf) return false;
-            m_FeedbackRing.push_back(std::move(buf));
+            auto buf = m_Device->CreateBufferHandle(d);   // A-3
+            if (!buf.IsValid()) return false;
+            m_FeedbackRing.push_back(buf);
         }
     }
 
@@ -261,7 +269,7 @@ bool NaniteStream::CreateResources() {
     m_Views.poolClusters  = m_Device->ResolveBuffer(m_PoolClusters);
     m_Views.poolVertices  = m_Device->ResolveBuffer(m_PoolVertices);
     m_Views.poolTriangles = m_Device->ResolveBuffer(m_PoolTriangles);
-    m_Views.feedback      = m_FeedbackRing.empty() ? nullptr : m_FeedbackRing[0].get();
+    m_Views.feedback      = m_FeedbackRing.empty() ? nullptr : m_Device->ResolveBuffer(m_FeedbackRing[0]);
     m_Views.clusterStride  = ps.clusterStride;
     m_Views.vertexStride   = ps.vertexStride;
     m_Views.triangleStride = ps.triangleStride;
@@ -395,8 +403,8 @@ void NaniteStream::BeginFrame(u32 frameIndex) {
         const u32 ring = frameIndex % m_Config.feedbackLatency;
         // 【视图必须跟着本帧的环槽走】帧 N 的 GPU 请求要写进环槽 N % L，而 CPU 在帧 N+L 读它
         //   ⇒ "请求到驻留的延迟"就**恰好**是 `feedbackLatency`，不需要任何时间戳。
-        m_Views.feedback = m_FeedbackRing[ring].get();
-        rhi::IRHIBuffer* buf = m_FeedbackRing[ring].get();
+        m_Views.feedback = m_Device->ResolveBuffer(m_FeedbackRing[ring]);
+        rhi::IRHIBuffer* buf = m_Device->ResolveBuffer(m_FeedbackRing[ring]);
         if (void* p = buf->Map()) {
             const u32* w = static_cast<const u32*>(p);
             u32 count = w[kNanitePageFeedbackCountSlot];
