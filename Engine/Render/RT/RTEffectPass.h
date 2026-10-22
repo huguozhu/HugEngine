@@ -93,7 +93,9 @@ public:
                          const RTExecuteContext& ctx) = 0;
 
     // ── 访问器 ──
-    rhi::IRHITexture* GetOutput() const { return m_Output.get(); }
+    rhi::IRHITexture* GetOutput() const {   // A-3：句柄按需解析
+        return m_Device ? m_Device->ResolveTexture(m_Output) : nullptr;
+    }
     u32 GetWidth()  const { return m_Width; }
     u32 GetHeight() const { return m_Height; }
     bool IsValid() const { return m_Pipeline && m_Pipeline->pipeline != nullptr; }
@@ -121,8 +123,8 @@ protected:
     std::unique_ptr<RTPass::RTEffectPipeline> m_Pipeline;
     rhi::DescriptorSetLayoutHandle m_RayGenLayout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_RayGenSet    = rhi::kInvalidSet;
-    std::unique_ptr<rhi::IRHITexture> m_Output;
-    std::unique_ptr<rhi::IRHIBuffer>  m_LightUB;   // RTHitLightGPU[16]（反射/GI ClosestHit）
+    rhi::RHITextureHandle m_Output{};   // A-3
+    rhi::RHIBufferHandle  m_LightUB{};   // A-3：RTHitLightGPU[16]（反射/GI ClosestHit）
     rhi::PushConstantRange m_PCRange;
     u32 m_Width = 0, m_Height = 0;
     bool m_OutputWritten = false;   // 输出纹理是否已被写入（首帧屏障用 Undefined）

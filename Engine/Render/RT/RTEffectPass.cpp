@@ -65,8 +65,8 @@ bool RTEffectPass::Initialize(rhi::IRHIDevice* device,
     d.width  = m_Width;
     d.height = m_Height;
     d.usage  = outUsage;
-    m_Output = device->CreateTexture(d);
-    if (!m_Output) {
+    m_Output = device->CreateTextureHandle(d);   // A-3
+    if (!m_Output.IsValid()) {
         HE_CORE_ERROR("RTEffectPass[{}]: 输出纹理创建失败", debugName);
         return false;
     }
@@ -76,8 +76,8 @@ bool RTEffectPass::Initialize(rhi::IRHIDevice* device,
 }
 
 void RTEffectPass::Shutdown() {
-    m_Output.reset();
-    m_LightUB.reset();
+    m_Device->DestroyTextureHandle(m_Output); m_Output = {};
+    m_Device->DestroyBufferHandle(m_LightUB); m_LightUB = {};
     m_Pipeline.reset();
     m_RayGenSet  = rhi::kInvalidSet;
     m_RayGenLayout = rhi::kInvalidLayout;
@@ -93,13 +93,13 @@ void RTEffectPass::Shutdown() {
 // RenderGraph 依据 Lighting 的读取依赖自动生成。
 // ============================================================
 void RTEffectPass::PrepareOutputUAV(rhi::IRHICommandList* cmd) {
-    if (!m_Output) return;
+    if (!m_Output.IsValid()) return;
     if (m_OutputWritten) {
         cmd->PipelineBarrier(rhi::PipelineStage::FragmentShader, rhi::PipelineStage::RayTracingShader,
-            rhi::ResourceState::ShaderResource, rhi::ResourceState::UnorderedAccess, m_Output.get());
+            rhi::ResourceState::ShaderResource, rhi::ResourceState::UnorderedAccess, m_Device->ResolveTexture(m_Output));
     } else {
         cmd->PipelineBarrier(rhi::PipelineStage::TopOfPipe, rhi::PipelineStage::RayTracingShader,
-            rhi::ResourceState::Undefined, rhi::ResourceState::UnorderedAccess, m_Output.get());
+            rhi::ResourceState::Undefined, rhi::ResourceState::UnorderedAccess, m_Device->ResolveTexture(m_Output));
     }
     m_OutputWritten = true;
 }
@@ -111,8 +111,8 @@ bool RTEffectPass::CreateHitLightUB(rhi::IRHIDevice* device) {
     rhi::BufferDesc ub;
     ub.size  = sizeof(RTHitLightGPU) * 16;
     ub.usage = rhi::BufferUsage::Uniform;
-    m_LightUB = device->CreateBuffer(ub);
-    if (!m_LightUB) {
+    m_LightUB = device->CreateBufferHandle(ub);   // A-3
+    if (!m_LightUB.IsValid()) {
         HE_CORE_ERROR("RTEffectPass[{}]: ClosestHit 光源 UBO 创建失败", m_DebugName);
         return false;
     }
@@ -124,11 +124,12 @@ bool RTEffectPass::CreateHitLightUB(rhi::IRHIDevice* device) {
 // GPULight 为 64B/个，RTHitLightGPU 为 48B/个（紧密布局）
 // ============================================================
 void RTEffectPass::FillHitLightUB(const RTExecuteContext& ctx) {
-    if (!m_LightUB || !ctx.lightBuffer) return;
+    if (!m_LightUB.IsValid() || !ctx.lightBuffer) return;
 
-    RTHitLightGPU* dst = static_cast<RTHitLightGPU*>(m_LightUB->Map());
+    auto* ubBuf   = m_Device->ResolveBuffer(m_LightUB);
+    RTHitLightGPU* dst = ubBuf ? static_cast<RTHitLightGPU*>(ubBuf->Map()) : nullptr;
     const GPULight* src = static_cast<const GPULight*>(ctx.lightBuffer->Map());
-    if (!dst || !src) { if (dst) m_LightUB->Unmap(); if (src) ctx.lightBuffer->Unmap(); return; }
+    if (!dst || !src) { if (dst) if (auto* ubu = m_Device->ResolveBuffer(m_LightUB)) ubu->Unmap(); if (src) ctx.lightBuffer->Unmap(); return; }
 
     u32 count = 0;
     const u32 maxCount = std::min(ctx.lightCount, 16u);
@@ -143,7 +144,7 @@ void RTEffectPass::FillHitLightUB(const RTExecuteContext& ctx) {
     for (u32 i = count; i < 16; ++i)
         dst[i] = RTHitLightGPU{};
 
-    m_LightUB->Unmap();
+    if (auto* ubu = m_Device->ResolveBuffer(m_LightUB)) ubu->Unmap();
     ctx.lightBuffer->Unmap();
 }
 

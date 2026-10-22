@@ -129,7 +129,7 @@ bool RTGIPass::Initialize(rhi::IRHIDevice* device, u32 fullWidth, u32 fullHeight
 void RTGIPass::Execute(rhi::IRHICommandList* cmd,
                        rhi::IRHIAccelerationStructure* tlas,
                        const RTExecuteContext& ctx) {
-    if (!IsValid() || !tlas || !m_Output || !m_Device) return;
+    if (!IsValid() || !tlas || !m_Output.IsValid() || !m_Device) return;
 
     // ── 预屏障：输出纹理 → UnorderedAccess（RT 写）──
     PrepareOutputUAV(cmd);
@@ -138,7 +138,7 @@ void RTGIPass::Execute(rhi::IRHICommandList* cmd,
     m_Device->UpdateDescriptorSet(m_RayGenSet, kRTGIBindTLAS,
         rhi::DescriptorType::AccelerationStructure, tlas);
     m_Device->UpdateDescriptorSetWithImageView(m_RayGenSet, 1,
-        rhi::DescriptorType::StorageImage, m_Output->GetNativeHandle());
+        rhi::DescriptorType::StorageImage, m_Device->ResolveTexture(m_Output)->GetNativeHandle());
     if (ctx.gbDepth)
         m_Device->UpdateDescriptorSet(m_RayGenSet, kRTGIBindDepth,
             rhi::DescriptorType::SampledImage, ctx.gbDepth, nullptr);
@@ -148,9 +148,9 @@ void RTGIPass::Execute(rhi::IRHICommandList* cmd,
     if (ctx.sceneMaterialTex)
         m_Device->UpdateDescriptorSet(m_RayGenSet, kRTGIBindMaterialTex,
             rhi::DescriptorType::SampledImage, ctx.sceneMaterialTex, nullptr);
-    if (m_LightUB)
+    if (m_LightUB.IsValid())
         m_Device->UpdateDescriptorSet(m_RayGenSet, kRTGIBindLights,
-            rhi::DescriptorType::UniformBuffer, m_LightUB.get());
+            rhi::DescriptorType::UniformBuffer, m_Device->ResolveBuffer(m_LightUB));
     if (ctx.sceneTriangleNormals)
         m_Device->UpdateDescriptorSet(m_RayGenSet, kRTGIBindNormalTex,
             rhi::DescriptorType::SampledImage, ctx.sceneTriangleNormals, nullptr);

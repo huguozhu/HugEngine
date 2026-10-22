@@ -114,8 +114,8 @@ bool RTShadowPass::Initialize(rhi::IRHIDevice* device, u32 fullWidth, u32 fullHe
         rhi::BufferDesc ub;
         ub.size  = sizeof(ShadowLightGPU) * kShadowMaxLights;
         ub.usage = rhi::BufferUsage::Uniform;
-        m_LightUB = device->CreateBuffer(ub);
-        if (!m_LightUB) {
+        m_LightUB = device->CreateBufferHandle(ub);   // A-3
+        if (!m_LightUB.IsValid()) {
             HE_CORE_ERROR("RTShadowPass: 光源 UB 创建失败");
             return false;
         }
@@ -139,7 +139,7 @@ bool RTShadowPass::Initialize(rhi::IRHIDevice* device, u32 fullWidth, u32 fullHe
 void RTShadowPass::Execute(rhi::IRHICommandList* cmd,
                            rhi::IRHIAccelerationStructure* tlas,
                            const RTExecuteContext& ctx) {
-    if (!IsValid() || !tlas || !m_Output || !m_Device) return;
+    if (!IsValid() || !tlas || !m_Output.IsValid() || !m_Device) return;
 
     // ── 预屏障：输出纹理 → UnorderedAccess（RT 写，首帧 Undefined → UAV）──
     PrepareOutputUAV(cmd);
@@ -149,16 +149,16 @@ void RTShadowPass::Execute(rhi::IRHICommandList* cmd,
         rhi::DescriptorType::AccelerationStructure, tlas);
     // StorageImage 用原生 ImageView 绑定（与 RTPass 的 backbuffer 模式一致）
     m_Device->UpdateDescriptorSetWithImageView(m_RayGenSet, 1,
-        rhi::DescriptorType::StorageImage, m_Output->GetNativeHandle());
+        rhi::DescriptorType::StorageImage, m_Device->ResolveTexture(m_Output)->GetNativeHandle());
     if (ctx.gbDepth)
         m_Device->UpdateDescriptorSet(m_RayGenSet, kRTShadowBindDepth,
             rhi::DescriptorType::SampledImage, ctx.gbDepth, nullptr);
     if (ctx.gbNormal)
         m_Device->UpdateDescriptorSet(m_RayGenSet, kRTShadowBindNormal,
             rhi::DescriptorType::SampledImage, ctx.gbNormal, nullptr);
-    if (m_LightUB)
+    if (m_LightUB.IsValid())
         m_Device->UpdateDescriptorSet(m_RayGenSet, kRTShadowBindParams,
-            rhi::DescriptorType::UniformBuffer, m_LightUB.get());
+            rhi::DescriptorType::UniformBuffer, m_Device->ResolveBuffer(m_LightUB));
 
     // ── 填充阴影光源数据（显式抽取 GPULight[] → ShadowLight[16]）──
     FillLightBuffer(ctx);
@@ -190,11 +190,12 @@ void RTShadowPass::Execute(rhi::IRHICommandList* cmd,
 // FillLightBuffer — 从 GPULight[] SSBO 抽取阴影光源数据
 // ============================================================
 void RTShadowPass::FillLightBuffer(const RTExecuteContext& ctx) {
-    if (!m_LightUB || !ctx.lightBuffer) return;
+    if (!m_LightUB.IsValid() || !ctx.lightBuffer) return;
 
-    ShadowLightGPU* dst = static_cast<ShadowLightGPU*>(m_LightUB->Map());
+    auto* ubBuf    = m_Device->ResolveBuffer(m_LightUB);
+    ShadowLightGPU* dst = ubBuf ? static_cast<ShadowLightGPU*>(ubBuf->Map()) : nullptr;
     const GPULight* src = static_cast<const GPULight*>(ctx.lightBuffer->Map());
-    if (!dst || !src) { if (dst) m_LightUB->Unmap(); if (src) ctx.lightBuffer->Unmap(); return; }
+    if (!dst || !src) { if (dst) if (auto* ubu = m_Device->ResolveBuffer(m_LightUB)) ubu->Unmap(); if (src) ctx.lightBuffer->Unmap(); return; }
 
     u32 count = 0;
     const u32 maxCount = std::min(ctx.lightCount, kShadowMaxLights);
@@ -208,7 +209,7 @@ void RTShadowPass::FillLightBuffer(const RTExecuteContext& ctx) {
         sl.radius.x = src[i].shadowRadius;  // 光源半径（软阴影）
     }
 
-    m_LightUB->Unmap();
+    if (auto* ubu = m_Device->ResolveBuffer(m_LightUB)) ubu->Unmap();
     ctx.lightBuffer->Unmap();
 }
 

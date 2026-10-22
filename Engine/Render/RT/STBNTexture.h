@@ -13,12 +13,14 @@ class STBNTexture {
 public:
     bool Initialize(rhi::IRHIDevice* device);
     void Shutdown();
-    rhi::IRHITexture* GetTexture() const { return m_Texture.get(); }
-    bool IsValid() const { return m_Texture != nullptr; }
+    rhi::IRHITexture* GetTexture() const {   // A-3：句柄按需解析
+        return m_Device ? m_Device->ResolveTexture(m_Texture) : nullptr;
+    }
+    bool IsValid() const { return m_Texture.IsValid(); }
 
 private:
     rhi::IRHIDevice* m_Device = nullptr;
-    std::unique_ptr<rhi::IRHITexture> m_Texture;
+    rhi::RHITextureHandle m_Texture{};   // A-3
 };
 
 } // namespace he::render

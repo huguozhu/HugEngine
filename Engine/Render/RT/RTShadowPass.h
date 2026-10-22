@@ -45,7 +45,7 @@ private:
     // 从 GPULight[] SSBO 显式抽取阴影光源数据（48B/light，匹配 shader ShadowLight 布局）
     void FillLightBuffer(const RTExecuteContext& ctx);
 
-    std::unique_ptr<rhi::IRHIBuffer> m_LightUB;   // 阴影光源 Uniform Buffer（48B × 16）
+    rhi::RHIBufferHandle m_LightUB{};   // A-3：阴影光源 Uniform Buffer（48B × 16）
     u32 m_FullWidth = 0, m_FullHeight = 0;
     bool m_HalfRes = true;       // 默认半分辨率（阴影是低频效果）
 };

@@ -114,7 +114,7 @@ bool RTAOPass::Initialize(rhi::IRHIDevice* device, u32 fullWidth, u32 fullHeight
 void RTAOPass::Execute(rhi::IRHICommandList* cmd,
                        rhi::IRHIAccelerationStructure* tlas,
                        const RTExecuteContext& ctx) {
-    if (!IsValid() || !tlas || !m_Output || !m_Device) return;
+    if (!IsValid() || !tlas || !m_Output.IsValid() || !m_Device) return;
 
     // ── 预屏障：输出纹理 → UnorderedAccess（RT 写）──
     PrepareOutputUAV(cmd);
@@ -123,7 +123,7 @@ void RTAOPass::Execute(rhi::IRHICommandList* cmd,
     m_Device->UpdateDescriptorSet(m_RayGenSet, kRTAOBindTLAS,
         rhi::DescriptorType::AccelerationStructure, tlas);
     m_Device->UpdateDescriptorSetWithImageView(m_RayGenSet, 1,
-        rhi::DescriptorType::StorageImage, m_Output->GetNativeHandle());
+        rhi::DescriptorType::StorageImage, m_Device->ResolveTexture(m_Output)->GetNativeHandle());
     if (ctx.gbDepth)
         m_Device->UpdateDescriptorSet(m_RayGenSet, kRTAOBindDepth,
             rhi::DescriptorType::SampledImage, ctx.gbDepth, nullptr);

@@ -6,7 +6,7 @@ namespace he::render {
 
 bool STBNTexture::Initialize(rhi::IRHIDevice* device) {
     m_Device = device;
-    if (m_Texture) return true;   // 幂等
+    if (m_Texture.IsValid()) return true;   // 幂等
 
     // 3D 纹理：initialData 由 Vulkan 后端走暂存缓冲上传（见 VulkanResources.cpp）
     rhi::TextureDesc d;
@@ -17,8 +17,8 @@ bool STBNTexture::Initialize(rhi::IRHIDevice* device) {
     d.format = rhi::Format::RGBA8_UNORM;
     d.usage  = rhi::TextureUsage::ShaderResource;
     d.initialData = kSTBNData;                 // 内嵌数据（4MB）
-    m_Texture = device->CreateTexture(d);
-    if (!m_Texture) {
+    m_Texture = device->CreateTextureHandle(d);   // A-3
+    if (!m_Texture.IsValid()) {
         HE_CORE_ERROR("STBNTexture: 3D 纹理创建失败");
         return false;
     }
@@ -29,7 +29,7 @@ bool STBNTexture::Initialize(rhi::IRHIDevice* device) {
 }
 
 void STBNTexture::Shutdown() {
-    m_Texture.reset();
+    m_Device->DestroyTextureHandle(m_Texture); m_Texture = {};
     m_Device = nullptr;
 }
 
