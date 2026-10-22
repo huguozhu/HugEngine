@@ -98,7 +98,8 @@ public:
     // ── Global SDF（步骤 10 / clipmap 分层）──
     /// 指定层的可采样全局场（0 = 最细的近层，kGlobalLayerCount-1 = 覆盖全场的远层）
     [[nodiscard]] rhi::IRHITexture* GetGlobalField(u32 layer = kMaxGlobalLayers - 1u) const {
-        return (layer < m_GlobalLayerCount) ? m_GlobalLayers[layer].field.get() : nullptr;
+        auto& L = m_GlobalLayers[layer];
+        return (layer < m_GlobalLayerCount && m_Device) ? m_Device->ResolveTexture(L.field) : nullptr;
     }
     [[nodiscard]] u32    GetGlobalLayerCount() const { return m_GlobalLayerCount; }
     /// 步骤 15 的捕获 pass 需要线性采样器（与全局注入同源）与全局分辨率
@@ -177,9 +178,9 @@ public:
         for (const auto& e : m_Entries) if (e.field) out.push_back(e.field.get());
         for (u32 i = 0; i < m_GlobalLayerCount; ++i) {
             const GlobalLayer& L = m_GlobalLayers[i];
-            if (L.scratch) out.push_back(L.scratch.get());
-            if (L.field)   out.push_back(L.field.get());
-            if (L.seed)    out.push_back(L.seed.get());
+            if (L.scratch.IsValid()) out.push_back(m_Device->ResolveTexture(L.scratch));
+            if (L.field.IsValid())   out.push_back(m_Device->ResolveTexture(L.field));
+            if (L.seed.IsValid())    out.push_back(m_Device->ResolveTexture(L.seed));
         }
         if (m_DebugTex.IsValid())        out.push_back(m_Device->ResolveTexture(m_DebugTex));
         if (m_CardCoverageTex.IsValid()) out.push_back(m_Device->ResolveTexture(m_CardCoverageTex));
@@ -322,11 +323,11 @@ private:
     // ── Global SDF（步骤 10 / clipmap 分层）──
     /// 一层 clipmap：u32 原子目标 + R32F 可采样输出 + 自检探针
     struct GlobalLayer {
-        std::unique_ptr<rhi::IRHITexture> scratch;
-        std::unique_ptr<rhi::IRHITexture> field;
-        std::unique_ptr<rhi::IRHIBuffer>  probe;
+        rhi::RHITextureHandle scratch{};   // A-3
+        rhi::RHITextureHandle field{};   // A-3
+        rhi::RHIBufferHandle  probe{};   // A-3
         // 向量距离变换的种子坐标（R32_UINT，同分辨率）：把"每跳加步长"的图测地偏差换掉
-        std::unique_ptr<rhi::IRHITexture> seed;
+        rhi::RHITextureHandle seed{};   // A-3
         float3 origin    = float3(0.0f);
         float  voxelSize = 0.0f;
         u32    res = 0, probeCount = 0;
