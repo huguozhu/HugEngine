@@ -153,7 +153,7 @@ public:
         if (width == m_ViewportW && height == m_ViewportH) return;
         m_ViewportW = width;
         m_ViewportH = height;
-        m_DebugTex.reset();   // 尺寸变了：输出纹理必须重建（PSO / 布局与尺寸无关，不重建）
+        m_Device->DestroyTextureHandle(m_DebugTex); m_DebugTex = {};   // 尺寸变了：输出纹理必须重建（PSO / 布局与尺寸无关，不重建）
     }
     /// 每帧执行一次逐像素 sphere tracing，把结果写进调试纹理（由帧图的 SDF compute pass 调用）。
     /// 相机参数逐帧变化，故不缓存；矩阵类转置风险用基向量绕开（见 shader 注释）。
@@ -161,7 +161,7 @@ public:
                       const float3& camPos, const float3& forward, const float3& right, const float3& up,
                       float tanHalfFov, float aspect);
     /// 调试视图输出（RGBA16F，屏幕尺寸）：R=命中层, G=t/最大距离, B=步数比, A=是否命中
-    [[nodiscard]] rhi::IRHITexture* GetDebugTexture() const { return m_DebugTex.get(); }
+    [[nodiscard]] rhi::IRHITexture* GetDebugTexture() const { return m_Device->ResolveTexture(m_DebugTex); }
 
     /// 【步骤 37】收集本类自持的**存储图像**（被 compute 当 RWTexture 写的那些）。
     ///
@@ -172,8 +172,8 @@ public:
     /// 而按规范此时的存储写是**未定义行为**（本步实测过一次"统计正常但图像整幅为黑"）。
     /// 这里把清单交出去，由 `LumenScene` 在首帧统一转换一次。
     void CollectStorageImages(std::vector<rhi::IRHITexture*>& out) const {
-        if (m_MeshScratch) out.push_back(m_MeshScratch.get());
-        if (m_MeshSeed)    out.push_back(m_MeshSeed.get());
+        if (m_MeshScratch.IsValid()) out.push_back(m_Device->ResolveTexture(m_MeshScratch));
+        if (m_MeshSeed.IsValid())    out.push_back(m_Device->ResolveTexture(m_MeshSeed));
         for (const auto& e : m_Entries) if (e.field) out.push_back(e.field.get());
         for (u32 i = 0; i < m_GlobalLayerCount; ++i) {
             const GlobalLayer& L = m_GlobalLayers[i];
@@ -181,8 +181,8 @@ public:
             if (L.field)   out.push_back(L.field.get());
             if (L.seed)    out.push_back(L.seed.get());
         }
-        if (m_DebugTex)        out.push_back(m_DebugTex.get());
-        if (m_CardCoverageTex) out.push_back(m_CardCoverageTex.get());
+        if (m_DebugTex.IsValid())        out.push_back(m_Device->ResolveTexture(m_DebugTex));
+        if (m_CardCoverageTex.IsValid()) out.push_back(m_Device->ResolveTexture(m_CardCoverageTex));
     }
 
     // ── L2 Surface Cache：步骤 13 的 Card 生成器 + 覆盖率（CPU 版；GPU atlas 见步骤 14+）──    /// 覆盖率结论：卡片数、按面积加权采样数、被任一卡片覆盖的采样数
@@ -237,7 +237,7 @@ public:
     }
     /// 覆盖率可视化（RGBA8）：上半是最大网格的 6 个投影面（白=有表面，红=有表面但未被卡片覆盖），
     /// 下半是逐 mesh 的覆盖条（绿=已覆盖长度）。
-    [[nodiscard]] rhi::IRHITexture* GetCardCoverageTexture() const { return m_CardCoverageTex.get(); }
+    [[nodiscard]] rhi::IRHITexture* GetCardCoverageTexture() const { return m_Device->ResolveTexture(m_CardCoverageTex); }
 
 private:
     void BuildQueue(const MeshBatcher& batcher);
@@ -283,12 +283,12 @@ private:
     rhi::DescriptorSetHandle                  m_ConvertSet;
     // 同上：转换 pass 的输出是**每 mesh 一张**纹理，共用一套描述符集会让写入落到同一张上
     std::vector<rhi::DescriptorSetHandle>     m_ConvertSets;
-    std::unique_ptr<rhi::IRHITexture>         m_MeshScratch;  // 共享的 u32 距离场（原子最小目标）
+    rhi::RHITextureHandle m_MeshScratch{};   // A-3  // 共享的 u32 距离场（原子最小目标）
     bool m_MeshScratchTransitioned = false;   // 步骤 37：共享中间纹理的布局已转换（首次使用时做）
     bool m_GlobalImagesTransitioned = false;  // 步骤 37：clipmap 各层图像的布局已转换（首次注入前做）
     // 带种子坐标的 JFA（真欧氏距离，见 SDF_MeshFloodSeeds.comp.slang）：种子坐标共享一张纹理，
     // 逐 mesh 串行复用（+8 MB），把"26 连通图最短路径"的 ~8% 高估换成 ~1 体素的精确欧氏距离。
-    std::unique_ptr<rhi::IRHITexture>         m_MeshSeed;
+    rhi::RHITextureHandle m_MeshSeed{};   // A-3
     rhi::DescriptorSetLayoutHandle            m_SeedFloodLayout;
     rhi::DescriptorSetHandle                  m_SeedFloodSet;
     rhi::RHIPipelineStateHandle   m_SeedFloodPSO{};   // A-3
@@ -376,7 +376,7 @@ private:
     rhi::DescriptorSetLayoutHandle m_DebugLayout;
     rhi::DescriptorSetHandle       m_DebugSet;
     rhi::RHIPipelineStateHandle m_DebugPSO{};   // A-3
-    std::unique_ptr<rhi::IRHITexture>       m_DebugTex;      // RGBA16F，屏幕尺寸
+    rhi::RHITextureHandle m_DebugTex{};   // A-3      // RGBA16F，屏幕尺寸
     std::unique_ptr<rhi::IRHIBuffer>        m_DebugStats;    // CPU 可读（原子计数）
     std::unique_ptr<rhi::IRHIBuffer>        m_DebugProbe;    // CPU 可读（沿中心射线的场剖面）
     void* m_DebugStatsMapped = nullptr;
@@ -388,7 +388,7 @@ private:
     // ── L2 Surface Cache（步骤 13）──
     CardCoverage m_CardCoverage;
     std::vector<CardInfo> m_Cards;
-    std::unique_ptr<rhi::IRHITexture> m_CardCoverageTex;
+    rhi::RHITextureHandle m_CardCoverageTex{};   // A-3
     bool m_CardsBuilt = false;
     // mesh 场探针（每帧查一个 mesh，读回等 3 帧）
     u32   m_MeshProbeIndex = 0;

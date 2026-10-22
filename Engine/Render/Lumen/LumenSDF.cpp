@@ -323,10 +323,10 @@ void LumenSDF::UploadGeometry(const MeshBatcher& batcher) {
         td.format = rhi::Format::R32_UINT;
         td.width = td.height = td.depth = m_Config.resolution;
         td.usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource;
-        m_MeshScratch = m_Device->CreateTexture(td);
+        m_MeshScratch = m_Device->CreateTextureHandle(td);   // A-3
         // 种子坐标纹理（同样共享、逐 mesh 复用）；8 位/轴的打包要求分辨率 <= 256
         if (m_Config.resolution > 256u) HE_CORE_WARN("LumenSDF: 分辨率 {} > 256，JFA 的种子坐标打包会溢出", m_Config.resolution);
-        m_MeshSeed = m_Device->CreateTexture(td);
+        m_MeshSeed = m_Device->CreateTextureHandle(td);
         // 描述符绑定放在 BakeOne 里首次使用时做：UploadGeometry 跑在 CreateGPUObjects **之前**，
         // 那时 m_SeedFloodSet 还没分配（写进去是 no-op ⇒ 采样/写入描符未绑定，只涨 VUID 不出效果）。
 
@@ -335,9 +335,9 @@ void LumenSDF::UploadGeometry(const MeshBatcher& batcher) {
     m_Device->UpdateDescriptorSet(m_Set, kBindPosition, rhi::DescriptorType::StorageBuffer, m_Positions.get());
     m_Device->UpdateDescriptorSet(m_Set, kBindIndex,    rhi::DescriptorType::StorageBuffer, m_Indices.get());
     m_Device->UpdateDescriptorSetWithImageView(m_Set, kBindField, rhi::DescriptorType::StorageImage,
-                                               m_MeshScratch->GetNativeHandle());
+                                               m_Device->ResolveTexture(m_MeshScratch)->GetNativeHandle());
     m_Device->UpdateDescriptorSetWithImageView(m_ConvertSet, 0, rhi::DescriptorType::StorageImage,
-                                               m_MeshScratch->GetNativeHandle());
+                                               m_Device->ResolveTexture(m_MeshScratch)->GetNativeHandle());
     m_Device->UpdateDescriptorSet(m_ConvertSet, 2, rhi::DescriptorType::StorageBuffer, m_ProbeDist.get());
 
     m_GeometryUploaded = true;
@@ -355,7 +355,7 @@ void LumenSDF::BakeOne(rhi::IRHICommandList* cmd, u32 entryIndex) {
     // 必须早于本帧的任何存储写。
     if (!m_MeshScratchTransitioned) {
         m_MeshScratchTransitioned = true;
-        for (rhi::IRHITexture* t : { m_MeshScratch.get(), m_MeshSeed.get() }) {
+        for (rhi::IRHITexture* t : { m_Device->ResolveTexture(m_MeshScratch), m_Device->ResolveTexture(m_MeshSeed) }) {
             if (t) cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
                                         rhi::ResourceState::Undefined, rhi::ResourceState::UnorderedAccess, t);
         }
@@ -401,7 +401,7 @@ void LumenSDF::BakeOne(rhi::IRHICommandList* cmd, u32 entryIndex) {
     cmd->Dispatch((u32)((voxels + 63ull) / 64ull), 1, 1);
     cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
                          rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess,
-                         m_MeshScratch.get());
+                         m_Device->ResolveTexture(m_MeshScratch));
 
     // ── ② scatter：一个三角形一个线程组，只扫自己的 AABB ──
     pc.meshIndex = 1u;   // scatter 的 mode：1 = 逐三角形写入
@@ -409,7 +409,7 @@ void LumenSDF::BakeOne(rhi::IRHICommandList* cmd, u32 entryIndex) {
     cmd->Dispatch(std::max(1u, e.triCount), 1, 1);
     cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
                          rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess,
-                         m_MeshScratch.get());
+                         m_Device->ResolveTexture(m_MeshScratch));
 
     // ── ②b 跳步洪泛：scatter 只写了表面附近的一条带，远处仍是 +inf（= 高估，会穿漏），
     //      按 res/2, res/4 … 1 逐级松弛补全全场 ──
@@ -417,9 +417,9 @@ void LumenSDF::BakeOne(rhi::IRHICommandList* cmd, u32 entryIndex) {
     // 首次使用时一次性写好"距离 + 种子"两张纹理的描述符（此后不再改写，避免在飞行帧里改描述符集）
     if (!m_SeedSetBound) {
         m_Device->UpdateDescriptorSetWithImageView(m_SeedFloodSet, 0, rhi::DescriptorType::StorageImage,
-                                                   m_MeshScratch->GetNativeHandle());
+                                                   m_Device->ResolveTexture(m_MeshScratch)->GetNativeHandle());
         m_Device->UpdateDescriptorSetWithImageView(m_SeedFloodSet, 1, rhi::DescriptorType::StorageImage,
-                                                   m_MeshSeed->GetNativeHandle());
+                                                   m_Device->ResolveTexture(m_MeshSeed)->GetNativeHandle());
         m_SeedSetBound = true;
     }
     // 改用带**种子坐标**的 JFA（真欧氏距离）：绑定换成"距离 + 种子"那一套，先立种子
@@ -431,7 +431,7 @@ void LumenSDF::BakeOne(rhi::IRHICommandList* cmd, u32 entryIndex) {
         cmd->Dispatch(fg, fg, fg);
         cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
                              rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess,
-                             m_MeshSeed.get());
+                             m_Device->ResolveTexture(m_MeshSeed));
     }
     for (u32 s = e.resolution / 2u; s >= 1u; s /= 2u) {
         pc.meshIndex = s;   // flood 的 dims.w = 本次步长（体素）
@@ -443,10 +443,10 @@ void LumenSDF::BakeOne(rhi::IRHICommandList* cmd, u32 entryIndex) {
             cmd->Dispatch(fgroups, fgroups, fgroups);
             cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
                                  rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess,
-                                 m_MeshSeed.get());
+                                 m_Device->ResolveTexture(m_MeshSeed));
             cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
                                  rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess,
-                                 m_MeshScratch.get());
+                                 m_Device->ResolveTexture(m_MeshScratch));
         }
         if (s == 1u) break;   // 防止 s 折半变 0 造成死循环
     }
@@ -455,7 +455,7 @@ void LumenSDF::BakeOne(rhi::IRHICommandList* cmd, u32 entryIndex) {
     rhi::DescriptorSetHandle convSet = (entryIndex < m_ConvertSets.size())
                                      ? m_ConvertSets[entryIndex] : m_ConvertSet;
     m_Device->UpdateDescriptorSetWithImageView(convSet, 0, rhi::DescriptorType::StorageImage,
-                                               m_MeshScratch->GetNativeHandle());
+                                               m_Device->ResolveTexture(m_MeshScratch)->GetNativeHandle());
     m_Device->UpdateDescriptorSetWithImageView(convSet, 1, rhi::DescriptorType::StorageImage,
                                                e.field->GetNativeHandle());
     m_Device->UpdateDescriptorSet(convSet, 2, rhi::DescriptorType::StorageBuffer, m_ProbeDist.get());
@@ -1780,7 +1780,7 @@ void LumenSDF::CreateDebugGPUObjects() {
 
     // 输出纹理：compute 写（UAV）+ 采样（SRV）+ 拷贝转储（TRANSFER_SRC）。
     // resize 时由 SetViewport 置空本指针 ⇒ 这里按新尺寸重建并重新写描述符。
-    if (!m_DebugTex) {
+    if (!m_DebugTex.IsValid()) {
         rhi::TextureDesc td;
         td.width  = m_ViewportW;
         td.height = m_ViewportH;
@@ -1788,10 +1788,10 @@ void LumenSDF::CreateDebugGPUObjects() {
         td.format = rhi::Format::RGBA16_FLOAT;
         td.usage  = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource |
                     rhi::TextureUsage::TransferSrc;
-        m_DebugTex = m_Device->CreateTexture(td);
+        m_DebugTex = m_Device->CreateTextureHandle(td);
         // 存储图像的描述符必须走 imageView 重载（本引擎没有"独立存储图像"以外的写法）
         m_Device->UpdateDescriptorSetWithImageView(m_DebugSet, kDBindOut,
-            rhi::DescriptorType::StorageImage, m_DebugTex->GetNativeHandle());
+            rhi::DescriptorType::StorageImage, m_Device->ResolveTexture(m_DebugTex)->GetNativeHandle());
     }
 
     // 统计缓冲（CPU 可读）：创建时清零一次，之后只靠 shader 的原子加
@@ -1829,7 +1829,7 @@ void LumenSDF::RunDebugView(rhi::IRHICommandList* cmd, const float3& camPos, con
     // 只在 SDF 构建完成后跑；没建完时视图没有意义（场还没注入）
     if (m_Phase != Phase::Done || !GetGlobalField(0)) return;
     CreateDebugGPUObjects();
-    if (!m_DebugPSO.IsValid() || !m_DebugTex || !m_DebugStats) return;
+    if (!m_DebugPSO.IsValid() || !m_DebugTex.IsValid() || !m_DebugStats) return;
     if (!m_LinearSampler) return;
 
     const bool countFrame = (++m_DebugFrames == kDebugCountFrame);
@@ -1870,7 +1870,7 @@ void LumenSDF::RunDebugView(rhi::IRHICommandList* cmd, const float3& camPos, con
     // UAV → 拷贝源：转储（06.GILab 的 GI 采样路径）在本 pass 之后整幅拷走
     cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::Transfer,
                          rhi::ResourceState::UnorderedAccess, rhi::ResourceState::CopySrc,
-                         m_DebugTex.get());
+                         m_Device->ResolveTexture(m_DebugTex));
 
     // 统计帧后 3 帧读回（飞行帧数），把"看得见的画面"同时落成可回归的数字
     if (m_DebugFrames == kDebugCountFrame + 3) LogDebugStats();
@@ -2247,7 +2247,7 @@ void LumenSDF::BuildCards() {
     td.format = rhi::Format::RGBA8_UNORM;
     td.usage  = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::TransferSrc;
     td.initialData = img.data();
-    m_CardCoverageTex = m_Device->CreateTexture(td);
+    m_CardCoverageTex = m_Device->CreateTextureHandle(td);
 
     // 覆盖最差的 3 个 mesh 点名（"空洞 ↔ 卡片设置"的可回归证据）
     std::vector<u32> order;
