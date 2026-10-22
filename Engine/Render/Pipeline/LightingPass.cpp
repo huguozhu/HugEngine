@@ -81,8 +81,8 @@ void LightingPass::Render(rhi::IRHICommandList* cmd, const LightingInputs& in) {
     };
 
     // ── 绑定 GBuffer 纹理 ──
-    rhi::IRHITexture* black = m_Device->ResolveTexture(m_PlaceholderBlack);
-    rhi::IRHITexture* white = m_Device->ResolveTexture(m_PlaceholderWhite);
+    rhi::IRHITexture* black = ResT(m_PlaceholderBlack);
+    rhi::IRHITexture* white = ResT(m_PlaceholderWhite);
     bindTex(kGPUBinding_GBufferA, in.gbA, m_Device->ResolveSampler(m_HDRSampler));
     bindTex(kGPUBinding_GBufferB, in.gbB, m_Device->ResolveSampler(m_HDRSampler));
     bindTex(kGPUBinding_GBufferC, in.gbC, m_Device->ResolveSampler(m_HDRSampler));
@@ -127,9 +127,9 @@ void LightingPass::Render(rhi::IRHICommandList* cmd, const LightingInputs& in) {
 
     // ── 绑定光追（RT）效果输出纹理（未提供时回落到中性占位）──
     // 阴影/AO 遮罩用线性采样上采样到全分辨率；反射/GI HDR 结果用线性采样
-    bindTex(kGPUBinding_RT_ShadowMask, in.rtShadowMask, m_Device->ResolveSampler(m_HDRSampler), m_Device->ResolveTexture(m_PlaceholderWhite));  // RT 阴影遮罩
+    bindTex(kGPUBinding_RT_ShadowMask, in.rtShadowMask, m_Device->ResolveSampler(m_HDRSampler), ResT(m_PlaceholderWhite));  // RT 阴影遮罩
     bindTex(kGPUBinding_RT_Reflection, in.rtReflection, m_Device->ResolveSampler(m_HDRSampler), black);   // RT 反射
-    bindTex(kGPUBinding_RT_AO, in.rtAO,         m_Device->ResolveSampler(m_HDRSampler), m_Device->ResolveTexture(m_PlaceholderWhite));   // RT AO
+    bindTex(kGPUBinding_RT_AO, in.rtAO,         m_Device->ResolveSampler(m_HDRSampler), ResT(m_PlaceholderWhite));   // RT AO
     bindTex(kGPUBinding_RT_GI, in.rtGI,         m_Device->ResolveSampler(m_HDRSampler), black);   // RT GI
     // 光照图键（任务 31）：GBuffer MRT7 的拷贝（uv0.xy + objectIndex）。用点采样：
     // 键是**索引**而不是可插值的颜色，任何过滤都会把页号/UV 混合成无意义的中间值。
@@ -157,12 +157,12 @@ void LightingPass::Render(rhi::IRHICommandList* cmd, const LightingInputs& in) {
     }
 
     // ── 执行全屏三角形绘制 ──
-    cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO));
+    cmd->SetPipeline(ResP(m_PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, set);
 
     rhi::ClearValue clr{};
-    cmd->BeginOffscreenPass(m_Device->ResolveTexture(m_HDRTarget)->GetNativeHandle(),
-                            m_Device->ResolveTexture(m_HDRDepth)->GetNativeHandle(),
+    cmd->BeginOffscreenPass(ResT(m_HDRTarget)->GetNativeHandle(),
+                            ResT(m_HDRDepth)->GetNativeHandle(),
                             in.width, in.height, &clr, false);
     cmd->SetViewport({0, (float)in.height, (float)in.width, -(float)in.height, 0, 1});
     cmd->SetScissor({0, 0, in.width, in.height});
@@ -192,7 +192,7 @@ void LightingPass::Render(rhi::IRHICommandList* cmd, const LightingInputs& in) {
         static_assert(sizeof(GIChannelBlendData) == sizeof(GIChannelBlendParams),
                       "GIChannelBlendData 必须与 shader 的 GIChannelBlendParams 布局一致");
         if (m_BlendUBO[slot].IsValid()) {
-            auto* bub    = m_Device->ResolveBuffer(m_BlendUBO[slot]);
+            auto* bub    = ResB(m_BlendUBO[slot]);
             HE_ASSERT(bub, "LightingPass: Blend UBO 句柄解析失败");
             void* mapped = bub ? bub->Map() : nullptr;
             if (mapped) {
@@ -200,7 +200,7 @@ void LightingPass::Render(rhi::IRHICommandList* cmd, const LightingInputs& in) {
                 std::memcpy(&bp->diffuse,  &in.diffuseBlend,  sizeof(GIChannelBlendData));
                 std::memcpy(&bp->specular, &in.specularBlend, sizeof(GIChannelBlendData));
                 std::memcpy(&bp->ao,       &in.aoBlend,       sizeof(GIChannelBlendData));
-                if (auto* bub = m_Device->ResolveBuffer(m_BlendUBO[slot])) bub->Unmap();
+                if (auto* bub = ResB(m_BlendUBO[slot])) bub->Unmap();
             }
         }
     }
@@ -307,7 +307,7 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
         m_BlendUBO[i] = device->CreateBufferHandle(bd);   // A-3
         HE_ASSERT(m_BlendUBO[i].IsValid(), "LightingPass: Blend UBO 句柄创建失败");
         device->UpdateDescriptorSet(m_Sets[i], kGPUBinding_GIBlendParams,
-            rhi::DescriptorType::UniformBuffer, m_Device->ResolveBuffer(m_BlendUBO[i]));
+            rhi::DescriptorType::UniformBuffer, ResB(m_BlendUBO[i]));
     }
 
     // ── 预填充所有 binding 占位纹理（避免未绑定 → Intel GPU 白屏）──
@@ -336,7 +336,7 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
         for (u32 b : {0u,1u,2u,3u,4u,9u,10u,11u,14u,23u,28u,29u})
             for (u32 i = 0; i < rhi::kMaxFramesInFlight; ++i)
                 device->UpdateDescriptorSet(m_Sets[i], b, rhi::DescriptorType::CombinedImageSampler,
-                                            m_Device->ResolveTexture(m_PlaceholderWhite), m_Device->ResolveSampler(m_PlaceholderSampler));
+                                            ResT(m_PlaceholderWhite), m_Device->ResolveSampler(m_PlaceholderSampler));
 
         // 占位绑定辅助：每一份集合都要写（它们各自独立，不能只写第一份）
         auto updateAllTex = [&](u32 binding, rhi::IRHITexture* tex) {
@@ -364,31 +364,31 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
             btd.initialData = bk;
             m_PlaceholderBlack = device->CreateTextureHandle(btd);   // A-3
 
-            updateAllTex(kGPUBinding_RT_ShadowMask, m_Device->ResolveTexture(m_PlaceholderWhite));
-            updateAllTex(kGPUBinding_RT_AO, m_Device->ResolveTexture(m_PlaceholderWhite));
-            updateAllTex(kGPUBinding_RT_Reflection, m_Device->ResolveTexture(m_PlaceholderBlack));
-            updateAllTex(kGPUBinding_RT_GI, m_Device->ResolveTexture(m_PlaceholderBlack));
+            updateAllTex(kGPUBinding_RT_ShadowMask, ResT(m_PlaceholderWhite));
+            updateAllTex(kGPUBinding_RT_AO, ResT(m_PlaceholderWhite));
+            updateAllTex(kGPUBinding_RT_Reflection, ResT(m_PlaceholderBlack));
+            updateAllTex(kGPUBinding_RT_GI, ResT(m_PlaceholderBlack));
             // 光照图键（任务 31）：占位用黑 → 键的页号分量为 0、uv 为 0，光照图分支判为无效键
-            updateAllTex(kGPUBinding_LightmapKey, m_Device->ResolveTexture(m_PlaceholderBlack));
+            updateAllTex(kGPUBinding_LightmapKey, ResT(m_PlaceholderBlack));
 
             // SSGI/SSAO/SSR 占位（19/20/21）：
             // 光追效果关闭、回退屏幕空间源时，shader 会采样这些纹理。
             // 必须绑定中性占位，避免采样未初始化描述符 → 黑屏。
             //   SSGI → 黑（无间接漫反射），SSAO → 白（无遮蔽），SSR → 黑（无镜面反射）
-            updateAllTex(kGPUBinding_SSGI, m_Device->ResolveTexture(m_PlaceholderBlack));
-            updateAllTex(kGPUBinding_SSAO_DL, m_Device->ResolveTexture(m_PlaceholderWhite));
-            updateAllTex(kGPUBinding_SSR, m_Device->ResolveTexture(m_PlaceholderBlack));
+            updateAllTex(kGPUBinding_SSGI, ResT(m_PlaceholderBlack));
+            updateAllTex(kGPUBinding_SSAO_DL, ResT(m_PlaceholderWhite));
+            updateAllTex(kGPUBinding_SSR, ResT(m_PlaceholderBlack));
             // Lumen 输出（binding 32）→ 黑色（无间接光）。与 SSGI/SSR 同理：未产出时必须是中性值
-            updateAllTex(kGPUBinding_Lumen, m_Device->ResolveTexture(m_PlaceholderBlack));
+            updateAllTex(kGPUBinding_Lumen, ResT(m_PlaceholderBlack));
 
             // RSM 位置/通量图（15/16）→ 黑色：
             // 这两张**不能**用白色占位。对 u_RSMPositionMap，白色是 worldPos≈(1,1,1)；
             // 对 u_RSMFluxMap，白色是 flux=1.0，即一个"全亮 VPL"——一旦门控与 RSM pass 的真实
             // 产出不一致，回落就从一个安全值变成一个偏亮的错误值。黑色才是"无间接光"的中性值。
-            updateAllTex(kGPUBinding_RSMPosition, m_Device->ResolveTexture(m_PlaceholderBlack));
-            updateAllTex(kGPUBinding_RSMFlux, m_Device->ResolveTexture(m_PlaceholderBlack));   // RSM 法线图：中性值不会让它"有效"
+            updateAllTex(kGPUBinding_RSMPosition, ResT(m_PlaceholderBlack));
+            updateAllTex(kGPUBinding_RSMFlux, ResT(m_PlaceholderBlack));   // RSM 法线图：中性值不会让它"有效"
             // RSM 间接光 E（binding 5）→ 黑色（无间接光），理由同上
-            updateAllTex(kGPUBinding_RSMIndirect, m_Device->ResolveTexture(m_PlaceholderBlack));
+            updateAllTex(kGPUBinding_RSMIndirect, ResT(m_PlaceholderBlack));
         }
 
         // 绑定 12=Irradiance, 13=Prefilter 需要 Cubemap（Shader 声明为 TextureCube）
@@ -406,8 +406,8 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
             ctd.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::Cubemap;
             ctd.initialData = w4cube;
             m_PlaceholderCube = device->CreateTextureHandle(ctd);   // A-3
-            updateAllTex(kGPUBinding_IrradianceMap, m_Device->ResolveTexture(m_PlaceholderCube));
-            updateAllTex(kGPUBinding_PrefilterMap, m_Device->ResolveTexture(m_PlaceholderCube));
+            updateAllTex(kGPUBinding_IrradianceMap, ResT(m_PlaceholderCube));
+            updateAllTex(kGPUBinding_PrefilterMap, ResT(m_PlaceholderCube));
         }
 
         // Cluster SSBO 占位（binding 7/8）

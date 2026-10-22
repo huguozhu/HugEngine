@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Threading/RenderThreadContext.h"   // T2.6：帧上下文（唯一 RHI 出口）
+
 #include "RHI/RHI.h"
 #include "Pipeline/Material.h"
 #include "Pipeline/ClusteredShading.h"
@@ -156,6 +158,29 @@ private:
     rhi::RHISamplerHandle m_HDRSampler{}, m_PointSampler{};   // A-3：句柄持有
 
     rhi::IRHIDevice* m_Device = nullptr;
+
+    /// 【T2.6】本帧的渲染线程上下文（可空；空时解析回退 `m_Device`）
+    const RenderThreadContext* m_FrameCtx = nullptr;
+
+public:
+    /// 【T2.6】设置本帧的渲染线程上下文（搬迁过渡期用）
+    void SetFrameContext(const RenderThreadContext* ctx) { m_FrameCtx = ctx; }
+
+private:
+    // 【T2.6】统一解析入口。注意：回退分支必须直接调 `m_Device->Resolve*`，
+    // 不能再写成 `ResX(...)` —— 否则与本文件的批量替换叠加会变成无限递归（踩过栈溢出）。
+    [[nodiscard]] rhi::IRHIBuffer* ResB(rhi::RHIBufferHandle h) const {
+        if (m_FrameCtx) return m_FrameCtx->ResolveBuffer(h);
+        return m_Device ? m_Device->ResolveBuffer(h) : nullptr;
+    }
+    [[nodiscard]] rhi::IRHITexture* ResT(rhi::RHITextureHandle h) const {
+        if (m_FrameCtx) return m_FrameCtx->ResolveTexture(h);
+        return m_Device ? m_Device->ResolveTexture(h) : nullptr;
+    }
+    [[nodiscard]] rhi::IRHIPipelineState* ResP(rhi::RHIPipelineStateHandle h) const {
+        if (m_FrameCtx) return m_FrameCtx->ResolvePipelineState(h);
+        return m_Device ? m_Device->ResolvePipelineState(h) : nullptr;
+    }
 
     // ── Lighting PSO + 描述符集（每飞行帧一份）──
     rhi::RHIPipelineStateHandle m_PSO{};   // A-3：句柄持有
