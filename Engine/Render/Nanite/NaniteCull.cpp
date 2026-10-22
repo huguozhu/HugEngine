@@ -410,8 +410,8 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
             sd.addressU  = sd.addressV = sd.addressW = rhi::AddressMode::ClampToEdge;
             sd.minLod    = 0.0f;
             sd.maxLod    = (float)kNaniteMaxHiZMips;
-            m_HiZSampler = m_Device->CreateSampler(sd);
-            if (!m_HiZSampler) { HE_CORE_ERROR("NaniteCull: Hi-Z 采样器创建失败"); return false; }
+            m_HiZSampler = m_Device->CreateSamplerHandle(sd);   // A-3
+            if (!m_HiZSampler.IsValid()) { HE_CORE_ERROR("NaniteCull: Hi-Z 采样器创建失败"); return false; }
         }
         // 【任务 15】Hi-Z 占位纹理：binding 10 必须**永远**是合法描述符（Vulkan 不接受指向空纹理的
         //   采样器绑定）⇒ 没有外部金字塔时绑这张 1×1。层数传 0 ⇒ shader 第一句就返回"不遮挡"，
@@ -423,10 +423,10 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
             td.height    = 1u;
             td.mipLevels = 1u;
             td.usage     = rhi::TextureUsage::ShaderResource;
-            m_HiZPlaceholderTex = m_Device->CreateTexture(td);
-            if (!m_HiZPlaceholderTex) { HE_CORE_ERROR("NaniteCull: Hi-Z 占位纹理创建失败"); return false; }
+            m_HiZPlaceholderTex = m_Device->CreateTextureHandle(td);   // A-3
+            if (!m_HiZPlaceholderTex.IsValid()) { HE_CORE_ERROR("NaniteCull: Hi-Z 占位纹理创建失败"); return false; }
             m_Device->UpdateDescriptorSet(m_BVHSet, 10, rhi::DescriptorType::CombinedImageSampler,
-                                          m_HiZPlaceholderTex.get(), m_HiZSampler.get());
+                                          m_Device->ResolveTexture(m_HiZPlaceholderTex), m_Device->ResolveSampler(m_HiZSampler));
         }
 
         m_BVHCS.stage      = rhi::ShaderStage::Compute;
@@ -575,8 +575,8 @@ void NaniteCull::Shutdown() {
     m_HiZViewOwner = nullptr;
     m_HiZViewCount = 0u;
     m_Device->DestroyPipelineStateHandle(m_HiZBuildPSO); m_HiZBuildPSO = {};
-    m_HiZPlaceholderTex.reset();
-    m_HiZSampler.reset();
+    m_Device->DestroyTextureHandle(m_HiZPlaceholderTex); m_HiZPlaceholderTex = {};
+    m_Device->DestroySamplerHandle(m_HiZSampler); m_HiZSampler = {};
     m_BVHData = NaniteClusterBVH{};
     m_LODInfo.clear();
     m_ClusterDrawRanges.clear();       // 【任务 16】绘制参数的 CPU 镜像
@@ -1219,7 +1219,7 @@ u32 NaniteCull::BuildHiZPyramid(rhi::IRHICommandList* cmd, rhi::IRHITexture* pyr
 
         // ── 每个集合的每个绑定**每帧只写一次**（这是本实现正确的关键；见头注释）──
         m_Device->UpdateDescriptorSet(set, 0, rhi::DescriptorType::CombinedImageSampler,
-                                      depth, m_HiZSampler.get());
+                                      depth, m_Device->ResolveSampler(m_HiZSampler));
         // srcMip == 0 时 binding 1 不被使用，但必须是**合法且布局正确**的描述符 ⇒ 绑一个金字塔
         // 层的存储视图（整图此刻处于 GENERAL，正是 StorageImage 期望的布局）。
         const u32 srcView = (level == 0u) ? 1u : level;             // 目标层索引 = level+1
@@ -1330,7 +1330,7 @@ void NaniteCull::RecordCullChainPass(rhi::IRHICommandList* cmd,
 
     if (m_FrameHiZMipCount >= 2u) {
         m_Device->UpdateDescriptorSet(m_BVHSet, 10, rhi::DescriptorType::CombinedImageSampler,
-                                      hizTexture, m_HiZSampler.get());
+                                      hizTexture, m_Device->ResolveSampler(m_HiZSampler));
     } else {
         // 没有可用金字塔（开关关闭 / 纹理缺失 / 层数不足）⇒ 绑占位纹理 + 层数 0
         //（shader 的遮挡测试第一句就返回 false）。占位纹理必须先转成"只读"布局，
@@ -1338,9 +1338,9 @@ void NaniteCull::RecordCullChainPass(rhi::IRHICommandList* cmd,
         m_FrameHiZMipCount = 0u;
         cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
                              rhi::ResourceState::Undefined, rhi::ResourceState::ShaderResource,
-                             m_HiZPlaceholderTex.get());
+                             m_Device->ResolveTexture(m_HiZPlaceholderTex));
         m_Device->UpdateDescriptorSet(m_BVHSet, 10, rhi::DescriptorType::CombinedImageSampler,
-                                      m_HiZPlaceholderTex.get(), m_HiZSampler.get());
+                                      m_Device->ResolveTexture(m_HiZPlaceholderTex), m_Device->ResolveSampler(m_HiZSampler));
     }
 
     // ── 【与任务 13 同一处修法】计数器的"每帧清零"必须在命令缓冲内完成（GPU 有序）──

@@ -629,8 +629,8 @@ private:
     /// 【任务 15】Hi-Z 占位纹理（1×1 R32_FLOAT）+ 采样器：当本帧没有外部 Hi-Z 纹理时占位，
     ///   保证 binding 10 永远是**合法描述符**（Vulkan 不接受"未绑定/空纹理"的采样器绑定）。
     ///   层数传 0 ⇒ shader 的 `hizOccluded` 第一句就返回 false ⇒ 不会真的采样它。
-    std::unique_ptr<rhi::IRHITexture> m_HiZPlaceholderTex;
-    std::unique_ptr<rhi::IRHISampler> m_HiZSampler;
+    rhi::RHITextureHandle m_HiZPlaceholderTex{};   // A-3
+    rhi::RHISamplerHandle m_HiZSampler{};   // A-3
 
     // ── cluster BVH 遍历的 compute 管线 ──
     rhi::ShaderBytecode m_BVHCS;   // Nanite_ClusterBVH.comp.spv
