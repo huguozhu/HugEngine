@@ -2654,3 +2654,16 @@ A-5（ImGui/PSO 命令化）、T2.6、T3.3/T3.4、T5.1~T5.3、L4-3。
 T2.6 判为**部分完成**：出口已就位（19.1），搬迁按 19.3 的配方持续推进；在没有完成全部搬迁前，
 不应声称"`RenderThreadContext` 是唯一 RHI 出口"。
 
+### 19.5 无需搬迁的 pass（创建期直连设备是正确形态）
+
+搬迁范围按"是否有**帧内**设备调用"划分，以下三类不需要改：
+
+| 类型 | 例子 | 理由 |
+|---|---|---|
+| 只在 `Initialize(device, ...)` 里用设备参数 | `GI_IBL`(9)、`GI_RSM`(10)、`DDGITracePass`(1) | 全部解析调用都在创建期；那时还没有"本帧上下文"，直接用手上的设备参数正是配方第 4 步所说的"创建期直连" |
+| 设备通过参数传入、类内不存裸指针 | `GBufferContext`（已改为携带 `frameCtx`）等 | 归属本来就清晰，只需把上下文一并传入 |
+| 纯容器/工具类 | `GITiming`、`GIProbeGrid`、`RSMFrustum`、各 `*Provider` | 不含任何 RHI 调用 |
+
+**已迁移（帧内路径）**：`ForwardPipeline`(13)、`DeferredPipeline`(2)、`GBufferRenderer`(41)、
+`LightingPass`(25)、`DecalPass`(3)、AA 三类(17)、阴影四技术(17)、GI 五组件(37) ⇒ **合计 155 处**。
+
