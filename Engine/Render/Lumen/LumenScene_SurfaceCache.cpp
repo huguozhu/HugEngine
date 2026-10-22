@@ -594,7 +594,7 @@ void LumenScene::RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHIText
         cb.size = gpu.size() * sizeof(ShadeCard);
         cb.usage = rhi::BufferUsage::Storage;
         cb.initialData = gpu.data();
-        m_ShadeCardsBuf = m_Device->CreateBuffer(cb);
+        m_ShadeCardsBuf = m_Device->CreateBufferHandle(cb);   // A-3
 
         const u32 maxRays = kMaxScreenProbes * 16u;
         rhi::BufferDesc ob; ob.size = (usize)maxRays * sizeof(float4); ob.usage = rhi::BufferUsage::Storage; ob.cpuAccess = true;
@@ -606,8 +606,8 @@ void LumenScene::RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHIText
         // 统计槽：0..6 见 shader；7/8/9 = 重叠带内 / 真正混合 / 副点无材质
         // 统计槽：0..13 见 shader；14 = 命中但着色源未实现（步骤 28）
         rhi::BufferDesc sb; sb.size = sizeof(u32) * 24u; sb.usage = rhi::BufferUsage::Storage; sb.cpuAccess = true;
-        m_ShadeStatsBuf = m_Device->CreateBuffer(sb);
-        m_ShadeStatsMapped = m_ShadeStatsBuf->Map();
+        m_ShadeStatsBuf = m_Device->CreateBufferHandle(sb);   // A-3
+        m_ShadeStatsMapped = m_Device->ResolveBuffer(m_ShadeStatsBuf)->Map();
 
         // 步骤 27：副命中点缓冲（远场合并写、着色读）在这里一并建好，避免"描述符声明了但还没绑"
         // 的窗口期（第一帧远场 pass 还没跑时着色已经在派发）。距离分桶同理。
@@ -624,12 +624,12 @@ void LumenScene::RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHIText
 
         m_Device->UpdateDescriptorSet(m_ShadeSet, 0, rhi::DescriptorType::CombinedImageSampler,
                                       m_Device->ResolveTexture(m_AtlasAlbedo), m_SDF.GetLinearSampler());
-        m_Device->UpdateDescriptorSet(m_ShadeSet, 1, rhi::DescriptorType::StorageBuffer, m_ShadeCardsBuf.get());
+        m_Device->UpdateDescriptorSet(m_ShadeSet, 1, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_ShadeCardsBuf));
         m_Device->UpdateDescriptorSet(m_ShadeSet, 2, rhi::DescriptorType::StorageBuffer, m_PageTableBuf.get());
         m_Device->UpdateDescriptorSet(m_ShadeSet, 3, rhi::DescriptorType::StorageBuffer, m_RayHitPosBuf.get());
         m_Device->UpdateDescriptorSet(m_ShadeSet, 5, rhi::DescriptorType::StorageBuffer, m_ShadeOutBuf.get());
         m_Device->UpdateDescriptorSet(m_ShadeSet, 6, rhi::DescriptorType::StorageBuffer, m_ShadeOutGbBuf.get());
-        m_Device->UpdateDescriptorSet(m_ShadeSet, 7, rhi::DescriptorType::StorageBuffer, m_ShadeStatsBuf.get());
+        m_Device->UpdateDescriptorSet(m_ShadeSet, 7, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_ShadeStatsBuf));
         m_Device->UpdateDescriptorSet(m_ShadeSet, 9, rhi::DescriptorType::StorageBuffer, m_ShadeOutBestBuf.get());
         m_Device->UpdateDescriptorSet(m_ShadeSet, 10, rhi::DescriptorType::StorageBuffer, m_RayFadeBuf.get());
         m_Device->UpdateDescriptorSet(m_ShadeSet, 11, rhi::DescriptorType::StorageBuffer, m_DistBinBuf.get());
@@ -839,8 +839,8 @@ void LumenScene::RunProbeTrace(rhi::IRHICommandList* cmd) {
 
         rhi::BufferDesc sb;
         sb.size = sizeof(u32) * 4u; sb.usage = rhi::BufferUsage::Storage; sb.cpuAccess = true;
-        m_RayStatsBuf = m_Device->CreateBuffer(sb);
-        m_RayStatsMapped = m_RayStatsBuf->Map();
+        m_RayStatsBuf = m_Device->CreateBufferHandle(sb);   // A-3
+        m_RayStatsMapped = m_Device->ResolveBuffer(m_RayStatsBuf)->Map();
 
         m_Device->UpdateDescriptorSet(m_TraceSet, 0, rhi::DescriptorType::CombinedImageSampler,
                                       m_SDF.GetGlobalField(0), m_SDF.GetLinearSampler());
@@ -848,7 +848,7 @@ void LumenScene::RunProbeTrace(rhi::IRHICommandList* cmd) {
                                       m_SDF.GetGlobalField(1), m_SDF.GetLinearSampler());
         m_Device->UpdateDescriptorSet(m_TraceSet, 1, rhi::DescriptorType::StorageBuffer, m_ProbeBuf.get());
         m_Device->UpdateDescriptorSet(m_TraceSet, 2, rhi::DescriptorType::StorageBuffer, m_RayResultBuf.get());
-        m_Device->UpdateDescriptorSet(m_TraceSet, 3, rhi::DescriptorType::StorageBuffer, m_RayStatsBuf.get());
+        m_Device->UpdateDescriptorSet(m_TraceSet, 3, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_RayStatsBuf));
         m_Device->UpdateDescriptorSet(m_TraceSet, 4, rhi::DescriptorType::StorageBuffer, m_RayHitPosBuf.get());
         m_TraceBound = true;
         return;   // 新建资源当帧不用
@@ -964,15 +964,15 @@ void LumenScene::RunProbePlacement(rhi::IRHICommandList* cmd, rhi::IRHITexture* 
 
         rhi::BufferDesc cb;
         cb.size = sizeof(u32); cb.usage = rhi::BufferUsage::Storage; cb.cpuAccess = true;
-        m_ProbeCountBuf = m_Device->CreateBuffer(cb);
-        m_ProbeCountMapped = m_ProbeCountBuf->Map();
+        m_ProbeCountBuf = m_Device->CreateBufferHandle(cb);   // A-3
+        m_ProbeCountMapped = m_Device->ResolveBuffer(m_ProbeCountBuf)->Map();
 
         const u32 tiles = 256u * 256u;   // 偏差缓冲按 8K 屏幕上限（256×256 个 32×32 tile）
         rhi::BufferDesc db;
         db.size = (usize)tiles * sizeof(float);
         db.usage = rhi::BufferUsage::Storage; db.cpuAccess = true;
-        m_TileDevBuf = m_Device->CreateBuffer(db);
-        m_TileDevMapped = m_TileDevBuf->Map();
+        m_TileDevBuf = m_Device->CreateBufferHandle(db);   // A-3
+        m_TileDevMapped = m_Device->ResolveBuffer(m_TileDevBuf)->Map();
         m_ProbeTileDev.assign(tiles, -1.0f);
 
         // 步骤 24：16×16 单元 → 探针的映射（合成端按像素查探针，见 Lumen_ProbeIrradiance）
@@ -988,8 +988,8 @@ void LumenScene::RunProbePlacement(rhi::IRHICommandList* cmd, rhi::IRHITexture* 
         m_Device->UpdateDescriptorSet(m_ProbeSet, 1, rhi::DescriptorType::CombinedImageSampler,
                                       gbWorldPos, m_SDF.GetLinearSampler());
         m_Device->UpdateDescriptorSet(m_ProbeSet, 2, rhi::DescriptorType::StorageBuffer, m_ProbeBuf.get());
-        m_Device->UpdateDescriptorSet(m_ProbeSet, 3, rhi::DescriptorType::StorageBuffer, m_ProbeCountBuf.get());
-        m_Device->UpdateDescriptorSet(m_ProbeSet, 4, rhi::DescriptorType::StorageBuffer, m_TileDevBuf.get());
+        m_Device->UpdateDescriptorSet(m_ProbeSet, 3, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_ProbeCountBuf));
+        m_Device->UpdateDescriptorSet(m_ProbeSet, 4, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_TileDevBuf));
         m_Device->UpdateDescriptorSet(m_ProbeSet, 5, rhi::DescriptorType::StorageBuffer, m_CellProbeBuf.get());
         m_ProbeBound = true;
         return;   // 新建资源当帧不用（§附二十、§附二十五 的教训）
@@ -1349,14 +1349,14 @@ void LumenScene::RunScreenProbeSHProject(rhi::IRHICommandList* cmd, bool furnace
 
         rhi::BufferDesc sb;
         sb.size = sizeof(u32) * 4u; sb.usage = rhi::BufferUsage::Storage; sb.cpuAccess = true;
-        m_SHStatsBuf = m_Device->CreateBuffer(sb);
-        m_SHStatsMapped = m_SHStatsBuf->Map();
+        m_SHStatsBuf = m_Device->CreateBufferHandle(sb);   // A-3
+        m_SHStatsMapped = m_Device->ResolveBuffer(m_SHStatsBuf)->Map();
 
         m_Device->UpdateDescriptorSet(m_SHSet, 0, rhi::DescriptorType::StorageBuffer, m_ProbeBuf.get());
         m_Device->UpdateDescriptorSet(m_SHSet, 1, rhi::DescriptorType::StorageBuffer, m_ShadeOutBuf.get());
         m_Device->UpdateDescriptorSet(m_SHSet, 2, rhi::DescriptorType::StorageBuffer, m_IrradShBuf.get());
         m_Device->UpdateDescriptorSet(m_SHSet, 3, rhi::DescriptorType::StorageBuffer, m_IrradRefBuf.get());
-        m_Device->UpdateDescriptorSet(m_SHSet, 4, rhi::DescriptorType::StorageBuffer, m_SHStatsBuf.get());
+        m_Device->UpdateDescriptorSet(m_SHSet, 4, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_SHStatsBuf));
         m_Device->UpdateDescriptorSet(m_SHSet, 5, rhi::DescriptorType::StorageBuffer, m_RayResultBuf.get());
         m_SHBound = true;
         return;   // 本帧只建资源；下一帧开始派发（"新建资源当帧使用"的教训见 §附二十）

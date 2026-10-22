@@ -330,7 +330,8 @@ private:
     // ── Screen Probe（步骤 20）──
     static constexpr u32 kMaxScreenProbes = 65536;    // 8K 探针量级（1080p 96×54 tile × 4）
     float m_MergeNormalCos = 0.995f;                  // 法线一致阈值（cos；越大越严格 ⇒ 探针越多）
-    std::unique_ptr<rhi::IRHIBuffer> m_ProbeBuf, m_ProbeCountBuf, m_TileDevBuf;
+    std::unique_ptr<rhi::IRHIBuffer> m_ProbeBuf;
+    rhi::RHIBufferHandle m_ProbeCountBuf{}, m_TileDevBuf{};   // A-3
     void* m_ProbeCountMapped = nullptr;
     void* m_TileDevMapped = nullptr;
     rhi::DescriptorSetLayoutHandle m_ProbeLayout = 0;
@@ -342,7 +343,8 @@ private:
     std::vector<float> m_ProbeTileDev;
     // ── 探针半球追踪（步骤 21）──
     LumenTraceConfig m_TraceConfig;
-    std::unique_ptr<rhi::IRHIBuffer> m_RayResultBuf, m_RayStatsBuf;
+    std::unique_ptr<rhi::IRHIBuffer> m_RayResultBuf;
+    rhi::RHIBufferHandle m_RayStatsBuf{};   // A-3
     void* m_RayStatsMapped = nullptr;
     rhi::DescriptorSetLayoutHandle m_TraceLayout = 0;
     rhi::DescriptorSetHandle       m_TraceSet    = 0;
@@ -351,7 +353,8 @@ private:
     u32  m_TraceFrame = 0;
     u32  m_ProbeRayHits = 0, m_ProbeRayMisses = 0, m_ProbeRaysTotal = 0, m_ProbeRayHemisphere = 0;
     // ── 命中点着色（步骤 22）──
-    std::unique_ptr<rhi::IRHIBuffer> m_RayHitPosBuf, m_ShadeCardsBuf, m_ShadeOutBuf, m_ShadeOutGbBuf, m_ShadeOutBestBuf, m_ShadeStatsBuf;
+    std::unique_ptr<rhi::IRHIBuffer> m_RayHitPosBuf, m_ShadeOutBuf, m_ShadeOutGbBuf, m_ShadeOutBestBuf;
+    rhi::RHIBufferHandle m_ShadeCardsBuf{}, m_ShadeStatsBuf{};   // A-3
     void* m_ShadeStatsMapped = nullptr;
     rhi::DescriptorSetLayoutHandle m_ShadeLayout = 0;
     rhi::DescriptorSetHandle       m_ShadeSet    = 0;
@@ -365,7 +368,8 @@ private:
     float m_ShadedAlbedoBestDiff = 0.0f;      // 多卡覆盖下"最贴合 GBuffer 的候选"的平均 |Δalbedo|（归因下界）
     u32   m_ShadedAlbedoBestSamples = 0;
     // ── SH 投影（步骤 23）──
-    std::unique_ptr<rhi::IRHIBuffer> m_IrradShBuf, m_IrradRefBuf, m_SHStatsBuf;
+    std::unique_ptr<rhi::IRHIBuffer> m_IrradShBuf, m_IrradRefBuf;
+    rhi::RHIBufferHandle m_SHStatsBuf{};   // A-3
     void* m_SHStatsMapped = nullptr;
     rhi::DescriptorSetLayoutHandle m_SHLayout = 0;
     rhi::DescriptorSetHandle       m_SHSet    = 0;

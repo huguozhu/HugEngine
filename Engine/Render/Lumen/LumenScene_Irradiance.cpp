@@ -252,7 +252,7 @@ void LumenScene::LogMemoryUsage() const {
     // 屏幕尺寸（与视口相关）
     const double px = (double)m_Width * (double)m_Height;
     items.push_back({"Lumen 输出 + 辐照度（2 × 屏幕 RGBA16F）", 2.0 * px * 8.0 / (1024.0 * 1024.0)});
-    addBuf("卡片清单 / 页表镜像", m_ShadeCardsBuf.get());
+    addBuf("卡片清单 / 页表镜像", m_Device->ResolveBuffer(m_ShadeCardsBuf));
     addBuf("页表镜像", m_PageTableBuf.get());
     addBuf("命中点缓冲", m_RayHitPosBuf.get());
     addBuf("光线结果缓冲", m_RayResultBuf.get());
