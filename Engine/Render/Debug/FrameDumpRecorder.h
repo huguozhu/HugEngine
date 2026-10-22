@@ -44,8 +44,12 @@ public:
         float aspect     = 1.0f;
     };
 
-    /// 读取环境变量（HE_DUMP_GI / HE_DUMP_GI_FRAME / HE_DUMP_LUMEN_PROBES）
+    /// 读取环境变量（默认 HE_DUMP_GI / HE_DUMP_GI_FRAME / HE_DUMP_LUMEN_PROBES，输出前缀 "gi_"）
     static FrameDumpRecorder FromEnv();
+
+    /// 同上，但可换开关名与输出前缀（例如 05.PathTracing 用 HE_DUMP_PT + "pt_"）。
+    /// tagEnv 为空 ⇒ 恒不启用。
+    static FrameDumpRecorder FromEnv(const char* prefix, const char* tagEnv, const char* frameEnv);
 
     /// 是否开启（未设置 HE_DUMP_GI ⇒ false）
     [[nodiscard]] bool IsActive() const { return m_Active; }
@@ -59,10 +63,19 @@ public:
         return m_Active && !m_Done && renderFrameIndex >= m_FrameIndex;
     }
 
+    /// 是否"已录制、待落盘"（使用方可据此把落盘夹在自己那段读回之后；不适用时恒 false）
+    [[nodiscard]] bool PendingWriteBack() const { return m_Active && m_Done && !m_Written; }
+
     /// 登记一个**纹理**目标：整幅拷进 host 可见缓冲（RGBA16F 等按实际格式算每像素字节）。
     /// 必须在 render pass 之外、与录制同一线程上调用。
     void AddTexture(rhi::IRHIDevice* device, rhi::IRHICommandList* cmd,
                     const char* name, rhi::IRHITexture* tex);
+
+    /// 同上，但由调用方显式给出每像素字节与 _meta.txt 里的格式字样
+    /// （05.PathTracing 的对照脚本用 "RGBA16F"/"R32F"/"BGRA8"，必须原样保留）。
+    void AddTexture(rhi::IRHIDevice* device, rhi::IRHICommandList* cmd,
+                    const char* name, rhi::IRHITexture* tex,
+                    u32 bytesPerPixel, const char* formatTag);
 
     /// 登记一个**缓冲**目标：原始字节落盘（.bin），用于探针/单元图这类非纹理中间量。
     void AddBuffer(rhi::IRHIDevice* device, rhi::IRHICommandList* cmd,
@@ -86,6 +99,7 @@ private:
         bool                             isBuffer = false;
         usize                            bytes    = 0;
         u32                              bytesPerPixel = 8;   // 按纹理实际格式算
+        String                           formatTag;           // _meta.txt 里的格式字样（空 = 用 "<n>bit"）
     };
 
     /// 按纹理格式算每像素字节（写死 8 B 会把 R16F/R32F 的末尾未初始化内存算成"差异"）
@@ -96,6 +110,7 @@ private:
     bool                m_Done           = false;   // 已录制拷贝（防止重复录制）
     bool                m_Written        = false;   // 已落盘（防止重复写文件）
     String              m_Tag;
+    String              m_Prefix = "gi_";   // 输出文件名前缀（05.PathTracing 用 "pt_"）
     u64                 m_FrameIndex = 60ull;
     std::vector<Target> m_Targets;
 

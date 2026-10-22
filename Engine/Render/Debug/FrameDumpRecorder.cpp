@@ -11,16 +11,22 @@
 namespace he::render {
 
 FrameDumpRecorder FrameDumpRecorder::FromEnv() {
+    return FromEnv("gi_", "HE_DUMP_GI", "HE_DUMP_GI_FRAME");
+}
+
+FrameDumpRecorder FrameDumpRecorder::FromEnv(const char* prefix, const char* tagEnvName,
+                                             const char* frameEnvName) {
     FrameDumpRecorder r;
-    const char* tagEnv   = std::getenv("HE_DUMP_GI");
-    const char* frameEnv = std::getenv("HE_DUMP_GI_FRAME");
+    r.m_Prefix = (prefix && *prefix) ? prefix : "gi_";
+    const char* tagEnv   = tagEnvName ? std::getenv(tagEnvName) : nullptr;
+    const char* frameEnv = frameEnvName ? std::getenv(frameEnvName) : nullptr;
     r.m_Tag          = tagEnv ? tagEnv : "";
     r.m_Active       = !r.m_Tag.empty();
     r.m_FrameIndex   = frameEnv ? (u64)std::max(1, std::atoi(frameEnv)) : 60ull;
     r.m_IncludeBuffers = (std::getenv("HE_DUMP_LUMEN_PROBES") != nullptr);
     if (r.m_Active) {
-        HE_CORE_INFO("[GI采样] 已启用：标签={} 目标帧={} 输出 build/verify/gi_{}_*.f16",
-                     r.m_Tag, r.m_FrameIndex, r.m_Tag);
+        HE_CORE_INFO("[采样落盘] 已启用：前缀={} 标签={} 目标帧={} 输出 build/verify/{}{}_*.f16",
+                     r.m_Prefix, r.m_Tag, r.m_FrameIndex, r.m_Prefix, r.m_Tag);
     }
     return r;
 }
@@ -40,13 +46,21 @@ u32 FrameDumpRecorder::BytesPerPixelOf(rhi::Format f) {
 void FrameDumpRecorder::AddTexture(rhi::IRHIDevice* device, rhi::IRHICommandList* cmd,
                                    const char* name, rhi::IRHITexture* tex) {
     if (!m_Active || !device || !cmd || !tex) return;
+    AddTexture(device, cmd, name, tex, BytesPerPixelOf(tex->GetFormat()), nullptr);
+}
+
+void FrameDumpRecorder::AddTexture(rhi::IRHIDevice* device, rhi::IRHICommandList* cmd,
+                                   const char* name, rhi::IRHITexture* tex,
+                                   u32 bytesPerPixel, const char* formatTag) {
+    if (!m_Active || !device || !cmd || !tex) return;
 
     Target t;
     t.name = name;
     t.tex  = tex;
     t.w    = tex->GetWidth();
     t.h    = tex->GetHeight();
-    t.bytesPerPixel = BytesPerPixelOf(tex->GetFormat());
+    t.bytesPerPixel = bytesPerPixel ? bytesPerPixel : BytesPerPixelOf(tex->GetFormat());
+    t.formatTag = formatTag ? formatTag : "";
 
     rhi::BufferDesc dd;                             // 宽 × 高 × bpp 字节
     dd.size      = (usize)t.w * t.h * t.bytesPerPixel;
@@ -89,7 +103,7 @@ void FrameDumpRecorder::FinishRecording(rhi::IRHIDevice* device, rhi::IRHIComman
 
     if (m_Targets.empty()) {
         m_Active = false;
-        HE_CORE_WARN("[GI采样] 没有可用目标（HDR 未创建？），本次跳过");
+        HE_CORE_WARN("[采样落盘] 没有可用目标，本次跳过");
         return;
     }
     m_Done = true;   // 已录制；实际读取放在 Submit 之后
@@ -117,7 +131,7 @@ bool FrameDumpRecorder::TryWriteBack(rhi::IRHIDevice* device, const CameraSnapsh
     }
 
     const String dir  = "build/verify/";
-    const String base = dir + "gi_" + m_Tag;
+    const String base = dir + m_Prefix + m_Tag;
     std::filesystem::create_directories(dir);
     std::ofstream meta(base + "_meta.txt");
     for (auto& t : m_Targets) {                        // 逐目标写：像素直落，无文件头
@@ -131,12 +145,14 @@ bool FrameDumpRecorder::TryWriteBack(rhi::IRHIDevice* device, const CameraSnapsh
         std::ofstream f(base + "_" + t.name + (t.isBuffer ? ".bin" : ".f16"), std::ios::binary);
         f.write(static_cast<const char*>(p), (std::streamsize)bytes);
         t.buf->Unmap();
-        meta << t.name << " " << t.w << " " << t.h << " "
-             << (t.isBuffer ? String("RAWBUFFER") : (std::to_string(t.bytesPerPixel * 8u) + "bit"))
-             << "\n";
-        HE_CORE_INFO("[GI采样] {}_{}.f16  {}x{}  {} B", base, t.name, t.w, t.h, bytes);
+        String fmt;
+        if (t.isBuffer)                  fmt = "RAWBUFFER";
+        else if (!t.formatTag.empty())   fmt = t.formatTag;                 // 调用方给的字样（05 的脚本依赖它）
+        else                             fmt = std::to_string(t.bytesPerPixel * 8u) + "bit";
+        meta << t.name << " " << t.w << " " << t.h << " " << fmt << "\n";
+        HE_CORE_INFO("[采样落盘] {}_{}.f16  {}x{}  {} B", base, t.name, t.w, t.h, bytes);
     }
-    HE_CORE_INFO("[GI采样] 共落盘 {} 个目标，请求退出", m_Targets.size());
+    HE_CORE_INFO("[采样落盘] 共落盘 {} 个目标", m_Targets.size());
 
     // 相机参数一并落盘：解析对照需要"渲染这一帧时"的相机参数，硬编码的会随 cfg 改动失效。
     {
