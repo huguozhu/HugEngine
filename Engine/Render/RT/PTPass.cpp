@@ -169,16 +169,16 @@ bool PTPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     d.usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource
             | rhi::TextureUsage::TransferSrc;
     d.format = rhi::Format::RGBA16_FLOAT;
-    m_HDR = device->CreateTexture(d);
+    m_HDR = device->CreateTextureHandle(d);   // A-3
     d.format = rhi::Format::R32_FLOAT;
-    m_Depth = device->CreateTexture(d);
+    m_Depth = device->CreateTextureHandle(d);
     d.format = rhi::Format::RGBA16_FLOAT;
-    m_Normal = device->CreateTexture(d);
+    m_Normal = device->CreateTextureHandle(d);
     d.format = rhi::Format::RG16_FLOAT;
-    m_Velocity = device->CreateTexture(d);
+    m_Velocity = device->CreateTextureHandle(d);
     d.format = rhi::Format::RGBA16_FLOAT;
-    m_AlbedoMetallic = device->CreateTexture(d);
-    if (!m_HDR || !m_Depth || !m_Normal || !m_Velocity || !m_AlbedoMetallic) {
+    m_AlbedoMetallic = device->CreateTextureHandle(d);
+    if (!m_HDR.IsValid() || !m_Depth.IsValid() || !m_Normal.IsValid() || !m_Velocity.IsValid() || !m_AlbedoMetallic.IsValid()) {
         HE_CORE_ERROR("PTPass: 输出纹理创建失败");
         return false;
     }
@@ -188,11 +188,11 @@ bool PTPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
 }
 
 void PTPass::Shutdown() {
-    m_Velocity.reset();
-    m_AlbedoMetallic.reset();
-    m_Normal.reset();
-    m_Depth.reset();
-    m_HDR.reset();
+    m_Device->DestroyTextureHandle(m_Velocity); m_Velocity = {};
+    m_Device->DestroyTextureHandle(m_AlbedoMetallic); m_AlbedoMetallic = {};
+    m_Device->DestroyTextureHandle(m_Normal); m_Normal = {};
+    m_Device->DestroyTextureHandle(m_Depth); m_Depth = {};
+    m_Device->DestroyTextureHandle(m_HDR); m_HDR = {};
     m_Pipeline.reset();
     m_Set = rhi::kInvalidSet;
     m_Layout = rhi::kInvalidLayout;
@@ -208,7 +208,7 @@ void PTPass::Shutdown() {
 // 由 RenderGraph 依据降噪/ReSTIR 的读取依赖自动生成。
 // ============================================================
 void PTPass::PrepareOutputUAV(rhi::IRHICommandList* cmd) {
-    if (!m_HDR) return;
+    if (!m_HDR.IsValid()) return;
     auto barrier = [&](rhi::IRHITexture* tex) {
         if (m_OutputWritten) {
             cmd->PipelineBarrier(rhi::PipelineStage::FragmentShader, rhi::PipelineStage::RayTracingShader,
@@ -218,11 +218,11 @@ void PTPass::PrepareOutputUAV(rhi::IRHICommandList* cmd) {
                 rhi::ResourceState::Undefined, rhi::ResourceState::UnorderedAccess, tex);
         }
     };
-    barrier(m_HDR.get());
-    barrier(m_Depth.get());
-    barrier(m_Normal.get());
-    barrier(m_Velocity.get());
-    barrier(m_AlbedoMetallic.get());
+    barrier(m_Device->ResolveTexture(m_HDR));
+    barrier(m_Device->ResolveTexture(m_Depth));
+    barrier(m_Device->ResolveTexture(m_Normal));
+    barrier(m_Device->ResolveTexture(m_Velocity));
+    barrier(m_Device->ResolveTexture(m_AlbedoMetallic));
     m_OutputWritten = true;
 }
 
@@ -231,7 +231,7 @@ void PTPass::PrepareOutputUAV(rhi::IRHICommandList* cmd) {
 // ============================================================
 void PTPass::Execute(rhi::IRHICommandList* cmd, rhi::IRHIAccelerationStructure* tlas,
                      const PTRenderContext& ctx) {
-    if (!IsValid() || !tlas || !m_HDR || !m_Device) return;
+    if (!IsValid() || !tlas || !m_HDR.IsValid() || !m_Device) return;
 
     // ── 预屏障：5 输出 → UnorderedAccess（RT 写）──
     PrepareOutputUAV(cmd);
@@ -240,15 +240,15 @@ void PTPass::Execute(rhi::IRHICommandList* cmd, rhi::IRHIAccelerationStructure* 
     m_Device->UpdateDescriptorSet(m_Set, kPTBindTLAS,
         rhi::DescriptorType::AccelerationStructure, tlas);
     m_Device->UpdateDescriptorSetWithImageView(m_Set, 1,
-        rhi::DescriptorType::StorageImage, m_HDR->GetNativeHandle());
+        rhi::DescriptorType::StorageImage, m_Device->ResolveTexture(m_HDR)->GetNativeHandle());
     m_Device->UpdateDescriptorSetWithImageView(m_Set, 2,
-        rhi::DescriptorType::StorageImage, m_Depth->GetNativeHandle());
+        rhi::DescriptorType::StorageImage, m_Device->ResolveTexture(m_Depth)->GetNativeHandle());
     m_Device->UpdateDescriptorSetWithImageView(m_Set, 3,
-        rhi::DescriptorType::StorageImage, m_Normal->GetNativeHandle());
+        rhi::DescriptorType::StorageImage, m_Device->ResolveTexture(m_Normal)->GetNativeHandle());
     m_Device->UpdateDescriptorSetWithImageView(m_Set, 4,
-        rhi::DescriptorType::StorageImage, m_Velocity->GetNativeHandle());
+        rhi::DescriptorType::StorageImage, m_Device->ResolveTexture(m_Velocity)->GetNativeHandle());
     m_Device->UpdateDescriptorSetWithImageView(m_Set, 9,
-        rhi::DescriptorType::StorageImage, m_AlbedoMetallic->GetNativeHandle());
+        rhi::DescriptorType::StorageImage, m_Device->ResolveTexture(m_AlbedoMetallic)->GetNativeHandle());
     if (ctx.lightBuffer)
         m_Device->UpdateDescriptorSet(m_Set, kPTBindLights,
             rhi::DescriptorType::StorageBuffer, ctx.lightBuffer);

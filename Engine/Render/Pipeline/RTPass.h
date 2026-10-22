@@ -139,8 +139,8 @@ public:
     void BindDescriptorSets(rhi::IRHICommandList* cmd);
 
     // 状态查询（AS-only 模式 m_RTPipeline 可为空，只要 TLAS 有效即可用）
-    bool IsValid() const { return m_TLAS != nullptr; }
-    rhi::IRHIAccelerationStructure* GetTLAS() const { return m_TLAS.get(); }
+    bool IsValid() const { return m_TLAS.IsValid(); }
+    rhi::IRHIAccelerationStructure* GetTLAS() const { return rhi::GetDevice()->ResolveAccelerationStructure(m_TLAS); }
 
     // ============================================================
     // 多管线工厂（Deferred 的 RT 效果 Pass 使用）
@@ -183,12 +183,12 @@ private:
     rhi::IRHIDevice* m_Device = nullptr;
 
     // RT Pipeline + SBT
-    std::unique_ptr<rhi::IRHIRayTracingPipelineState> m_RTPipeline;
+    rhi::RHIRayTracingPipelineHandle m_RTPipeline{};   // A-3
     rhi::SBTDesc m_SBT;
     std::unique_ptr<rhi::IRHIBuffer> m_SBTBuffer;   // 注意：BuildSBT 以 unique_ptr& 接收，暂不句柄化
 
     // AS
-    std::unique_ptr<rhi::IRHIAccelerationStructure> m_TLAS;
+    rhi::RHIAccelerationStructureHandle m_TLAS{};   // A-3
     rhi::RHIBufferHandle m_TLASScratch{};   // A-3
     rhi::RHIBufferHandle m_TLASInstanceBuffer{};   // A-3
 

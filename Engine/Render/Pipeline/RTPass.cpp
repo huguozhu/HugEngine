@@ -76,8 +76,8 @@ bool RTPass::Initialize(rhi::IRHIDevice* device,
         if (m_PushConstRange.size > 0)
             rtpDesc.pushConstantRanges.push_back(m_PushConstRange);
 
-        m_RTPipeline = device->CreateRTPipelineState(rtpDesc);
-        if (!m_RTPipeline) {
+        m_RTPipeline = device->CreateRTPipelineStateHandle(rtpDesc);   // A-3
+        if (!m_RTPipeline.IsValid()) {
             HE_CORE_ERROR("RTPass: RT Pipeline State 创建失败");
             return false;
         }
@@ -95,8 +95,8 @@ bool RTPass::Initialize(rhi::IRHIDevice* device,
     rhi::TLASBuildDesc tlasDesc;
     tlasDesc.maxInstanceCount = m_MaxInstanceCount;
     tlasDesc.flags = rhi::ASBuildFlags::PreferFastTrace;
-    m_TLAS = device->CreateTLAS(tlasDesc);
-    if (!m_TLAS) {
+    m_TLAS = device->CreateTLASHandle(tlasDesc);   // A-3
+    if (!m_TLAS.IsValid()) {
         HE_CORE_ERROR("RTPass: TLAS 创建失败");
         return false;
     }
@@ -196,8 +196,8 @@ static bool BuildSBT(rhi::IRHIDevice* device,
 }
 
 bool RTPass::CreateSBT(rhi::IRHIDevice* device) {
-    if (!m_RTPipeline) return false;
-    return BuildSBT(device, m_RTPipeline.get(), m_ShaderGroups, m_SBT, m_SBTBuffer);
+    if (!m_RTPipeline.IsValid()) return false;
+    return BuildSBT(device, rhi::GetDevice()->ResolveRTPipelineState(m_RTPipeline), m_ShaderGroups, m_SBT, m_SBTBuffer);
 }
 
 // ============================================================
@@ -260,8 +260,8 @@ void RTPass::Shutdown() {
     rhi::GetDevice()->DestroyBufferHandle(m_TLASScratch); m_TLASScratch = {};
     rhi::GetDevice()->DestroyBufferHandle(m_TLASInstanceBuffer); m_TLASInstanceBuffer = {};
     m_SBTBuffer.reset();
-    m_RTPipeline.reset();
-    m_TLAS.reset();
+    rhi::GetDevice()->DestroyRTPipelineStateHandle(m_RTPipeline); m_RTPipeline = {};
+    rhi::GetDevice()->DestroyAccelerationStructureHandle(m_TLAS); m_TLAS = {};
     m_BLASMap.clear();
     m_Initialized = false;
 }
@@ -390,7 +390,7 @@ void RTPass::BuildAS(rhi::IRHICommandList* cmd, const FrameSceneSnapshot& snapsh
         std::memcpy(mapped, instances.data(), instances.size() * sizeof(rhi::TLASInstanceDesc));
         rhi::GetDevice()->ResolveBuffer(m_TLASInstanceBuffer)->Unmap();
 
-        cmd->BuildTLAS(m_TLAS.get(), rhi::GetDevice()->ResolveBuffer(m_TLASScratch), rhi::GetDevice()->ResolveBuffer(m_TLASInstanceBuffer),
+        cmd->BuildTLAS(rhi::GetDevice()->ResolveAccelerationStructure(m_TLAS), rhi::GetDevice()->ResolveBuffer(m_TLASScratch), rhi::GetDevice()->ResolveBuffer(m_TLASInstanceBuffer),
                        static_cast<u32>(instances.size()), false);
 
         HE_CORE_INFO("RTPass: TLAS 构建 ({} instances)", instances.size());
@@ -402,12 +402,12 @@ void RTPass::BuildAS(rhi::IRHICommandList* cmd, const FrameSceneSnapshot& snapsh
 // ============================================================
 
 void RTPass::BindPipeline(rhi::IRHICommandList* cmd) {
-    if (!m_RTPipeline) return;
-    cmd->BindRTPipeline(m_RTPipeline.get());
+    if (!m_RTPipeline.IsValid()) return;
+    cmd->BindRTPipeline(rhi::GetDevice()->ResolveRTPipelineState(m_RTPipeline));
 }
 
 void RTPass::TraceRays(rhi::IRHICommandList* cmd, u32 width, u32 height) {
-    if (!m_RTPipeline) return;
+    if (!m_RTPipeline.IsValid()) return;
     cmd->TraceRays(m_SBT, width, height, 1);
 }
 
@@ -415,12 +415,12 @@ void RTPass::TraceRays(rhi::IRHICommandList* cmd, u32 width, u32 height) {
 void RTPass::UpdateRTDescriptorSet(rhi::IRHIDevice* device,
                                     void* backBufferView,
                                     rhi::IRHIBuffer* objectDataBuffer) {
-    if (!m_TLAS) return;
+    if (!m_TLAS.IsValid()) return;
 
     // set=0: TLAS + BackBuffer（RayGen 使用）
     if (m_DescSet != rhi::kInvalidSet) {
         device->UpdateDescriptorSet(m_DescSet, 0,
-            rhi::DescriptorType::AccelerationStructure, m_TLAS.get());
+            rhi::DescriptorType::AccelerationStructure, rhi::GetDevice()->ResolveAccelerationStructure(m_TLAS));
         device->UpdateDescriptorSetWithImageView(m_DescSet, 1,
             rhi::DescriptorType::StorageImage, backBufferView);
     }
@@ -911,7 +911,7 @@ int RTPass::ReloadShader(StringView shaderName, const std::vector<u32>& newSpirv
             rtpDesc.descriptorSetLayouts.push_back(m_DescLayout2);
         if (m_PushConstRange.size > 0)
             rtpDesc.pushConstantRanges.push_back(m_PushConstRange);
-        m_RTPipeline = m_Device->CreateRTPipelineState(rtpDesc);
+        m_RTPipeline = m_Device->CreateRTPipelineStateHandle(rtpDesc);   // A-3
         CreateSBT(m_Device);
         HE_CORE_INFO("RTPass: 热重载 {} 个 shader", count);
     }

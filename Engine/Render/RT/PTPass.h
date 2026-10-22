@@ -62,11 +62,11 @@ public:
                  const PTRenderContext& ctx);
 
     // ── 访问器 ──
-    rhi::IRHITexture* GetHDR()      const { return m_HDR.get(); }
-    rhi::IRHITexture* GetDepth()    const { return m_Depth.get(); }
-    rhi::IRHITexture* GetNormal()   const { return m_Normal.get(); }
-    rhi::IRHITexture* GetVelocity() const { return m_Velocity.get(); }
-    rhi::IRHITexture* GetAlbedoMetallic() const { return m_AlbedoMetallic.get(); }
+    rhi::IRHITexture* GetHDR()      const { return m_Device ? m_Device->ResolveTexture(m_HDR) : nullptr; }   // A-3
+    rhi::IRHITexture* GetDepth()    const { return m_Device ? m_Device->ResolveTexture(m_Depth) : nullptr; }
+    rhi::IRHITexture* GetNormal()   const { return m_Device ? m_Device->ResolveTexture(m_Normal) : nullptr; }
+    rhi::IRHITexture* GetVelocity() const { return m_Device ? m_Device->ResolveTexture(m_Velocity) : nullptr; }
+    rhi::IRHITexture* GetAlbedoMetallic() const { return m_Device ? m_Device->ResolveTexture(m_AlbedoMetallic) : nullptr; }
     u32 GetWidth()  const { return m_Width; }
     u32 GetHeight() const { return m_Height; }
     bool IsValid()  const { return m_Pipeline && m_Pipeline->pipeline != nullptr; }
@@ -85,11 +85,11 @@ private:
     rhi::PushConstantRange         m_PCRange;
 
     // 5 张输出纹理（同生共死，单标志控制首帧屏障）
-    std::unique_ptr<rhi::IRHITexture> m_HDR;      // RGBA16_FLOAT 噪声 HDR
-    std::unique_ptr<rhi::IRHITexture> m_Depth;    // R32_FLOAT 线性视图深度
-    std::unique_ptr<rhi::IRHITexture> m_Normal;   // RGBA16_FLOAT 世界法线(0~1)+roughness
-    std::unique_ptr<rhi::IRHITexture> m_Velocity; // RG16_FLOAT 屏幕速度
-    std::unique_ptr<rhi::IRHITexture> m_AlbedoMetallic; // RGBA16_FLOAT albedo(rgb)+metallic(a)
+    rhi::RHITextureHandle m_HDR{};      // A-3：RGBA16_FLOAT 噪声 HDR
+    rhi::RHITextureHandle m_Depth{};    // A-3：R32_FLOAT 线性视图深度
+    rhi::RHITextureHandle m_Normal{};   // A-3：RGBA16_FLOAT 世界法线(0~1)+roughness
+    rhi::RHITextureHandle m_Velocity{}; // A-3：RG16_FLOAT 屏幕速度
+    rhi::RHITextureHandle m_AlbedoMetallic{}; // A-3：RGBA16_FLOAT albedo(rgb)+metallic(a)
     bool m_OutputWritten = false;
 };
 
