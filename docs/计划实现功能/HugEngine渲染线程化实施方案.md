@@ -2423,12 +2423,26 @@ pass 指纹（`1C15AB72E688B530` / `750CC247BF8B9C3D`）未变；`06.GILab` 冒�
 
 ### 16.4 剩余工作
 
-| 类 | 模块 | 估计处数 |
-|---|---|---|
-| 小（可快速批） | `AA_TAA`(6)、`AA_SMAA`(7)、`AA_FXAA`(4)、`MeshBatcher`(2)、`InstanceCuller`(5)、`STBNTexture`(1)、`RTEffectPass`(2)、`RTShadowPass`(1) | ~30 |
-| 中 | `GI_IBL`(6)、`GI_RSM`(6)、`GI_SSGI`(6)、`GI_SSR`(6)、`GI_DDGI`(7)、`GIRadianceHistory`(3) | ~35 |
-| 大 | `RTPass`/`PTPass`/`ReSTIRPass`（~20）、`LumenScene`+`LumenSDF`（~60）、`NaniteCull`+`NaniteRaster`+`NaniteStream`（~40） | ~120 |
-| 其他 | `Editor` 帧外壳收口、`L4-3` 整帧命令化（独立项目） | — |
+**原表（AA/GI/RTPass/Lumen/Nanite 等模块的句柄化）已全部完成**，2026-10-22 第三轮收尾时逐项核对：
+
+| 原列项 | 状态 |
+|---|---|
+| 小：`AA_TAA`/`AA_SMAA`/`AA_FXAA`/`MeshBatcher`/`InstanceCuller`/`STBNTexture`/`RTEffectPass`/`RTShadowPass` | 完成 |
+| 中：`GI_IBL`/`GI_RSM`/`GI_SSGI`/`GI_SSR`/`GI_DDGI`/`GIRadianceHistory` | 完成 |
+| 大：`RTPass`/`PTPass`/`ReSTIRPass`、`LumenScene`+`LumenSDF`、`NaniteCull`+`NaniteRaster`+`NaniteStream` | 完成 |
+| 其他：`L4-3` 整帧命令化 | 未开始（all-or-nothing 独立项目，§12.12） |
+
+**A-3 仍未做的两处（记录在案，非阻塞）**：
+
+1. `LumenSDF::Entry.field` —— per-mesh 动态条目，改句柄需连同"条目移除/清空时销毁"一起做；
+2. `LumenScene` 的 `m_ReqBuf[]`/`m_ProbeFilterHistBuf[]`/`m_CellProbeHistBuf[]` —— 源码中只有声明、无使用点。
+
+**`FrameRetireQueue::SetReleaser`（`44a6587`）已就绪**：当前三个使用点（`InstanceCuller`、
+`SkinnedMeshBuffers`、`TextRenderComponent`）的元素都是自管理 `unique_ptr`，无需接线；
+将来把退役队列改成句柄时直接 `SetReleaser([dev](Handle& h){ dev->Destroy*(h); })` 即可。
+
+**文档层面仍待办的项（与 A-3 无关）**：`Editor` 帧外壳收口（T2.5/T4.1/T4.3/T4.4）、
+A-5（ImGui/PSO 命令化）、T2.6、T3.3/T3.4、T5.1~T5.3、L4-3。
 
 ### 16.5 已知既有缺陷（**与 A-3 无关，已 bisect 证明**）
 
