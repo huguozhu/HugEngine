@@ -403,6 +403,514 @@ static bool BuildScene(World& world, SceneGraph& sceneGraph, rhi::IRHIDevice* de
     return true;
 }
 
+// ============================================================
+// GILabUI —— 06.GILab 的两个 ImGui 面板（主窗口 / GI 控制台）
+//
+// 原先这两个面板共 ~460 行内联在 main() 的帧循环里。抽成成员函数后 main 只保留
+// "BeginFrame -> DrawMainPanel -> DrawGIPanel"，读 UI 逻辑不必在 1700 行里找。
+//
+// 【为什么用"全引用成员"】面板要读写 main 里的一批状态（相机、管线、模式开关、探针…）。
+// 把这些状态以**同名引用**成员交给本结构后，面板代码可以**逐字不动**（裸名字直接解析到成员），
+// 既没有 lambda 捕获，也不必给几百行代码逐个改写成 ui.xxx。
+// ============================================================
+struct GILabUI {
+    render::DeferredPipeline&            deferredPipeline;
+    render::ForwardPipeline&             forwardPipeline;
+    render::IRenderPipeline*&            curPipeline;
+    render::CameraController&            camCtrl;
+    World&                               world;
+    SceneGraph&                          sceneGraph;
+    std::unique_ptr<rhi::IRHIDevice>&    device;
+    std::unique_ptr<rhi::IRHISwapChain>& swapchain;
+    render::PixelProbe&                  probe;
+    f32&                                 deltaTime;
+    int&                                 g_PipelineMode;
+    bool&                                g_GISolo;
+    int&                                 g_GIPreset;
+    int&                                 g_UiThreadingMode;
+    bool&                                g_ProbeEnabled;
+    int&                                 g_ProbeInterval;
+    bool&                                g_FurnaceMode;
+    bool&                                g_PendingPipelineSwitch;
+    bool&                                g_PendingHalfResApply;
+
+    void DrawMainPanel();   // 主窗口：FPS / 管线信息 / 相机与曝光 / 场景与光源列表
+    void DrawGIPanel();     // GI 控制台：管线与档位 / 层栈四通道 / 配置诊断已删 / Shadow
+};
+
+void GILabUI::DrawMainPanel() {
+    ImGui::SetNextWindowPos({10, 10}, ImGuiCond_Once);
+    ImGui::SetNextWindowBgAlpha(0.55f);
+    ImGui::Begin("06.GILab (Cornell Box)");
+    {
+        float fps = 1.0f / (deltaTime > 0.001f ? deltaTime : 0.016f);
+        ImGui::TextColored({0.3f, 1.0f, 0.3f, 1.0f}, "FPS: %.0f", fps);
+        ImGui::SameLine(120);
+        ImGui::TextColored({0.6f, 0.6f, 0.6f, 1.0f}, "(%.2f ms)", deltaTime * 1000.0f);
+
+        ImGui::SeparatorText("延迟渲染管线");
+        ImGui::Text("GBuffer + Lighting Pass (全屏 PBR)");
+        ImGui::Text("3×MRT (albedo+metallic | normal+roughness | emissive+ao) + D32");
+        bool clustered = deferredPipeline.GetClusteredShading().enabled;
+        if (ImGui::Checkbox("Clustered Shading", &clustered))
+            deferredPipeline.GetClusteredShading().enabled = clustered;
+        if (clustered) {
+            ImGui::SameLine();
+            ImGui::TextColored({0.5f, 1.0f, 0.5f, 1.0f}, "%u clusters",
+                deferredPipeline.GetClusteredShading().GetClusterCount());
+        }
+        bool gpuCull = deferredPipeline.GetGPUCulling().enabled;
+        if (ImGui::Checkbox("GPU 视锥剔除", &gpuCull))
+            deferredPipeline.GetGPUCulling().enabled = gpuCull;
+        if (gpuCull) {
+            ImGui::SameLine();
+            ImGui::TextColored({0.5f, 1.0f, 0.5f, 1.0f}, "%u 可见",
+                deferredPipeline.GetGPUCulling().GetLastVisibleCount());
+        }
+
+        // 相机
+        ImGui::SeparatorText("相机");
+        // ---- 渲染线程模式（T2.4/T2.2）----
+    {
+        static const char* kModeItems[] = {
+            "0  单线程（收集/录制/提交/呈现都在游戏线程）",
+            "1  游戏线程 + 渲染线程（整帧 RHI 归渲染线程）",
+            "2  游戏线程 + 渲染线程 + RHI 线程（RHI 线程 = 唯一提交者）",
+        };
+        int sel = g_UiThreadingMode;
+        ImGui::SetNextItemWidth(360.0f);
+        if (ImGui::Combo("渲染线程模式##threading", &sel, kModeItems, IM_ARRAYSIZE(kModeItems))) {
+            g_UiThreadingMode = sel;   // 帧首统一生效（切换需要排空并停/起线程）
+        }
+        ImGui::TextDisabled("当前生效：%s；三种模式可任意切换，切换在下一帧帧首生效",
+                            he::RenderThreadingModeName(he::GetRenderThreadingMode()));
+    }
+
+    ImGui::DragFloat3("位置##Camera", &camCtrl.GetCamera().position[0], 5.0f);
+        float yawDeg   = glm::degrees(camCtrl.GetYaw());
+        float pitchDeg = glm::degrees(camCtrl.GetPitch());
+        if (ImGui::SliderFloat("Yaw", &yawDeg, -180.0f, 180.0f, "%.1f°"))
+            camCtrl.SetOrientation(glm::radians(yawDeg), camCtrl.GetPitch());
+        if (ImGui::SliderFloat("Pitch", &pitchDeg, -85.0f, 85.0f, "%.1f°"))
+            camCtrl.SetOrientation(camCtrl.GetYaw(), glm::radians(pitchDeg));
+        float moveSpeed = camCtrl.GetMoveSpeed();
+        if (ImGui::DragFloat("移动速度", &moveSpeed, 1.0f, 1.0f, 500.0f, "%.0f"))
+            camCtrl.SetMoveSpeed(moveSpeed);
+        float nearP = camCtrl.GetCamera().nearPlane;
+        float farP  = camCtrl.GetCamera().farPlane;
+        if (ImGui::DragFloat("近裁剪面", &nearP, 0.01f, 0.001f, 10.0f, "%.3f"))
+            camCtrl.GetCamera().nearPlane = nearP;
+        if (ImGui::DragFloat("远裁剪面", &farP, 10.0f, 10.0f, 50000.0f, "%.0f"))
+            camCtrl.GetCamera().farPlane = farP;
+
+
+        // ── AutoExposure ──
+        ImGui::SeparatorText("AutoExposure");
+        {
+            auto& ae = deferredPipeline.GetAutoExposure();
+            bool aeOn = ae.IsEnabled();
+            if (ImGui::Checkbox("启用自动曝光", &aeOn)) ae.SetEnabled(aeOn);
+            if (aeOn) {
+                ImGui::Indent(12.0f);
+                float s = ae.GetAdaptSpeed();
+                if (ImGui::SliderFloat("适应速度", &s, 0.1f, 10.0f, "%.1f")) ae.SetAdaptSpeed(s);
+                float t = ae.GetTargetLum();
+                if (ImGui::SliderFloat("目标亮度", &t, 0.01f, 1.0f, "%.2f")) ae.SetTargetLum(t);
+                ImGui::Text("当前曝光: %.2f", ae.GetExposure());
+                ImGui::Unindent(12.0f);
+            }
+        }
+
+        // 场景统计
+        ImGui::SeparatorText("场景");
+        u32 meshCount = 0, dirLightCount = 0, spotCount = 0;
+        world.ForEach<he::MeshComponent>([&](he::Entity, he::MeshComponent&) { meshCount++; });
+        world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight&) { dirLightCount++; });
+        world.ForEach<he::SpotLight>([&](he::Entity, he::SpotLight&) { spotCount++; });
+        ImGui::Text("%u 网格  |  %u 方向光  |  %u 点光  |  %u 聚光", meshCount, dirLightCount, 1, spotCount);
+
+        // ── 光源列表：类型 / 开关 / 颜色 / 强度 / 方向（可直接编辑）──
+        ImGui::SeparatorText("光源");
+        int lightId = 0;
+        world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight& l) {
+            ImGui::PushID(lightId++);
+            ImGui::TextUnformatted("方向光"); ImGui::SameLine();
+            ImGui::Checkbox("启用##dl", &l.enabled); ImGui::SameLine();
+            ImGui::ColorEdit3("颜色##dl", &l.color.x, ImGuiColorEditFlags_NoInputs); ImGui::SameLine();
+            ImGui::SetNextItemWidth(90.0f);
+            ImGui::DragFloat("强度##dl", &l.intensity, 0.05f, 0.0f, 100.0f, "%.2f");
+            ImGui::SetNextItemWidth(220.0f);
+            ImGui::DragFloat3("方向##dl", &l.direction.x, 0.01f, -1.0f, 1.0f, "%.2f");
+            ImGui::Checkbox("投射阴影##dl", &l.castShadow);
+            ImGui::PopID();
+        });
+        world.ForEach<he::PointLight>([&](he::Entity e, he::PointLight& l) {
+            ImGui::PushID(lightId++);
+            ImGui::TextUnformatted("点光  "); ImGui::SameLine();
+            ImGui::Checkbox("启用##pl", &l.enabled); ImGui::SameLine();
+            ImGui::ColorEdit3("颜色##pl", &l.color.x, ImGuiColorEditFlags_NoInputs); ImGui::SameLine();
+            ImGui::SetNextItemWidth(90.0f);
+            ImGui::DragFloat("强度##pl", &l.intensity, 0.05f, 0.0f, 100.0f, "%.2f");
+            ImGui::SetNextItemWidth(90.0f);
+            ImGui::DragFloat("范围##pl", &l.range, 0.1f, 0.1f, 500.0f, "%.1f");
+            // 位置编辑：修改本地变换后标记 SceneGraph 脏，GetWorldPosition 即时反映
+            if (auto* tf = world.GetComponent<he::TransformComponent>(e)) {
+                float3 p = tf->position;
+                if (ImGui::DragFloat3("位置##pl", &p.x, 0.1f, -500.0f, 500.0f, "%.1f")) {
+                    tf->position = p;
+                    sceneGraph.MarkDirty(e);
+                }
+            }
+            ImGui::PopID();
+        });
+        world.ForEach<he::SpotLight>([&](he::Entity, he::SpotLight& l) {
+            ImGui::PushID(lightId++);
+            ImGui::TextUnformatted("聚光  "); ImGui::SameLine();
+            ImGui::Checkbox("启用##sl", &l.enabled); ImGui::SameLine();
+            ImGui::ColorEdit3("颜色##sl", &l.color.x, ImGuiColorEditFlags_NoInputs); ImGui::SameLine();
+            ImGui::SetNextItemWidth(90.0f);
+            ImGui::DragFloat("强度##sl", &l.intensity, 0.05f, 0.0f, 100.0f, "%.2f");
+            ImGui::SetNextItemWidth(90.0f);
+            ImGui::DragFloat("范围##sl", &l.range, 0.1f, 0.1f, 500.0f, "%.1f");
+            ImGui::SetNextItemWidth(160.0f);
+            ImGui::DragFloat3("方向##sl", &l.direction.x, 0.01f, -1.0f, 1.0f, "%.2f");
+            ImGui::PopID();
+        });
+        world.ForEach<he::RectLight>([&](he::Entity, he::RectLight& l) {
+            ImGui::PushID(lightId++);
+            ImGui::TextUnformatted("矩形光"); ImGui::SameLine();
+            ImGui::Checkbox("启用##rl", &l.enabled); ImGui::SameLine();
+            ImGui::ColorEdit3("颜色##rl", &l.color.x, ImGuiColorEditFlags_NoInputs); ImGui::SameLine();
+            ImGui::SetNextItemWidth(90.0f);
+            ImGui::DragFloat("强度##rl", &l.intensity, 0.05f, 0.0f, 100.0f, "%.2f");
+            ImGui::SetNextItemWidth(90.0f);
+            ImGui::DragFloat("范围##rl", &l.range, 0.1f, 0.1f, 500.0f, "%.1f");
+            ImGui::PopID();
+        });
+        if (lightId == 0) {
+            ImGui::TextUnformatted("（场景中无光源）");
+        }
+    }
+    ImGui::End();
+}
+
+void GILabUI::DrawGIPanel() {
+    ImGui::SetNextWindowPos(ImVec2(560.0f, 10.0f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(430.0f, 700.0f), ImGuiCond_FirstUseEver);
+    ImGui::Begin("GI 控制台");
+    {
+        // ── 渲染管线选择（Forward / Deferred）──
+        // 注：光追已归入 GI 源（层栈中的 RTGI/RT 反射/RTAO/RT 阴影），
+        //     Deferred 管线勾选 RT 源即等价于此前的 HybridRT，无需独立管线
+        ImGui::SeparatorText("渲染管线");
+        {
+            const char* pipelineNames[] = {"Forward", "Deferred"};
+            int prevMode = g_PipelineMode;
+            ImGui::Combo("管线##pipeline", &g_PipelineMode, pipelineNames, 2);
+            if (g_PipelineMode != prevMode) {
+                // 切换管线：确保交换链与视口尺寸同步。
+                // 【T2.2】`SetSwapChain`/`OnResize` 都是 RHI 调用 ⇒ 不能在这里做（控件跑在游戏
+                // 线程），改为置标志、由**下一条渲染命令**在渲染线程上执行。
+                g_PendingPipelineSwitch = true;
+            }
+        }
+
+        // ── GI 实验室：只看 GI（关闭直接光）→ 逐个开启 GI 看间接光贡献 ──
+        ImGui::SeparatorText("GI 实验室");
+        if (ImGui::Checkbox("只看 GI（关闭直接光）", &g_GISolo)) {
+            // 关闭/恢复所有直接光源：画面只剩 GI（IBL/SSGI/DDGI/RSM 等）的间接光
+            world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight& l){ l.enabled = !g_GISolo; });
+            world.ForEach<he::PointLight>([&](he::Entity, he::PointLight& l){ l.enabled = !g_GISolo; });
+            world.ForEach<he::SpotLight>([&](he::Entity, he::SpotLight& l){ l.enabled = !g_GISolo; });
+            world.ForEach<he::RectLight>([&](he::Entity, he::RectLight& l){ l.enabled = !g_GISolo; });
+        }
+        ImGui::TextWrapped("开启后画面只剩 GI 间接光——\n逐个启用 SSGI/DDGI 看各自贡献；IBL 强度即环境 GI 强度。");
+
+        // ── 白炉探针（Wave 0.2）：能量守恒的数值读数 ──
+        ImGui::SeparatorText("白炉探针（能量守恒）");
+        ImGui::Checkbox("启用探针（读回 HDR 目标像素）", &g_ProbeEnabled);
+        ImGui::SetNextItemWidth(120.0f);
+        ImGui::SliderInt("采样间隔(帧)", &g_ProbeInterval, 1, 120);
+        if (ImGui::Checkbox("白炉数值测试（源真值=1）", &g_FurnaceMode)) {
+            // 白炉条件：全白环境 + albedo=1 + 关闭直接光（源真值由 shader 代入，这里保证场景端一致）
+            if (auto* gcPtr = curPipeline->GetGIConfig()) gcPtr->furnaceMode = g_FurnaceMode;
+            if (g_FurnaceMode) g_ProbeEnabled = true;   // 打开白炉即自动开探针
+            if (g_FurnaceMode) {
+                g_GISolo = true;   // 关闭全部直接光
+                world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight& l){ l.enabled = false; });
+                world.ForEach<he::PointLight>([&](he::Entity, he::PointLight& l){ l.enabled = false; });
+                world.ForEach<he::SpotLight>([&](he::Entity, he::SpotLight& l){ l.enabled = false; });
+                world.ForEach<he::RectLight>([&](he::Entity, he::RectLight& l){ l.enabled = false; });
+                if (auto* gi = curPipeline->GetGI()) {   // 环境强度取 1（白炉真值）
+                    auto s = gi->GetSettings();
+                    s.intensity = 1.0f;
+                    gi->SetSettings(s);
+                }
+            }
+        }
+        ImGui::TextWrapped("白炉条件：全白环境 + albedo=1 + 关闭直接光 → 各源真值均为 1，\n"
+                           "正确的分层合成应恰好读回 1.0；>1 即存在归一化之外的双重计数。");
+        if (g_ProbeEnabled) {
+            const auto& pv = probe.Values();
+            ImGui::Text("中心像素 (线性 RGB): %.4f %.4f %.4f", pv[0].rgb[0], pv[0].rgb[1], pv[0].rgb[2]);
+            ImGui::Text("背景像素 (线性 RGB): %.4f %.4f %.4f", pv[1].rgb[0], pv[1].rgb[1], pv[1].rgb[2]);
+            // 白炉正确时：物体消失 → 中心与背景都应等于环境真值 1.0
+            const float ratio = probe.LuminanceRatio(0, 1);
+            const bool ok = (ratio > 0.98f && ratio < 1.02f);
+            const ImVec4 col = ok ? ImVec4(0.3f, 0.9f, 0.3f, 1.0f) : ImVec4(1.0f, 0.6f, 0.2f, 1.0f);
+            ImGui::TextColored(col, "亮度比 中心/背景 = %.4f   (白炉判据 0.98 ~ 1.02)", ratio);
+            ImGui::TextColored(col, "中心亮度 = %.4f   (白炉真值 1.0)", pv[0].luminance);
+        }
+
+        // ── GI 质量档位（紧随管线选择）──
+        ImGui::SeparatorText("GI 质量档位");
+        const char* presetNames[] = {"Low", "Medium", "High", "Ultra"};
+        render::GIConfig& gc = *curPipeline->GetGIConfig();
+        const u32  giCaps = curPipeline->GetGIPipelineCaps();
+        const bool rtOk   = device->GetCaps().supportsRayTracing;
+        if (ImGui::Combo("档位##preset", &g_GIPreset, presetNames, 4)) {
+            // 应用预设 + 按「管线能力 ∧ 设备能力」自动降级
+            gc = render::GIRegistry::Degrade(render::GIConfigFromPreset((render::GIQualityPreset)g_GIPreset),
+                                             giCaps, rtOk);
+            if (auto* dp = dynamic_cast<render::DeferredPipeline*>(curPipeline)) {
+                dp->GetSSGI()->SetEnabled(gc.ShouldRunSSGI());
+                dp->GetDDGI()->SetEnabled(gc.ShouldRunDDGI());
+                dp->GetSSR()->SetEnabled(gc.ShouldRunSpecular());
+                dp->GetSSAO().enabled = gc.ShouldRunAO();
+                auto sg = dp->GetSSGI()->GetSettings();
+                sg.halfRes = gc.halfRes;
+                dp->GetSSGI()->SetSettings(sg);
+                auto sr = dp->GetSSR()->GetSettings();
+                sr.halfRes = gc.halfRes;
+                dp->GetSSR()->SetSettings(sr);
+                dp->GetSSAO().halfRes = gc.halfRes;
+                // 纹理重建延迟到帧边界（NextFrame 之后），避免在 ImGui 回调内销毁/创建正在使用的纹理
+                g_PendingHalfResApply = true;
+            }
+        }
+
+        // 当前管线可用的 GI 子系统（按管线类型获取，Forward 无屏幕空间/探针 GI）
+        auto* dp = dynamic_cast<render::DeferredPipeline*>(curPipeline);
+        auto* giSSGI = dp ? dp->GetSSGI() : nullptr;
+        auto* giSSR  = dp ? dp->GetSSR()  : nullptr;
+        auto* giDDGI = dp ? dp->GetDDGI() : nullptr;
+
+        // ── GI 通道：Diffuse / Specular / AO / Shadow ──
+        ImGui::SeparatorText("GI 通道");
+        const ImVec4 colOk  = ImVec4(0.4f, 1.0f, 0.4f, 1.0f);
+        const ImVec4 colBad = ImVec4(1.0f, 0.55f, 0.2f, 1.0f);
+
+        // 本管线的能力位里一个 GI 源都没有（当前只有 Forward 是这样）：它的 IBL/RSM 由
+        // 管线级开关驱动、不读层栈，因此下面整段层栈 UI 对它是**死开关**。与其把死开关
+        // 摆出来，不如直说（§9.2-H）。阴影通道独立于层栈，仍然有效。
+        const bool anyGISource = (giCaps & render::PipelineCaps::AllSources) != 0u;
+        if (!anyGISource) {
+            ImGui::TextColored(colBad,
+                "本管线的 GI 不由层栈驱动（IBL/RSM 是管线级开关），层栈内容对它没有影响");
+            // 层栈 UI 全部置灰但不隐藏：内容仍可查看（便于对照诊断），但不可编辑，
+            // 免得用户以为改了这里就能改变 Forward 的画面。
+            ImGui::BeginDisabled();
+        }
+
+        // ── 通道 UI 辅助：显示该通道的「源层栈」（源 / 频段 / 权重 / 让位距离）──
+        // 勾选 = 该源参与合成（weight>0）；多个源同时勾选即为「融合」
+        auto channelUI = [&](const char* label, render::GIChannelStack& st,
+                             const render::GISourceId* candidates, int candCount) {
+            ImGui::TextUnformatted(label);
+            ImGui::Indent(12.0f);
+            for (int i = 0; i < candCount; i++) {
+                const render::GISourceId id = candidates[i];
+                const bool  avail  = render::GIRegistry::IsAvailable(id, giCaps, rtOk);
+                const float weight = st.WeightOf(id);
+                bool active = weight > 0.0f;
+                ImGui::PushID((int)id);
+                if (ImGui::Checkbox(render::GISourceName(id), &active)) {
+                    st.Set(id, active ? 1.0f : 0.0f, st.FalloffOf(id));
+                }
+                ImGui::SameLine();
+                ImGui::TextColored(avail ? colOk : colBad, "[%s]",
+                    avail ? render::GISourceClassName(id) : "不可用");
+                if (active) {
+                    ImGui::SameLine();
+                    ImGui::SetNextItemWidth(80.0f);
+                    float w = st.WeightOf(id);
+                    if (ImGui::DragFloat("权重", &w, 0.05f, 0.0f, 2.0f, "%.2f")) {
+                        st.Set(id, w, st.FalloffOf(id));
+                    }
+                    ImGui::SameLine();
+                    ImGui::SetNextItemWidth(80.0f);
+                    float fo = st.FalloffOf(id);
+                    if (ImGui::DragFloat("让位", &fo, 0.5f, 0.0f, 200.0f, "%.0f")) {
+                        st.Set(id, w, fo);
+                    }
+                }
+                ImGui::PopID();
+            }
+            // 该通道的合成方式（相加仅作对照；归一化保证无双重计数）
+            int mode = (int)st.mode;
+            const char* modes[] = {"相加(对照)", "归一化加权"};
+            ImGui::SetNextItemWidth(140.0f);
+            if (ImGui::Combo("合成", &mode, modes, 2)) {
+                st.mode = (render::GIBlendMode)mode;
+            }
+            ImGui::Unindent(12.0f);
+        };
+
+        // ---- Diffuse（间接漫反射）----
+        {
+            // P4：候选源从已注册的 Provider 派生（低频 → 高频排列）。
+            // 频段顺序用于面板可读性；未接入 Provider 的源（如预留的 Lightmap）不出现。
+            static const render::GISourceId kAllDiffuse[] = {
+                render::GISourceId::IBL, render::GISourceId::Lightmap, render::GISourceId::DDGI,
+                render::GISourceId::SSGI, render::GISourceId::RSM, render::GISourceId::RTGI,
+            render::GISourceId::Lumen };
+            std::vector<render::GISourceId> diffuseSources;
+            if (dp) {
+                for (auto id : kAllDiffuse) {
+                    // 只列出「本管线能力位允许」的源：能力位就是层栈模型下管线能承载的范围，
+                    // 列出一个它根本不消费的源，等于让面板把一个假开关摆给用户（§9.2-H）。
+                    if (!render::GIRegistry::IsAvailable(id, giCaps, rtOk)) continue;
+                    for (auto& p : dp->GetGIProviders()) {
+                        if (p->Handles(id)) { diffuseSources.push_back(id); break; }
+                    }
+                }
+            }
+            if (diffuseSources.empty()) diffuseSources.push_back(render::GISourceId::IBL);
+            channelUI("Diffuse — 间接漫反射（低频 → 高频）", gc.diffuse,
+                      diffuseSources.data(), (int)diffuseSources.size());
+            ImGui::Indent(12.0f);
+            ImGui::SliderFloat("GI 强度", &gc.giIntensity, 0.0f, 2.0f, "%.2f");
+            ImGui::Checkbox("半分辨率", &gc.halfRes);
+            if (giSSGI) {
+                bool on = giSSGI->IsEnabled();
+                if (ImGui::Checkbox("启用 SSGI", &on)) giSSGI->SetEnabled(on);
+                if (on) {
+                    ImGui::Indent(12.0f);
+                    ImGui::DragFloat("采样半径##ssgi", &giSSGI->radius, 0.1f, 0.1f, 5.0f, "%.1f");
+                    ImGui::SliderInt("采样数##ssgi", &giSSGI->sampleCount, 4, 64);
+                    ImGui::Unindent(12.0f);
+                }
+                ImGui::Text("SSGI 耗时 %.2f ms", giSSGI->GetDebugData().avgRenderTimeMs);
+            }
+            if (giDDGI) {
+                bool on = giDDGI->IsEnabled();
+                if (ImGui::Checkbox("启用 DDGI", &on)) giDDGI->SetEnabled(on);
+                if (on) {
+                    ImGui::Indent(12.0f);
+                    ImGui::SliderFloat("时间混合##ddgi", &giDDGI->blendAlpha, 0.0f, 0.98f, "%.2f");
+                    ImGui::SliderFloat("贡献缩放##ddgi", &giDDGI->debugScale, 0.0f, 2.0f, "%.2f");
+                    u32 pc = giDDGI->gridX * giDDGI->gridY * giDDGI->gridZ;
+                    ImGui::Text("%u 探针 (%u×%u×%u)", pc, giDDGI->gridX, giDDGI->gridY, giDDGI->gridZ);
+                    ImGui::Unindent(12.0f);
+                }
+                ImGui::Text("DDGI 耗时 %.2f ms", giDDGI->GetDebugData().avgRenderTimeMs);
+            }
+            // IBL 环境光（所有管线共用）
+            if (auto* gi = curPipeline->GetGI()) {
+                auto s = gi->GetSettings();
+                float inten = s.intensity;
+                if (ImGui::SliderFloat("IBL 强度", &inten, 0.0f, 3.0f, "%.2f")) {
+                    s.intensity = inten;
+                    gi->SetSettings(s);
+                }
+                ImGui::Text("IBL 耗时 %.2f ms", gi->GetDebugData().avgRenderTimeMs);
+            }
+            ImGui::Unindent(12.0f);
+        }
+
+        // ---- Specular（镜面反射）----
+        {
+            // P4：候选源从已注册的 Provider 派生
+            static const render::GISourceId kAllSpecular[] = {
+                render::GISourceId::IBL, render::GISourceId::SSR,
+            render::GISourceId::RTReflection, render::GISourceId::Lumen };
+            std::vector<render::GISourceId> specSources;
+            if (dp) {
+                for (auto id : kAllSpecular) {
+                    for (auto& p : dp->GetGIProviders()) {
+                        if (p->Handles(id)) { specSources.push_back(id); break; }
+                    }
+                }
+            }
+            if (specSources.empty()) specSources.push_back(render::GISourceId::IBL);
+            channelUI("Specular — 镜面反射（低频 → 高频）", gc.specular,
+                      specSources.data(), (int)specSources.size());
+            ImGui::Indent(12.0f);
+            if (giSSR) {
+                bool on = giSSR->IsEnabled();
+                if (ImGui::Checkbox("启用 SSR", &on)) giSSR->SetEnabled(on);
+                if (on) {
+                    ImGui::Indent(12.0f);
+                    ImGui::SliderFloat("最大步数##ssr", &giSSR->maxSteps, 16.0f, 256.0f, "%.0f");
+                    ImGui::SliderFloat("步长##ssr", &giSSR->stepSize, 0.1f, 2.0f, "%.1f");
+                    ImGui::Unindent(12.0f);
+                }
+                ImGui::Text("SSR 耗时 %.2f ms", giSSR->GetDebugData().avgRenderTimeMs);
+            }
+            ImGui::Unindent(12.0f);
+        }
+
+        // ---- AO（环境光遮蔽）----
+        {
+            // P4：候选源从已注册的 GI Provider 派生（不再硬编码源列表）。
+            // 目前 SSAO/GTAO 已 Provider 化；RTAO 尚未（留待下一波次推广）。
+            std::vector<render::GISourceId> aoSources;
+            if (dp) {
+                for (auto& p : dp->GetGIProviders()) {
+                    if (p->Handles(render::GISourceId::SSAO)) {
+                        aoSources.push_back(render::GISourceId::SSAO);
+                        aoSources.push_back(render::GISourceId::GTAO);
+                    }
+                }
+            }
+            if (aoSources.empty()) aoSources.push_back(render::GISourceId::SSAO);
+            aoSources.push_back(render::GISourceId::RTAO);   // 尚未 Provider 化
+            channelUI("AO — 环境光遮蔽", gc.ao, aoSources.data(), (int)aoSources.size());
+            ImGui::Indent(12.0f);
+            ImGui::SliderFloat("AO 强度##gc", &gc.aoIntensity, 0.0f, 1.5f, "%.2f");
+            if (dp) {
+                auto& ssao = dp->GetSSAO();
+                bool on = ssao.enabled;
+                if (ImGui::Checkbox("启用 SSAO", &on)) ssao.enabled = on;
+                if (on) {
+                    ImGui::Indent(12.0f);
+                    ImGui::DragFloat("半径##ssao", &ssao.radius, 0.05f, 0.1f, 5.0f, "%.2f");
+                    ImGui::SliderInt("采样数##ssao", &ssao.sampleCount, 4, 32);
+                    ImGui::Checkbox("半分辨率##ssao", &ssao.halfRes);
+                    ImGui::Unindent(12.0f);
+                }
+            }
+            ImGui::Unindent(12.0f);
+        }
+
+        // 结束「层栈 UI 置灰」（见上：本管线没有层栈 GI 源时）
+        if (!anyGISource) ImGui::EndDisabled();
+
+        // ---- Shadow（阴影）----
+        // 阴影是「可见性（乘法项）」而非「能量（加法项）」——不适用层栈的
+        // 频段/权重/距离让位语义，故用独立枚举：None / Raster / RT
+        {
+            const char* shadowNames[] = {"None", "Raster（光栅 CSM 等）", "RT（光追阴影）"};
+            int sh = (int)gc.shadow;
+            ImGui::TextUnformatted("Shadow — 阴影（可见性，不参与能量合成）");
+            ImGui::Indent(12.0f);
+            ImGui::SetNextItemWidth(220.0f);
+            if (ImGui::Combo("##shadow", &sh, shadowNames, 3)) {
+                gc.shadow = (render::ShadowChannel)sh;
+                gc = render::GIRegistry::Degrade(gc, giCaps, rtOk);   // 不可用则回退
+            }
+            const bool shOk = render::GIRegistry::IsAvailable(gc.shadow, giCaps, rtOk)
+                           || gc.shadow == render::ShadowChannel::None;
+            ImGui::SameLine();
+            ImGui::TextColored(shOk ? colOk : colBad, shOk ? "[可用]" : "[不可用]");
+            ImGui::Unindent(12.0f);
+        }
+
+    }
+    ImGui::End();
+}
+
+
 int main() {
     // ---- 0. 安装崩溃处理器（Wave 0.8 诊断基建） ----
     //    崩溃时打印"函数名 + 源文件:行号"的完整调用栈，并写出 minidump。
@@ -1032,477 +1540,20 @@ int main() {
         submitRender(recordScene);
         if (frameAborted) continue;   // Acquire 失败：跳过本帧剩余部分
 
+        // UI 依赖（全引用成员；见 main 之前的 GILabUI）
+        GILabUI uiDeps{deferredPipeline, forwardPipeline, curPipeline, camCtrl, world, sceneGraph,
+                       device, swapchain, probe, deltaTime,
+                       g_PipelineMode, g_GISolo, g_GIPreset, g_UiThreadingMode,
+                       g_ProbeEnabled, g_ProbeInterval, g_FurnaceMode,
+                       g_PendingPipelineSwitch, g_PendingHalfResApply};
+
         imgui.BeginFrame();
-        ImGui::SetNextWindowPos({10, 10}, ImGuiCond_Once);
-        ImGui::SetNextWindowBgAlpha(0.55f);
-        ImGui::Begin("06.GILab (Cornell Box)");
-        {
-            float fps = 1.0f / (deltaTime > 0.001f ? deltaTime : 0.016f);
-            ImGui::TextColored({0.3f, 1.0f, 0.3f, 1.0f}, "FPS: %.0f", fps);
-            ImGui::SameLine(120);
-            ImGui::TextColored({0.6f, 0.6f, 0.6f, 1.0f}, "(%.2f ms)", deltaTime * 1000.0f);
-
-            ImGui::SeparatorText("延迟渲染管线");
-            ImGui::Text("GBuffer + Lighting Pass (全屏 PBR)");
-            ImGui::Text("3×MRT (albedo+metallic | normal+roughness | emissive+ao) + D32");
-            bool clustered = deferredPipeline.GetClusteredShading().enabled;
-            if (ImGui::Checkbox("Clustered Shading", &clustered))
-                deferredPipeline.GetClusteredShading().enabled = clustered;
-            if (clustered) {
-                ImGui::SameLine();
-                ImGui::TextColored({0.5f, 1.0f, 0.5f, 1.0f}, "%u clusters",
-                    deferredPipeline.GetClusteredShading().GetClusterCount());
-            }
-            bool gpuCull = deferredPipeline.GetGPUCulling().enabled;
-            if (ImGui::Checkbox("GPU 视锥剔除", &gpuCull))
-                deferredPipeline.GetGPUCulling().enabled = gpuCull;
-            if (gpuCull) {
-                ImGui::SameLine();
-                ImGui::TextColored({0.5f, 1.0f, 0.5f, 1.0f}, "%u 可见",
-                    deferredPipeline.GetGPUCulling().GetLastVisibleCount());
-            }
-
-            // 相机
-            ImGui::SeparatorText("相机");
-            // ---- 渲染线程模式（T2.4/T2.2）----
-        {
-            static const char* kModeItems[] = {
-                "0  单线程（收集/录制/提交/呈现都在游戏线程）",
-                "1  游戏线程 + 渲染线程（整帧 RHI 归渲染线程）",
-                "2  游戏线程 + 渲染线程 + RHI 线程（RHI 线程 = 唯一提交者）",
-            };
-            int sel = g_UiThreadingMode;
-            ImGui::SetNextItemWidth(360.0f);
-            if (ImGui::Combo("渲染线程模式##threading", &sel, kModeItems, IM_ARRAYSIZE(kModeItems))) {
-                g_UiThreadingMode = sel;   // 帧首统一生效（切换需要排空并停/起线程）
-            }
-            ImGui::TextDisabled("当前生效：%s；三种模式可任意切换，切换在下一帧帧首生效",
-                                he::RenderThreadingModeName(he::GetRenderThreadingMode()));
-        }
-
-        ImGui::DragFloat3("位置##Camera", &camCtrl.GetCamera().position[0], 5.0f);
-            float yawDeg   = glm::degrees(camCtrl.GetYaw());
-            float pitchDeg = glm::degrees(camCtrl.GetPitch());
-            if (ImGui::SliderFloat("Yaw", &yawDeg, -180.0f, 180.0f, "%.1f°"))
-                camCtrl.SetOrientation(glm::radians(yawDeg), camCtrl.GetPitch());
-            if (ImGui::SliderFloat("Pitch", &pitchDeg, -85.0f, 85.0f, "%.1f°"))
-                camCtrl.SetOrientation(camCtrl.GetYaw(), glm::radians(pitchDeg));
-            float moveSpeed = camCtrl.GetMoveSpeed();
-            if (ImGui::DragFloat("移动速度", &moveSpeed, 1.0f, 1.0f, 500.0f, "%.0f"))
-                camCtrl.SetMoveSpeed(moveSpeed);
-            float nearP = camCtrl.GetCamera().nearPlane;
-            float farP  = camCtrl.GetCamera().farPlane;
-            if (ImGui::DragFloat("近裁剪面", &nearP, 0.01f, 0.001f, 10.0f, "%.3f"))
-                camCtrl.GetCamera().nearPlane = nearP;
-            if (ImGui::DragFloat("远裁剪面", &farP, 10.0f, 10.0f, 50000.0f, "%.0f"))
-                camCtrl.GetCamera().farPlane = farP;
-
-
-            // ── AutoExposure ──
-            ImGui::SeparatorText("AutoExposure");
-            {
-                auto& ae = deferredPipeline.GetAutoExposure();
-                bool aeOn = ae.IsEnabled();
-                if (ImGui::Checkbox("启用自动曝光", &aeOn)) ae.SetEnabled(aeOn);
-                if (aeOn) {
-                    ImGui::Indent(12.0f);
-                    float s = ae.GetAdaptSpeed();
-                    if (ImGui::SliderFloat("适应速度", &s, 0.1f, 10.0f, "%.1f")) ae.SetAdaptSpeed(s);
-                    float t = ae.GetTargetLum();
-                    if (ImGui::SliderFloat("目标亮度", &t, 0.01f, 1.0f, "%.2f")) ae.SetTargetLum(t);
-                    ImGui::Text("当前曝光: %.2f", ae.GetExposure());
-                    ImGui::Unindent(12.0f);
-                }
-            }
-
-            // 场景统计
-            ImGui::SeparatorText("场景");
-            u32 meshCount = 0, dirLightCount = 0, spotCount = 0;
-            world.ForEach<he::MeshComponent>([&](he::Entity, he::MeshComponent&) { meshCount++; });
-            world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight&) { dirLightCount++; });
-            world.ForEach<he::SpotLight>([&](he::Entity, he::SpotLight&) { spotCount++; });
-            ImGui::Text("%u 网格  |  %u 方向光  |  %u 点光  |  %u 聚光", meshCount, dirLightCount, 1, spotCount);
-
-            // ── 光源列表：类型 / 开关 / 颜色 / 强度 / 方向（可直接编辑）──
-            ImGui::SeparatorText("光源");
-            int lightId = 0;
-            world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight& l) {
-                ImGui::PushID(lightId++);
-                ImGui::TextUnformatted("方向光"); ImGui::SameLine();
-                ImGui::Checkbox("启用##dl", &l.enabled); ImGui::SameLine();
-                ImGui::ColorEdit3("颜色##dl", &l.color.x, ImGuiColorEditFlags_NoInputs); ImGui::SameLine();
-                ImGui::SetNextItemWidth(90.0f);
-                ImGui::DragFloat("强度##dl", &l.intensity, 0.05f, 0.0f, 100.0f, "%.2f");
-                ImGui::SetNextItemWidth(220.0f);
-                ImGui::DragFloat3("方向##dl", &l.direction.x, 0.01f, -1.0f, 1.0f, "%.2f");
-                ImGui::Checkbox("投射阴影##dl", &l.castShadow);
-                ImGui::PopID();
-            });
-            world.ForEach<he::PointLight>([&](he::Entity e, he::PointLight& l) {
-                ImGui::PushID(lightId++);
-                ImGui::TextUnformatted("点光  "); ImGui::SameLine();
-                ImGui::Checkbox("启用##pl", &l.enabled); ImGui::SameLine();
-                ImGui::ColorEdit3("颜色##pl", &l.color.x, ImGuiColorEditFlags_NoInputs); ImGui::SameLine();
-                ImGui::SetNextItemWidth(90.0f);
-                ImGui::DragFloat("强度##pl", &l.intensity, 0.05f, 0.0f, 100.0f, "%.2f");
-                ImGui::SetNextItemWidth(90.0f);
-                ImGui::DragFloat("范围##pl", &l.range, 0.1f, 0.1f, 500.0f, "%.1f");
-                // 位置编辑：修改本地变换后标记 SceneGraph 脏，GetWorldPosition 即时反映
-                if (auto* tf = world.GetComponent<he::TransformComponent>(e)) {
-                    float3 p = tf->position;
-                    if (ImGui::DragFloat3("位置##pl", &p.x, 0.1f, -500.0f, 500.0f, "%.1f")) {
-                        tf->position = p;
-                        sceneGraph.MarkDirty(e);
-                    }
-                }
-                ImGui::PopID();
-            });
-            world.ForEach<he::SpotLight>([&](he::Entity, he::SpotLight& l) {
-                ImGui::PushID(lightId++);
-                ImGui::TextUnformatted("聚光  "); ImGui::SameLine();
-                ImGui::Checkbox("启用##sl", &l.enabled); ImGui::SameLine();
-                ImGui::ColorEdit3("颜色##sl", &l.color.x, ImGuiColorEditFlags_NoInputs); ImGui::SameLine();
-                ImGui::SetNextItemWidth(90.0f);
-                ImGui::DragFloat("强度##sl", &l.intensity, 0.05f, 0.0f, 100.0f, "%.2f");
-                ImGui::SetNextItemWidth(90.0f);
-                ImGui::DragFloat("范围##sl", &l.range, 0.1f, 0.1f, 500.0f, "%.1f");
-                ImGui::SetNextItemWidth(160.0f);
-                ImGui::DragFloat3("方向##sl", &l.direction.x, 0.01f, -1.0f, 1.0f, "%.2f");
-                ImGui::PopID();
-            });
-            world.ForEach<he::RectLight>([&](he::Entity, he::RectLight& l) {
-                ImGui::PushID(lightId++);
-                ImGui::TextUnformatted("矩形光"); ImGui::SameLine();
-                ImGui::Checkbox("启用##rl", &l.enabled); ImGui::SameLine();
-                ImGui::ColorEdit3("颜色##rl", &l.color.x, ImGuiColorEditFlags_NoInputs); ImGui::SameLine();
-                ImGui::SetNextItemWidth(90.0f);
-                ImGui::DragFloat("强度##rl", &l.intensity, 0.05f, 0.0f, 100.0f, "%.2f");
-                ImGui::SetNextItemWidth(90.0f);
-                ImGui::DragFloat("范围##rl", &l.range, 0.1f, 0.1f, 500.0f, "%.1f");
-                ImGui::PopID();
-            });
-            if (lightId == 0) {
-                ImGui::TextUnformatted("（场景中无光源）");
-            }
-        }
-        ImGui::End();
+        uiDeps.DrawMainPanel();   // 主窗口（实现见 main 之前）
 
         // ---- 独立 GI 控制面板：渲染管线 → GI 质量档位 → GI 四通道（可用性 + 参数） ----
         // 与主面板分离，便于独立摆放/查看
         // 首次使用时默认摆放在主面板右侧（之后由 imgui.ini 恢复用户位置/大小）
-        ImGui::SetNextWindowPos(ImVec2(560.0f, 10.0f), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(430.0f, 700.0f), ImGuiCond_FirstUseEver);
-        ImGui::Begin("GI 控制台");
-        {
-            // ── 渲染管线选择（Forward / Deferred）──
-            // 注：光追已归入 GI 源（层栈中的 RTGI/RT 反射/RTAO/RT 阴影），
-            //     Deferred 管线勾选 RT 源即等价于此前的 HybridRT，无需独立管线
-            ImGui::SeparatorText("渲染管线");
-            {
-                const char* pipelineNames[] = {"Forward", "Deferred"};
-                int prevMode = g_PipelineMode;
-                ImGui::Combo("管线##pipeline", &g_PipelineMode, pipelineNames, 2);
-                if (g_PipelineMode != prevMode) {
-                    // 切换管线：确保交换链与视口尺寸同步。
-                    // 【T2.2】`SetSwapChain`/`OnResize` 都是 RHI 调用 ⇒ 不能在这里做（控件跑在游戏
-                    // 线程），改为置标志、由**下一条渲染命令**在渲染线程上执行。
-                    g_PendingPipelineSwitch = true;
-                }
-            }
-
-            // ── GI 实验室：只看 GI（关闭直接光）→ 逐个开启 GI 看间接光贡献 ──
-            ImGui::SeparatorText("GI 实验室");
-            if (ImGui::Checkbox("只看 GI（关闭直接光）", &g_GISolo)) {
-                // 关闭/恢复所有直接光源：画面只剩 GI（IBL/SSGI/DDGI/RSM 等）的间接光
-                world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight& l){ l.enabled = !g_GISolo; });
-                world.ForEach<he::PointLight>([&](he::Entity, he::PointLight& l){ l.enabled = !g_GISolo; });
-                world.ForEach<he::SpotLight>([&](he::Entity, he::SpotLight& l){ l.enabled = !g_GISolo; });
-                world.ForEach<he::RectLight>([&](he::Entity, he::RectLight& l){ l.enabled = !g_GISolo; });
-            }
-            ImGui::TextWrapped("开启后画面只剩 GI 间接光——\n逐个启用 SSGI/DDGI 看各自贡献；IBL 强度即环境 GI 强度。");
-
-            // ── 白炉探针（Wave 0.2）：能量守恒的数值读数 ──
-            ImGui::SeparatorText("白炉探针（能量守恒）");
-            ImGui::Checkbox("启用探针（读回 HDR 目标像素）", &g_ProbeEnabled);
-            ImGui::SetNextItemWidth(120.0f);
-            ImGui::SliderInt("采样间隔(帧)", &g_ProbeInterval, 1, 120);
-            if (ImGui::Checkbox("白炉数值测试（源真值=1）", &g_FurnaceMode)) {
-                // 白炉条件：全白环境 + albedo=1 + 关闭直接光（源真值由 shader 代入，这里保证场景端一致）
-                if (auto* gcPtr = curPipeline->GetGIConfig()) gcPtr->furnaceMode = g_FurnaceMode;
-                if (g_FurnaceMode) g_ProbeEnabled = true;   // 打开白炉即自动开探针
-                if (g_FurnaceMode) {
-                    g_GISolo = true;   // 关闭全部直接光
-                    world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight& l){ l.enabled = false; });
-                    world.ForEach<he::PointLight>([&](he::Entity, he::PointLight& l){ l.enabled = false; });
-                    world.ForEach<he::SpotLight>([&](he::Entity, he::SpotLight& l){ l.enabled = false; });
-                    world.ForEach<he::RectLight>([&](he::Entity, he::RectLight& l){ l.enabled = false; });
-                    if (auto* gi = curPipeline->GetGI()) {   // 环境强度取 1（白炉真值）
-                        auto s = gi->GetSettings();
-                        s.intensity = 1.0f;
-                        gi->SetSettings(s);
-                    }
-                }
-            }
-            ImGui::TextWrapped("白炉条件：全白环境 + albedo=1 + 关闭直接光 → 各源真值均为 1，\n"
-                               "正确的分层合成应恰好读回 1.0；>1 即存在归一化之外的双重计数。");
-            if (g_ProbeEnabled) {
-                const auto& pv = probe.Values();
-                ImGui::Text("中心像素 (线性 RGB): %.4f %.4f %.4f", pv[0].rgb[0], pv[0].rgb[1], pv[0].rgb[2]);
-                ImGui::Text("背景像素 (线性 RGB): %.4f %.4f %.4f", pv[1].rgb[0], pv[1].rgb[1], pv[1].rgb[2]);
-                // 白炉正确时：物体消失 → 中心与背景都应等于环境真值 1.0
-                const float ratio = probe.LuminanceRatio(0, 1);
-                const bool ok = (ratio > 0.98f && ratio < 1.02f);
-                const ImVec4 col = ok ? ImVec4(0.3f, 0.9f, 0.3f, 1.0f) : ImVec4(1.0f, 0.6f, 0.2f, 1.0f);
-                ImGui::TextColored(col, "亮度比 中心/背景 = %.4f   (白炉判据 0.98 ~ 1.02)", ratio);
-                ImGui::TextColored(col, "中心亮度 = %.4f   (白炉真值 1.0)", pv[0].luminance);
-            }
-
-            // ── GI 质量档位（紧随管线选择）──
-            ImGui::SeparatorText("GI 质量档位");
-            const char* presetNames[] = {"Low", "Medium", "High", "Ultra"};
-            render::GIConfig& gc = *curPipeline->GetGIConfig();
-            const u32  giCaps = curPipeline->GetGIPipelineCaps();
-            const bool rtOk   = device->GetCaps().supportsRayTracing;
-            if (ImGui::Combo("档位##preset", &g_GIPreset, presetNames, 4)) {
-                // 应用预设 + 按「管线能力 ∧ 设备能力」自动降级
-                gc = render::GIRegistry::Degrade(render::GIConfigFromPreset((render::GIQualityPreset)g_GIPreset),
-                                                 giCaps, rtOk);
-                if (auto* dp = dynamic_cast<render::DeferredPipeline*>(curPipeline)) {
-                    dp->GetSSGI()->SetEnabled(gc.ShouldRunSSGI());
-                    dp->GetDDGI()->SetEnabled(gc.ShouldRunDDGI());
-                    dp->GetSSR()->SetEnabled(gc.ShouldRunSpecular());
-                    dp->GetSSAO().enabled = gc.ShouldRunAO();
-                    auto sg = dp->GetSSGI()->GetSettings();
-                    sg.halfRes = gc.halfRes;
-                    dp->GetSSGI()->SetSettings(sg);
-                    auto sr = dp->GetSSR()->GetSettings();
-                    sr.halfRes = gc.halfRes;
-                    dp->GetSSR()->SetSettings(sr);
-                    dp->GetSSAO().halfRes = gc.halfRes;
-                    // 纹理重建延迟到帧边界（NextFrame 之后），避免在 ImGui 回调内销毁/创建正在使用的纹理
-                    g_PendingHalfResApply = true;
-                }
-            }
-
-            // 当前管线可用的 GI 子系统（按管线类型获取，Forward 无屏幕空间/探针 GI）
-            auto* dp = dynamic_cast<render::DeferredPipeline*>(curPipeline);
-            auto* giSSGI = dp ? dp->GetSSGI() : nullptr;
-            auto* giSSR  = dp ? dp->GetSSR()  : nullptr;
-            auto* giDDGI = dp ? dp->GetDDGI() : nullptr;
-
-            // ── GI 通道：Diffuse / Specular / AO / Shadow ──
-            ImGui::SeparatorText("GI 通道");
-            const ImVec4 colOk  = ImVec4(0.4f, 1.0f, 0.4f, 1.0f);
-            const ImVec4 colBad = ImVec4(1.0f, 0.55f, 0.2f, 1.0f);
-
-            // 本管线的能力位里一个 GI 源都没有（当前只有 Forward 是这样）：它的 IBL/RSM 由
-            // 管线级开关驱动、不读层栈，因此下面整段层栈 UI 对它是**死开关**。与其把死开关
-            // 摆出来，不如直说（§9.2-H）。阴影通道独立于层栈，仍然有效。
-            const bool anyGISource = (giCaps & render::PipelineCaps::AllSources) != 0u;
-            if (!anyGISource) {
-                ImGui::TextColored(colBad,
-                    "本管线的 GI 不由层栈驱动（IBL/RSM 是管线级开关），层栈内容对它没有影响");
-                // 层栈 UI 全部置灰但不隐藏：内容仍可查看（便于对照诊断），但不可编辑，
-                // 免得用户以为改了这里就能改变 Forward 的画面。
-                ImGui::BeginDisabled();
-            }
-
-            // ── 通道 UI 辅助：显示该通道的「源层栈」（源 / 频段 / 权重 / 让位距离）──
-            // 勾选 = 该源参与合成（weight>0）；多个源同时勾选即为「融合」
-            auto channelUI = [&](const char* label, render::GIChannelStack& st,
-                                 const render::GISourceId* candidates, int candCount) {
-                ImGui::TextUnformatted(label);
-                ImGui::Indent(12.0f);
-                for (int i = 0; i < candCount; i++) {
-                    const render::GISourceId id = candidates[i];
-                    const bool  avail  = render::GIRegistry::IsAvailable(id, giCaps, rtOk);
-                    const float weight = st.WeightOf(id);
-                    bool active = weight > 0.0f;
-                    ImGui::PushID((int)id);
-                    if (ImGui::Checkbox(render::GISourceName(id), &active)) {
-                        st.Set(id, active ? 1.0f : 0.0f, st.FalloffOf(id));
-                    }
-                    ImGui::SameLine();
-                    ImGui::TextColored(avail ? colOk : colBad, "[%s]",
-                        avail ? render::GISourceClassName(id) : "不可用");
-                    if (active) {
-                        ImGui::SameLine();
-                        ImGui::SetNextItemWidth(80.0f);
-                        float w = st.WeightOf(id);
-                        if (ImGui::DragFloat("权重", &w, 0.05f, 0.0f, 2.0f, "%.2f")) {
-                            st.Set(id, w, st.FalloffOf(id));
-                        }
-                        ImGui::SameLine();
-                        ImGui::SetNextItemWidth(80.0f);
-                        float fo = st.FalloffOf(id);
-                        if (ImGui::DragFloat("让位", &fo, 0.5f, 0.0f, 200.0f, "%.0f")) {
-                            st.Set(id, w, fo);
-                        }
-                    }
-                    ImGui::PopID();
-                }
-                // 该通道的合成方式（相加仅作对照；归一化保证无双重计数）
-                int mode = (int)st.mode;
-                const char* modes[] = {"相加(对照)", "归一化加权"};
-                ImGui::SetNextItemWidth(140.0f);
-                if (ImGui::Combo("合成", &mode, modes, 2)) {
-                    st.mode = (render::GIBlendMode)mode;
-                }
-                ImGui::Unindent(12.0f);
-            };
-
-            // ---- Diffuse（间接漫反射）----
-            {
-                // P4：候选源从已注册的 Provider 派生（低频 → 高频排列）。
-                // 频段顺序用于面板可读性；未接入 Provider 的源（如预留的 Lightmap）不出现。
-                static const render::GISourceId kAllDiffuse[] = {
-                    render::GISourceId::IBL, render::GISourceId::Lightmap, render::GISourceId::DDGI,
-                    render::GISourceId::SSGI, render::GISourceId::RSM, render::GISourceId::RTGI,
-                render::GISourceId::Lumen };
-                std::vector<render::GISourceId> diffuseSources;
-                if (dp) {
-                    for (auto id : kAllDiffuse) {
-                        // 只列出「本管线能力位允许」的源：能力位就是层栈模型下管线能承载的范围，
-                        // 列出一个它根本不消费的源，等于让面板把一个假开关摆给用户（§9.2-H）。
-                        if (!render::GIRegistry::IsAvailable(id, giCaps, rtOk)) continue;
-                        for (auto& p : dp->GetGIProviders()) {
-                            if (p->Handles(id)) { diffuseSources.push_back(id); break; }
-                        }
-                    }
-                }
-                if (diffuseSources.empty()) diffuseSources.push_back(render::GISourceId::IBL);
-                channelUI("Diffuse — 间接漫反射（低频 → 高频）", gc.diffuse,
-                          diffuseSources.data(), (int)diffuseSources.size());
-                ImGui::Indent(12.0f);
-                ImGui::SliderFloat("GI 强度", &gc.giIntensity, 0.0f, 2.0f, "%.2f");
-                ImGui::Checkbox("半分辨率", &gc.halfRes);
-                if (giSSGI) {
-                    bool on = giSSGI->IsEnabled();
-                    if (ImGui::Checkbox("启用 SSGI", &on)) giSSGI->SetEnabled(on);
-                    if (on) {
-                        ImGui::Indent(12.0f);
-                        ImGui::DragFloat("采样半径##ssgi", &giSSGI->radius, 0.1f, 0.1f, 5.0f, "%.1f");
-                        ImGui::SliderInt("采样数##ssgi", &giSSGI->sampleCount, 4, 64);
-                        ImGui::Unindent(12.0f);
-                    }
-                    ImGui::Text("SSGI 耗时 %.2f ms", giSSGI->GetDebugData().avgRenderTimeMs);
-                }
-                if (giDDGI) {
-                    bool on = giDDGI->IsEnabled();
-                    if (ImGui::Checkbox("启用 DDGI", &on)) giDDGI->SetEnabled(on);
-                    if (on) {
-                        ImGui::Indent(12.0f);
-                        ImGui::SliderFloat("时间混合##ddgi", &giDDGI->blendAlpha, 0.0f, 0.98f, "%.2f");
-                        ImGui::SliderFloat("贡献缩放##ddgi", &giDDGI->debugScale, 0.0f, 2.0f, "%.2f");
-                        u32 pc = giDDGI->gridX * giDDGI->gridY * giDDGI->gridZ;
-                        ImGui::Text("%u 探针 (%u×%u×%u)", pc, giDDGI->gridX, giDDGI->gridY, giDDGI->gridZ);
-                        ImGui::Unindent(12.0f);
-                    }
-                    ImGui::Text("DDGI 耗时 %.2f ms", giDDGI->GetDebugData().avgRenderTimeMs);
-                }
-                // IBL 环境光（所有管线共用）
-                if (auto* gi = curPipeline->GetGI()) {
-                    auto s = gi->GetSettings();
-                    float inten = s.intensity;
-                    if (ImGui::SliderFloat("IBL 强度", &inten, 0.0f, 3.0f, "%.2f")) {
-                        s.intensity = inten;
-                        gi->SetSettings(s);
-                    }
-                    ImGui::Text("IBL 耗时 %.2f ms", gi->GetDebugData().avgRenderTimeMs);
-                }
-                ImGui::Unindent(12.0f);
-            }
-
-            // ---- Specular（镜面反射）----
-            {
-                // P4：候选源从已注册的 Provider 派生
-                static const render::GISourceId kAllSpecular[] = {
-                    render::GISourceId::IBL, render::GISourceId::SSR,
-                render::GISourceId::RTReflection, render::GISourceId::Lumen };
-                std::vector<render::GISourceId> specSources;
-                if (dp) {
-                    for (auto id : kAllSpecular) {
-                        for (auto& p : dp->GetGIProviders()) {
-                            if (p->Handles(id)) { specSources.push_back(id); break; }
-                        }
-                    }
-                }
-                if (specSources.empty()) specSources.push_back(render::GISourceId::IBL);
-                channelUI("Specular — 镜面反射（低频 → 高频）", gc.specular,
-                          specSources.data(), (int)specSources.size());
-                ImGui::Indent(12.0f);
-                if (giSSR) {
-                    bool on = giSSR->IsEnabled();
-                    if (ImGui::Checkbox("启用 SSR", &on)) giSSR->SetEnabled(on);
-                    if (on) {
-                        ImGui::Indent(12.0f);
-                        ImGui::SliderFloat("最大步数##ssr", &giSSR->maxSteps, 16.0f, 256.0f, "%.0f");
-                        ImGui::SliderFloat("步长##ssr", &giSSR->stepSize, 0.1f, 2.0f, "%.1f");
-                        ImGui::Unindent(12.0f);
-                    }
-                    ImGui::Text("SSR 耗时 %.2f ms", giSSR->GetDebugData().avgRenderTimeMs);
-                }
-                ImGui::Unindent(12.0f);
-            }
-
-            // ---- AO（环境光遮蔽）----
-            {
-                // P4：候选源从已注册的 GI Provider 派生（不再硬编码源列表）。
-                // 目前 SSAO/GTAO 已 Provider 化；RTAO 尚未（留待下一波次推广）。
-                std::vector<render::GISourceId> aoSources;
-                if (dp) {
-                    for (auto& p : dp->GetGIProviders()) {
-                        if (p->Handles(render::GISourceId::SSAO)) {
-                            aoSources.push_back(render::GISourceId::SSAO);
-                            aoSources.push_back(render::GISourceId::GTAO);
-                        }
-                    }
-                }
-                if (aoSources.empty()) aoSources.push_back(render::GISourceId::SSAO);
-                aoSources.push_back(render::GISourceId::RTAO);   // 尚未 Provider 化
-                channelUI("AO — 环境光遮蔽", gc.ao, aoSources.data(), (int)aoSources.size());
-                ImGui::Indent(12.0f);
-                ImGui::SliderFloat("AO 强度##gc", &gc.aoIntensity, 0.0f, 1.5f, "%.2f");
-                if (dp) {
-                    auto& ssao = dp->GetSSAO();
-                    bool on = ssao.enabled;
-                    if (ImGui::Checkbox("启用 SSAO", &on)) ssao.enabled = on;
-                    if (on) {
-                        ImGui::Indent(12.0f);
-                        ImGui::DragFloat("半径##ssao", &ssao.radius, 0.05f, 0.1f, 5.0f, "%.2f");
-                        ImGui::SliderInt("采样数##ssao", &ssao.sampleCount, 4, 32);
-                        ImGui::Checkbox("半分辨率##ssao", &ssao.halfRes);
-                        ImGui::Unindent(12.0f);
-                    }
-                }
-                ImGui::Unindent(12.0f);
-            }
-
-            // 结束「层栈 UI 置灰」（见上：本管线没有层栈 GI 源时）
-            if (!anyGISource) ImGui::EndDisabled();
-
-            // ---- Shadow（阴影）----
-            // 阴影是「可见性（乘法项）」而非「能量（加法项）」——不适用层栈的
-            // 频段/权重/距离让位语义，故用独立枚举：None / Raster / RT
-            {
-                const char* shadowNames[] = {"None", "Raster（光栅 CSM 等）", "RT（光追阴影）"};
-                int sh = (int)gc.shadow;
-                ImGui::TextUnformatted("Shadow — 阴影（可见性，不参与能量合成）");
-                ImGui::Indent(12.0f);
-                ImGui::SetNextItemWidth(220.0f);
-                if (ImGui::Combo("##shadow", &sh, shadowNames, 3)) {
-                    gc.shadow = (render::ShadowChannel)sh;
-                    gc = render::GIRegistry::Degrade(gc, giCaps, rtOk);   // 不可用则回退
-                }
-                const bool shOk = render::GIRegistry::IsAvailable(gc.shadow, giCaps, rtOk)
-                               || gc.shadow == render::ShadowChannel::None;
-                ImGui::SameLine();
-                ImGui::TextColored(shOk ? colOk : colBad, shOk ? "[可用]" : "[不可用]");
-                ImGui::Unindent(12.0f);
-            }
-
-        }
-        ImGui::End();
+        uiDeps.DrawGIPanel();     // GI 控制台（实现见 main 之前）
 
         ImGui::End();
 
