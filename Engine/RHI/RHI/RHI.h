@@ -80,6 +80,15 @@ public:
     virtual IRHISampler*           ResolveSampler(RHISamplerHandle /*handle*/) const { return nullptr; }
     virtual void DestroyPipelineStateHandle(RHIPipelineStateHandle /*handle*/) {}
     virtual void DestroySamplerHandle(RHISamplerHandle /*handle*/) {}
+
+    // --- A-3 第二批·扩展：光线追踪管线与加速结构（同样与 unique_ptr 版并存）---
+    virtual RHIRayTracingPipelineHandle CreateRTPipelineStateHandle(const RTPipelineStateDesc& /*desc*/) { return {}; }
+    virtual RHIAccelerationStructureHandle CreateBLASHandle(const BLASBuildDesc& /*desc*/) { return {}; }
+    virtual RHIAccelerationStructureHandle CreateTLASHandle(const TLASBuildDesc& /*desc*/) { return {}; }
+    virtual IRHIRayTracingPipelineState* ResolveRTPipelineState(RHIRayTracingPipelineHandle /*handle*/) const { return nullptr; }
+    virtual IRHIAccelerationStructure*   ResolveAccelerationStructure(RHIAccelerationStructureHandle /*handle*/) const { return nullptr; }
+    virtual void DestroyRTPipelineStateHandle(RHIRayTracingPipelineHandle /*handle*/) {}
+    virtual void DestroyAccelerationStructureHandle(RHIAccelerationStructureHandle /*handle*/) {}
     virtual std::unique_ptr<IRHISampler>        CreateSampler(const SamplerDesc& desc) = 0;
     virtual std::unique_ptr<IRHIPipelineState>  CreatePipelineState(const PipelineStateDesc& desc) = 0;
 

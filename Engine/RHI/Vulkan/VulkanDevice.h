@@ -115,6 +115,15 @@ public:
     std::unique_ptr<IRHIRayTracingPipelineState>
         CreateRTPipelineState(const RTPipelineStateDesc& desc) override;
 
+    // A-3 第二批·扩展：句柄式（RT 管线 + 加速结构）
+    RHIRayTracingPipelineHandle CreateRTPipelineStateHandle(const RTPipelineStateDesc& desc) override;
+    RHIAccelerationStructureHandle CreateBLASHandle(const BLASBuildDesc& desc) override;
+    RHIAccelerationStructureHandle CreateTLASHandle(const TLASBuildDesc& desc) override;
+    IRHIRayTracingPipelineState* ResolveRTPipelineState(RHIRayTracingPipelineHandle handle) const override;
+    IRHIAccelerationStructure*   ResolveAccelerationStructure(RHIAccelerationStructureHandle handle) const override;
+    void DestroyRTPipelineStateHandle(RHIRayTracingPipelineHandle handle) override;
+    void DestroyAccelerationStructureHandle(RHIAccelerationStructureHandle handle) override;
+
     void WaitIdle() override;
     void Submit(IRHICommandList* cmdList, RHICommandList* stream = nullptr) override;
 
@@ -452,6 +461,11 @@ private:
     RHISamplerTable       m_SamplerTable;
     std::unordered_map<u64, std::unique_ptr<IRHIPipelineState>> m_HandlePipelineStates;
     std::unordered_map<u64, std::unique_ptr<IRHISampler>>       m_HandleSamplers;
+    // A-3 第二批·扩展
+    RHIRayTracingPipelineTable  m_RTPipelineTable;
+    RHIAccelerationStructureTable m_AccelTable;
+    std::unordered_map<u64, std::unique_ptr<IRHIRayTracingPipelineState>> m_HandleRTPipelines;
+    std::unordered_map<u64, std::unique_ptr<IRHIAccelerationStructure>>   m_HandleAccelStructures;
     u64 m_CurrentFrame = 0;  // 递增帧计数器（PSO 缓存 LRU + 延迟销毁去重）
     u64 m_LastDeferredAdvanceFrame = UINT64_MAX;  // 上一次延迟销毁的帧 ID
 

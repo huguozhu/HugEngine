@@ -128,14 +128,42 @@ struct RHISamplerHandle {
     friend bool operator!=(RHISamplerHandle a, RHISamplerHandle b) { return !(a == b); }
 };
 
+/// 光线追踪管线句柄（A-3 第二批·扩展）。语义同其它句柄：`index == 0` 无效，`generation` 做代次校验。
+struct RHIRayTracingPipelineHandle {
+    u32 index      = 0;
+    u32 generation = 0;
+
+    [[nodiscard]] bool IsValid() const { return index != 0u; }
+    friend bool operator==(RHIRayTracingPipelineHandle a, RHIRayTracingPipelineHandle b) {
+        return a.index == b.index && a.generation == b.generation;
+    }
+    friend bool operator!=(RHIRayTracingPipelineHandle a, RHIRayTracingPipelineHandle b) { return !(a == b); }
+};
+
+/// 加速结构句柄（BLAS / TLAS 共用；`generation` 做代次校验）
+struct RHIAccelerationStructureHandle {
+    u32 index      = 0;
+    u32 generation = 0;
+
+    [[nodiscard]] bool IsValid() const { return index != 0u; }
+    friend bool operator==(RHIAccelerationStructureHandle a, RHIAccelerationStructureHandle b) {
+        return a.index == b.index && a.generation == b.generation;
+    }
+    friend bool operator!=(RHIAccelerationStructureHandle a, RHIAccelerationStructureHandle b) { return !(a == b); }
+};
+
 class IRHIBuffer;    // 前向声明：本头文件不依赖 Buffer.h / Texture.h 的实现细节
 class IRHITexture;
 class IRHIPipelineState;
 class IRHISampler;
+class IRHIRayTracingPipelineState;
+class IRHIAccelerationStructure;
 
 using RHIBufferTable  = RHIResourceTable<RHIBufferHandle, IRHIBuffer>;
 using RHITextureTable = RHIResourceTable<RHITextureHandle, IRHITexture>;
 using RHIPipelineStateTable = RHIResourceTable<RHIPipelineStateHandle, IRHIPipelineState>;
 using RHISamplerTable       = RHIResourceTable<RHISamplerHandle, IRHISampler>;
+using RHIRayTracingPipelineTable = RHIResourceTable<RHIRayTracingPipelineHandle, IRHIRayTracingPipelineState>;
+using RHIAccelerationStructureTable = RHIResourceTable<RHIAccelerationStructureHandle, IRHIAccelerationStructure>;
 
 } // namespace he::rhi

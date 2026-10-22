@@ -399,6 +399,8 @@ void VulkanDevice::Shutdown() {
     m_HandleTextures.clear();
     m_HandlePipelineStates.clear();
     m_HandleSamplers.clear();
+    m_HandleRTPipelines.clear();
+    m_HandleAccelStructures.clear();
     m_PipelineStateTable = {};
     m_SamplerTable = {};
     m_BufferTable = {};
@@ -975,6 +977,55 @@ void VulkanDevice::DestroySamplerHandle(RHISamplerHandle handle) {
     if (it == m_HandleSamplers.end()) return;
     m_SamplerTable.Remove(handle);
     m_HandleSamplers.erase(it);
+}
+
+// --- A-3 第二批·扩展：光线追踪管线与加速结构 ---
+RHIRayTracingPipelineHandle VulkanDevice::CreateRTPipelineStateHandle(const RTPipelineStateDesc& desc) {
+    auto p = CreateRTPipelineState(desc);
+    if (!p) return {};
+    const RHIRayTracingPipelineHandle h = m_RTPipelineTable.Add(p.get());
+    m_HandleRTPipelines[HandleKey(h.index, h.generation)] = std::move(p);
+    return h;
+}
+
+RHIAccelerationStructureHandle VulkanDevice::CreateBLASHandle(const BLASBuildDesc& desc) {
+    auto a = CreateBLAS(desc);
+    if (!a) return {};
+    const RHIAccelerationStructureHandle h = m_AccelTable.Add(a.get());
+    m_HandleAccelStructures[HandleKey(h.index, h.generation)] = std::move(a);
+    return h;
+}
+
+RHIAccelerationStructureHandle VulkanDevice::CreateTLASHandle(const TLASBuildDesc& desc) {
+    auto a = CreateTLAS(desc);
+    if (!a) return {};
+    const RHIAccelerationStructureHandle h = m_AccelTable.Add(a.get());
+    m_HandleAccelStructures[HandleKey(h.index, h.generation)] = std::move(a);
+    return h;
+}
+
+IRHIRayTracingPipelineState* VulkanDevice::ResolveRTPipelineState(RHIRayTracingPipelineHandle handle) const {
+    return m_RTPipelineTable.Get(handle);
+}
+
+IRHIAccelerationStructure* VulkanDevice::ResolveAccelerationStructure(RHIAccelerationStructureHandle handle) const {
+    return m_AccelTable.Get(handle);
+}
+
+void VulkanDevice::DestroyRTPipelineStateHandle(RHIRayTracingPipelineHandle handle) {
+    if (!handle.IsValid()) return;
+    auto it = m_HandleRTPipelines.find(HandleKey(handle.index, handle.generation));
+    if (it == m_HandleRTPipelines.end()) return;
+    m_RTPipelineTable.Remove(handle);
+    m_HandleRTPipelines.erase(it);
+}
+
+void VulkanDevice::DestroyAccelerationStructureHandle(RHIAccelerationStructureHandle handle) {
+    if (!handle.IsValid()) return;
+    auto it = m_HandleAccelStructures.find(HandleKey(handle.index, handle.generation));
+    if (it == m_HandleAccelStructures.end()) return;
+    m_AccelTable.Remove(handle);
+    m_HandleAccelStructures.erase(it);
 }
 
 void VulkanDevice::WaitIdle() {
