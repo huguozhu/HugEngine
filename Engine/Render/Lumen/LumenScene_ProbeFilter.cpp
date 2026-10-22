@@ -60,7 +60,7 @@ const char* LumenScene::GetProbeFilterNote() const {
 }
 
 void LumenScene::CreateProbeFilterGPUObjects() {
-    if (m_ProbeFilterPSO) return;
+    if (m_ProbeFilterPSO.IsValid()) return;
 
     rhi::DescriptorSetLayoutDesc layout;
     layout.bindings = {
@@ -92,8 +92,8 @@ void LumenScene::CreateProbeFilterGPUObjects() {
     pso.descriptorSetLayouts = {m_ProbeFilterLayout};
     pso.pushConstantRanges   = {pcr};
     pso.debugName            = "Lumen_ScreenProbe_Filter";
-    m_ProbeFilterPSO = m_Device->CreatePipelineState(pso);
-    if (!m_ProbeFilterPSO) HE_CORE_ERROR("LumenScene: 探针滤波 PSO 创建失败");
+    m_ProbeFilterPSO = m_Device->CreatePipelineStateHandle(pso);   // A-3
+    if (!m_ProbeFilterPSO.IsValid()) HE_CORE_ERROR("LumenScene: 探针滤波 PSO 创建失败");
 }
 
 void LumenScene::RunScreenProbeFilter(rhi::IRHICommandList* cmd, const float4x4& viewProj) {
@@ -105,7 +105,7 @@ void LumenScene::RunScreenProbeFilter(rhi::IRHICommandList* cmd, const float4x4&
 
     if (!m_ProbeFilterBound) {
         CreateProbeFilterGPUObjects();
-        if (!m_ProbeFilterPSO) return;
+        if (!m_ProbeFilterPSO.IsValid()) return;
 
         // 模式与两个核参数：只在建资源时读一次环境变量（运行中改它没有意义）
         {
@@ -219,7 +219,7 @@ void LumenScene::RunScreenProbeFilter(rhi::IRHICommandList* cmd, const float4x4&
                         m_ProbeFilterDistTol);
 
     ComputeBarrier(cmd);   // 等"SH 投影写回探针系数"落地（Lumen 内部 pass 之间必须显式屏障）
-    cmd->SetPipeline(m_ProbeFilterPSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_ProbeFilterPSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_ProbeFilterSet);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
     // 线程数取 max(探针数, 单元数)：每个单元一个线程负责"把当帧映射抄进历史缓冲"，

@@ -55,7 +55,7 @@ void LumenScene::CreateIrradianceTexture() {
 }
 
 void LumenScene::CreateIrradianceGPUObjects() {
-    if (m_IrrPSO) return;
+    if (m_IrrPSO.IsValid()) return;
 
     rhi::DescriptorSetLayoutDesc layout;
     layout.bindings = {
@@ -86,8 +86,8 @@ void LumenScene::CreateIrradianceGPUObjects() {
     pso.descriptorSetLayouts = {m_IrrLayout};
     pso.pushConstantRanges   = {pcr};
     pso.debugName            = "Lumen_ProbeIrradiance";
-    m_IrrPSO = m_Device->CreatePipelineState(pso);
-    if (!m_IrrPSO) HE_CORE_ERROR("LumenScene: 逐像素辐照度 PSO 创建失败");
+    m_IrrPSO = m_Device->CreatePipelineStateHandle(pso);   // A-3
+    if (!m_IrrPSO.IsValid()) HE_CORE_ERROR("LumenScene: 逐像素辐照度 PSO 创建失败");
 }
 
 void LumenScene::RunProbeIrradiance(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbNormal,
@@ -97,7 +97,7 @@ void LumenScene::RunProbeIrradiance(rhi::IRHICommandList* cmd, rhi::IRHITexture*
 
     if (!m_IrrBound) {
         CreateIrradianceGPUObjects();
-        if (!m_IrrPSO) return;
+        if (!m_IrrPSO.IsValid()) return;
         // 【步骤 35】绑定**过滤后**的探针缓冲：辐照度是探针 SH 的逐像素重建，
         // 读未过滤的一份就等于把刚做的滤波丢掉（滤波 pass 每帧都会写出这一份）。
         m_Device->UpdateDescriptorSet(m_IrrSet, 0, rhi::DescriptorType::StorageBuffer,
@@ -150,7 +150,7 @@ void LumenScene::RunProbeIrradiance(rhi::IRHICommandList* cmd, rhi::IRHITexture*
     pc.x = m_Width; pc.y = m_Height; pc.z = cellsX; pc.w = 0u;
     pc.params = float4(0.0f, 0.0f, 0.0f, 0.0f);   // x = 1 时只输出辐照度（调试）
     ComputeBarrier(cmd);   // 等"SH pass 写回探针系数"落地
-    cmd->SetPipeline(m_IrrPSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_IrrPSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_IrrSet);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
     cmd->Dispatch((m_Width + 7u) / 8u, (m_Height + 7u) / 8u, 1);

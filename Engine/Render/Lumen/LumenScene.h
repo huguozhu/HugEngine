@@ -379,7 +379,7 @@ private:
     bool m_IrradianceTransitioned = false;          // 步骤 37：辐照度纹理的布局是否已转换过
     rhi::DescriptorSetLayoutHandle m_ProbeFilterLayout = 0;
     rhi::DescriptorSetHandle       m_ProbeFilterSet    = 0;
-    std::unique_ptr<rhi::IRHIPipelineState> m_ProbeFilterPSO;
+    rhi::RHIPipelineStateHandle m_ProbeFilterPSO{};   // A-3
     std::unique_ptr<rhi::IRHIBuffer> m_ProbeFilteredBuf;             // 过滤结果（96 B/探针，下游读它）
     std::unique_ptr<rhi::IRHIBuffer> m_ProbeFilterHistBuf[2];        // 历史探针镜像（80 B/探针，乒乓）
     std::unique_ptr<rhi::IRHIBuffer> m_CellProbeHistBuf[2];          // 历史单元映射（乒乓）
@@ -404,7 +404,7 @@ private:
     // ── 由 SH 采样出逐像素辐照度（步骤 24）──
     rhi::DescriptorSetLayoutHandle m_IrrLayout = 0;
     rhi::DescriptorSetHandle       m_IrrSet    = 0;
-    std::unique_ptr<rhi::IRHIPipelineState> m_IrrPSO;
+    rhi::RHIPipelineStateHandle m_IrrPSO{};   // A-3
     std::unique_ptr<rhi::IRHIBuffer>        m_CellProbeBuf;
     std::unique_ptr<rhi::IRHITexture>       m_IrradianceTex;
     std::unique_ptr<rhi::IRHIBuffer>        m_IrradianceStatsBuf;   // 0=覆盖像素 1=亮度定点累加 2=亮度定点最大
