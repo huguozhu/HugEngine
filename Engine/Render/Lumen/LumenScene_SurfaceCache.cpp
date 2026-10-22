@@ -502,7 +502,7 @@ void LumenScene::RunCardCapture(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbA
 // 步骤 22：命中点着色（从 L2 的 atlas 取材质）
 // ============================================================
 void LumenScene::CreateShadeGPUObjects() {
-    if (m_ShadePSO) return;
+    if (m_ShadePSO.IsValid()) return;
 
     rhi::DescriptorSetLayoutDesc layout;
     layout.bindings = {
@@ -539,8 +539,8 @@ void LumenScene::CreateShadeGPUObjects() {
     pso.descriptorSetLayouts = {m_ShadeLayout};
     pso.pushConstantRanges   = {pcr};
     pso.debugName            = "Lumen_SurfaceCacheSample";
-    m_ShadePSO = m_Device->CreatePipelineState(pso);
-    if (!m_ShadePSO) HE_CORE_ERROR("LumenScene: 命中点着色 PSO 创建失败");
+    m_ShadePSO = m_Device->CreatePipelineStateHandle(pso);   // A-3
+    if (!m_ShadePSO.IsValid()) HE_CORE_ERROR("LumenScene: 命中点着色 PSO 创建失败");
 }
 
 void LumenScene::RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbAlbedo,
@@ -575,7 +575,7 @@ void LumenScene::RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHIText
     }
     if (!m_ShadeBound) {
         CreateShadeGPUObjects();
-        if (!m_ShadePSO) return;
+        if (!m_ShadePSO.IsValid()) return;
         const auto& cards = m_SDF.GetCards();
         struct ShadeCard { float4 aabbLo; uint4 axisDirPageCard; };
         std::vector<ShadeCard> gpu(cards.size());
@@ -745,7 +745,7 @@ void LumenScene::RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHIText
     const bool shadeUnimplemented = (m_TraceConfig.shade == LumenShadeSource::HitLighting);
     pc.atlas = float4((float)kAtlasPageRes, (float)kAtlasSize, 0.18f, shadeUnimplemented ? 1.0f : 0.0f);
     ComputeBarrier(cmd);   // 等"追踪 pass 写命中点"落地
-    cmd->SetPipeline(m_ShadePSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_ShadePSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_ShadeSet);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
     cmd->Dispatch((total + 63u) / 64u, 1, 1);
@@ -758,7 +758,7 @@ void LumenScene::RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHIText
 // 在**加载/配置期**就报错并拒绝派发，而不是渲染出一片黑再回头查。
 // ============================================================
 void LumenScene::CreateProbeTraceGPUObjects() {
-    if (m_TracePSO) return;
+    if (m_TracePSO.IsValid()) return;
 
     rhi::DescriptorSetLayoutDesc layout;
     layout.bindings = {
@@ -788,8 +788,8 @@ void LumenScene::CreateProbeTraceGPUObjects() {
     pso.descriptorSetLayouts = {m_TraceLayout};
     pso.pushConstantRanges   = {pcr};
     pso.debugName            = "Lumen_ScreenProbe_Trace";
-    m_TracePSO = m_Device->CreatePipelineState(pso);
-    if (!m_TracePSO) HE_CORE_ERROR("LumenScene: 探针追踪 PSO 创建失败");
+    m_TracePSO = m_Device->CreatePipelineStateHandle(pso);   // A-3
+    if (!m_TracePSO.IsValid()) HE_CORE_ERROR("LumenScene: 探针追踪 PSO 创建失败");
 }
 
 void LumenScene::RunProbeTrace(rhi::IRHICommandList* cmd) {
@@ -826,7 +826,7 @@ void LumenScene::RunProbeTrace(rhi::IRHICommandList* cmd) {
     }
     if (!m_TraceBound) {
         CreateProbeTraceGPUObjects();
-        if (!m_TracePSO) return;
+        if (!m_TracePSO.IsValid()) return;
         rhi::BufferDesc rb;
         rb.size  = (usize)kMaxScreenProbes * 16u * sizeof(float4);   // 最多 16 条光线/探针
         rb.usage = rhi::BufferUsage::Storage;
@@ -897,7 +897,7 @@ void LumenScene::RunProbeTrace(rhi::IRHICommandList* cmd) {
     pc.march = float4((float)m_SDF.GetMarchMaxSteps(), kProbeMarchEpsVoxels * m_SDF.GetGlobalVoxelSize(0),
                       (float)m_SDF.GetMarchMaxDist(), 0.0f);
     ComputeBarrier(cmd);   // 等"布置 pass 写探针"落地
-    cmd->SetPipeline(m_TracePSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_TracePSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_TraceSet);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
     cmd->Dispatch((total + 63u) / 64u, 1, 1);

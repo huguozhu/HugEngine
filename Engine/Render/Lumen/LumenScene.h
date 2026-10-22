@@ -342,7 +342,7 @@ private:
     void* m_RayStatsMapped = nullptr;
     rhi::DescriptorSetLayoutHandle m_TraceLayout = 0;
     rhi::DescriptorSetHandle       m_TraceSet    = 0;
-    std::unique_ptr<rhi::IRHIPipelineState> m_TracePSO;
+    rhi::RHIPipelineStateHandle m_TracePSO{};   // A-3
     bool m_TraceBound = false;
     u32  m_TraceFrame = 0;
     u32  m_ProbeRayHits = 0, m_ProbeRayMisses = 0, m_ProbeRaysTotal = 0, m_ProbeRayHemisphere = 0;
@@ -351,7 +351,7 @@ private:
     void* m_ShadeStatsMapped = nullptr;
     rhi::DescriptorSetLayoutHandle m_ShadeLayout = 0;
     rhi::DescriptorSetHandle       m_ShadeSet    = 0;
-    std::unique_ptr<rhi::IRHIPipelineState> m_ShadePSO;
+    rhi::RHIPipelineStateHandle m_ShadePSO{};   // A-3
     bool m_ShadeBound = false;
     u32  m_ShadeFrame = 0;
     u32  m_ShadedHits = 0, m_ShadedMissingPages = 0, m_ShadedAlbedoSamples = 0;
