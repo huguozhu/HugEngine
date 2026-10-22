@@ -923,6 +923,237 @@ void GILabUI::DrawGIChannels() {
 
 
 
+// ============================================================
+// GILabFrameRecorder —— 每帧两条渲染命令的录制体（命令 1 / 命令 2）
+//
+// 原先两条命令是 main() 里两个 [&] lambda（74 + 112 行）。抽成成员函数后主循环只剩
+// "submitRender(...)" 两处调用，录制逻辑集中在这里。
+//
+// 【为什么用"同名引用成员"】两条命令要读写 main 里的一批对象（设备/命令列表/管线/相机/
+// 转储器/探针/各开关）。以同名引用成员交给本结构后，命令体可以**逐字不动**。
+// 【哪些走参数】每帧会变的值（frameAborted、deltaTime、renderFrameIndex、dumpThisFrame）
+// 一律走参数 —— 避免引用成员绑到每帧新建的局部量上而悬空。
+// ============================================================
+struct GILabFrameRecorder {
+    editor::ImGuiIntegration&             imgui;
+    rhi::FramePresenter&               framePresenter;
+    std::unique_ptr<rhi::IRHIDevice>&     device;
+    std::unique_ptr<rhi::IRHICommandList>& cmdList;
+    std::unique_ptr<rhi::IRHISwapChain>&  swapchain;
+    Engine&                               engine;
+    render::DeferredPipeline&             deferredPipeline;
+    render::ForwardPipeline&              forwardPipeline;
+    render::IRenderPipeline*&             curPipeline;
+    render::CameraController&             camCtrl;
+    render::FrameDumpRecorder&            giDump;
+    render::PixelProbe&                   probe;
+    World&                                world;
+    SceneGraph&                           sceneGraph;
+    u64&                                  frameIndex;
+    int&                                  g_PipelineMode;
+    int&                                  g_ProbeInterval;
+    bool&                                 g_ProbeEnabled;
+    bool&                                 g_FurnaceMode;
+    bool&                                 g_PendingPipelineSwitch;
+    bool&                                 g_PendingHalfResApply;
+    const bool&                           noVsync;   // main 里是 const bool（开机决定一次）
+
+    /// 命令 1：Acquire + 切管线 + 装配快照 + 阴影 + 各 Pass 录制 + End/Submit
+    void RecordScene(bool& frameAborted, f32 deltaTime);
+
+    /// 命令 2：ImGui 录制 + 白炉探针 + GI 采样落盘 + Present
+    void RecordUiAndPresent(u64 renderFrameIndex, bool dumpThisFrame);
+};
+
+void GILabFrameRecorder::RecordScene(bool& frameAborted, f32 deltaTime) {
+    if (!framePresenter.BeginFrame()) {
+        HE_CORE_WARN("06.GILab：AcquireNextImage 失败，跳过本帧剩余部分");
+        frameAborted = true;   // 命令可能在渲染线程跑 ⇒ 用标志代替 while 的 continue
+        return;
+    }
+
+    // 控件里请求的管线切换（含 RHI）在这里（渲染线程）落地
+    if (g_PendingPipelineSwitch) {
+        g_PendingPipelineSwitch = false;
+        curPipeline->SetSwapChain(swapchain.get());
+        curPipeline->OnResize(swapchain->GetWidth(), swapchain->GetHeight());
+    }
+
+    framePresenter.BeginRecording(device.get(), cmdList.get());   // L4-2
+    switch (g_PipelineMode) {
+    case 0:  // Forward
+        curPipeline = &forwardPipeline;
+        break;
+    default: // Deferred（含光追源：RT 已归入 GI 层栈，无需独立管线）
+        curPipeline = &deferredPipeline;
+        break;
+    }
+    curPipeline->NextFrame();
+    // 【阶段 1 §15.1 第③段：帧入口收快照】装配在**命令 1（recordScene）内部**统一经接口完成
+    // （模式 0 就地 ⇒ 游戏线程；模式 1/2 ⇒ 渲染线程，由命令 1 的严格握手保证此刻无人改世界；
+    //  三条管线同构；
+    // `AssembleScene` 每帧幂等 ⇒ Forward 分支下面再调一次也无副作用）。必须在任何阴影收集之前，
+    // 因为阴影技术现在从快照取几何与光源。
+    curPipeline->GetFrameAssembler().AssembleScene(world, sceneGraph, camCtrl.GetCamera());
+    // --- Forward 的阴影系统必须由**调用方**驱动（任务 34 / §9.2-AD）---
+    // `ShadowSystem` 不像 GI 子系统那样自己从帧图拿数据：它要靠调用方先
+    // `SetRenderResources`（对象/阴影缓冲 + 描述符集）再 `Update`（收集投影光源、拟合 CSM），
+    // 之后 `HasActiveShadows()` 才为真。02.Cube / 03.Sponza-Forward / AISamples 都这么做，
+    // **06.GILab 此前漏了** ⇒ Forward 模式下 `Shadow` 与 `RSM_Generate` 两个 pass 都不注册：
+    // 画面**没有阴影**，RSM 源恒为 0（而"层栈改变画面 / 多源不变亮 / 双源等于加权平均"
+    // 三条判据在"某个源恒为 0"时全部成立，看不出这件事）。
+    // 位置：必须在 NextFrame 之后（阴影缓冲按飞行帧轮换）且在本帧 Render 之前（帧图按
+    // `HasActiveShadows()` 门控）。Deferred 侧由管线内部自己驱动，这里只处理 Forward。
+    if (g_PipelineMode == 0) {
+        if (auto* shadowSys = forwardPipeline.GetShadowSystem()) {
+            shadowSys->SetRenderResources(forwardPipeline.GetCurrentShadowObjectBuffer(),
+                                          forwardPipeline.GetCurrentShadowBuffer(),
+                                          forwardPipeline.GetCurrentDescSet());
+            render::SubsystemContext shadowCtx;
+            shadowCtx.camera     = &camCtrl.GetCamera();
+            // 物理天空的太阳方向先同步到方向光：阴影与光照必须同向（02.Cube 同款做法）
+            he::SyncPhysicalSkyToSun(world);
+            // 快照已在上面统一装配（`AssembleScene` 幂等）；阴影收集吃的就是它
+            shadowCtx.snapshot     = &forwardPipeline.GetFrameSnapshot();
+            shadowCtx.meshRegistry = &forwardPipeline.GetMeshRegistry();
+            shadowSys->Update(shadowCtx);
+            forwardPipeline.GetFrameAssembler().ResolveLightShadowIndices(
+                [&](he::Entity le) { return shadowSys->GetShadowIndex(le); });
+            forwardPipeline.GetFrameAssembler().ReserveOnce();
+        }
+    }
+    // 帧边界应用延迟的半分辨率纹理重建（先等待 GPU 空闲，避免销毁正在使用的纹理）
+    if (g_PendingHalfResApply) {
+        device->WaitIdle();
+        if (auto* dpApply = dynamic_cast<render::DeferredPipeline*>(curPipeline)) {
+            dpApply->GetSSGI()->OnResize(swapchain->GetWidth(), swapchain->GetHeight());
+            dpApply->GetSSR()->OnResize(swapchain->GetWidth(), swapchain->GetHeight());
+            dpApply->GetSSAO().OnResize(swapchain->GetWidth(), swapchain->GetHeight());
+        }
+        g_PendingHalfResApply = false;
+    }
+    // 【T2.2 步骤 (b)】管线渲染与其余 RHI 调用一起放进本帧的**第一条命令**，
+    // 不再单独经队列（一帧两条命令，见下面 submitRender 的两处调用）。
+    curPipeline->Render(cmdList.get(), curPipeline->GetFrameSnapshot(),
+                         camCtrl.GetCamera(), deltaTime);
+
+
+}
+
+void GILabFrameRecorder::RecordUiAndPresent(u64 renderFrameIndex, bool dumpThisFrame) {
+    // --- ImGui（LOAD 保留 ToneMap 输出）---
+    cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
+        rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
+
+    imgui.EndFrame(cmdList.get());
+    cmdList->EndRenderPass();
+
+    // ── 白炉探针：把 HDR 目标上的两个像素拷进 host 可见缓冲 ──
+    // 必须在 render pass 之外录制（拷贝不能在 pass 内），因此放在 EndRenderPass 之后、End 之前
+    // 白炉探针：把 HDR 上的中心/背景两个像素读回（机制在 PixelProbe）
+    const bool probeThisFrame = g_ProbeEnabled &&
+        probe.WantsFrame(frameIndex, (u32)std::max(1, g_ProbeInterval));
+    if (probeThisFrame) {
+        // HDR 要按**当前管线**取：Forward 有自己的那张（层栈归一化在 Forward 也生效）
+        rhi::IRHITexture* hdr = (g_PipelineMode == 0) ? forwardPipeline.GetHDRTarget()
+                                                      : deferredPipeline.GetLighting().GetHDRTarget();
+        if (hdr) {
+            const u32 pw = swapchain->GetWidth(), ph = swapchain->GetHeight();
+            const render::PixelProbe::Sample pts[2] = {
+                {pw / 2,  ph / 2},    // 中心（物体所在）
+                {pw / 10, ph / 10},   // 背景取样点
+            };
+            probe.RecordReadback(cmdList.get(), hdr, pts, 2);
+            probe.FinishRecording(device.get(), cmdList.get());   // 挂本帧 timeline
+        }
+    }
+
+    // ── GI 频谱采样：把若干张纹理整幅拷进 host 可见缓冲（仅测试路径）──
+    // 同样必须在 render pass 之外录制；缓冲在采样帧才创建，尺寸取自纹理本身
+    // 目标分三类：
+    //   hdr / albedo  —— 合成结果与接收端反照率（做差 + 除 albedo 后即得 E/π）
+    //   provN_raw/final —— 各有效 Provider 的原始输出 / 降噪后输出（定位"某源为 0"发生在哪一级）
+    if (dumpThisFrame) {
+        // 登记纹理目标：机制（读回缓冲 / 格式推断 / 拷贝录制）在 FrameDumpRecorder 里
+        auto addTarget = [&](const String& name, rhi::IRHITexture* tex) {
+            giDump.AddTexture(device.get(), cmdList.get(), name.c_str(), tex);
+        };
+        // 【诊断用】缓冲落盘（只在 HE_DUMP_LUMEN_PROBES=1 时调用）
+        // 登记缓冲目标（探针/单元图等非纹理中间量，落盘为 .bin）
+        auto addBufferTarget = [&](const String& name, rhi::IRHIBuffer* src, usize bytes) {
+            giDump.AddBuffer(device.get(), cmdList.get(), name.c_str(), src, bytes);
+        };
+        // HDR 取**当前管线**的那张（任务 26）：Forward 没有 GBuffer / Provider 输出，
+        // 但它的 HDR 目标就是层栈归一化的产物 —— 这正是 Forward 侧唯一可读的判据出口。
+        // 此前这里无条件取 deferredPipeline 的 HDR，于是 `pipeline_mode=0` 下落盘的
+        // 根本不是 Forward 的画面（文档 §11.3 早就把这点写成了注意事项，任务 26 修掉）。
+        const bool forwardMode = (g_PipelineMode == 0);
+        addTarget("hdr", forwardMode ? forwardPipeline.GetHDRTarget()
+                                     : deferredPipeline.GetLighting().GetHDRTarget());
+                          // RSM 链路的逐级中间量（任务 30）：按当前管线取（两管线各有自己的光源视锥）
+        if (auto* rsm = forwardMode ? forwardPipeline.GetRSM() : deferredPipeline.GetRSM()) {
+            addTarget("rsm_pos", rsm->GetRSMPositionMap());
+            addTarget("rsm_nrm", rsm->GetRSMFluxMap());
+            addTarget("rsm_rad", rsm->GetRSMRadianceMap());
+        }
+        // Deferred 侧清单（GBuffer / 前帧辐射度 / 各 Provider / Lumen / RSM 间接光 / SSR）
+        // 已下沉到管线 CollectDumpTargets()：判据定义的"真值"只有一份。
+        if (auto* dpDump = dynamic_cast<render::DeferredPipeline*>(curPipeline))
+            dpDump->CollectDumpTargets(giDump, device.get(), cmdList.get());
+        // 探针级**缓冲**目标：需要 ScreenProbe 的尺寸（该类型只对本样例可见），故留在样例侧。
+        if (giDump.IncludeBuffers() && !forwardMode) {
+            constexpr usize kDumpProbes = 8192;
+            for (auto& prov : deferredPipeline.GetGIProviders()) {
+                auto* lp = dynamic_cast<render::LumenProvider*>(prov.get());
+                if (!lp || !lp->ProducedThisFrame()) continue;
+                addBufferTarget("lumen_probes",    lp->GetProbeBuffer(),    kDumpProbes * sizeof(ScreenProbe));
+                addBufferTarget("lumen_rawprobes", lp->GetRawProbeBuffer(), kDumpProbes * sizeof(ScreenProbe));
+                if (auto* cells = lp->GetCellProbeBuffer()) {
+                    addBufferTarget("lumen_cellmap", cells,
+                                    (usize)lp->GetScreenCellsX() * lp->GetScreenCellsY() * sizeof(u32));
+                }
+                break;
+            }
+        }
+        giDump.FinishRecording(device.get(), cmdList.get());   // 挂本帧 timeline 信号
+    }
+
+    framePresenter.EndRecording();   // L4-2：End + Submit 收口
+    deferredPipeline.FlushComputeWork();  // AsyncCompute: Graphics Submit 之后提交 Compute 工作
+
+    // ── 白炉探针：等本帧 timeline 后读回数值（机制在 PixelProbe）──
+    if (probeThisFrame && probe.TryReadBack(device.get())) {
+        const auto& v = probe.Values();
+        HE_CORE_INFO("[白炉探针] 中心 RGB=({:.4f},{:.4f},{:.4f}) 背景 RGB=({:.4f},{:.4f},{:.4f}) "
+                     "亮度 中心={:.4f} 背景={:.4f} 比值={:.4f} 白炉={}",
+                     v[0].rgb[0], v[0].rgb[1], v[0].rgb[2],
+                     v[1].rgb[0], v[1].rgb[1], v[1].rgb[2],
+                     v[0].luminance, v[1].luminance, probe.LuminanceRatio(0, 1),
+                     g_FurnaceMode ? "ON" : "off");
+    }
+
+    // ── GI 频谱采样：等本帧 timeline 后原样落盘（机制在 FrameDumpRecorder）──
+    {
+        const render::CameraData& cam = camCtrl.GetCamera();
+        render::FrameDumpRecorder::CameraSnapshot camSnap;
+        camSnap.pos[0] = cam.position.x; camSnap.pos[1] = cam.position.y; camSnap.pos[2] = cam.position.z;
+        camSnap.forward[0] = cam.forward.x; camSnap.forward[1] = cam.forward.y; camSnap.forward[2] = cam.forward.z;
+        camSnap.up[0] = cam.up.x; camSnap.up[1] = cam.up.y; camSnap.up[2] = cam.up.z;
+        camSnap.fov = cam.fov; camSnap.nearPlane = cam.nearPlane;
+        camSnap.farPlane = cam.farPlane; camSnap.aspect = cam.aspectRatio;
+        if (giDump.TryWriteBack(device.get(), camSnap)) {
+            // 采样完成即请求关窗：让脚本无需超时等待，也保证退出前正常走完清理与保存流程
+            glfwSetWindowShouldClose(engine.GetWindow()->GetNativeHandle(), GLFW_TRUE);
+        }
+    }
+
+
+    // 垂直同步必须与创建时一致：只改 SwapChainDesc 而这里仍传 true，帧率照样被锁在刷新率
+    // （步骤 37 第一次测就是这么被误导的：pass 合计 14 ms 却只有 19 fps）。
+    framePresenter.EndFrame(!noVsync);
+}
+
+
 int main() {
     // ---- 0. 安装崩溃处理器（Wave 0.8 诊断基建） ----
     //    崩溃时打印"函数名 + 源文件:行号"的完整调用栈，并写出 minidump。
@@ -1475,81 +1706,14 @@ int main() {
 
         // --- 渲染（按选择的管线执行；各管线均通过 RenderGraph 自动编排）---
         // ---- 命令 1：Acquire + 录制（管线）----
-        auto recordScene = [&]() {
-            if (!framePresenter.BeginFrame()) {
-                HE_CORE_WARN("06.GILab：AcquireNextImage 失败，跳过本帧剩余部分");
-                frameAborted = true;   // 命令可能在渲染线程跑 ⇒ 用标志代替 while 的 continue
-                return;
-            }
+        // 两条渲染命令的录制体（全引用成员；见 main 之前的 GILabFrameRecorder）
+        GILabFrameRecorder frameRec{imgui, framePresenter, device, cmdList, swapchain, engine,
+                                    deferredPipeline, forwardPipeline, curPipeline, camCtrl,
+                                    giDump, probe, world, sceneGraph, frameIndex,
+                                    g_PipelineMode, g_ProbeInterval, g_ProbeEnabled, g_FurnaceMode,
+                                    g_PendingPipelineSwitch, g_PendingHalfResApply, noVsync};
 
-            // 控件里请求的管线切换（含 RHI）在这里（渲染线程）落地
-            if (g_PendingPipelineSwitch) {
-                g_PendingPipelineSwitch = false;
-                curPipeline->SetSwapChain(swapchain.get());
-                curPipeline->OnResize(swapchain->GetWidth(), swapchain->GetHeight());
-            }
-
-            framePresenter.BeginRecording(device.get(), cmdList.get());   // L4-2
-            switch (g_PipelineMode) {
-            case 0:  // Forward
-                curPipeline = &forwardPipeline;
-                break;
-            default: // Deferred（含光追源：RT 已归入 GI 层栈，无需独立管线）
-                curPipeline = &deferredPipeline;
-                break;
-            }
-            curPipeline->NextFrame();
-            // 【阶段 1 §15.1 第③段：帧入口收快照】装配在**命令 1（recordScene）内部**统一经接口完成
-            // （模式 0 就地 ⇒ 游戏线程；模式 1/2 ⇒ 渲染线程，由命令 1 的严格握手保证此刻无人改世界；
-            //  三条管线同构；
-            // `AssembleScene` 每帧幂等 ⇒ Forward 分支下面再调一次也无副作用）。必须在任何阴影收集之前，
-            // 因为阴影技术现在从快照取几何与光源。
-            curPipeline->GetFrameAssembler().AssembleScene(world, sceneGraph, camCtrl.GetCamera());
-            // --- Forward 的阴影系统必须由**调用方**驱动（任务 34 / §9.2-AD）---
-            // `ShadowSystem` 不像 GI 子系统那样自己从帧图拿数据：它要靠调用方先
-            // `SetRenderResources`（对象/阴影缓冲 + 描述符集）再 `Update`（收集投影光源、拟合 CSM），
-            // 之后 `HasActiveShadows()` 才为真。02.Cube / 03.Sponza-Forward / AISamples 都这么做，
-            // **06.GILab 此前漏了** ⇒ Forward 模式下 `Shadow` 与 `RSM_Generate` 两个 pass 都不注册：
-            // 画面**没有阴影**，RSM 源恒为 0（而"层栈改变画面 / 多源不变亮 / 双源等于加权平均"
-            // 三条判据在"某个源恒为 0"时全部成立，看不出这件事）。
-            // 位置：必须在 NextFrame 之后（阴影缓冲按飞行帧轮换）且在本帧 Render 之前（帧图按
-            // `HasActiveShadows()` 门控）。Deferred 侧由管线内部自己驱动，这里只处理 Forward。
-            if (g_PipelineMode == 0) {
-                if (auto* shadowSys = forwardPipeline.GetShadowSystem()) {
-                    shadowSys->SetRenderResources(forwardPipeline.GetCurrentShadowObjectBuffer(),
-                                                  forwardPipeline.GetCurrentShadowBuffer(),
-                                                  forwardPipeline.GetCurrentDescSet());
-                    render::SubsystemContext shadowCtx;
-                    shadowCtx.camera     = &camCtrl.GetCamera();
-                    // 物理天空的太阳方向先同步到方向光：阴影与光照必须同向（02.Cube 同款做法）
-                    he::SyncPhysicalSkyToSun(world);
-                    // 快照已在上面统一装配（`AssembleScene` 幂等）；阴影收集吃的就是它
-                    shadowCtx.snapshot     = &forwardPipeline.GetFrameSnapshot();
-                    shadowCtx.meshRegistry = &forwardPipeline.GetMeshRegistry();
-                    shadowSys->Update(shadowCtx);
-                    forwardPipeline.GetFrameAssembler().ResolveLightShadowIndices(
-                        [&](he::Entity le) { return shadowSys->GetShadowIndex(le); });
-                    forwardPipeline.GetFrameAssembler().ReserveOnce();
-                }
-            }
-            // 帧边界应用延迟的半分辨率纹理重建（先等待 GPU 空闲，避免销毁正在使用的纹理）
-            if (g_PendingHalfResApply) {
-                device->WaitIdle();
-                if (auto* dpApply = dynamic_cast<render::DeferredPipeline*>(curPipeline)) {
-                    dpApply->GetSSGI()->OnResize(swapchain->GetWidth(), swapchain->GetHeight());
-                    dpApply->GetSSR()->OnResize(swapchain->GetWidth(), swapchain->GetHeight());
-                    dpApply->GetSSAO().OnResize(swapchain->GetWidth(), swapchain->GetHeight());
-                }
-                g_PendingHalfResApply = false;
-            }
-            // 【T2.2 步骤 (b)】管线渲染与其余 RHI 调用一起放进本帧的**第一条命令**，
-            // 不再单独经队列（一帧两条命令，见下面 submitRender 的两处调用）。
-            curPipeline->Render(cmdList.get(), curPipeline->GetFrameSnapshot(),
-                                 camCtrl.GetCamera(), deltaTime);
-
-
-        };
-        submitRender(recordScene);
+        submitRender([&] { frameRec.RecordScene(frameAborted, deltaTime); });
         if (frameAborted) continue;   // Acquire 失败：跳过本帧剩余部分
 
         // UI 依赖（全引用成员；见 main 之前的 GILabUI）
@@ -1572,118 +1736,6 @@ int main() {
         // ---- 命令 2：ImGui 录制 + 调试绘制 + Submit + 探测读回 + Present ----
         // 【按值携带】帧号与转储判定由游戏线程算好后**按值**传进来（绝不读外层可变变量 ——
         // 命令可能在渲染线程执行，读外层变量会拿到下一帧已改写的值）。
-        auto recordUiAndPresent = [&](u64 renderFrameIndex, bool dumpThisFrame) {
-            // --- ImGui（LOAD 保留 ToneMap 输出）---
-            cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
-                rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
-
-            imgui.EndFrame(cmdList.get());
-            cmdList->EndRenderPass();
-
-            // ── 白炉探针：把 HDR 目标上的两个像素拷进 host 可见缓冲 ──
-            // 必须在 render pass 之外录制（拷贝不能在 pass 内），因此放在 EndRenderPass 之后、End 之前
-            // 白炉探针：把 HDR 上的中心/背景两个像素读回（机制在 PixelProbe）
-            const bool probeThisFrame = g_ProbeEnabled &&
-                probe.WantsFrame(frameIndex, (u32)std::max(1, g_ProbeInterval));
-            if (probeThisFrame) {
-                // HDR 要按**当前管线**取：Forward 有自己的那张（层栈归一化在 Forward 也生效）
-                rhi::IRHITexture* hdr = (g_PipelineMode == 0) ? forwardPipeline.GetHDRTarget()
-                                                              : deferredPipeline.GetLighting().GetHDRTarget();
-                if (hdr) {
-                    const u32 pw = swapchain->GetWidth(), ph = swapchain->GetHeight();
-                    const render::PixelProbe::Sample pts[2] = {
-                        {pw / 2,  ph / 2},    // 中心（物体所在）
-                        {pw / 10, ph / 10},   // 背景取样点
-                    };
-                    probe.RecordReadback(cmdList.get(), hdr, pts, 2);
-                    probe.FinishRecording(device.get(), cmdList.get());   // 挂本帧 timeline
-                }
-            }
-
-            // ── GI 频谱采样：把若干张纹理整幅拷进 host 可见缓冲（仅测试路径）──
-            // 同样必须在 render pass 之外录制；缓冲在采样帧才创建，尺寸取自纹理本身
-            // 目标分三类：
-            //   hdr / albedo  —— 合成结果与接收端反照率（做差 + 除 albedo 后即得 E/π）
-            //   provN_raw/final —— 各有效 Provider 的原始输出 / 降噪后输出（定位"某源为 0"发生在哪一级）
-            if (dumpThisFrame) {
-                // 登记纹理目标：机制（读回缓冲 / 格式推断 / 拷贝录制）在 FrameDumpRecorder 里
-                auto addTarget = [&](const String& name, rhi::IRHITexture* tex) {
-                    giDump.AddTexture(device.get(), cmdList.get(), name.c_str(), tex);
-                };
-                // 【诊断用】缓冲落盘（只在 HE_DUMP_LUMEN_PROBES=1 时调用）
-                // 登记缓冲目标（探针/单元图等非纹理中间量，落盘为 .bin）
-                auto addBufferTarget = [&](const String& name, rhi::IRHIBuffer* src, usize bytes) {
-                    giDump.AddBuffer(device.get(), cmdList.get(), name.c_str(), src, bytes);
-                };
-                // HDR 取**当前管线**的那张（任务 26）：Forward 没有 GBuffer / Provider 输出，
-                // 但它的 HDR 目标就是层栈归一化的产物 —— 这正是 Forward 侧唯一可读的判据出口。
-                // 此前这里无条件取 deferredPipeline 的 HDR，于是 `pipeline_mode=0` 下落盘的
-                // 根本不是 Forward 的画面（文档 §11.3 早就把这点写成了注意事项，任务 26 修掉）。
-                const bool forwardMode = (g_PipelineMode == 0);
-                addTarget("hdr", forwardMode ? forwardPipeline.GetHDRTarget()
-                                             : deferredPipeline.GetLighting().GetHDRTarget());
-                                  // RSM 链路的逐级中间量（任务 30）：按当前管线取（两管线各有自己的光源视锥）
-                if (auto* rsm = forwardMode ? forwardPipeline.GetRSM() : deferredPipeline.GetRSM()) {
-                    addTarget("rsm_pos", rsm->GetRSMPositionMap());
-                    addTarget("rsm_nrm", rsm->GetRSMFluxMap());
-                    addTarget("rsm_rad", rsm->GetRSMRadianceMap());
-                }
-                // Deferred 侧清单（GBuffer / 前帧辐射度 / 各 Provider / Lumen / RSM 间接光 / SSR）
-                // 已下沉到管线 CollectDumpTargets()：判据定义的"真值"只有一份。
-                if (auto* dpDump = dynamic_cast<render::DeferredPipeline*>(curPipeline))
-                    dpDump->CollectDumpTargets(giDump, device.get(), cmdList.get());
-                // 探针级**缓冲**目标：需要 ScreenProbe 的尺寸（该类型只对本样例可见），故留在样例侧。
-                if (giDump.IncludeBuffers() && !forwardMode) {
-                    constexpr usize kDumpProbes = 8192;
-                    for (auto& prov : deferredPipeline.GetGIProviders()) {
-                        auto* lp = dynamic_cast<render::LumenProvider*>(prov.get());
-                        if (!lp || !lp->ProducedThisFrame()) continue;
-                        addBufferTarget("lumen_probes",    lp->GetProbeBuffer(),    kDumpProbes * sizeof(ScreenProbe));
-                        addBufferTarget("lumen_rawprobes", lp->GetRawProbeBuffer(), kDumpProbes * sizeof(ScreenProbe));
-                        if (auto* cells = lp->GetCellProbeBuffer()) {
-                            addBufferTarget("lumen_cellmap", cells,
-                                            (usize)lp->GetScreenCellsX() * lp->GetScreenCellsY() * sizeof(u32));
-                        }
-                        break;
-                    }
-                }
-                giDump.FinishRecording(device.get(), cmdList.get());   // 挂本帧 timeline 信号
-            }
-
-            framePresenter.EndRecording();   // L4-2：End + Submit 收口
-            deferredPipeline.FlushComputeWork();  // AsyncCompute: Graphics Submit 之后提交 Compute 工作
-
-            // ── 白炉探针：等本帧 timeline 后读回数值（机制在 PixelProbe）──
-            if (probeThisFrame && probe.TryReadBack(device.get())) {
-                const auto& v = probe.Values();
-                HE_CORE_INFO("[白炉探针] 中心 RGB=({:.4f},{:.4f},{:.4f}) 背景 RGB=({:.4f},{:.4f},{:.4f}) "
-                             "亮度 中心={:.4f} 背景={:.4f} 比值={:.4f} 白炉={}",
-                             v[0].rgb[0], v[0].rgb[1], v[0].rgb[2],
-                             v[1].rgb[0], v[1].rgb[1], v[1].rgb[2],
-                             v[0].luminance, v[1].luminance, probe.LuminanceRatio(0, 1),
-                             g_FurnaceMode ? "ON" : "off");
-            }
-
-            // ── GI 频谱采样：等本帧 timeline 后原样落盘（机制在 FrameDumpRecorder）──
-            {
-                const render::CameraData& cam = camCtrl.GetCamera();
-                render::FrameDumpRecorder::CameraSnapshot camSnap;
-                camSnap.pos[0] = cam.position.x; camSnap.pos[1] = cam.position.y; camSnap.pos[2] = cam.position.z;
-                camSnap.forward[0] = cam.forward.x; camSnap.forward[1] = cam.forward.y; camSnap.forward[2] = cam.forward.z;
-                camSnap.up[0] = cam.up.x; camSnap.up[1] = cam.up.y; camSnap.up[2] = cam.up.z;
-                camSnap.fov = cam.fov; camSnap.nearPlane = cam.nearPlane;
-                camSnap.farPlane = cam.farPlane; camSnap.aspect = cam.aspectRatio;
-                if (giDump.TryWriteBack(device.get(), camSnap)) {
-                    // 采样完成即请求关窗：让脚本无需超时等待，也保证退出前正常走完清理与保存流程
-                    glfwSetWindowShouldClose(engine.GetWindow()->GetNativeHandle(), GLFW_TRUE);
-                }
-            }
-
-
-            // 垂直同步必须与创建时一致：只改 SwapChainDesc 而这里仍传 true，帧率照样被锁在刷新率
-            // （步骤 37 第一次测就是这么被误导的：pass 合计 14 ms 却只有 19 fps）。
-            framePresenter.EndFrame(!noVsync);
-        };
         // 命令 2 只发布：游戏线程随即进入下一帧的准备（与渲染线程重叠）
         // ---- 游戏线程记账（这些是游戏线程自己的循环状态，**不能**放进渲染命令）----
         // 【顺序很关键】先冻结本帧命令该看到的帧号（原判定发生在命令里、`frameIndex++` **之前**），
@@ -1704,7 +1756,7 @@ int main() {
 
         // ---- 入队命令 2（**按值捕获**帧号与转储判定：命令可能在渲染线程执行）----
         submitRender([&, renderFrameIndex, dumpNow]() {
-            recordUiAndPresent(renderFrameIndex, dumpNow);
+            frameRec.RecordUiAndPresent(renderFrameIndex, dumpNow);
         }, /*waitForCompletion=*/false);
 
 
