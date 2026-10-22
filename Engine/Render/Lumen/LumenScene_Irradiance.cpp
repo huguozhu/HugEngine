@@ -43,7 +43,7 @@ void LumenScene::CreateIrradianceTexture() {
     // UnorderedAccess：compute 写入（走 UpdateDescriptorSetWithImageView，见 RHI 的存储图像约束）
     // ShaderResource：全屏 pass 采样
     td.usage  = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource;
-    m_IrradianceTex = m_Device->CreateTexture(td);
+    m_IrradianceTex = m_Device->CreateTextureHandle(td);   // A-3
     m_IrrBound = false;   // 纹理换了 ⇒ 描述符要重绑
 
     if (!m_IrradianceStatsBuf) {
@@ -92,7 +92,7 @@ void LumenScene::CreateIrradianceGPUObjects() {
 
 void LumenScene::RunProbeIrradiance(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbNormal,
                                     rhi::IRHITexture* gbAlbedo, rhi::IRHITexture* gbWorldPos) {
-    if (!m_Device || !cmd || !m_ProbeBuf || !m_CellProbeBuf || !m_IrradianceTex) return;
+    if (!m_Device || !cmd || !m_ProbeBuf || !m_CellProbeBuf || !m_IrradianceTex.IsValid()) return;
     if (!gbNormal || !gbAlbedo || !gbWorldPos || !m_ProbeCount) return;
 
     if (!m_IrrBound) {
@@ -104,7 +104,7 @@ void LumenScene::RunProbeIrradiance(rhi::IRHICommandList* cmd, rhi::IRHITexture*
                                       m_ProbeFilteredBuf ? m_ProbeFilteredBuf.get() : m_ProbeBuf.get());
         m_Device->UpdateDescriptorSet(m_IrrSet, 1, rhi::DescriptorType::StorageBuffer, m_CellProbeBuf.get());
         m_Device->UpdateDescriptorSetWithImageView(m_IrrSet, 5,
-            rhi::DescriptorType::StorageImage, m_IrradianceTex->GetNativeHandle());
+            rhi::DescriptorType::StorageImage, m_Device->ResolveTexture(m_IrradianceTex)->GetNativeHandle());
         m_Device->UpdateDescriptorSet(m_IrrSet, 6, rhi::DescriptorType::StorageBuffer, m_IrradianceStatsBuf.get());
         m_IrrBound = true;
         return;   // 本帧只建资源；下一帧开始派发（"新建资源当帧使用"的教训见 §附二十）
@@ -119,11 +119,11 @@ void LumenScene::RunProbeIrradiance(rhi::IRHICommandList* cmd, rhi::IRHITexture*
 
     // 【步骤 37】辐照度纹理是自持存储图像（compute 以 RWTexture2D 写），创建点没有命令列表，
     // 故在首次写入之前转换一次（理由见 LumenSDF::BakeOne 的同一处说明）。
-    if (!m_IrradianceTransitioned && m_IrradianceTex) {
+    if (!m_IrradianceTransitioned && m_IrradianceTex.IsValid()) {
         m_IrradianceTransitioned = true;
         cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
                              rhi::ResourceState::Undefined, rhi::ResourceState::UnorderedAccess,
-                             m_IrradianceTex.get());
+                             m_Device->ResolveTexture(m_IrradianceTex));
     }
 
     // ① 先读上一帧的统计（同"先读后清"）
@@ -204,19 +204,19 @@ void LumenScene::CreateIrradianceCopyPipeline() {
     m_IrrCopyPSO = m_Device->CreatePipelineStateHandle(d);   // A-3
     if (!m_IrrCopyPSO.IsValid()) HE_CORE_ERROR("LumenScene: 辐照度输出 pass 的 PSO 创建失败");
 
-    if (m_IrradianceTex) {
+    if (m_IrradianceTex.IsValid()) {
         m_Device->UpdateDescriptorSet(m_IrrCopySet, 0, rhi::DescriptorType::CombinedImageSampler,
-                                      m_IrradianceTex.get(), GetOutputSampler());
+                                      m_Device->ResolveTexture(m_IrradianceTex), GetOutputSampler());
     }
 }
 
 void LumenScene::DrawIrradiance(rhi::IRHICommandList* cmd, float gain) {
     if (!cmd) return;
     CreateIrradianceCopyPipeline();
-    if (!m_IrrCopyPSO.IsValid() || !m_IrradianceTex) return;
+    if (!m_IrrCopyPSO.IsValid() || !m_IrradianceTex.IsValid()) return;
     // 纹理可能刚随 resize 重建 ⇒ 每次绑定（一帧一次，代价可忽略）
     m_Device->UpdateDescriptorSet(m_IrrCopySet, 0, rhi::DescriptorType::CombinedImageSampler,
-                                  m_IrradianceTex.get(), GetOutputSampler());
+                                  m_Device->ResolveTexture(m_IrradianceTex), GetOutputSampler());
     const float4 pc(gain, 1.0f, 0.0f, 0.0f);
     cmd->SetPipeline(m_Device->ResolvePipelineState(m_IrrCopyPSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_IrrCopySet);

@@ -49,7 +49,7 @@ void LumenScene::TransitionStorageImagesOnce(rhi::IRHICommandList* cmd) {
 
     std::vector<rhi::IRHITexture*> images;
     m_SDF.CollectStorageImages(images);
-    if (m_IrradianceTex)   images.push_back(m_IrradianceTex.get());
+    if (m_IrradianceTex.IsValid())   images.push_back(m_Device->ResolveTexture(m_IrradianceTex));
     if (m_AtlasAlbedo)     images.push_back(m_AtlasAlbedo.get());
     if (m_AtlasNormal)     images.push_back(m_AtlasNormal.get());
     if (m_AtlasEmissive)   images.push_back(m_AtlasEmissive.get());

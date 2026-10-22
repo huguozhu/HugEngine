@@ -71,8 +71,8 @@ void LumenScene::Shutdown() {
     // 步骤 8/10/14/23 在这里释放 Mesh SDF 缓存、Global SDF clipmap、页表与探针缓冲。
     m_SDF.Shutdown();
     DestroySkeletonPipeline();
-    m_OutputSampler.reset();
-    m_Output.reset();
+    m_Device->DestroySamplerHandle(m_OutputSampler); m_OutputSampler = {};
+    m_Device->DestroyTextureHandle(m_Output); m_Output = {};
     if (m_Device) {
         HE_CORE_INFO("LumenScene: 释放持久资源宿主");
     }
@@ -166,17 +166,17 @@ void LumenScene::CreateOutput() {
     td.height = m_Height;
     // RenderTarget：帧图把它当作 offscreen 颜色附件清写；ShaderResource：Lighting 采样它
     td.usage  = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
-    m_Output  = m_Device->CreateTexture(td);
+    m_Output  = m_Device->CreateTextureHandle(td);   // A-3
 
     // 步骤 24：屏幕尺寸的辐照度中间纹理（compute 写、全屏 pass 采样）
     CreateIrradianceTexture();
 
     // 线性 + Clamp：Lumen 输出是低频间接光，采样器与 SSGI/SSR 的输出采样器同规格
-    if (!m_OutputSampler) {
+    if (!m_OutputSampler.IsValid()) {
         rhi::SamplerDesc sd;
         sd.minFilter = sd.magFilter = rhi::FilterMode::Linear;
         sd.addressU  = sd.addressV  = rhi::AddressMode::ClampToEdge;
-        m_OutputSampler = m_Device->CreateSampler(sd);
+        m_OutputSampler = m_Device->CreateSamplerHandle(sd);   // A-3
     }
 }
 

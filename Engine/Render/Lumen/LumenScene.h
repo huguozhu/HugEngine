@@ -68,8 +68,12 @@ public:
     /// 屏幕空间的 Lumen 输出纹理（RGBA16F，可被 Lighting 采样）。
     /// 【骨架阶段】漫反射与镜面**共用这一张**；步骤 20~29 里漫反射来自 Screen Probe、
     /// 镜面来自反射路径，届时再拆成两张（并相应增加一个 binding）。
-    [[nodiscard]] rhi::IRHITexture* GetOutput() const { return m_Output.get(); }
-    [[nodiscard]] rhi::IRHISampler* GetOutputSampler() const { return m_OutputSampler.get(); }
+    [[nodiscard]] rhi::IRHITexture* GetOutput() const {   // A-3：句柄按需解析
+        return m_Device ? m_Device->ResolveTexture(m_Output) : nullptr;
+    }
+    [[nodiscard]] rhi::IRHISampler* GetOutputSampler() const {   // A-3
+        return m_Device ? m_Device->ResolveSampler(m_OutputSampler) : nullptr;
+    }
 
     // ── 骨架阶段的全屏占位 pass（步骤 6）──
     // 帧图在 `BeginOffscreenPass` 之前调用它，使 RenderPass 与输出纹理的附件数一致；
@@ -150,7 +154,7 @@ public:
     void RunProbeIrradiance(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbNormal,
                             rhi::IRHITexture* gbAlbedo, rhi::IRHITexture* gbWorldPos);
     /// 步骤 24 的辐照度纹理（Provider 的输出 pass 采样它写进 GI 输出）
-    [[nodiscard]] rhi::IRHITexture* GetIrradianceTexture() const { return m_IrradianceTex.get(); }
+    [[nodiscard]] rhi::IRHITexture* GetIrradianceTexture() const { return m_Device->ResolveTexture(m_IrradianceTex); }
     [[nodiscard]] float GetIrradianceMean() const { return m_IrradianceMean; }
     [[nodiscard]] float GetIrradianceMax() const { return m_IrradianceMax; }
     [[nodiscard]] u32   GetIrradianceCoveredPixels() const { return m_IrradianceCovered; }
@@ -236,8 +240,8 @@ private:
     rhi::IRHIDevice* m_Device = nullptr;
     u32 m_Width  = 0;
     u32 m_Height = 0;
-    std::unique_ptr<rhi::IRHITexture> m_Output;   // 屏幕空间输出（与视口同尺寸）
-    std::unique_ptr<rhi::IRHISampler> m_OutputSampler;
+    rhi::RHITextureHandle m_Output{};   // A-3：屏幕空间输出（与视口同尺寸）
+    rhi::RHISamplerHandle m_OutputSampler{};   // A-3
     // 占位 pass 的管线状态（单颜色附件 RGBA16F、无深度）。不随视口尺寸变化，只建一次。
     rhi::RHIPipelineStateHandle m_SkeletonPSO{};   // A-3
     // 逐 mesh 距离场（步骤 8）
@@ -406,7 +410,7 @@ private:
     rhi::DescriptorSetHandle       m_IrrSet    = 0;
     rhi::RHIPipelineStateHandle m_IrrPSO{};   // A-3
     std::unique_ptr<rhi::IRHIBuffer>        m_CellProbeBuf;
-    std::unique_ptr<rhi::IRHITexture>       m_IrradianceTex;
+    rhi::RHITextureHandle       m_IrradianceTex{};   // A-3
     std::unique_ptr<rhi::IRHIBuffer>        m_IrradianceStatsBuf;   // 0=覆盖像素 1=亮度定点累加 2=亮度定点最大
     void* m_IrrStatsMapped = nullptr;
     bool m_IrrBound = false;
