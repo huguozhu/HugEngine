@@ -10,9 +10,9 @@
 #include "Core/Engine.h"
 #include "Platform/Window.h"
 #include "RHI/RHI.h"
-#include "RHI/FramePresenter.h"
+#include "RHI/FramePresenter.h"   // L4-1：帧外壳（acquire/present）收口
 #include "Debug/FrameDumpRecorder.h"
-#include "Debug/PixelProbe.h"   // L4-1：帧外壳（acquire/present）收口
+#include "Debug/PixelProbe.h"      // 白炉探针（像素数值读回）
 #include "RHI/ThreadAffinity.h"   // T2.2：渲染线程启动钩子里认领 RHI 归属（GetThreadAffinity）
 #include "Pipeline/DeferredPipeline.h"
 #include "Pipeline/ForwardPipeline.h"
@@ -24,7 +24,6 @@
 #include "Threading/RenderCommandQueue.h"
 #include "Threading/RenderThread.h"
 #include "Threading/RHIThread.h"      // 模式 2：RHI 线程（唯一提交者）
-#include <atomic>                     // P1：诊断读回的 timeline 屏障（跨线程传递句柄/值）
 #include "Lumen/ScreenProbe.slang"   // 2026-09-24 诊断：探针缓冲落盘需要 sizeof(ScreenProbe)
 #include "Pipeline/CameraController.h"
 #include "Pipeline/PhysicalCamera.h"
@@ -42,14 +41,11 @@
 #include "imgui.h"
 #include "Core/CrashHandler.h"   // 崩溃处理器（Wave 0.8）：崩溃时打印完整调用栈 + minidump
 
-#include <glm/gtc/packing.hpp>   // 白炉探针：half float 解码（RGBA16F 读回）
 
 #include <algorithm>
-#include <cmath>
 #include <cstdlib>   // std::getenv / std::atoi（环境变量开关）
 #include <filesystem>
 #include <fstream>
-#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
