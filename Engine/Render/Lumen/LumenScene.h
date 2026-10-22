@@ -461,7 +461,7 @@ private:
     // 输出 pass（把辐照度纹理贴到 Provider 输出）
     rhi::DescriptorSetLayoutHandle m_IrrCopyLayout = 0;
     rhi::DescriptorSetHandle       m_IrrCopySet    = 0;
-    std::unique_ptr<rhi::IRHIPipelineState> m_IrrCopyPSO;
+    rhi::RHIPipelineStateHandle m_IrrCopyPSO{};   // A-3
 
     std::vector<u32> m_LastTopPages;
     void CreateFeedbackGPUObjects();

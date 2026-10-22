@@ -167,7 +167,7 @@ void LumenScene::RunProbeIrradiance(rhi::IRHICommandList* cmd, rhi::IRHITexture*
 }
 
 void LumenScene::CreateIrradianceCopyPipeline() {
-    if (!m_Device || m_IrrCopyPSO) return;
+    if (!m_Device || m_IrrCopyPSO.IsValid()) return;
 
     rhi::DescriptorSetLayoutDesc layout;
     layout.bindings = {
@@ -201,8 +201,8 @@ void LumenScene::CreateIrradianceCopyPipeline() {
     d.descriptorSetLayouts = {m_IrrCopyLayout};
     d.pushConstantRanges   = {pcr};
     d.debugName            = "Lumen_Irradiance";
-    m_IrrCopyPSO = m_Device->CreatePipelineState(d);
-    if (!m_IrrCopyPSO) HE_CORE_ERROR("LumenScene: 辐照度输出 pass 的 PSO 创建失败");
+    m_IrrCopyPSO = m_Device->CreatePipelineStateHandle(d);   // A-3
+    if (!m_IrrCopyPSO.IsValid()) HE_CORE_ERROR("LumenScene: 辐照度输出 pass 的 PSO 创建失败");
 
     if (m_IrradianceTex) {
         m_Device->UpdateDescriptorSet(m_IrrCopySet, 0, rhi::DescriptorType::CombinedImageSampler,
@@ -213,12 +213,12 @@ void LumenScene::CreateIrradianceCopyPipeline() {
 void LumenScene::DrawIrradiance(rhi::IRHICommandList* cmd, float gain) {
     if (!cmd) return;
     CreateIrradianceCopyPipeline();
-    if (!m_IrrCopyPSO || !m_IrradianceTex) return;
+    if (!m_IrrCopyPSO.IsValid() || !m_IrradianceTex) return;
     // 纹理可能刚随 resize 重建 ⇒ 每次绑定（一帧一次，代价可忽略）
     m_Device->UpdateDescriptorSet(m_IrrCopySet, 0, rhi::DescriptorType::CombinedImageSampler,
                                   m_IrradianceTex.get(), GetOutputSampler());
     const float4 pc(gain, 1.0f, 0.0f, 0.0f);
-    cmd->SetPipeline(m_IrrCopyPSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_IrrCopyPSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_IrrCopySet);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
     cmd->Draw(3);
