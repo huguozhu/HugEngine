@@ -1,4 +1,5 @@
 #include "Pipeline/GPUCulling.h"
+#include "Math/Geometry.h"   // 统一视锥提取（he::Frustum::FromViewProj）
 #include "Pipeline/MeshBatcher.h"  // IndirectDrawCommand
 #include "GPUCull.comp.spv.h"
 #include "GPUCull_Phase1.comp.spv.h"
@@ -59,26 +60,6 @@ struct PTGParams {
 static_assert(sizeof(PTGParams) == 192,
               "PTGParams size must be 192 bytes (padded to 16)");
 
-/// 从 ViewProj 矩阵提取 6 个视锥平面（Gribb-Hartmann, world space）
-static void ExtractFrustumPlanes(const float4x4& vp, float4 planes[6]) {
-    float4 r1 = glm::row(vp, 0);
-    float4 r2 = glm::row(vp, 1);
-    float4 r3 = glm::row(vp, 2);
-    float4 r4 = glm::row(vp, 3);
-
-    planes[0] = r4 + r1;  // Left
-    planes[1] = r4 - r1;  // Right
-    planes[2] = r4 + r2;  // Bottom
-    planes[3] = r4 - r2;  // Top
-    // Vulkan [0,1]: 近平面 z>=0 → row2，非 OpenGL row3+row2 (z>=-w)
-    planes[4] = r3;        // Near
-    planes[5] = r4 - r3;   // Far
-
-    for (int i = 0; i < 6; ++i) {
-        float len = glm::length(float3(planes[i]));
-        planes[i] /= len;
-    }
-}
 
 // ============================================================
 // Initialize
@@ -414,7 +395,7 @@ void GPUCulling::Dispatch(rhi::IRHICommandList* cmd,
     m_LastViewProj = viewProj;
 
     float4 planes[6];
-    ExtractFrustumPlanes(viewProj, planes);
+    he::Frustum::ToPlaneArray(he::Frustum::FromViewProj(viewProj), planes);
 
     struct { float4 planes[6]; float4x4 vp; float2 sSize; u32 mips; u32 count; } pc;
     for (int i = 0; i < 6; ++i) pc.planes[i] = planes[i];
@@ -453,7 +434,7 @@ void GPUCulling::DispatchPhase1(rhi::IRHICommandList* cmd, const float4x4& viewP
     m_LastViewProj = viewProj;
 
     float4 planes[6];
-    ExtractFrustumPlanes(viewProj, planes);
+    he::Frustum::ToPlaneArray(he::Frustum::FromViewProj(viewProj), planes);
 
     struct { float4 planes[6]; float4x4 vp; float2 sSize; u32 mips; u32 count; } pc;
     for (int i = 0; i < 6; ++i) pc.planes[i] = planes[i];
@@ -734,7 +715,7 @@ void GPUCulling::SignalPTG(rhi::IRHICommandList* cmd, const float4x4& viewProj,
 
     // 提取 6 个视锥平面
     float4 planes[6];
-    ExtractFrustumPlanes(viewProj, planes);
+    he::Frustum::ToPlaneArray(he::Frustum::FromViewProj(viewProj), planes);
 
     // 写入 PTGParams 到 Uniform Buffer
     auto* ptgB   = ResB(m_PTGParamBuf);

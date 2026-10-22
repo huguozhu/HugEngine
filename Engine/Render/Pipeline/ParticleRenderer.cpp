@@ -1,6 +1,7 @@
 // ParticleRenderer.cpp — GPU 粒子系统完整实现
 
 #include "Pipeline/ParticleRenderer.h"
+#include "Math/Geometry.h"   // 统一视锥提取（he::Frustum::FromViewProj）
 #include "Core/Log.h"
 #include "Core/Assert.h"
 #include <cstring>
@@ -64,26 +65,6 @@ using he::DispatchArgs;
 static constexpr u32 kRandomFloatNum = 512;
 static constexpr u32 kCS_Threads    = 32;
 
-// 从 ViewProj 矩阵提取 6 个视锥平面 (NDC space)
-static void ExtractFrustumPlanes(const float4x4& vp, float4 planes[6]) {
-    // Left:   row3 + row0
-    planes[0] = float4(vp[0][3] + vp[0][0], vp[1][3] + vp[1][0], vp[2][3] + vp[2][0], vp[3][3] + vp[3][0]);
-    // Right:  row3 - row0
-    planes[1] = float4(vp[0][3] - vp[0][0], vp[1][3] - vp[1][0], vp[2][3] - vp[2][0], vp[3][3] - vp[3][0]);
-    // Bottom: row3 + row1
-    planes[2] = float4(vp[0][3] + vp[0][1], vp[1][3] + vp[1][1], vp[2][3] + vp[2][1], vp[3][3] + vp[3][1]);
-    // Top:    row3 - row1
-    planes[3] = float4(vp[0][3] - vp[0][1], vp[1][3] - vp[1][1], vp[2][3] - vp[2][1], vp[3][3] - vp[3][1]);
-    // Near:   row2
-    planes[4] = float4(vp[0][2], vp[1][2], vp[2][2], vp[3][2]);
-    // Far:    row3 - row2
-    planes[5] = float4(vp[0][3] - vp[0][2], vp[1][3] - vp[1][2], vp[2][3] - vp[2][2], vp[3][3] - vp[3][2]);
-    // Normalize all planes
-    for (int i = 0; i < 6; i++) {
-        float len = sqrt(planes[i].x * planes[i].x + planes[i].y * planes[i].y + planes[i].z * planes[i].z);
-        planes[i] /= len;
-    }
-}
 
 // ============================================================
 // CompState::CreateBuffers
@@ -717,7 +698,7 @@ void ParticleRenderer::DispatchCompute(rhi::IRHICommandList* cmd, u32 id, float 
         std::memcpy(cullParam.viewProj, &viewProj, sizeof(float4x4));
         // frustumPlanes: float4[6] → float[6][4]
         float4 planes[6];
-        ExtractFrustumPlanes(viewProj, planes);
+        he::Frustum::ToPlaneArray(he::Frustum::FromViewProj(viewProj), planes);
         std::memcpy(cullParam.frustumPlanes, planes, sizeof(planes));
 
         // upload to UB

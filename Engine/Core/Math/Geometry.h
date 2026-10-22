@@ -66,6 +66,12 @@ struct Frustum {
     // 从视图投影矩阵提取 6 个裁剪平面（Gribb/Hartmann 方法）
     static Frustum FromViewProj(const float4x4& vp);
 
+    /// 【统一入口】从 view-proj 提取 6 个平面到 `float4[6]`（顺序 Left/Right/Bottom/Top/Near/Far）。
+    /// 只做一次转发：数学实现只有 `FromViewProj` 一处，避免各模块各写一份 Gribb/Hartmann。
+    static void ToPlaneArray(const Frustum& f, float4 outPlanes[6]) {
+        for (u32 i = 0; i < 6u; ++i) outPlanes[i] = f.planes[i];
+    }
+
     // 剔除测试
     bool Intersects(const AABB& box) const;
     bool Intersects(const Sphere& sphere) const;
