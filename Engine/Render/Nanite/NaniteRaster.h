@@ -524,8 +524,8 @@ private:
     /// 【为什么用缓冲而不是 R32_UINT 存储图像】结构化缓冲上的 `InterlockedMin` 同样零额外设备
     ///   特性，而且**清屏等价于一次 `CopyBuffer`**（存储图像没有等价的"整图填充"命令，
     ///   否则要再写一个小 compute）。代价是 4B/像素（1920×1080 ≈ 8.3MB）。
-    std::unique_ptr<rhi::IRHIBuffer> m_DepthKey;
-    std::unique_ptr<rhi::IRHIBuffer> m_DepthKeyZeroSrc;   ///< 常驻 0xFF（`TransferSrc`）
+    rhi::RHIBufferHandle m_DepthKey{};   // A-3
+    rhi::RHIBufferHandle m_DepthKeyZeroSrc{};   ///< A-3：常驻 0xFF（`TransferSrc`）
     u32 m_DepthKeyPixels = 0u;                            ///< 当前容量（像素数）；尺寸变化时重建
     u32 m_DepthKeyZeroSrcPixels = 0u;                     ///< 常驻 0xFF 源的容量（与深度键同步重建）
 

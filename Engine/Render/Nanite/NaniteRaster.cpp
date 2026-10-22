@@ -231,8 +231,8 @@ void NaniteRaster::Shutdown() {
     m_SoftColorSet          = rhi::kInvalidSet;
     m_DepthResolveLayout    = rhi::kInvalidLayout;
     m_DepthResolveSet       = rhi::kInvalidSet;
-    m_DepthKey.reset();
-    m_DepthKeyZeroSrc.reset();
+    m_Device->DestroyBufferHandle(m_DepthKey); m_DepthKey = {};
+    m_Device->DestroyBufferHandle(m_DepthKeyZeroSrc); m_DepthKeyZeroSrc = {};
     // 【确定性赢家选择】赢家候选号缓冲与深度键同生共死（同一份容量、同一个清零源）
     m_WinnerID.reset();
     m_DepthKeyPixels        = 0u;
@@ -920,7 +920,7 @@ bool NaniteRaster::EnsureDepthKeyBuffers(u32 width, u32 height) {
     // 【确定性赢家选择】就绪条件必须**一并包含**赢家候选号缓冲：两者永远同尺寸同格式、
     //   同生共死；只判深度键会让"深度键在、候选号不在"这种半就绪状态溜进录制路径
     //   （仲裁趟会绑一个空缓冲 ⇒ 未定义行为）。
-    if (m_DepthKey && m_WinnerID && m_DepthKeyPixels == pixels) return true;
+    if (m_DepthKey.IsValid() && m_WinnerID && m_DepthKeyPixels == pixels) return true;
 
     // 【替换的安全性】本函数在 `RecordSoftRasterPass` 里被调用（帧内录制期），而深度键只被
     //   模块自己的三趟使用、且这三趟都录在**当前**命令缓冲里。视口变化时引擎会 OnResize →
@@ -931,8 +931,8 @@ bool NaniteRaster::EnsureDepthKeyBuffers(u32 width, u32 height) {
     d.size      = sizeof(u32) * pixels;
     d.usage     = rhi::BufferUsage::Storage;   // Storage 路径恒定带 TRANSFER_DST（每帧的 CopyBuffer 目标）
     d.cpuAccess = true;
-    m_DepthKey = m_Device->CreateBuffer(d);
-    if (!m_DepthKey) { HE_CORE_ERROR("NaniteRaster: 深度键缓冲创建失败（{} 像素）", pixels); return false; }
+    m_DepthKey = m_Device->CreateBufferHandle(d);   // A-3
+    if (!m_DepthKey.IsValid()) { HE_CORE_ERROR("NaniteRaster: 深度键缓冲创建失败（{} 像素）", pixels); return false; }
 
     // 【确定性赢家选择】赢家候选号缓冲：与深度键**逐字段相同**的 `BufferDesc`（同尺寸、同格式
     //   R32_UINT、同 usage）。它是仲裁趟（第 2.5 趟）的 `u_WinnerID`：每帧先被清成 0xFFFFFFFF，
@@ -944,16 +944,16 @@ bool NaniteRaster::EnsureDepthKeyBuffers(u32 width, u32 height) {
     // 【为什么用"常驻 0xFF 源 + CopyBuffer"而不是主机写】任务 13 的教训：录制期的主机写会与
     //   GPU 派发竞争（CPU 领先 GPU ⇒ 第 N+1 帧的写落到第 N 帧派发之前）。命令缓冲内的拷贝
     //   由 GPU 有序执行，零停顿。
-    if (!m_DepthKeyZeroSrc || m_DepthKeyZeroSrcPixels != pixels) {
+    if (!m_DepthKeyZeroSrc.IsValid() || m_DepthKeyZeroSrcPixels != pixels) {
         rhi::BufferDesc z;
         z.size      = d.size;
         z.usage     = rhi::BufferUsage::TransferSrc;
         z.cpuAccess = true;
-        m_DepthKeyZeroSrc = m_Device->CreateBuffer(z);
-        if (!m_DepthKeyZeroSrc) { HE_CORE_ERROR("NaniteRaster: 深度键清零源创建失败"); return false; }
-        if (void* p = m_DepthKeyZeroSrc->Map()) {
+        m_DepthKeyZeroSrc = m_Device->CreateBufferHandle(z);   // A-3
+        if (!m_DepthKeyZeroSrc.IsValid()) { HE_CORE_ERROR("NaniteRaster: 深度键清零源创建失败"); return false; }
+        if (void* p = m_Device->ResolveBuffer(m_DepthKeyZeroSrc)->Map()) {
             std::memset(p, 0xFF, d.size);
-            m_DepthKeyZeroSrc->Unmap();
+            if (auto* zb = m_Device->ResolveBuffer(m_DepthKeyZeroSrc)) zb->Unmap();
         }
         m_DepthKeyZeroSrcPixels = pixels;
     }
@@ -964,14 +964,14 @@ bool NaniteRaster::EnsureDepthKeyBuffers(u32 width, u32 height) {
 }
 
 void NaniteRaster::RecordDepthKeyClear(rhi::IRHICommandList* cmd) {
-    if (!cmd || !m_DepthKey || !m_DepthKeyZeroSrc) return;
-    cmd->CopyBuffer(m_DepthKeyZeroSrc.get(), m_DepthKey.get(), (u64)m_DepthKeyPixels * sizeof(u32), 0, 0);
+    if (!cmd || !m_DepthKey.IsValid() || !m_DepthKeyZeroSrc.IsValid()) return;
+    cmd->CopyBuffer(m_Device->ResolveBuffer(m_DepthKeyZeroSrc), m_Device->ResolveBuffer(m_DepthKey), (u64)m_DepthKeyPixels * sizeof(u32), 0, 0);
     // 【确定性赢家选择】赢家候选号用**同一个**常驻 0xFF 源再拷一次。
     //   【为什么初值必须是 0xFFFFFFFF】仲裁趟做的是 `InterlockedMin(u_WinnerID[p], candidateID)`；
     //   只有"初始值大于任何合法候选号"时，这次原子最小才等价于"取最小候选号"。哨兵
     //   `0xFFFFFFFF` 满足它（合法候选号 = (槽位 < 2^24) << 8 | 下标 ≤ 0xFFFFFF3F < 0xFFFFFFFF）。
     if (m_WinnerID) {
-        cmd->CopyBuffer(m_DepthKeyZeroSrc.get(), m_WinnerID.get(),
+        cmd->CopyBuffer(m_Device->ResolveBuffer(m_DepthKeyZeroSrc), m_WinnerID.get(),
                         (u64)m_DepthKeyPixels * sizeof(u32), 0, 0);
     }
     // 拷贝 → 第 1 趟 compute：显式内存屏障（模块自持缓冲不在帧图里，同步必须自己给）
@@ -1168,7 +1168,7 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
         m_Device->UpdateDescriptorSet(set, 3, rhi::DescriptorType::StorageBuffer, visibleRefs);
         m_Device->UpdateDescriptorSet(set, 4, rhi::DescriptorType::StorageBuffer, visibleCount);
         m_Device->UpdateDescriptorSet(set, 5, rhi::DescriptorType::StorageBuffer, instances);
-        m_Device->UpdateDescriptorSet(set, 6, rhi::DescriptorType::StorageBuffer, m_DepthKey.get());
+        m_Device->UpdateDescriptorSet(set, 6, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_DepthKey));
         m_Device->UpdateDescriptorSet(set, 7, rhi::DescriptorType::StorageBuffer, m_SoftStats.get());
         m_Device->UpdateDescriptorSet(set, 15, rhi::DescriptorType::StorageBuffer, clusterPageSrc);
         m_Device->UpdateDescriptorSet(set, 16, rhi::DescriptorType::StorageBuffer, pageTableSrc);
@@ -1198,7 +1198,7 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
                                                targets.worldPos->GetNativeHandle());
     m_Device->UpdateDescriptorSetWithImageView(m_SoftColorSet, 11, rhi::DescriptorType::StorageImage,
                                                targets.lightmapKey->GetNativeHandle());
-    m_Device->UpdateDescriptorSet(m_DepthResolveSet, 0, rhi::DescriptorType::StorageBuffer, m_DepthKey.get());
+    m_Device->UpdateDescriptorSet(m_DepthResolveSet, 0, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_DepthKey));
     // 【P0 修复（§14.30）】读数缓冲：深度解析通道自己原子累加"真实写入深度的像素数"
     m_Device->UpdateDescriptorSet(m_DepthResolveSet, 1, rhi::DescriptorType::StorageBuffer, m_SoftStats.get());
 
@@ -1528,9 +1528,9 @@ void NaniteRaster::RecordHardRasterPass(rhi::IRHICommandList* cmd,
     m_Device->UpdateDescriptorSet(m_HardRasterSet, 4, rhi::DescriptorType::StorageBuffer, visibleCount);
     m_Device->UpdateDescriptorSet(m_HardRasterSet, 5, rhi::DescriptorType::StorageBuffer, instances);
     // binding 6：本通道不读深度键，但布局声明了它 ⇒ 有就绑上（避免"声明了却从未更新"的告警）
-    if (m_DepthKey) {
+    if (m_DepthKey.IsValid()) {
         m_Device->UpdateDescriptorSet(m_HardRasterSet, 6, rhi::DescriptorType::StorageBuffer,
-                                      m_DepthKey.get());
+                                      m_Device->ResolveBuffer(m_DepthKey));
     }
     m_Device->UpdateDescriptorSet(m_HardRasterSet, 7, rhi::DescriptorType::StorageBuffer,
                                   m_HardStats.get());
