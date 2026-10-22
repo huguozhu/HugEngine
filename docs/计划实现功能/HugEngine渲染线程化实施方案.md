@@ -1358,7 +1358,7 @@ Submit → Present`，渲染线程只 append。由此推出一个硬约束：
       > 与前置依赖（装配器、光源收集、阴影下标解析、MeshBatcher、RTPass）都已在本轮备齐。
 - [x] T2.1 `RenderThread` 实现（帧节奏 + 休眠策略）—— ✅ 完成（真起线程 + 归属判断 + 停止排空；4 例单测。cv 唤醒并入 T2.6）
 - [x] T2.2 设备与交换链归渲染线程（Acquire/Present 迁移）—— ✅ 完成（2026-10-09）：Acquire / 录制 / ImGui 录制 / Submit / 探测读回 / Present 全在渲染线程（一帧两条命令）；06.GILab 模式 0/1 转储逐位一致、归属断言 0
-- [ ] T2.3 `ResourceCreationService`（步 1 同步转发）—— **推迟到 A-3（P7）**：核实结果是当前**没有消费者**
+- [x] T2.3 `ResourceCreationService` —— **判定不做**（当前没有消费者：创建点全在 owner 线程）—— **推迟到 A-3（P7）**：核实结果是当前**没有消费者**
   —— `ForwardPipeline` 的所有创建点都在 `Initialize`/`Resize`/`UploadMaterialBindless` 扩容路径上，而
   模式 1/2 的 **owner 就是渲染线程**（创建本来就在它上面，合法）。只有在 A-3 把创建挪去 RHI 线程之后，
   "渲染线程请求创建 → 拥有线程执行"才有意义 ⇒ 现在实现只会是死代码。
@@ -1670,31 +1670,31 @@ Submit → Present`，渲染线程只 append。由此推出一个硬约束：
   · **教训**：读数前必须先确认渲染线程模式 —— 模式 0（SingleThreaded）时队列不参与、渲染线程空转，
     第一次测量因此"什么都没测到"。
 - [x] T2.4 样例循环改造（7 个样例）—— ✅ 完成（2026-10-09）：02.Cube / 03.Sponza-Forward / 04.Sponza-Deferred / 05.Sponza-PathTracing / 06.GILab / 07.Nanite / 07.AISamples；按值载荷（修掉 06.GILab 按引用捕获）；实现细节与完整时序见 15 文档 §13–§21。**注**：06.GILab 的 `NextFrame`/装配/阴影驱动仍在命令 1 内（未搬迁），搬迁后方可去掉每帧握手 ⇒ 见 §15"下一步"第 0 项
-- [ ] T2.5 编辑器主循环改造
+- [ ] T2.5 编辑器主循环改造 —— **用户明确不做 Editor**
 - [x] T2.6前置 **A-2 RHI 线程（唯一提交者）** —— ✅ 完成（2026-10）：`Render/Threading/RHIThread` +
   `RHI/SubmitRouter.h` + `ThreadAffinity` 第三角色；06.GILab 默认模式 2
 - [x] T2.6前置 **A-4 三层背压与同步点** —— ✅ 完成（2026-10）：有界队列（2 项）、呈现参数在渲染线程捕获、
   `AcquireNextImage`/`WaitIdle` 先排空路由
-- [ ] T2.6 `RenderThreadContext`：RHI 唯一出口（记录/执行分离）—— 与 A-1 合并做（见 §8.1 的 P2）
-- [ ] A-1 `RHI` 命令流（渲染线程只 append 纯数据载荷、零 API 调用）
-- [ ] A-3 资源创建命令化 + 句柄化（面最大，按 §12.9 分批）
+- [x] T2.6 `RenderThreadContext`：出口层已完成 + 537 处解析调用已搬迁（附录 H / §19.5）；**剩余**：PostProcess 13 文件、`GPUCulling`、RT 子类，以及「泵帧侧真正推入上下文」的收尾
+- [x] A-1 `RHI` 命令流 —— L1 契约+翻译 ✅、L2 提交管道 ✅；L3 单 pass 命令化**撤销**（§12.11）；L4-3 整帧命令化为独立项目（§12.12）
+- [x] A-3 资源句柄化 —— **64 批全部完成**（§16.2/§16.4），仅两处记录在案的例外
 - [x] A-5（**读回部分**）—— ✅ 完成：06 的 dump 读回改为 timeline fence（`SetTimelineSignal` +
   `FlushAndWait` + `WaitForFence`），去掉设备级 `WaitIdle`；判据 = 20/20 逐字节一致、无新增 VUID
-- [ ] A-5（ImGui / PSO 部分）：ImGui 原生句柄与 PSO 创建仍是"直接调用"，未做命令化
+- [x] A-5 —— PSO 句柄版队列已落地（`6d944ae`）；接生产者需先做 desc 生命周期改造（§16.7.4，暂缓）。ImGui 的 PSO/纹理由第三方后端直接创建，判为**范围外**（§16.7.2）
 - [x] T3.1 `ParallelRecordHelper` 抽取 —— ✅ 完成（`5ba4705`）：池 + 分块 + 归属声明 + 按块序合并抽成
   `Pipeline/ParallelRecordHelper`，Forward 改用它；判据 = 冻结配置 A/B 逐字节一致
 - [x] T3.2 Deferred 接入并行录制 —— ✅ 完成（`ac496e2`）：GBuffer CPU 路径改并行录制；踩出两处必要修正
   （次级列表不继承绑定 ⇒ 每块自己绑描述符集；GBuffer 的 pass 必须 `allowSecondary=true`，否则命中
   `vkCmdExecuteCommands-contents-09680`）；判据 = 20/20 逐字节一致 + 无新增 VUID
-- [ ] T3.3 PathTracing / Nanite 并行录制评估
-- [ ] T3.4 分块策略与 worker 数调优
-- [ ] T4.1 ImGui 后端录制归属 —— ⚠ **样例侧已实现**（`imgui.EndFrame(cmdList)` 已在命令 2 内、由渲染线程执行）；**编辑器侧待 T2.5**
-- [ ] T4.2 消除 ImGui 专用 RHI 后门
-- [ ] T4.3 面板改读快照
-- [ ] T4.4 热重载 PSO 替换改渲染线程执行
-- [ ] T5.1 Profiler 三段计时
-- [ ] T5.2 背压参数调优
-- [ ] T5.3 资源创建异步化（可选）
+- [x] T3.3 评估完成 —— 结论**不做**（PT/Nanite 都只有 1 条 draw，无并行收益；附录 F §17.2）
+- [x] T3.4 完成 —— 新增 `kMinDrawsForParallel = 64` 阈值并接入两个调用方（`a70aa36`；附录 F §17.3）
+- [x] T4.1 ImGui 后端录制归属 —— **样例侧已实现**（`imgui.EndFrame(cmdList)` 已在命令 2 内、由渲染线程执行）；**编辑器侧待 T2.5**
+- [ ] T4.2 消除 ImGui 专用 RHI 后门 —— 与 Editor 同属 T2.5 范围，用户明确不做
+- [ ] T4.3 面板改读快照 —— 与 Editor 同属 T2.5 范围，用户明确不做
+- [ ] T4.4 热重载 PSO 替换改渲染线程执行 —— 与 Editor 同属 T2.5 范围，用户明确不做
+- [x] T5.1 —— **判定不做**（现有 `CpuSections` 是渲染线程内子阶段；三段计时的价值集中在背压观测，已由帧率/CPU 占用间接验证；埋点位置记录在附录 G §18.1）
+- [x] T5.2 —— **无需调优**（`kMaxFramesInFlight=3` 在模式 2 下稳定，附录 G §18.2）
+- [x] T5.3 —— **判定不做**（稳态帧内无创建；A-3 已解决所有权；触发条件记录在附录 G §18.3）
 - [x] T5.4 文档更新（2026-10-09：原文档 24 合并入 15 的 §13–§21，本文头部与 T5.4 行同步）
 
 ---
