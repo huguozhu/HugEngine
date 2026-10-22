@@ -177,14 +177,15 @@ int main() {
     config.windowWidth  = 1920;   // 窗口宽（960×2）
     config.windowHeight = 1080;   // 窗口高（540×2）
 
-    // 【默认模式 1】06.GILab 默认走"游戏线程 + 渲染线程"（T2.2）：整帧 RHI（Acquire → 录制 →
-    // ImGui 录制 → Submit → 探测读回 → Present）都归渲染线程，游戏线程只做输入/相机/装配快照。
-    // 仍可被覆盖：环境变量 `HE_RENDER_THREADING_MODE=0` 可回到单线程（`Engine::Initialize` 里
-    // 环境变量优先于本配置，见 Engine.cpp）；`HE_RENDER_THREAD_FORCE_SHELL=1` 可强制壳模式做对照。
-    // 【模式 2 默认】**三线程形态**（游戏线程 + 渲染线程 + RHI 线程）：渲染线程只录制，`Submit`/`Present`
-    // 经二级队列交给 RHI 线程（唯一提交者）。判据（2026-10 实测）：模式 0 vs 模式 2 的 20 个 GI 转储
-    // 目标**逐字节一致**、断言 0、VUID 与模式 0 相同（只剩转储装置自身的既有 VUID）、到第 40 帧的墙钟
-    // 9.57 s vs 9.59 s（无退化）。`HE_RENDER_THREADING_MODE=1` 可退回单渲染线程（对照用）。
+    // 【默认模式 2：三线程】（游戏线程 + 渲染线程 + RHI 线程）
+    //   · 渲染线程只**录制**；`Submit` / `Present` 经二级队列交给 **RHI 线程**（唯一提交者）；
+    //   · 游戏线程只做输入 / 相机 / 打包命令与 UI —— **装配快照在命令 1（recordScene）里**，
+    //     因此模式 1/2 下它在**渲染线程**执行（详见下方 applyThreadingMode 附近的说明）。
+    // 【对照判据（2026-10 实测）】模式 0 vs 模式 2：20 个 GI 转储目标**逐字节一致**、断言 0、
+    //   VUID 与模式 0 相同（只剩转储装置自身的既有 VUID）、到第 40 帧墙钟 9.57 s vs 9.59 s（无退化）。
+    // 【如何覆盖】环境变量优先于本配置（见 `Engine::Initialize`）：
+    //   · `HE_RENDER_THREADING_MODE=0` ⇒ 单线程；`=1` ⇒ 游戏线程 + 渲染线程（两线程对照）；
+    //   · `HE_RENDER_THREAD_FORCE_SHELL=1` ⇒ 壳模式（模式值不变、不起真线程，命令就地执行）。
     config.renderThreadingMode = he::RenderThreadingMode::RenderThreadAndRHI;
     // 【步骤 37 / L6 帧时判据】vsync 打开时墙钟帧率被锁在刷新率（60Hz），"有没有 60fps"
     // 这件事就没法从帧率上判定。`HE_NO_VSYNC=1` 关掉垂直同步，让墙钟帧率反映真实 GPU 吞吐。
@@ -503,7 +504,7 @@ int main() {
 
     int  g_PipelineMode = 1;                       // 0=Forward 1=Deferred 2=HybridRT
     bool g_PendingHalfResApply = false;
-bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）⇒ 延迟到渲染命令里做            // 档位切换后延迟到帧边界重建半分辨率纹理（ImGui 回调内重建会死锁）
+    bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）⇒ 延迟到渲染命令里做            // 档位切换后延迟到帧边界重建半分辨率纹理（ImGui 回调内重建会死锁）
     bool g_GISolo = true;                          // 只看 GI（关闭直接光）
     int  g_GIPreset = 1;                           // GI 质量档位（默认 Medium=1）
     render::IRenderPipeline* curPipeline = &deferredPipeline;
@@ -998,31 +999,31 @@ bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）
         // 管线 CPU 侧耗时累计（命令 1 里累加、命令 2 的帧率读数里消费 ⇒ 提到帧体层级）
         static double s_accPipelineMs = 0.0;
 
-    // 【T2.2 步骤 (b)】一帧两条命令的统一交接：模式 0 直接在本线程执行（此时本线程就是渲染
-    // 线程）；模式 1/2 经队列 + **严格握手**（`SubmitAndWait`）⇒ 游戏线程在渲染线程工作期间
-    // 阻塞，所以命令里 `[&]` 捕获的帧内局部量不会被并发改写（T2.6 会换成类型化载荷 + cv 唤醒）。
-    // 【T2.4 步骤 (b)：去掉每帧的第二次握手】`waitForCompletion = false` 时**只发布不等待** ——
-    // 真线程模式下渲染线程按 FIFO 消费，所以"下一帧的命令 1"必然在"本帧的命令 2"之后执行；
-    // 于是游戏线程**不必**在命令 2 之后等待，可以直接去准备下一帧（输入/相机/装配快照），
-    // 与渲染线程执行本帧命令 2（ImGui 录制 + Submit + Present）**重叠**。
-    // 帧内资源仍安全：命令 2 不读快照，而同一份 `cmdList` 由 FIFO 保证了先来后到。
-    u64 lastAsyncFrame = UINT64_MAX;
-    auto submitRender = [&](auto&& fn, bool waitForCompletion = true) {
-        if (useRenderQueue) {
-            renderQueue.BeginFrame();
-            renderQueue.Enqueue([&](render::RenderThreadContext&) { fn(); });
-            if (waitForCompletion) {
-                bool timedOut = false;
-                frameScheduler.SubmitAndWait(timedOut);
-                if (timedOut) HE_CORE_WARN("06.GILab：等待本帧渲染命令完成超时");
+        // 【T2.2 步骤 (b)】一帧两条命令的统一交接：模式 0 直接在本线程执行（此时本线程就是渲染
+        // 线程）；模式 1/2 经队列 + **严格握手**（`SubmitAndWait`）⇒ 游戏线程在渲染线程工作期间
+        // 阻塞，所以命令里 `[&]` 捕获的帧内局部量不会被并发改写（T2.6 会换成类型化载荷 + cv 唤醒）。
+        // 【T2.4 步骤 (b)：去掉每帧的第二次握手】`waitForCompletion = false` 时**只发布不等待** ——
+        // 真线程模式下渲染线程按 FIFO 消费，所以"下一帧的命令 1"必然在"本帧的命令 2"之后执行；
+        // 于是游戏线程**不必**在命令 2 之后等待，可以直接去准备下一帧（输入/相机/装配快照），
+        // 与渲染线程执行本帧命令 2（ImGui 录制 + Submit + Present）**重叠**。
+        // 帧内资源仍安全：命令 2 不读快照，而同一份 `cmdList` 由 FIFO 保证了先来后到。
+        u64 lastAsyncFrame = UINT64_MAX;
+        auto submitRender = [&](auto&& fn, bool waitForCompletion = true) {
+            if (useRenderQueue) {
+                renderQueue.BeginFrame();
+                renderQueue.Enqueue([&](render::RenderThreadContext&) { fn(); });
+                if (waitForCompletion) {
+                    bool timedOut = false;
+                    frameScheduler.SubmitAndWait(timedOut);
+                    if (timedOut) HE_CORE_WARN("06.GILab：等待本帧渲染命令完成超时");
+                } else {
+                    // 只发布：真线程模式下由渲染线程执行；壳模式下 SubmitAndPump 会就地执行并回收
+                    lastAsyncFrame = frameScheduler.SubmitAndPump();
+                }
             } else {
-                // 只发布：真线程模式下由渲染线程执行；壳模式下 SubmitAndPump 会就地执行并回收
-                lastAsyncFrame = frameScheduler.SubmitAndPump();
+                fn();
             }
-        } else {
-            fn();
-        }
-    };
+        };
 
 
         // --- 相机控制（鼠标右键拖拽旋转 / WASD+EQ 移动 / T 切换相机动画）---
@@ -1108,7 +1109,9 @@ bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）
                 break;
             }
             curPipeline->NextFrame();
-            // 【阶段 1 §15.1 第③段：帧入口收快照】装配在**游戏线程**统一经接口完成（三条管线同构；
+            // 【阶段 1 §15.1 第③段：帧入口收快照】装配在**命令 1（recordScene）内部**统一经接口完成
+            // （模式 0 就地 ⇒ 游戏线程；模式 1/2 ⇒ 渲染线程，由命令 1 的严格握手保证此刻无人改世界；
+            //  三条管线同构；
             // `AssembleScene` 每帧幂等 ⇒ Forward 分支下面再调一次也无副作用）。必须在任何阴影收集之前，
             // 因为阴影技术现在从快照取几何与光源。
             curPipeline->GetFrameAssembler().AssembleScene(world, sceneGraph, camCtrl.GetCamera());
@@ -1504,7 +1507,7 @@ bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）
                 static const render::GISourceId kAllDiffuse[] = {
                     render::GISourceId::IBL, render::GISourceId::Lightmap, render::GISourceId::DDGI,
                     render::GISourceId::SSGI, render::GISourceId::RSM, render::GISourceId::RTGI,
-                    render::GISourceId::Lumen };
+                render::GISourceId::Lumen };
                 std::vector<render::GISourceId> diffuseSources;
                 if (dp) {
                     for (auto id : kAllDiffuse) {
@@ -1564,7 +1567,7 @@ bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）
                 // P4：候选源从已注册的 Provider 派生
                 static const render::GISourceId kAllSpecular[] = {
                     render::GISourceId::IBL, render::GISourceId::SSR,
-                    render::GISourceId::RTReflection, render::GISourceId::Lumen };
+                render::GISourceId::RTReflection, render::GISourceId::Lumen };
                 std::vector<render::GISourceId> specSources;
                 if (dp) {
                     for (auto id : kAllSpecular) {
