@@ -82,6 +82,11 @@ private:
         return m_Device ? m_Device->ResolvePipelineState(h) : nullptr;
     }
 
+    [[nodiscard]] rhi::IRHISampler* ResS(rhi::RHISamplerHandle h) const {
+        if (m_FrameCtx) return m_FrameCtx->ResolveSampler(h);
+        return m_Device ? m_Device->ResolveSampler(h) : nullptr;
+    }
+
     u32 m_Width  = 0;
     u32 m_Height = 0;
     bool m_Ready = false;

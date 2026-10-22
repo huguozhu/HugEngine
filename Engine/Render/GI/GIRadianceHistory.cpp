@@ -101,7 +101,7 @@ void GIRadianceHistory::Capture(rhi::IRHICommandList* cmd, rhi::IRHITexture* hdr
     const u32 th = ResT(m_Texture)->GetHeight();
 
     m_Device->UpdateDescriptorSet(m_Set, kRadianceBindInput,
-        rhi::DescriptorType::CombinedImageSampler, hdr, m_Device->ResolveSampler(m_Sampler));
+        rhi::DescriptorType::CombinedImageSampler, hdr, ResS(m_Sampler));
 
     cmd->SetPipeline(ResP(m_PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);

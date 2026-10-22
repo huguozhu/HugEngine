@@ -264,6 +264,11 @@ public:
         return m_Device ? m_Device->ResolvePipelineState(h) : nullptr;
     }
 
+    [[nodiscard]] rhi::IRHISampler* ResS(rhi::RHISamplerHandle h) const {
+        if (m_FrameCtx) return m_FrameCtx->ResolveSampler(h);
+        return m_Device ? m_Device->ResolveSampler(h) : nullptr;
+    }
+
     u32 m_Width  = 0;
     u32 m_Height = 0;
     rhi::RHITextureHandle m_Output{};   // A-3：屏幕空间输出（与视口同尺寸）

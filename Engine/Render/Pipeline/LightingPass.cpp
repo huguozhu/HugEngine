@@ -77,27 +77,27 @@ void LightingPass::Render(rhi::IRHICommandList* cmd, const LightingInputs& in) {
         }
         if (!fallback || !m_PlaceholderSampler.IsValid()) return;
         m_Device->UpdateDescriptorSet(set, binding,
-            rhi::DescriptorType::CombinedImageSampler, fallback, m_Device->ResolveSampler(m_PlaceholderSampler));
+            rhi::DescriptorType::CombinedImageSampler, fallback, ResS(m_PlaceholderSampler));
     };
 
     // ── 绑定 GBuffer 纹理 ──
     rhi::IRHITexture* black = ResT(m_PlaceholderBlack);
     rhi::IRHITexture* white = ResT(m_PlaceholderWhite);
-    bindTex(kGPUBinding_GBufferA, in.gbA, m_Device->ResolveSampler(m_HDRSampler));
-    bindTex(kGPUBinding_GBufferB, in.gbB, m_Device->ResolveSampler(m_HDRSampler));
-    bindTex(kGPUBinding_GBufferC, in.gbC, m_Device->ResolveSampler(m_HDRSampler));
-    bindTex(kGPUBinding_GBufferE, in.gbE, m_Device->ResolveSampler(m_PointSampler));
-    bindTex(kGPUBinding_GBufferF, in.gbDisneyA, m_Device->ResolveSampler(m_HDRSampler));  // disneyA（anisotropic/subsurface/specular/sheen）
-    bindTex(kGPUBinding_GBufferG, in.gbDisneyB, m_Device->ResolveSampler(m_HDRSampler));  // disneyB（clearcoat/clearcoatGloss/specularTint.rg）
-    bindTex(kGPUBinding_Depth, in.gbDepth, m_Device->ResolveSampler(m_PointSampler));
+    bindTex(kGPUBinding_GBufferA, in.gbA, ResS(m_HDRSampler));
+    bindTex(kGPUBinding_GBufferB, in.gbB, ResS(m_HDRSampler));
+    bindTex(kGPUBinding_GBufferC, in.gbC, ResS(m_HDRSampler));
+    bindTex(kGPUBinding_GBufferE, in.gbE, ResS(m_PointSampler));
+    bindTex(kGPUBinding_GBufferF, in.gbDisneyA, ResS(m_HDRSampler));  // disneyA（anisotropic/subsurface/specular/sheen）
+    bindTex(kGPUBinding_GBufferG, in.gbDisneyB, ResS(m_HDRSampler));  // disneyB（clearcoat/clearcoatGloss/specularTint.rg）
+    bindTex(kGPUBinding_Depth, in.gbDepth, ResS(m_PointSampler));
 
     // ── 绑定阴影贴图（门控：本帧没产出就回绑白色占位 = 无遮挡）──
     // 采样深度 1.0 = 无遮挡，正是"该光源不投影"的中性值。调用方必须传 nullptr 表示
     // "本帧没有产出这张图"，不能传一张没写过的真实纹理。
-    bindTex(kGPUBinding_ShadowMap0, in.csmShadow0, m_Device->ResolveSampler(m_HDRSampler), white);
-    bindTex(kGPUBinding_ShadowMap1, in.csmShadow1, m_Device->ResolveSampler(m_HDRSampler), white);
-    bindTex(kGPUBinding_ShadowMap2, in.csmShadow2, m_Device->ResolveSampler(m_HDRSampler), white);
-    bindTex(kGPUBinding_SpotShadow_DL, in.spotShadow, m_Device->ResolveSampler(m_HDRSampler), white);
+    bindTex(kGPUBinding_ShadowMap0, in.csmShadow0, ResS(m_HDRSampler), white);
+    bindTex(kGPUBinding_ShadowMap1, in.csmShadow1, ResS(m_HDRSampler), white);
+    bindTex(kGPUBinding_ShadowMap2, in.csmShadow2, ResS(m_HDRSampler), white);
+    bindTex(kGPUBinding_SpotShadow_DL, in.spotShadow, ResS(m_HDRSampler), white);
 
     // ── 绑定光源/阴影数据 SSBO ──
     if (in.lightBuffer && m_Device)
@@ -107,7 +107,7 @@ void LightingPass::Render(rhi::IRHICommandList* cmd, const LightingInputs& in) {
 
     // ── 绑定屏幕空间效果（门控：SSGI/SSR 未注册 pass 时回绑黑色占位 = 无贡献）──
     bindTex(kGPUBinding_SSGI, in.ssgiTex, in.ssgiSampler, black);
-    bindTex(kGPUBinding_SSAO_DL, in.ssaoTex, m_Device->ResolveSampler(m_HDRSampler));
+    bindTex(kGPUBinding_SSAO_DL, in.ssaoTex, ResS(m_HDRSampler));
     bindTex(kGPUBinding_SSR, in.ssrTex, in.ssrSampler, black);
     // Lumen 输出（binding 32）。与 SSGI/SSR 同一约定：本帧没产出就回绑黑色占位（无间接光）
     bindTex(kGPUBinding_Lumen, in.lumenTex, in.lumenSampler, black);
@@ -120,21 +120,21 @@ void LightingPass::Render(rhi::IRHICommandList* cmd, const LightingInputs& in) {
         m_Device->UpdateDescriptorSet(set, kGPUBinding_DDGIGridParams, rhi::DescriptorType::UniformBuffer, in.ddgiGridUniform);
 
     // ── 绑定 RSM 间接光（Forward/Deferred 共用；未提供时回落到黑色占位 = 无间接光）──
-    bindTex(kGPUBinding_RSMPosition, in.rsmPositionMap, m_Device->ResolveSampler(m_HDRSampler), black);
-    bindTex(kGPUBinding_RSMFlux, in.rsmNormalMap,     m_Device->ResolveSampler(m_HDRSampler), black);
+    bindTex(kGPUBinding_RSMPosition, in.rsmPositionMap, ResS(m_HDRSampler), black);
+    bindTex(kGPUBinding_RSMFlux, in.rsmNormalMap,     ResS(m_HDRSampler), black);
     // RSM 间接光 E（半分辨率）：线性采样以便升采样到全分辨率；未产出时黑色占位（无间接光）
-    bindTex(kGPUBinding_RSMIndirect, in.rsmIndirectTex, m_Device->ResolveSampler(m_HDRSampler), black);
+    bindTex(kGPUBinding_RSMIndirect, in.rsmIndirectTex, ResS(m_HDRSampler), black);
 
     // ── 绑定光追（RT）效果输出纹理（未提供时回落到中性占位）──
     // 阴影/AO 遮罩用线性采样上采样到全分辨率；反射/GI HDR 结果用线性采样
-    bindTex(kGPUBinding_RT_ShadowMask, in.rtShadowMask, m_Device->ResolveSampler(m_HDRSampler), ResT(m_PlaceholderWhite));  // RT 阴影遮罩
-    bindTex(kGPUBinding_RT_Reflection, in.rtReflection, m_Device->ResolveSampler(m_HDRSampler), black);   // RT 反射
-    bindTex(kGPUBinding_RT_AO, in.rtAO,         m_Device->ResolveSampler(m_HDRSampler), ResT(m_PlaceholderWhite));   // RT AO
-    bindTex(kGPUBinding_RT_GI, in.rtGI,         m_Device->ResolveSampler(m_HDRSampler), black);   // RT GI
+    bindTex(kGPUBinding_RT_ShadowMask, in.rtShadowMask, ResS(m_HDRSampler), ResT(m_PlaceholderWhite));  // RT 阴影遮罩
+    bindTex(kGPUBinding_RT_Reflection, in.rtReflection, ResS(m_HDRSampler), black);   // RT 反射
+    bindTex(kGPUBinding_RT_AO, in.rtAO,         ResS(m_HDRSampler), ResT(m_PlaceholderWhite));   // RT AO
+    bindTex(kGPUBinding_RT_GI, in.rtGI,         ResS(m_HDRSampler), black);   // RT GI
     // 光照图键（任务 31）：GBuffer MRT7 的拷贝（uv0.xy + objectIndex）。用点采样：
     // 键是**索引**而不是可插值的颜色，任何过滤都会把页号/UV 混合成无意义的中间值。
     // 未提供时绑黑色占位（页号 0、uv 0 —— 光照图分支据此判无效键）。
-    bindTex(kGPUBinding_LightmapKey, in.gbLightmapKey, m_Device->ResolveSampler(m_PointSampler), black);
+    bindTex(kGPUBinding_LightmapKey, in.gbLightmapKey, ResS(m_PointSampler), black);
 
     // ── 聚集着色（可选）──
     u32 useClustered = 0;
@@ -336,13 +336,13 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
         for (u32 b : {0u,1u,2u,3u,4u,9u,10u,11u,14u,23u,28u,29u})
             for (u32 i = 0; i < rhi::kMaxFramesInFlight; ++i)
                 device->UpdateDescriptorSet(m_Sets[i], b, rhi::DescriptorType::CombinedImageSampler,
-                                            ResT(m_PlaceholderWhite), m_Device->ResolveSampler(m_PlaceholderSampler));
+                                            ResT(m_PlaceholderWhite), ResS(m_PlaceholderSampler));
 
         // 占位绑定辅助：每一份集合都要写（它们各自独立，不能只写第一份）
         auto updateAllTex = [&](u32 binding, rhi::IRHITexture* tex) {
             for (u32 i = 0; i < rhi::kMaxFramesInFlight; ++i)
                 device->UpdateDescriptorSet(m_Sets[i], binding, rhi::DescriptorType::CombinedImageSampler,
-                                            tex, m_Device->ResolveSampler(m_PlaceholderSampler));
+                                            tex, ResS(m_PlaceholderSampler));
         };
         auto updateAllBuf = [&](u32 binding, rhi::IRHIBuffer* buf) {
             for (u32 i = 0; i < rhi::kMaxFramesInFlight; ++i)

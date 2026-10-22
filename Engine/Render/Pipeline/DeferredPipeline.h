@@ -230,6 +230,11 @@ private:
         return m_Device ? m_Device->ResolvePipelineState(h) : nullptr;
     }
 
+    [[nodiscard]] rhi::IRHISampler* ResS(rhi::RHISamplerHandle h) const {
+        if (m_FrameCtx) return m_FrameCtx->ResolveSampler(h);
+        return m_Device ? m_Device->ResolveSampler(h) : nullptr;
+    }
+
     // AsyncCompute: 专用 Compute 队列命令列表（延迟创建）
     std::unique_ptr<rhi::IRHICommandList> m_ComputeCmdList;
     rhi::RHIFenceHandle m_CrossQueueFence = rhi::kInvalidFence;  // 跨队列同步信号量

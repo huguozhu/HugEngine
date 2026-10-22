@@ -711,7 +711,7 @@ void LumenSDF::BuildGlobalField(rhi::IRHICommandList* cmd) {
             // binding 2：该层自己的场（供"独立取样"pass 用最近邻采样）
             m_Device->UpdateDescriptorSet(ls, kGBindMeshField,
                 rhi::DescriptorType::CombinedImageSampler, ResT(layer.field),
-                m_Device->ResolveSampler(m_NearestSampler));
+                ResS(m_NearestSampler));
             for (u32 m = 0; m < injectStride && m < (u32)m_Entries.size(); ++m) {
                 auto& is = m_GlobalInjectSets[(usize)L * injectStride + m];
                 m_Device->UpdateDescriptorSetWithImageView(is, kGBindGlobal,
@@ -723,7 +723,7 @@ void LumenSDF::BuildGlobalField(rhi::IRHICommandList* cmd) {
                 if (m_Entries[m].field) {
                     m_Device->UpdateDescriptorSet(is, kGBindMeshField,
                         rhi::DescriptorType::CombinedImageSampler, m_Entries[m].field.get(),
-                        m_Device->ResolveSampler(m_LinearSampler));
+                        ResS(m_LinearSampler));
                 }
             }
         }
@@ -1369,9 +1369,9 @@ void LumenSDF::RunMarch(rhi::IRHICommandList* cmd) {
     if (!m_MarchPSO.IsValid() || !GetGlobalField(0) || m_RayOriginCPU.empty()) return;
 
     m_Device->UpdateDescriptorSet(m_MarchSet, kMBindField,
-        rhi::DescriptorType::CombinedImageSampler, GetGlobalField(0), m_Device->ResolveSampler(m_LinearSampler));
+        rhi::DescriptorType::CombinedImageSampler, GetGlobalField(0), ResS(m_LinearSampler));
     m_Device->UpdateDescriptorSet(m_MarchSet, kMBindField1,
-        rhi::DescriptorType::CombinedImageSampler, GetGlobalField(1), m_Device->ResolveSampler(m_LinearSampler));
+        rhi::DescriptorType::CombinedImageSampler, GetGlobalField(1), ResS(m_LinearSampler));
 
     MarchPC pc{};
     pc.originX = GetGlobalOrigin(0).x; pc.originY = GetGlobalOrigin(0).y; pc.originZ = GetGlobalOrigin(0).z;
@@ -1418,7 +1418,7 @@ void LumenSDF::RunMarchDetail(rhi::IRHICommandList* cmd) {
             m_Device->UpdateDescriptorSet(ds, kMBindNormal, rhi::DescriptorType::StorageBuffer, ResB(m_RayT));
             if (m_Entries[m].field) {
                 m_Device->UpdateDescriptorSet(ds, kMBindField, rhi::DescriptorType::CombinedImageSampler,
-                                              m_Entries[m].field.get(), m_Device->ResolveSampler(m_LinearSampler));
+                                              m_Entries[m].field.get(), ResS(m_LinearSampler));
             }
             m_DetailSets.push_back(ds);
         }
@@ -1863,11 +1863,11 @@ void LumenSDF::RunDebugView(rhi::IRHICommandList* cmd, const float3& camPos, con
 
     m_Device->UpdateDescriptorSet(m_DebugSet, kDBindField,
         rhi::DescriptorType::CombinedImageSampler, ResT(m_GlobalLayers[0].field),
-        m_Device->ResolveSampler(m_LinearSampler));
+        ResS(m_LinearSampler));
     m_Device->UpdateDescriptorSet(m_DebugSet, kDBindField1,
         rhi::DescriptorType::CombinedImageSampler,
         hasLayer1 ? ResT(m_GlobalLayers[1].field) : ResT(m_GlobalLayers[0].field),
-        m_Device->ResolveSampler(m_LinearSampler));
+        ResS(m_LinearSampler));
 
     cmd->SetPipeline(ResP(m_DebugPSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DebugSet);
@@ -1975,7 +1975,7 @@ void LumenSDF::RunMeshFieldProbe(rhi::IRHICommandList* cmd, const float3& camPos
         }
 
         m_Device->UpdateDescriptorSet(m_DetailSet, kMBindField,
-            rhi::DescriptorType::CombinedImageSampler, e.field.get(), m_Device->ResolveSampler(m_LinearSampler));
+            rhi::DescriptorType::CombinedImageSampler, e.field.get(), ResS(m_LinearSampler));
 
         MarchPC pc{};
         pc.originX = e.origin.x; pc.originY = e.origin.y; pc.originZ = e.origin.z;

@@ -182,6 +182,11 @@ private:
         return m_Device ? m_Device->ResolvePipelineState(h) : nullptr;
     }
 
+    [[nodiscard]] rhi::IRHISampler* ResS(rhi::RHISamplerHandle h) const {
+        if (m_FrameCtx) return m_FrameCtx->ResolveSampler(h);
+        return m_Device ? m_Device->ResolveSampler(h) : nullptr;
+    }
+
     // ── Lighting PSO + 描述符集（每飞行帧一份）──
     rhi::RHIPipelineStateHandle m_PSO{};   // A-3：句柄持有
     rhi::DescriptorSetLayoutHandle m_Layout = rhi::kInvalidLayout;

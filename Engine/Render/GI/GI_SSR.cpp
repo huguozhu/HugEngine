@@ -137,13 +137,13 @@ void GI_SSR::SetInputs(rhi::IRHITexture* depth, rhi::IRHITexture* normal, rhi::I
     m_Albedo = albedo;
     // 每帧纹理可能变化，动态更新描述符集绑定
     if (m_Depth) {
-        m_Device->UpdateDescriptorSet(m_DescSet, kSSRBindDepth, rhi::DescriptorType::CombinedImageSampler, m_Depth, m_Device->ResolveSampler(m_PointSampler));
+        m_Device->UpdateDescriptorSet(m_DescSet, kSSRBindDepth, rhi::DescriptorType::CombinedImageSampler, m_Depth, ResS(m_PointSampler));
     }
     if (m_Normal) {
-        m_Device->UpdateDescriptorSet(m_DescSet, kSSRBindNormal, rhi::DescriptorType::CombinedImageSampler, m_Normal, m_Device->ResolveSampler(m_PointSampler));
+        m_Device->UpdateDescriptorSet(m_DescSet, kSSRBindNormal, rhi::DescriptorType::CombinedImageSampler, m_Normal, ResS(m_PointSampler));
     }
     if (m_Albedo) {
-        m_Device->UpdateDescriptorSet(m_DescSet, kSSRBindAlbedo, rhi::DescriptorType::CombinedImageSampler, m_Albedo, m_Device->ResolveSampler(m_PointSampler));
+        m_Device->UpdateDescriptorSet(m_DescSet, kSSRBindAlbedo, rhi::DescriptorType::CombinedImageSampler, m_Albedo, ResS(m_PointSampler));
     }
 }
 

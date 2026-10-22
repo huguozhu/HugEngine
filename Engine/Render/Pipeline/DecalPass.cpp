@@ -213,11 +213,11 @@ void DecalPass::Render(rhi::IRHICommandList* cmd, const FrameSceneSnapshot& snap
     // 1. 绑定 GBuffer 的世界坐标/深度（每帧写一次，尺寸变化后指针也会变）
     if (auto* device = m_Device) {
         device->UpdateDescriptorSet(m_Set, kDecalBindGBufferWorldPos,
-            rhi::DescriptorType::CombinedImageSampler, gb.GetWorldPos(), m_Device->ResolveSampler(m_PointSampler));
+            rhi::DescriptorType::CombinedImageSampler, gb.GetWorldPos(), ResS(m_PointSampler));
         device->UpdateDescriptorSet(m_Set, kDecalBindGBufferDepth,
-            rhi::DescriptorType::CombinedImageSampler, gb.GetDepth(), m_Device->ResolveSampler(m_PointSampler));
+            rhi::DescriptorType::CombinedImageSampler, gb.GetDepth(), ResS(m_PointSampler));
         device->UpdateDescriptorSet(m_Set, kDecalBindPointSampler,
-            rhi::DescriptorType::Sampler, nullptr, m_Device->ResolveSampler(m_PointSampler));
+            rhi::DescriptorType::Sampler, nullptr, ResS(m_PointSampler));
     }
 
     // 2. 起 render pass：SetPipeline 决定 render pass（Load 版本 + 8 附件 + 无深度）

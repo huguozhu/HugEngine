@@ -104,6 +104,11 @@ private:
         return m_Device ? m_Device->ResolvePipelineState(h) : nullptr;
     }
 
+    [[nodiscard]] rhi::IRHISampler* ResS(rhi::RHISamplerHandle h) const {
+        if (m_FrameCtx) return m_FrameCtx->ResolveSampler(h);
+        return m_Device ? m_Device->ResolveSampler(h) : nullptr;
+    }
+
 private:
 
     rhi::RHIBufferHandle m_CubeVB{};   // A-3：单位立方体（36 顶点 / 36 索引）

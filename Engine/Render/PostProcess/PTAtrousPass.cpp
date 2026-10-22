@@ -134,7 +134,7 @@ void PTAtrousPass::Render(rhi::IRHICommandList* cmd) {
     pc.clampThreshold  = m_Cfg.clampThreshold;
     pc.pad1 = pc.pad2 = 0.0f;
 
-    cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO));
+    cmd->SetPipeline(ResP(m_PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
     cmd->Dispatch((m_Width + 7) / 8, (m_Height + 7) / 8, 1);

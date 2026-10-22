@@ -63,12 +63,12 @@ void Denoiser::SetInputs(rhi::IRHITexture* color, rhi::IRHITexture* depth, rhi::
     m_Input=color;
     m_Depth=depth;
     m_Normal=normal;
-    if(color) m_Device->UpdateDescriptorSet(m_Set,kDenoiseBindColor,rhi::DescriptorType::CombinedImageSampler,color,m_Device->ResolveSampler(m_Sampler));
-    if(depth) m_Device->UpdateDescriptorSet(m_Set,kDenoiseBindDepth,rhi::DescriptorType::CombinedImageSampler,depth,m_Device->ResolveSampler(m_Sampler));
-    if(normal)m_Device->UpdateDescriptorSet(m_Set,kDenoiseBindNormal,rhi::DescriptorType::CombinedImageSampler,normal,m_Device->ResolveSampler(m_Sampler));
+    if(color) m_Device->UpdateDescriptorSet(m_Set,kDenoiseBindColor,rhi::DescriptorType::CombinedImageSampler,color,ResS(m_Sampler));
+    if(depth) m_Device->UpdateDescriptorSet(m_Set,kDenoiseBindDepth,rhi::DescriptorType::CombinedImageSampler,depth,ResS(m_Sampler));
+    if(normal)m_Device->UpdateDescriptorSet(m_Set,kDenoiseBindNormal,rhi::DescriptorType::CombinedImageSampler,normal,ResS(m_Sampler));
 }
 void Denoiser::Render(rhi::IRHICommandList* cmd){
-    cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO));
+    cmd->SetPipeline(ResP(m_PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame,m_Set);
     cmd->SetViewport({0,(float)m_Height,(float)m_Width,-(float)m_Height,0,1}); cmd->SetScissor({0,0,m_Width,m_Height});
     struct{float2 ts; float dS; float nS;}pc;

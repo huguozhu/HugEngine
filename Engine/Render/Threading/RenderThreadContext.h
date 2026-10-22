@@ -65,6 +65,9 @@ struct RenderThreadContext {
     [[nodiscard]] rhi::IRHIPipelineState* ResolvePipelineState(rhi::RHIPipelineStateHandle h) const {
         return device ? device->ResolvePipelineState(h) : nullptr;
     }
+    [[nodiscard]] rhi::IRHISampler* ResolveSampler(rhi::RHISamplerHandle h) const {
+        return device ? device->ResolveSampler(h) : nullptr;
+    }
 };
 
 } // namespace he::render

@@ -186,15 +186,15 @@ void GI_DDGI::SetGBufferInputs(rhi::IRHITexture* depth, rhi::IRHITexture* normal
     // 更新描述符集中 GBuffer 绑定（每帧纹理可能变化）
     if (m_Albedo && m_Device) {
         m_Device->UpdateDescriptorSet(m_Set, kDDGIBindAlbedo, rhi::DescriptorType::CombinedImageSampler,
-            m_Albedo, m_Device->ResolveSampler(m_PointSampler));
+            m_Albedo, ResS(m_PointSampler));
     }
     if (m_Normal && m_Device) {
         m_Device->UpdateDescriptorSet(m_Set, kDDGIBindNormal, rhi::DescriptorType::CombinedImageSampler,
-            m_Normal, m_Device->ResolveSampler(m_PointSampler));
+            m_Normal, ResS(m_PointSampler));
     }
     if (m_Depth && m_Device) {
         m_Device->UpdateDescriptorSet(m_Set, kDDGIBindDepth, rhi::DescriptorType::CombinedImageSampler,
-            m_Depth, m_Device->ResolveSampler(m_PointSampler));
+            m_Depth, ResS(m_PointSampler));
     }
 }
 
@@ -371,9 +371,9 @@ void GI_DDGI::SetRSM(rhi::IRHITexture* pos, rhi::IRHITexture* radiance, const fl
     m_RSMLightViewProj = lightViewProj;
     if (m_Device && pos && radiance) {
         m_Device->UpdateDescriptorSet(m_Set, kDDGIBindRSMPosition, rhi::DescriptorType::CombinedImageSampler,
-            pos, m_Device->ResolveSampler(m_LinearSampler));
+            pos, ResS(m_LinearSampler));
         m_Device->UpdateDescriptorSet(m_Set, kDDGIBindRSMRadiance, rhi::DescriptorType::CombinedImageSampler,
-            radiance, m_Device->ResolveSampler(m_LinearSampler));
+            radiance, ResS(m_LinearSampler));
     }
 }
 

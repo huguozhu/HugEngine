@@ -179,7 +179,7 @@ void RTDenoiser::SetInputs(rhi::IRHITexture* noisyColor, rhi::IRHITexture* depth
 // ============================================================
 void RTDenoiser::PreBind(rhi::IRHICommandList* cmd) {
     if (!m_Ready || !cmd) return;
-    cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO));
+    cmd->SetPipeline(ResP(m_PSO));
     cmd->SetViewport({0, (float)m_Height, (float)m_Width, -(float)m_Height, 0, 1});
     cmd->SetScissor({0, 0, m_Width, m_Height});
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);

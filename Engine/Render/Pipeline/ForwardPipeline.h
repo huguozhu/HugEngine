@@ -204,6 +204,11 @@ private:
         if (m_FrameCtx) return m_FrameCtx->ResolvePipelineState(h);
         return m_Device ? m_Device->ResolvePipelineState(h) : nullptr;
     }
+
+    [[nodiscard]] rhi::IRHISampler* ResS(rhi::RHISamplerHandle h) const {
+        if (m_FrameCtx) return m_FrameCtx->ResolveSampler(h);
+        return m_Device ? m_Device->ResolveSampler(h) : nullptr;
+    }
     std::unique_ptr<rhi::IRHIPipelineState> m_PBR_PSO;
     // 蒙皮网格 PSO（C1b）：扩展顶点布局（location 3/4 = JOINTS/WEIGHTS），同着色器
     std::unique_ptr<rhi::IRHIPipelineState> m_PBR_Skinned_PSO;

@@ -149,7 +149,7 @@ void AA_TAA::SetInput(rhi::IRHITexture* color, rhi::IRHISampler* /*sampler*/) {
     if (m_InputColor) {
         // CurrentColor 使用点采样（最近邻），避免对已抖动 HDR 颜色做线性插值模糊
         m_Device->UpdateDescriptorSet(m_DescSet, kTAABindCurrentColor, rhi::DescriptorType::CombinedImageSampler,
-                                      m_InputColor, m_Device->ResolveSampler(m_PointSampler));
+                                      m_InputColor, ResS(m_PointSampler));
     }
 }
 
@@ -163,7 +163,7 @@ void AA_TAA::SetGBufferInputs(rhi::IRHITexture* depth,
     // Depth/Normal/Velocity 使用点采样（最近邻），避免深度边界或法线方向因线性滤波失真
     auto bind = [&](u32 b, rhi::IRHITexture* t) {
         if (t) m_Device->UpdateDescriptorSet(m_DescSet, b, rhi::DescriptorType::CombinedImageSampler,
-                                             t, m_Device->ResolveSampler(m_PointSampler));
+                                             t, ResS(m_PointSampler));
     };
     bind(2, depth);
     bind(3, normal);
@@ -226,7 +226,7 @@ rhi::IRHITexture* AA_TAA::GetOutputTexture() const {
 }
 
 rhi::IRHISampler* AA_TAA::GetOutputSampler() const {
-    return m_Device->ResolveSampler(m_HistorySampler);
+    return ResS(m_HistorySampler);
 }
 
 void AA_TAA::Render(rhi::IRHICommandList* cmd) {
@@ -234,7 +234,7 @@ void AA_TAA::Render(rhi::IRHICommandList* cmd) {
 
     // 更新 history 纹理绑定到当前 read buffer
     m_Device->UpdateDescriptorSet(m_DescSet, kTAABindHistoryColor, rhi::DescriptorType::CombinedImageSampler,
-                                  ResT(m_HistoryColor[m_HistoryRead]), m_Device->ResolveSampler(m_HistorySampler));
+                                  ResT(m_HistoryColor[m_HistoryRead]), ResS(m_HistorySampler));
 
     cmd->SetPipeline(ResP(m_PSO));
     cmd->SetViewport({0, (float)m_Height, (float)m_Width, -(float)m_Height, 0, 1});

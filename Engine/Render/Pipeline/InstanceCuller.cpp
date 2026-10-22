@@ -30,7 +30,7 @@ bool InstanceCuller::Initialize(rhi::IRHIDevice* device) {
             return false;
         }
         m_VisibleSSBOHandle[slot] =
-            m_Device->GetBindlessHeap()->RegisterBuffer(m_Device->ResolveBuffer(m_VisibleBuf[slot]));
+            m_Device->GetBindlessHeap()->RegisterBuffer(ResB(m_VisibleBuf[slot]));
     }
 
     // 2. 描述符集布局：与引擎其它 pass 一致地登记 bindless 三件套
@@ -287,7 +287,7 @@ u32 InstanceCuller::Cull(rhi::IRHICommandList* cmd,
     pcs.visibleBufferHandle  = m_VisibleSSBOHandle[frameSlot];
     pcs.commandHandle        = commandSSBOHandle;
 
-    cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO));
+    cmd->SetPipeline(ResP(m_PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
     cmd->SetPushConstants(0, sizeof(pcs), &pcs);
 

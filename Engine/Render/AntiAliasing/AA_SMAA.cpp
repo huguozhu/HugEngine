@@ -184,7 +184,7 @@ void AA_SMAA::Render(rhi::IRHICommandList* cmd) {
         // 更新描述符：binding 0 = 边缘纹理（Point 采样）
         m_Device->UpdateDescriptorSet(m_BlendSet, kSMAABlendBindInput,
             rhi::DescriptorType::CombinedImageSampler,
-            ResT(m_EdgeTex), m_Device->ResolveSampler(m_PointSampler));
+            ResT(m_EdgeTex), ResS(m_PointSampler));
 
         cmd->SetPipeline(ResP(m_BlendPSO));
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_BlendSet);
@@ -231,7 +231,7 @@ void AA_SMAA::RenderFinalPass(rhi::IRHICommandList* cmd) {
     // binding 1 = 混合权重纹理（Point 采样）
     m_Device->UpdateDescriptorSet(m_NeighborSet, kSMAANeighborBindBlend,
         rhi::DescriptorType::CombinedImageSampler,
-        ResT(m_BlendTex), m_Device->ResolveSampler(m_PointSampler));
+        ResT(m_BlendTex), ResS(m_PointSampler));
 
     cmd->SetPipeline(ResP(m_NeighborPSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_NeighborSet);

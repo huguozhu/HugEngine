@@ -426,7 +426,7 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
             m_HiZPlaceholderTex = m_Device->CreateTextureHandle(td);   // A-3
             if (!m_HiZPlaceholderTex.IsValid()) { HE_CORE_ERROR("NaniteCull: Hi-Z 占位纹理创建失败"); return false; }
             m_Device->UpdateDescriptorSet(m_BVHSet, 10, rhi::DescriptorType::CombinedImageSampler,
-                                          ResT(m_HiZPlaceholderTex), m_Device->ResolveSampler(m_HiZSampler));
+                                          ResT(m_HiZPlaceholderTex), ResS(m_HiZSampler));
         }
 
         m_BVHCS.stage      = rhi::ShaderStage::Compute;
@@ -1219,7 +1219,7 @@ u32 NaniteCull::BuildHiZPyramid(rhi::IRHICommandList* cmd, rhi::IRHITexture* pyr
 
         // ── 每个集合的每个绑定**每帧只写一次**（这是本实现正确的关键；见头注释）──
         m_Device->UpdateDescriptorSet(set, 0, rhi::DescriptorType::CombinedImageSampler,
-                                      depth, m_Device->ResolveSampler(m_HiZSampler));
+                                      depth, ResS(m_HiZSampler));
         // srcMip == 0 时 binding 1 不被使用，但必须是**合法且布局正确**的描述符 ⇒ 绑一个金字塔
         // 层的存储视图（整图此刻处于 GENERAL，正是 StorageImage 期望的布局）。
         const u32 srcView = (level == 0u) ? 1u : level;             // 目标层索引 = level+1
@@ -1330,7 +1330,7 @@ void NaniteCull::RecordCullChainPass(rhi::IRHICommandList* cmd,
 
     if (m_FrameHiZMipCount >= 2u) {
         m_Device->UpdateDescriptorSet(m_BVHSet, 10, rhi::DescriptorType::CombinedImageSampler,
-                                      hizTexture, m_Device->ResolveSampler(m_HiZSampler));
+                                      hizTexture, ResS(m_HiZSampler));
     } else {
         // 没有可用金字塔（开关关闭 / 纹理缺失 / 层数不足）⇒ 绑占位纹理 + 层数 0
         //（shader 的遮挡测试第一句就返回 false）。占位纹理必须先转成"只读"布局，
@@ -1340,7 +1340,7 @@ void NaniteCull::RecordCullChainPass(rhi::IRHICommandList* cmd,
                              rhi::ResourceState::Undefined, rhi::ResourceState::ShaderResource,
                              ResT(m_HiZPlaceholderTex));
         m_Device->UpdateDescriptorSet(m_BVHSet, 10, rhi::DescriptorType::CombinedImageSampler,
-                                      ResT(m_HiZPlaceholderTex), m_Device->ResolveSampler(m_HiZSampler));
+                                      ResT(m_HiZPlaceholderTex), ResS(m_HiZSampler));
     }
 
     // ── 【与任务 13 同一处修法】计数器的"每帧清零"必须在命令缓冲内完成（GPU 有序）──

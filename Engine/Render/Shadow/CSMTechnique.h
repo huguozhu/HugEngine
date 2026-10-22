@@ -96,6 +96,11 @@ private:
         return m_Device ? m_Device->ResolvePipelineState(h) : nullptr;
     }
 
+    [[nodiscard]] rhi::IRHISampler* ResS(rhi::RHISamplerHandle h) const {
+        if (m_FrameCtx) return m_FrameCtx->ResolveSampler(h);
+        return m_Device ? m_Device->ResolveSampler(h) : nullptr;
+    }
+
     float4x4 m_LightVPs[CASCADE_COUNT]{};  // 缓存最近一次的 cascade VP（供 RSM 查询）
 };
 

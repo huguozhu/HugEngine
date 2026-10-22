@@ -115,9 +115,9 @@ void RSMIndirect::SetInputs(rhi::IRHITexture* depth, rhi::IRHITexture* worldPos,
     m_Normal   = normal;
     // 纹理每帧可能变化，逐个重绑（代价是一条描述符写，与 SSGI 的做法一致）
     if (m_Device) {
-        if (m_Depth)    m_Device->UpdateDescriptorSet(m_Set, kBindDepth,    rhi::DescriptorType::CombinedImageSampler, m_Depth,    m_Device->ResolveSampler(m_PointSampler));
-        if (m_WorldPos) m_Device->UpdateDescriptorSet(m_Set, kBindWorldPos, rhi::DescriptorType::CombinedImageSampler, m_WorldPos, m_Device->ResolveSampler(m_PointSampler));
-        if (m_Normal)   m_Device->UpdateDescriptorSet(m_Set, kBindNormal,   rhi::DescriptorType::CombinedImageSampler, m_Normal,   m_Device->ResolveSampler(m_PointSampler));
+        if (m_Depth)    m_Device->UpdateDescriptorSet(m_Set, kBindDepth,    rhi::DescriptorType::CombinedImageSampler, m_Depth,    ResS(m_PointSampler));
+        if (m_WorldPos) m_Device->UpdateDescriptorSet(m_Set, kBindWorldPos, rhi::DescriptorType::CombinedImageSampler, m_WorldPos, ResS(m_PointSampler));
+        if (m_Normal)   m_Device->UpdateDescriptorSet(m_Set, kBindNormal,   rhi::DescriptorType::CombinedImageSampler, m_Normal,   ResS(m_PointSampler));
     }
 }
 
@@ -129,9 +129,9 @@ void RSMIndirect::SetRSM(rhi::IRHITexture* positionMap, rhi::IRHITexture* normal
     m_RSMNrm = normalMap;
     m_RSMRad = radianceMap;
     if (!m_Device) return;
-    if (m_RSMPos) m_Device->UpdateDescriptorSet(m_Set, kBindRSMPos,   rhi::DescriptorType::CombinedImageSampler, m_RSMPos, m_Device->ResolveSampler(m_LinearSampler));
-    if (m_RSMNrm) m_Device->UpdateDescriptorSet(m_Set, kBindRSMNrm,   rhi::DescriptorType::CombinedImageSampler, m_RSMNrm, m_Device->ResolveSampler(m_LinearSampler));
-    if (m_RSMRad) m_Device->UpdateDescriptorSet(m_Set, kBindRadiance, rhi::DescriptorType::CombinedImageSampler, m_RSMRad, m_Device->ResolveSampler(m_LinearSampler));
+    if (m_RSMPos) m_Device->UpdateDescriptorSet(m_Set, kBindRSMPos,   rhi::DescriptorType::CombinedImageSampler, m_RSMPos, ResS(m_LinearSampler));
+    if (m_RSMNrm) m_Device->UpdateDescriptorSet(m_Set, kBindRSMNrm,   rhi::DescriptorType::CombinedImageSampler, m_RSMNrm, ResS(m_LinearSampler));
+    if (m_RSMRad) m_Device->UpdateDescriptorSet(m_Set, kBindRadiance, rhi::DescriptorType::CombinedImageSampler, m_RSMRad, ResS(m_LinearSampler));
 
     struct alignas(16) {
         float4x4 lightViewProj;

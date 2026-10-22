@@ -155,15 +155,15 @@ void GI_SSGI::SetInputs(rhi::IRHITexture* depth, rhi::IRHITexture* normal, rhi::
     // 每帧纹理可能变化，动态更新描述符集绑定
     if (m_Depth) {
         m_Device->UpdateDescriptorSet(m_DescSet, kSSGIBindDepth, rhi::DescriptorType::CombinedImageSampler,
-            m_Depth, m_Device->ResolveSampler(m_PointSampler));
+            m_Depth, ResS(m_PointSampler));
     }
     if (m_Normal) {
         m_Device->UpdateDescriptorSet(m_DescSet, kSSGIBindNormal, rhi::DescriptorType::CombinedImageSampler,
-            m_Normal, m_Device->ResolveSampler(m_PointSampler));
+            m_Normal, ResS(m_PointSampler));
     }
     if (m_Albedo) {
         m_Device->UpdateDescriptorSet(m_DescSet, kSSGIBindAlbedo, rhi::DescriptorType::CombinedImageSampler,
-            m_Albedo, m_Device->ResolveSampler(m_PointSampler));
+            m_Albedo, ResS(m_PointSampler));
     }
 }
 
