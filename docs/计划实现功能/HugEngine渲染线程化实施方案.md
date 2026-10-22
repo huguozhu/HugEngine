@@ -587,6 +587,14 @@ private:
 
 ### 8.1 三线程落地后的重排（2026-10）
 
+> **2026-10-22 现状**：**P1 ✅ 完成**（timeline fence 读回，`27d5033`）、**P3 ✅ 完成**（T3.1 `5ba4705`、
+> T3.2 `ac496e2`；T2.3 有证据地推迟到 A-3）、**P2 部分完成**（L1 契约/翻译 `9a294e7`、L2 提交管道
+> `9afe25c`、L3 前置命令 `0b8afe3`；**L3 已撤销**——论证见 §12.11 与 `6fa349a`；**L4-3 是 all-or-nothing
+> 的独立项目**，见 §12.12 / `ffb5be8`）。
+> 另有 **L4-1/L4-2 完成**：帧外壳（acquire / present / Begin / End / Submit）已收口到
+> `rhi::FramePresenter`（`cfaabe8`、`b9e8c3d`、`f1419bd`、`a0aa1bd`）。
+> A-3 已推进 **19 批**（见 §16 的提交清单与剩余清单）。
+
 **先重新分析：哪些结论变了、哪些没变。**
 
 | 原判断 | 现在的实际 |
@@ -2363,3 +2371,86 @@ pass 指纹（`1C15AB72E688B530` / `750CC247BF8B9C3D`）未变；`06.GILab` 冒�
 > 含顺带修掉的 Deferred 贴花口径缺口）；§6 增补"第四次复核"；§9 T1.5 增补第②段条目并把剩余
 > 13 处组件指针（全在 `RTPass`）的处置写清楚（并入第③段）；两项基线随实测下调
 > （组件指针 18 → 13、B1 80 → 76）。
+
+---
+
+## 16. 第三轮交接快照（2026-10-22；新会话建议从本节开始）
+
+### 16.1 结论摘要
+
+| 项 | 状态 | 关键提交 |
+|---|---|---|
+| **P1**（A-5 读回命令化） | ✅ 完成：dump 读回改 timeline fence（`SetTimelineSignal` + `router->FlushAndWait()` + `WaitForFence`），去掉设备级 `vkDeviceWaitIdle` | `27d5033` |
+| **P3**（并行录制） | ✅ 完成：T3.1 抽 `ParallelRecordHelper`、T3.2 Deferred GBuffer 接入；T2.3 推迟到 A-3（创建点全在 owner 线程，现在做是死代码） | `5ba4705`、`ac496e2` |
+| **L4-1**（acquire/present 收口） | ✅ 完成：新增 `rhi::FramePresenter`，8 个样例改用 `BeginFrame/EndFrame` | `cfaabe8`、`b9e8c3d` |
+| **L4-2**（录制生命周期收口） | ✅ 完成：`BeginRecording/EndRecording`，除 `Editor` 外全部样例 | `f1419bd`、`a0aa1bd` |
+| **P2 / A-1**（命令流） | 🟡 L1 契约+翻译 ✅（`9a294e7`）、L2 提交管道 ✅（`9afe25c`）、L3 前置命令 ✅（`0b8afe3`）；**L3 撤销**（§12.11）；**L4-3 = all-or-nothing 独立项目**（§12.12） | 见左 |
+| **A-3**（资源句柄化） | 🟡 **19 批已提交**（见 16.2），剩余约 75 处 | 见 16.2 |
+
+### 16.2 A-3 已完成的 19 批
+
+| # | 内容 | 提交 |
+|---|---|---|
+| 1 | 设备侧句柄资源表 + 句柄式创建/解析/销毁（`Create*Handle`/`Resolve*`/`Destroy*Handle`） | `e5e18c1` |
+| 2 | Forward `m_ObjectBuffers` | `ed42c4a` |
+| 3 | Forward 光源/阴影/阴影对象缓冲 | `89f2e3d` |
+| 4 | Forward 材质 SSBO（帧内重建） | `3211774` |
+| 5 | Forward HDR 颜色/深度 + bindless 占位纹理（含 resize 重建） | `f793eb7` |
+| 6 | Deferred 对象缓冲 + **VMA 销毁顺序修复**（句柄资源必须在 `vmaDestroyAllocator` 之前释放） | `5b3d010` |
+| 7 | Deferred 光源/阴影/阴影对象/LightGrid/IndexList 五组缓冲 | `c26b8e8` |
+| 8 | `GPUScene` 对象 SSBO（需新增 `m_Device`） | `28a9a9d` |
+| 9 | `GPUCulling` 5 个 PSO | `7794371` |
+| 10 | `GPUCulling` Hi-Z 纹理 + 采样器（resize + mip 视图） | `badaa04` |
+| 11 | `GPUCulling` PTG 参数缓冲（单缓冲试点） | `92769e5` |
+| 12 | `GPUCulling` 其余 4 个缓冲（**`m_Device` 在 `Initialize` 末尾才赋值 ⇒ 提到开头** 才修好崩溃） | `9b944df` |
+| 13 | `SpotShadowTechnique` | `d39efe8` |
+| 14 | `RectLightShadowTechnique` | `a302b5a` |
+| 15 | `PointShadowTechnique`（cubemap 数组 + 半状态回收） | `a41020b` |
+| 16 | `CSMTechnique`（二维数组 + `.cpp` 里的 getter + `GetPSO` 跨技术复用） | `dd32f45` |
+| 17 | `GBufferRenderer`（9 纹理经 lambda 创建 + PSO，用 `m_Ctx.device` 解析） | `93db8ca` |
+| 18 | `LightingPass`（10 持有者 / 62 处引用；补 `Core/Assert.h`） | `fe435a0` |
+| 19 | `DecalPass`（4 持有者；该路径在样例中未启用 ⇒ 判据为"构建 + 无回归"级） | `842c802` |
+
+### 16.3 验收判据（**四条**，缺一不可）
+
+1. 冻结配置 A/B 转储 **20/20 逐字节一致**（`HE_GILAB_CONFIG` 指向 pristine 副本 + `HE_DUMP_GI`）；
+2. **0 新增 VUID**（与基线日志做差集）；
+3. **0 断言**（`Assertion failed` / `IsEmpty()` / `not freed`）；
+4. **干净退出**：日志不含 `[crash phase`。
+   ⚠️ 工程当前存在**既有**的退出期崩溃（见 16.5），因此第 4 条要"与基线对照"，而不是无条件要求 clean。
+
+抓屏类判据（03.Sponza-Forward）另需**先校验图像尺寸**（976×579），再看 3D 区域均值 **149.76 / spread 0.00**。
+
+### 16.4 剩余工作
+
+| 类 | 模块 | 估计处数 |
+|---|---|---|
+| 小（可快速批） | `AA_TAA`(6)、`AA_SMAA`(7)、`AA_FXAA`(4)、`MeshBatcher`(2)、`InstanceCuller`(5)、`STBNTexture`(1)、`RTEffectPass`(2)、`RTShadowPass`(1) | ~30 |
+| 中 | `GI_IBL`(6)、`GI_RSM`(6)、`GI_SSGI`(6)、`GI_SSR`(6)、`GI_DDGI`(7)、`GIRadianceHistory`(3) | ~35 |
+| 大 | `RTPass`/`PTPass`/`ReSTIRPass`（~20）、`LumenScene`+`LumenSDF`（~60）、`NaniteCull`+`NaniteRaster`+`NaniteStream`（~40） | ~120 |
+| 其他 | `Editor` 帧外壳收口、`L4-3` 整帧命令化（独立项目） | — |
+
+### 16.5 已知既有缺陷（**与 A-3 无关，已 bisect 证明**）
+
+- **症状**：进程退出时崩溃，栈顶 `vulkan-1!vkResetEvent` ← `VulkanCommandList::~VulkanCommandList`，
+  说明**命令列表在设备销毁之后析构**；伴随 `vkDeviceWaitIdle: Invalid device` 的 loader 报错。
+- **时隐时现**：同一 HEAD 连跑 2 次必现，但不同构建/不同批次里有的 clean。
+- **bisect 结论**：回退 `c26b8e8` + `badaa04` 后**仍崩** ⇒ 与 A-3 的句柄化批次无关。
+- **建议**：单独立项修（`VulkanDevice::Shutdown` 与各管线 `Shutdown` 的销毁顺序 +
+  `ParallelRecordHelper` 的列表生命周期）。
+
+### 16.6 第五轮踩坑记录（避免重复）
+
+1. **判据漏项**：只查"转储/VUID/断言"不查"干净退出" ⇒ 把既有崩溃误判成自己的回归，浪费一轮 bisect。
+2. **抓屏不校验尺寸**：窗口从 976×579 变成 480×977 时，按固定 `x≥440` 裁剪读出"变暗"，
+   误退回了一次正确的迁移。
+3. **头文件内联 getter 漏改（出现 5 次）**：对策 = 松散 `.get()` 规则**同时作用于 `.h` 与 `.cpp`**，
+   且锚点**不带前导空格**（同一句在文件里常有多处不同缩进）。
+4. **PowerShell 内联脚本破坏源码/提交信息（3 次）**：编码、BOM、引号被吃。
+   对策 = 所有补丁脚本与提交信息**一律文件化**（`write` 工具写 `.py`/`.txt`，再 `python file.py`、
+   `git commit -F file`）。
+5. **凭 grep 片段猜写法**（`for(auto& m:...)m.reset()`、lambda 创建、`GetShadowMap` 定义在 `.cpp`）
+   ⇒ 对策 = **先整段 `read` 目标函数**，再写规则；每条规则带**期望命中次数**断言。
+6. **未核对设备指针**：`GPUScene`/`GBufferRenderer` 没有 `m_Device`；`GPUCulling` 的 `m_Device` 在
+   `Initialize` 末尾才赋值 ⇒ 早点赋值或用参数里的 device。这类问题占失败批次的一半。
+
