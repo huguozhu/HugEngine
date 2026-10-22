@@ -66,6 +66,7 @@ bool RenderThread::PumpOnce() {
     RenderThreadContext ctx;
     ctx.frameIndex = frame.frameIndex;
     ctx.frameSlot  = frame.frameSlot;
+    ctx.device     = m_Device;   // 【T2.6】本次泵帧的 RHI 出口
 
     for (RenderCommand& cmd : frame.commands) {
         if (cmd) cmd(ctx);                 // 命令为空（默认构造的 std::function）时跳过

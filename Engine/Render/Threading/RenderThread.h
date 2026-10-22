@@ -40,6 +40,10 @@ public:
     /// 空闲自旋时长（微秒；0 = 不自旋，直接休眠）。与 `EngineConfig::renderThreadSpinWaitUs` 对应。
     void SetSpinWaitUs(u32 us) { m_SpinWaitUs.store(us, std::memory_order_relaxed); }
 
+    /// 【T2.6】登记渲染线程所属设备：泵帧时填入 `RenderThreadContext::device`，
+    /// 使该上下文成为渲染层调用 RHI 的唯一出口。可在任意线程调用（启动前/后均可）。
+    void SetDevice(rhi::IRHIDevice* device) { m_Device = device; }
+
     /// 线程启动钩子（T2.2）：在**渲染线程**上、进入消费循环之前调用一次。
     /// 【为什么需要它】RHI 的归属（`he::rhi::ThreadAffinity`）按"当前线程"认领，而本层刻意保持
     /// **RHI-free**（便于单测直接编译）⇒ 认领动作由调用方通过这个钩子注入（样例里一行
@@ -77,6 +81,7 @@ private:
     u64                 m_ExecutedCommands = 0;
     std::function<void()> m_StartHook;   // 渲染线程启动钩子（T2.2：由调用方注入 RHI 归属认领）
     std::function<void()> m_StopHook;    // 渲染线程停止钩子（T2.2：撤销归属认领）
+    rhi::IRHIDevice*      m_Device = nullptr;   // 【T2.6】泵帧时填入上下文，成为唯一 RHI 出口
 
     /// 渲染线程 id 的哈希 + 1（0 = 无渲染线程/壳模式）。用哈希而不是 `atomic<thread::id>`：
     /// `std::thread::id` 的比较需要读一致快照，哈希成 `size_t` 后可用普通原子量。
