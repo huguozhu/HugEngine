@@ -1,2426 +1,2426 @@
-# HugEngine 渲染线程化实施方案（方案 B：Game Thread → Render+RHI 单线程）
-
-> **版本**：v1.6（2026-09-22 编写；2026-10-09 更新：§15.1 ①②③ 与 T2.2/T2.4 已落地并过判据，工作已合并入 main 并推送）
-> **基线提交**：`4af2d15`（引擎介绍目录编号化之后）
-> **性质**：**计划 + 实施记录**。§15.1 的 ①②③ 与 T2.4/T2.2 已落地并通过判据（**模式 0/1 已实现**；**模式 2 未实现**）；T3/T4/T5 其余项仍为计划。实现细节、完整时序与验收数据见 [15.多线程架构与渲染实现分析.md](../HugEngine引擎介绍/15.多线程架构与渲染实现分析.md) §13–§21。
-> **关联文档**：
-> - [15.多线程架构与渲染实现分析.md](../HugEngine引擎介绍/15.多线程架构与渲染实现分析.md)（JobSystem / MTCR / AsyncCompute 现状）
-> - [02.架构UML与可扩展性分析.md](../HugEngine引擎介绍/02.架构UML与可扩展性分析.md)（分层、时序、可扩展性债务）
-> - [04.功能缺口与对标分析.md](../HugEngine引擎介绍/04.功能缺口与对标分析.md)（§16 有代码证据的架构债务）
-> - [05.渲染管线实现分析.md](../HugEngine引擎介绍/05.渲染管线实现分析.md)（三条管线的每帧结构）
-> - [20.编辑器实现分析.md](../HugEngine引擎介绍/20.编辑器实现分析.md)（ImGui 集成与后端泄漏点）
->
-> **本文怎么读**：
-> - 只想了解**选型结论** → §1
-> - 要**排期/派活** → §5 分阶段任务 + §9 任务总表
-> - 要**动手写代码** → §3 三条铁律 + §4 接口草案 + §5 对应阶段
-> - 要**判断风险** → §2 现状约束 + §7 风险与回退
-
----
-
-## 目录
-
-1. [目标架构](#1-目标架构)
-2. [现状约束盘点（迁移必须处理的 8 件事）](#2-现状约束盘点迁移必须处理的-8-件事)
-3. [三条线程铁律（契约）](#3-三条线程铁律契约)
-4. [核心抽象设计（接口草案）](#4-核心抽象设计接口草案)
-5. [分阶段实施（阶段 0~5）](#5-分阶段实施阶段-05)
-6. [验收指标](#6-验收指标)
-7. [风险与回退](#7-风险与回退)
-8. [工作量与排期建议](#8-工作量与排期建议)
-9. [附录 A：任务总表（可勾选）](#9-附录-a任务总表可勾选)
-10. [附录 B：自动化迁移检查](#10-附录-b自动化迁移检查)
-11. [参考](#11-参考)
-12. [附录 C：升级到 UE 三线程模型的增量路径](#12-附录-c升级到-ue-三线程模型的增量路径)
-
----
-
-## 1. 目标架构
-
-### 1.1 一句话目标
-
-> **让渲染的"收集 → 录制 → 提交 → Present"全部离开游戏线程，跑在一根独立的渲染线程上；游戏线程只投递命令与不可变快照，永不触碰 RHI。**
-
-### 1.2 目标线程模型
-
-| 线程 | 数量 | 职责 | 禁止事项 |
-|---|---|---|---|
-| **游戏线程（主线程）** | 1 | 窗口与输入、ECS 系统 tick（Movement / Physics / Nav / Spline / 相机 / Skeletal / Text / CollisionDebug）、产出**帧快照**、投递渲染命令、ImGui 的 CPU 侧（`NewFrame` + 面板 + `Render()` 产出 `ImDrawData`） | **任何 RHI 调用**；任何对已提交快照数据的写 |
-| **渲染线程（本次新增）** | 1 | 消费命令与快照 → 剔除与收集 → 建帧图 → **录制** → **提交** → `AcquireNextImage`/`Present`；持有并驱动所有 RHI 对象 | 读写 ECS 世界；阻塞等待 GPU（除非是明确的帧同步点） |
-| **JobSystem 工作线程** | `hardware_concurrency()`（当前 12） | **并行录制**（每线程一个 secondary command list）；场景分块并行 | 触碰 RHI 的**非录制**部分（创建/提交/呈现） |
-| **Jolt 物理线程池** | 2 | 物理步进内部并行（不变） | — |
-| AI 推理 / 热重载监听 / 崩溃看门狗 | 各 1（按需） | 不变 | 触碰 RHI 创建或提交（热重载的 PSO 替换改为请求渲染线程执行） |
-
-### 1.3 一帧时序（含背压）
-
-```
-游戏线程                                    渲染线程
-   │                                            │
-   │ PollEvents / AcquireNextImage  ──────────► │（交换链归渲染线程）
-   │ ECS 系统 tick                              │
-   │ 产出 FrameSceneSnapshot（不可变）           │
-   │ EnqueueFrame(snapshot, camera, dt) ──────► │  ← 若在飞帧数 ≥ 3，游戏线程在此阻塞
-   │ ImGui NewFrame + 面板 + Render()           │
-   │ EnqueueUI(ImDrawData 快照) ──────────────► │
-   │ 下一帧循环（不必等渲染完成）                 │ 剔除 → 收集 → 建帧图 → 并行录制
-   │                                            │ → vkQueueSubmit → Present
-   │                                            │ 回收帧票据（唤醒可能阻塞的游戏线程）
-```
-
-关键点：**游戏线程与渲染线程并行推进**，两者之间只有"快照交接 + 有界队列"；渲染线程落后超过 `kMaxFramesInFlight`（= **3**，`Engine/RHI/RHI/Types.h:17`）时才对游戏线程施加背压。
-
-### 1.4 与 UE 的职责映射
-
-| UE 概念 | 本方案的对应物 | 说明 |
-|---|---|---|
-| Game Thread | 游戏线程（主线程） | 不变 |
-| Render Thread | **渲染线程**（本次新增） | 承担 UE 渲染线程的全部职责：剔除、MDC/绘制收集、RDG 建图、记录 RHI 命令 |
-| RHI Thread | **不存在**（本次明确不做） | 渲染线程即"Render + RHI 合并"，等价于 UE 的 `r.RHIThread.Enable=0`；**将来升级到三线程的增量路径见 §12** |
-| `ENQUEUE_RENDER_COMMAND` | `RenderCommandQueue` | 游戏 → 渲染的命令投递 |
-| Scene Proxy / FPrimitiveSceneProxy | `FrameSceneSnapshot` | 游戏线程产出的不可变渲染数据 |
-| `FParallelCommandListSet` | JobSystem + `m_SecRecordLists` | 已有雏形（仅 ForwardPipeline），本方案推广到全部管线 |
-| `FRHIGPUFence` | `RHIFenceHandle`（已存在） | `CreateFence/WaitForFence/GetFenceValue` |
-
-### 1.5 选型依据（为什么不是三线程）
-
-1. **瓶颈在录制不在提交**：《Lumen设计与实现》实测 **CPU 录制 16.4 ms vs GPU 3.4 ms**，RHI 线程只能挪走提交（1~3 ms 量级）；
-2. **录制基础已具备**：`VulkanCommandList` 自建命令池（`Engine/RHI/Vulkan/VulkanCommandList.cpp:107,132`），`ForwardPipeline.cpp:366-375` 已预分配每线程 secondary CB；
-3. **跨帧释放基础已具备**：`Engine/RHI/RHI/FrameRetireQueue.h`（N 帧延迟释放）+ `Engine/RHI/Vulkan/DeferredDestructionQueue.h`；
-4. **三线程的阻塞项都很贵**：阻塞式资源创建、阻塞 `Map()`、等待型提交、ImGui 原生句柄耦合（见 §2）；
-5. **可升级性**：本方案阶段 2 要求渲染线程通过**记录/执行分离**的方式持有 RHI（先记命令流、再统一执行），因此将来加第三根 RHI 线程只是"换个线程执行同一命令流"。
-
----
-
-## 2. 现状约束盘点（迁移必须处理的 8 件事）
-
-| # | 约束 | 代码证据 | 对方案的硬性影响 |
-|---|---|---|---|
-| **C1** | **渲染路径直接读 ECS World** | `DeferredPipeline::CollectLights(pc, world, sg, camera)`（`Engine/Render/Pipeline/DeferredPipeline.cpp:810`，调用点 `DeferredPipeline_FrameGraph.cpp:554,981,1184`）；`GPUScene::Collect(World&, SceneGraph&, const CameraData&)`（`GPUScene.cpp:52`）；`ForwardPipeline::CollectLights`（`ForwardPipeline.cpp:545`） | **最大障碍**。渲染线程读 World 时游戏线程正在 tick → 数据竞争。必须先做**帧快照**（阶段 1），否则渲染线程不能起 |
-| **C2** | **交换链操作在样例主循环** | `AcquireNextImage()`：`Samples/06.GILab/06.GILab.cpp:876`、`Samples/02.Cube/02.Cube.cpp:970`；`Present()`：`06.GILab.cpp:1794`、`02.Cube.cpp:1671` | Vulkan 交换链需外部同步 ⇒ Acquire/Present 必须**整体迁入渲染线程**，样例循环不再直接调用 |
-| **C3** | **资源创建同步阻塞 + 每帧仍有上传** | `vmaCreateBuffer`/`vmaCreateImage` 于调用线程立即执行（`Engine/RHI/Vulkan/VulkanResources.cpp:134,365`）；`BufferDesc::initialData` 每次创建 staging 并一次性提交（`VulkanResources.cpp:486,651`）；每帧级上传点遍布 Lumen/Nanite/Decal（如 `LumenSDF.cpp:299,305,1335`、`NaniteScene.cpp:167`、`DecalPass.cpp:74`） | 需要 `ResourceCreationService`（阶段 0），且**上传路径要能跨线程排队**；`initialData` 语义要明确"是否允许来自游戏线程的指针" |
-| **C4** | **阻塞读回** | `VulkanBuffer::Map()`（`VulkanResources.cpp:179`）；AutoExposure 读回路径 | 读回必须改为"渲染线程登记 + N 帧后取值"（`FrameRetireQueue` 已有账本） |
-| **C5** | **等待型提交** | `SignalFenceOnQueue` / `WaitFenceOnQueue` 提交后立即等待（`Engine/RHI/Vulkan/VulkanDevice.cpp:932,958`） | 这些调用必须**只允许在渲染线程**出现，且不得进入帧循环关键路径 |
-| **C6** | **ImGui 与场景共用命令缓冲与 RenderPass，且经原生句柄** | `Engine/RHI/RHI/RHI.h:163-169`（ImGui 专用后门：`CreateImGuiDescriptorPool`/`CreateImGuiRenderPass`/`GetImGuiCommandBuffer`）；`Samples/Editor/EditorApp.cpp:536-542`（场景与 UI 同一 CB） | UI 的 **CPU 侧**（`NewFrame`/面板/`Render()`）可留在游戏线程；**后端录制**必须迁到渲染线程（阶段 4） |
-| **C7** | **RHI 无线程归属机制** | 全仓 `GetCurrentThreadId` 只出现在 `Engine/Core/Core/CrashHandler.cpp` | 阶段 0 第一件事：加 `IsOwnerThread()` + 断言，否则违规调用只能靠"偶发崩溃"发现 |
-| **C8** | **RHI 调用面极宽** | `IRHICommandList` 有 45+ 个虚函数（`Engine/RHI/RHI/CommandList.h:36-283`），`IRHIDevice` 另有创建/提交/栅栏 API（`RHI.h:172,188-208`） | 不追求"让 RHI 线程安全"，而是**规定只有渲染线程能调**；录制期通过 secondary CB 分发到 worker（CE 已安全，见 C9） |
-| **C9** | ✅ **已有的有利条件**：录制期命令池是每 list 独立的 | `m_CmdPools[i]` + `m_SecondaryPool`（`VulkanCommandList.cpp:107,132`）；`ForwardPipeline.cpp:366-375` 每线程 secondary CB 池；`ForwardPipeline.cpp:1290-1300` 并行录制 + 主线程 `ExecuteSecondary` | 并行录制**不需要改 RHI**，只需把方案推广到 Deferred/PathTracing（阶段 3） |
-
-> **C1 是本方案的核心工作量**：快照层不做，渲染线程就只能"和游戏线程抢 World"，那是不可调试的。
-
----
-
-## 3. 三条线程铁律（契约）
-
-这三条要写进 `Engine/RHI` 的头文件注释，并用断言强制：
-
-| 铁律 | 内容 | 强制手段 |
-|---|---|---|
-| **铁律 1** | **RHI 只属于渲染线程**：`IRHIDevice::Create*` / `Destroy*`、`IRHICommandList::*`、`Submit` / `SubmitAll`、`SignalFenceOnQueue` / `WaitFenceOnQueue`、交换链 `AcquireNextImage` / `Present` —— **只能在渲染线程调用** | `HE_ASSERT(IsRenderThread())` 加在上述路径入口（Debug/RelWithDebInfo 生效） |
-| **铁律 2** | **游戏线程只产出不可变数据**：任何交给渲染线程的结构（快照、命令参数、上传数据）在交接后**不得再被游戏线程修改**；需要复用则用双/三缓冲按帧轮换 | 快照用 `FrameSceneSnapshot` 值语义 + 按 `frameSlot` 轮换；上传数据在入队时**拷贝**到队列自有内存 |
-| **铁律 3** | **渲染线程不阻塞等 GPU**：帧循环内不得出现 `WaitForFence(UINT64_MAX)` 之类的无限等待；必须等待时只允许"等待 N-`kMaxFramesInFlight` 帧之前已完成" | Code review + 在 `WaitFenceOnQueue` 加注释说明允许的调用点白名单 |
-
-**游戏线程唯一允许等待的位置**：提交新帧时若在飞帧数已达 `kMaxFramesInFlight`，则等待最老一帧的完成信号（背压，不是 GPU 同步）。
-
----
-
-## 4. 核心抽象设计（接口草案）
-
-> 以下为**接口草案**，用于确定职责边界；实现细节可在编码阶段调整。所有代码均含中文注释（项目规范）。
-
-### 4.1 `RenderCommandQueue`（游戏线程 → 渲染线程）
-
-**设计要点**：类型化命令 + 一次性 lambda 通道；命令参数**必须按值捕获**（铁律 2）。批量提交整帧命令，减少锁竞争。
-
-```cpp
-// Engine/Render/Threading/RenderCommandQueue.h
-namespace he::render {
-
-/// 渲染命令队列：游戏线程入队，渲染线程消费。
-/// 设计约束：
-///   1. 入队的数据必须**按值捕获**（铁律 2：交接后游戏线程不再修改）；
-///   2. 整帧提交（BeginFrame/EndFrame），避免每条命令一次锁；
-///   3. 队列容量有上限，超限说明渲染线程长期落后 → 由 RenderThread 施加背压。
-class RenderCommandQueue {
-public:
-    /// 游戏线程：开始本帧命令收集（拿到本帧的 slot）
-    void BeginFrame(u32 frameSlot);
-
-    /// 游戏线程：入队一条命令。fn 在渲染线程执行，禁止捕获 World/SceneGraph 引用
-    void Enqueue(std::function<void(class RenderThreadContext&)> fn);
-
-    /// 游戏线程：结束收集并发布给渲染线程（一次移动，不拷贝）
-    void PublishFrame();
-
-    /// 渲染线程：取出下一帧待执行命令；无命令时返回 false（由调用方决定等待/休眠）
-    bool TryConsumeFrame(std::vector<std::function<void(class RenderThreadContext&)>>& outCommands);
-
-    /// 在飞帧数（用于背压判断）
-    [[nodiscard]] u32 InFlightFrameCount() const;
-
-private:
-    std::mutex                          m_Mutex;
-    std::condition_variable             m_Cv;
-    std::vector<std::function<void(class RenderThreadContext&)>> m_Pending;
-    u32                                 m_InFlight = 0;
-};
-
-} // namespace he::render
-```
-
-### 4.2 `FrameSceneSnapshot`（游戏线程产出的不可变渲染数据）
-
-**设计要点**：这是**替换 `CollectLights(pc, world, sg, camera)` 与 `GPUScene::Collect(world, sg, camera)` 直接读 World 的关键**。快照要覆盖渲染真正需要的全部输入，且**不含任何 Entity/组件指针**。
-
-```cpp
-// Engine/Render/Threading/FrameSceneSnapshot.h
-namespace he::render {
-
-/// 单个可见物体的渲染输入（与 ECS 完全解耦：只有值，没有指针）
-struct SnapshotDrawItem {
-    float4x4 worldMatrix;      // 世界矩阵（已含父级与缩放）
-    float4x4 prevWorldMatrix;  // 上一帧世界矩阵（TAA/运动矢量/重投影需要）
-    u32      meshId;           // 网格资源 ID（渲染线程查表拿 GPU 缓冲）
-    u32      materialId;       // 材质 ID（4 个连续 bindless 槽，与 ForwardPipeline 现有约定一致）
-    u32      objectIndex;      // SSBO 槽位
-    u32      flags;            // 可见性/实例化/骨骼等位标记
-};
-
-/// 光源条目（替代 CollectLights 里的 World 遍历）
-struct SnapshotLight {
-    u32    type;               // 0=Dir 1=Point 2=Spot 3=Rect
-    float3 position;
-    float3 direction;
-    float3 color;
-    float  intensity;
-    float  range;
-    u32    shadowIndex;        // -1 = 不投影
-    // …按 GPULight 逐字段对齐，便于渲染线程直接 memcpy 进 UBO
-};
-
-/// 一帧的完整渲染输入。由游戏线程在 tick 结束后构造，交接后视为只读。
-struct FrameSceneSnapshot {
-    u64                 frameIndex = 0;
-    CameraData          camera;             // 含本帧 viewProj（TAA 抖动在渲染线程叠加，见阶段 2）
-    float               deltaTime  = 0.0f;
-    std::vector<SnapshotDrawItem>  draws;
-    std::vector<SnapshotLight>     lights;
-    std::vector<float4x4>          skinMatrices;   // 骨骼矩阵（扁平数组，替代读组件）
-    u32                            viewportWidth  = 0;
-    u32                            viewportHeight = 0;
-    // 需要时继续扩展；扩展前先确认"渲染是否真的需要它"
-};
-
-} // namespace he::render
-```
-
-> **判据（阶段 1 退出条件）**：`Engine/Render/` 内不再出现对 `he::World&` / `he::SceneGraph&` 的**渲染期**引用（`Engine/Render/` 目录 grep 断言，见附录 B）。
-
-### 4.3 `RenderThread`（调度器）
-
-```cpp
-// Engine/Render/Threading/RenderThread.h
-namespace he::render {
-
-/// 渲染线程：唯一的 RHI 消费者。
-/// 生命周期与 IRHIDevice / IRHISwapChain 绑定：设备在渲染线程上创建与销毁。
-class RenderThread {
-public:
-    /// 启动：在内部线程上完成设备初始化（含管线 Initialize、资源创建）
-    bool Start(rhi::Backend backend, const rhi::DeviceDesc& desc);
-
-    /// 停止：排空命令队列 → WaitIdle → 销毁管线与设备
-    void Stop();
-
-    /// 游戏线程：提交一帧（快照 + 命令）。若在飞帧数达上限则阻塞（背压点）
-    void SubmitFrame(FrameSceneSnapshot&& snapshot);
-
-    /// 游戏线程：投递一个"资源创建请求"，返回句柄（不阻塞；渲染线程执行创建）
-    template <typename T>
-    std::shared_ptr<T> RequestResource(const rhi::ResourceDesc& desc);
-
-    /// 游戏线程：请求一次设备级同步（仅用于加载期/退出期，不得进入帧循环）
-    void FlushAndWait();
-
-    /// 当前是否运行在渲染线程（供断言使用）
-    static bool IsCurrent();
-
-private:
-    void ThreadMain();          // 线程主体：命令循环 + 帧节奏
-    std::thread              m_Thread;
-    RenderCommandQueue       m_Commands;
-    // …帧票据、fence、背压计数
-};
-
-} // namespace he::render
-```
-
-**帧票据与背压**：
-
-```cpp
-/// 帧完成票据：渲染线程 Present 后回收，游戏线程据此解除背压
-struct FrameTicket {
-    u64 frameIndex;
-    u64 fenceValue;   // 与渲染线程的 timeline fence 对应
-};
-```
-
-### 4.4 `ResourceCreationService`（资源创建 → 渲染线程）
-
-**设计要点**：分两步走，降低一次性改造风险。
-
-| 步 | 形态 | 用在哪 | 风险 |
-|---|---|---|---|
-| **步 1（阶段 2 采用）** | **同步转发**：游戏线程入队创建请求 → 渲染线程执行 → 用 `std::promise` 回传（游戏线程阻塞等待） | 加载期、编辑器导入、resize 重建 | 简单、正确；但**阻塞**，因此**禁止**在帧循环内使用 |
-| **步 2（阶段 5 可选）** | **异步**：返回 `Future<Handle>`；帧内使用"上帧请求、下帧就绪"的两段式 | 帧内动态创建（如 Nanite 流式页） | 复杂度高，只在实测需要时做 |
-
-```cpp
-// Engine/Render/Threading/ResourceCreationService.h
-namespace he::render {
-
-/// 资源创建服务：把"创建 GPU 资源"从游戏线程搬到渲染线程执行。
-/// 步 1（本方案默认）：同步转发，仅供加载期/重建期使用；
-/// 步 2（后续可选）：异步 Future，供帧内动态资源使用。
-class ResourceCreationService {
-public:
-    /// 同步创建（游戏线程阻塞直到渲染线程完成）。**禁止在帧循环内调用**：
-    /// 帧内创建会让游戏线程等待渲染线程，破坏并行前提。
-    rhi::IRHIBuffer* CreateBufferSync(const rhi::BufferDesc& desc);
-    rhi::IRHITexture* CreateTextureSync(const rhi::TextureDesc& desc);
-
-    /// 上传数据：拷贝入队（铁律 2），由渲染线程在下一帧执行拷贝
-    void UploadAsync(rhi::IRHIBuffer* dst, const void* data, u64 size, u64 offset = 0);
-};
-
-} // namespace he::render
-```
-
-### 4.5 线程归属断言
-
-```cpp
-// Engine/RHI/RHI/ThreadAffinity.h
-namespace he::rhi {
-
-/// 设备拥有线程（= 渲染线程）。设备创建时记录，销毁时清空。
-class ThreadAffinity {
-public:
-    void Claim()   { m_Owner = std::this_thread::get_id(); m_Claimed = true; }
-    void Release() { m_Claimed = false; }
-    [[nodiscard]] bool IsOwner() const {
-        return !m_Claimed || m_Owner == std::this_thread::get_id();
-    }
-private:
-    std::thread::id m_Owner;
-    bool            m_Claimed = false;
-};
-
-} // namespace he::rhi
-
-/// 在 RHI 的创建/销毁/录制/提交入口统一使用：
-///   HE_ASSERT(IsRenderThread() && "RHI 调用必须在渲染线程（见三条铁律）");
-#define HE_ASSERT_RENDER_THREAD() /* Debug/RelWithDebInfo 生效 */
-```
-
----
-
-## 5. 分阶段实施（阶段 0~5）
-
-> 每阶段都满足：**可独立回退**（配置开关）且**有客观验收判据**（不靠"看起来没问题"）。
-
-### 阶段 0 · 地基（不改变现有行为）
-
-**目标**：把"跨线程会炸"的地方先圈出来并封好，为起线程做准备。**本阶段结束时引擎行为与现在逐像素一致。**
-
-| 任务 | 内容 | 主要文件 | 判据 |
-|---|---|---|---|
-| **T0.1** | 引入 `ThreadAffinity` + `HE_ASSERT_RENDER_THREAD()`，加在 `IRHIDevice` 创建/销毁、`IRHICommandList` 录制、`Submit`/`SubmitAll`、`WaitFenceOnQueue` 入口（先记录拥有线程 = 主线程，行为不变） | `Engine/RHI/RHI/*.h`、`Engine/RHI/Vulkan/VulkanDevice.cpp` | 现有样例全跑通、零断言触发；断言可被 `HE_DISABLE_THREAD_ASSERT` 关闭 |
-| **T0.2** | 清点并登记"帧内同步 RHI 调用"（上传 / 读回 / 等待型提交），产出清单（文件:行号 + 所属阶段） | 只读盘点，不改代码 | 清单里每条都标注"迁到渲染线程 / 改为异步 / 保留（加载期）" |
-| **T0.3** | `RenderCommandQueue` + `RenderThread` **壳实现**：游戏线程入队，主线程（当前线程）消费——**行为完全等价于现在** | `Engine/Render/Threading/`（新增） | 样例帧序与改前一致；`cmp_dumps` 前后 dump 逐像素相同 |
-| **T0.4** | 帧票据与背压骨架（`FrameTicket` + 在飞帧计数），上限 `kMaxFramesInFlight` | 同上 | 人为把上限设为 1 时能观察到游戏线程阻塞（可测） |
-| **T0.5** | `EngineConfig` 新增**三态渲染线程模式** `RenderThreadingMode`（`SingleThreaded` 默认 / `RenderThread` / `RenderThreadAndRHI`，取代原 `enableRenderThread` 布尔 —— 见下方说明）与 `renderThreadSpinWaitUs`；运行期可切换（`SetRenderThreadingMode`）+ `HE_RENDER_THREADING_MODE` 覆盖 | `Engine/Core/Core/RenderThreadingMode.h`（新增）、`Engine/Core/Core/Engine.{h,cpp}` | 编译期与运行期开关均可切换；关闭时走旧路径 |
-| **T0.6** | **（为 §12 预埋，可选但强烈建议）** 定义 RHI 命令流的**记录端契约**与 `RHICommand` 载荷形态（类型擦除 + 内联参数），暂不改变执行方式 | `Engine/RHI/RHI/RHICommandList.h`（新增） | 契约评审通过；本轮不接入生产路径，只落头文件与单测 |
-| **T0.7** | **（为 §12 预埋，可选但强烈建议）** 资源句柄化：新增 `RHIBufferHandle` / `RHITextureHandle`（含 generation），并让新代码优先用句柄；`unique_ptr<IRHIBuffer>` 保留为兼容层 | `Engine/RHI/RHI/RHI.h`、`Engine/RHI/RHI/RHIHandles.h`（新增） | 新代码不再新增 `unique_ptr<IRHIBuffer>` 成员（grep 断言）；旧代码可渐进迁移 |
-
-**退出判据**：阶段 0 全绿 = 现有样例在 `enableRenderThread=false/true`（壳模式）下**输出一致**、帧时间不退化 > 3%。
-> ✅ **已达成（2026-09-24，multi_thread 分支）**：
-> - **输出一致**：`06.GILab`（Cornell Box，121 帧）在单线程与渲染线程壳下，关掉已知噪声源
->   （`HE_LUMEN_PROBE_FILTER=off`）后 **28 个转储目标全部逐位相同**；默认滤波下差异**仅**出现在已有的
->   Lumen 屏幕探针家族（`lumen_irradiance` + 4×`prov6_*` + `hdr`），与本次改动无关。
-> - **帧时间不退化**：样例自测的每帧均值（最近 120 帧）—— 墙钟 465.190 → 465.143 ms、
->   CPU 侧 465.620 → 465.526 ms、管线 `Render` 464.057 → 464.279 ms（**+0.05%**，远低于 3% 预算）。
-> - 逐任务记录见 §9（T0.1~T0.7 全部勾选）与 §13 附录 D（帧内同步调用清点）。
-> **T0.6/T0.7 是本方案唯一的"现在不做、以后要付大代价"的两件事**，理由见 §12：RHI 命令流与资源句柄化是升级到三线程模型的前置条件，而在阶段 0 预埋只需 +5~8 人日，等到阶段 2 之后再补则要动全工程 200+ 处资源持有者。
-
-### 阶段 1 · 场景快照（把渲染与 World 解耦）
-
-**目标**：消除 C1。**这是本方案的核心工作量，也是最值得先做的一步**——即使最终不起渲染线程，快照层也能立刻改善架构（渲染不再穿过 ECS）。
-
-| 任务 | 内容 | 主要文件 | 判据 |
-|---|---|---|---|
-| **T1.1** | 定义 `FrameSceneSnapshot`（§4.2），字段与现有 `GPULight`/`GPUObjectData`/`PushConstantData` 逐字段对齐 | `Engine/Render/Threading/FrameSceneSnapshot.h` | 字段表评审通过（与 `ShaderTypes.slang` 一致，含 `static_assert`） |
-| **T1.2** | 游戏线程侧新增 `SceneSnapshotBuilder::Build(world, sg, camera) → snapshot`（把现在散在 `CollectLights`/`GPUScene::Collect` 里的遍历集中到这里） | `Engine/Render/Threading/SceneSnapshotBuilder.{h,cpp}` | 与旧路径**并行跑一帧双份**，逐字段比对一致（临时 `HE_SNAPSHOT_VERIFY` 开关） |
-| **T1.3** | `CollectLights` / `GPUScene::Collect` 改为**消费快照**（保留旧签名做过渡，内部转发到快照实现） | `DeferredPipeline.cpp:810`、`ForwardPipeline.cpp:545`、`GPUScene.cpp:52` | 三条管线（Forward / Deferred / PathTracing）渲染输出与改前**逐像素一致**（`cmp_dumps.py`） |
-| **T1.4** | 骨骼矩阵、材质快照、Decal/粒子等其余渲染输入的快照化 | `SceneRenderer.*`、各 Pass | 同上 |
-| **T1.5** | 移除渲染期对 World 的引用（保留加载期一次性访问） | `Engine/Render/` | **附录 B 的 grep 断言通过**：渲染期函数签名不再出现 `he::World&` / `SceneGraph&` ✅ 已完成（2026-10-09）：附录 B1 渲染期 0 / 加载期 0（80 → 0）、组件指针 0/0 |
-
-**退出判据**：全部样例在开关两种状态下输出一致；`Engine/Render/` 渲染期无 World 依赖；Lumen/Nanite 的流式路径有明确"谁在何时读世界"的记录。
-
-### 阶段 2 · 起渲染线程
-
-**目标**：真正让渲染跑在独立线程（C2/C3/C5/C6 落地）。
-
-| 任务 | 内容 | 主要文件 | 判据 |
-|---|---|---|---|
-| **T2.1** | `RenderThread` 实现（线程主体、命令循环、帧节奏、休眠策略：空闲时条件变量等待 + 可配的自旋窗口） | `Engine/Render/Threading/RenderThread.cpp` | 空闲帧 CPU 占用 < 1%（不得自旋烧核） |
-| **T2.2** | 设备与交换链**改由渲染线程创建/持有**；`AcquireNextImage` / `Present` 迁入渲染线程 | `VulkanDevice.cpp`、`VulkanSwapChain.*`、样例循环 | 样例里不再出现交换链调用；`HE_ASSERT_RENDER_THREAD` 无触发 ✅ 已完成（2026-10-09）：整帧 RHI（Acquire/录制/Submit/读回/Present）归渲染线程；模式 0/1 转储逐位一致、归属断言 0 |
-| **T2.3** | 管线 `Initialize/Shutdown`、`OnResize`、资源创建走 `ResourceCreationService`（步 1 同步转发） | 三条管线、`Engine/Render/Threading/ResourceCreationService.*` | 加载期与 resize 正常；帧循环内无同步创建（grep 断言） |
-| **T2.4** | 样例循环改造：`PollEvents` + tick + `SubmitFrame` + ImGui CPU 侧；删除主线程的渲染与提交代码 | `Samples/01~07` | 全部样例可运行；帧时间不退化 ✅ 已完成（2026-10-09）：7/7 样例（02/03/04/05/06.GILab/07.Nanite/07.AISamples），按值载荷 |
-| **T2.5** | 编辑器改造：`EditorApp` 主循环同样改为投递；ImGui 后端录制先保持"渲染线程内录制" | `Samples/Editor/EditorApp.cpp` | 编辑器可用；UI 与场景仍在同一 RenderPass（阶段 4 再解） |
-| **T2.6** | 关键：**渲染线程的 RHI 调用改用"记录 → 执行"两段式**（为将来加 RHI 线程留口）——至少把 `Submit` 与资源创建收口到 `RenderThreadContext` 的两个方法 | `Engine/Render/Threading/RenderThreadContext.h` | 记录/执行边界在代码上可见（`RenderThreadContext` 是唯一 RHI 出口） |
-
-**退出判据**：
-1. 主线程**零 RHI 调用**（断言 + grep 双重保证）；
-2. 游戏 tick 与渲染**真正并行**（帧时间从"游戏 + 渲染"变为"取较大者"，可用 profiler 观测）；
-3. `vkQueueSubmit` 不在游戏线程时间线上；
-4. Validation（含 `--sync-validation`）零新增告警；
-5. 全部样例 + 编辑器 + 46 个测试文件通过。
-
-### 阶段 3 · 并行录制推广
-
-**目标**：把 ForwardPipeline 已有的 MTCR 推广到全部管线（C9 的有利条件用起来）。
-
-| 任务 | 内容 | 主要文件 | 判据 |
-|---|---|---|---|
-| **T3.1** | 抽出 `ParallelRecordHelper`（secondary CB 池 + 分块 + `ExecuteSecondary` 合并），三条管线共用 | `Engine/Render/Pipeline/ParallelRecordHelper.{h,cpp}` | Forward 行为不变（重构不改变输出） |
-| **T3.2** | Deferred 的 GBuffer 与 Lighting 段接入并行录制 | `DeferredPipeline_FrameGraph.cpp` | 录制耗时下降；输出逐像素一致 |
-| **T3.3** | PathTracing / Nanite 光栅段的并行录制评估与接入（Nanite 是 indirect + mesh shader，可能不适合按 draw 分块） | `PathTracingPipeline.cpp`、`NaniteRaster.cpp` | 逐项结论记录在案（含"不做"的理由） |
-| **T3.4** | 分块策略与 worker 数调优（按 draw 数 vs 按 index 数分块；避免小规模场景下并行反而变慢） | `ParallelRecordHelper.*` | 小场景（draw < 64）不退化；大场景（Sponza）线性加速 |
-
-**退出判据**：Lumen 场景（06.GILab）的 **CPU 录制耗时显著下降**（目标：16.4 ms → < 8 ms，12 线程可用），且 GPU 时间不变。
-
-### 阶段 4 · 编辑器与 ImGui 收口
-
-| 任务 | 内容 | 判据 |
-|---|---|---|
-| **T4.1** | ImGui 后端录制归属明确化：CPU 侧（`NewFrame`/面板/`Render()`）留游戏线程，`RenderDrawData` 在渲染线程执行（标准做法） | 编辑器 UI 正常、无竞态 |
-| **T4.2** | 消除 `RHI.h:163-169` 的 ImGui 专用后门（改为通过标准 RHI 抽象拿描述符池/渲染通道/命令缓冲） | 后门接口从 `IRHIDevice` 移除 |
-| **T4.3** | 面板对渲染数据的访问改为只读快照（Details/Stats/Viewport 拾取等） | 面板仍可用；无跨线程读 ECS |
-| **T4.4** | 着色器热重载：文件监控线程只发"重编译请求"，PSO/字节码替换在渲染线程执行（当前 `SHADER_HOT_RELOAD` 替换路径在主线程 `Poll()`） | 热重载仍生效；替换发生在渲染线程 |
-
-### 阶段 5 · 性能验收与调优
-
-| 任务 | 内容 | 判据 |
-|---|---|---|
-| **T5.1** | `ProfilerManager` 增加"游戏 / 渲染 / 等待（背压）"三段计时并输出到 Stats 面板 | 三段耗时可见 |
-| **T5.2** | 背压参数调优（帧在飞数、自旋时长、命令队列容量） | 稳态帧率不低于改前；空闲 CPU 占用 < 1% |
-| **T5.3** | 资源创建异步化（步 2）——**仅在实测有帧内创建需求时做** | 若不做，记录原因 |
-| **T5.4** | 文档更新：本文标记为已实现；`15.多线程架构与渲染实现分析.md` 补"渲染线程"一节 | 文档与代码一致 → ✅ **已完成（2026-10-09）**：本文头部性质改为"计划 + 实施记录"；15 已并入"渲染线程化实现情况"（§13–§21，原独立文档 24 合并而来），并修正其过期结论 |
-
----
-
-## 6. 验收指标
-### 最终验收（阶段 1 ①②③ + T2.2/T2.4）
-| 判据 | 结果 |
-| --- | --- |
-| 附录 B1 世界依赖（渲染期 / 加载期） | **0 / 0**（基线已归零；80 → 76 → 69 → 51 → 47 → 43 → 27 → 24 → 17 → 0） |
-| 组件指针依赖（渲染期 / 加载期） | **0 / 0**（18 → 13 → 0） |
-| 帧内同步 RHI 调用 / T0.7 资源持有者 | 378（含归属漂移，调用点未增）/ 277 |
-| 单测 | **399 例 / 71850 断言**全通过 |
-| 模式 0 vs 模式 1（06.GILab，120 帧 28 个转储目标） | 同批双跑 **0 像素**（模式 0）；模式 1 vs 模式 0 = 4539 像素（= 已知间歇底噪；多轮另测得 0 像素）；两模式各 28 个转储齐全；模式 1 归属断言 **0** |
-| 帧时间（模式 1 vs 模式 0） | 多轮实测 **+0.72% ~ +2.84%**，均在"不退化 >3%"预算内（成本 = 每帧一次握手；深度 ≥2 可去掉） |
-| T2.4 | 7/7 样例完成"两条渲染命令 + 按值载荷"改造；`06.GILab` 按引用捕获缺陷已修并验证；`06.GILab` 默认起真渲染线程，其余 6 个为按需（未测帧时间前不默认） |
-| T2.2 | `06.GILab` 的 `Acquire`/录制（含 ImGui 录制）/`Submit`/`Present`/`WaitIdle` 全部在渲染线程执行（由上述转储一致 + 零归属断言 + 归属违规反转实验共同佐证） |
-
-| 指标 | 现状（实测/推断） | 阶段 2 目标 | 阶段 3 目标 |
-|---|---|---|---|
-| 渲染所在线程 | 主线程 | **独立渲染线程** | 同左 |
-| 游戏 tick 与渲染 | 串行相加 | **并行（取较大者）** | 同左 |
-| CPU 录制耗时（Lumen 场景） | **16.4 ms** | < 12 ms | **< 8 ms** |
-| `vkQueueSubmit` 位置 | 主线程帧内 | 渲染线程 | 渲染线程 |
-| 主线程 RHI 调用 | 大量 | **0**（断言 + grep） | 0 |
-| GPU 空闲率 | 偏高（CPU 受限） | 下降 | 进一步下降 |
-| Validation 告警（含 sync） | 基线 | **零新增** | 零新增 |
-| 渲染输出一致性 | 基线 | 逐像素一致 | 逐像素一致 |
-| 空闲帧 CPU 占用 | — | < 1% | < 1% |
-
-> 一致性验收工具：`Tools/pt/dump_pt.ps1` + `Tools/pt/analyze_pt.py`、`Tools/gi/dump_gi.ps1`、`Tools/gi/*check.ps1`（详见 [22.开发与验证手册.md](../HugEngine引擎介绍/22.开发与验证手册.md) §5/§7）。
-
-> **阶段 0 实测数字（2026-09-24，multi_thread 分支，`06.GILab` Cornell Box，121 帧，样例自测每帧均值）**：
->
-> | 指标 | 单线程渲染 | 渲染线程壳（`HE_RENDER_THREADING_MODE=1`） | 变化 |
-> |---|---|---|---|
-> | 墙钟 / 帧 | 465.190 ms | 465.143 ms | −0.01% |
-> | CPU 侧 / 帧 | 465.620 ms | 465.526 ms | −0.02% |
-> | 管线 `Render` / 帧 | 464.057 ms | 464.279 ms | **+0.05%**（判据：不退化 > 3%） |
-> | 转储一致性 | 28 个目标逐位相同（关掉已知 Lumen 噪声源后） | 同左 | 0 差异 |
->
-> 说明：这两次运行都是**壳模式**（命令在同一线程执行），因此这里的差值只反映"入队 + 发布 + 回收票据"
-> 的开销；真正把渲染搬到另一根线程是阶段 2，届时"游戏 tick 与渲染并行"才会体现在墙钟帧时上。
-
-> **阶段 0 / 1 累计实测（截至 2026-09-24，`multi_thread` 分支）**
->
-> | 项 | 数字 | 说明 / 复现 |
-> |---|---|---|
-> | 单测规模 | **384 例 / 71703 断言全通过** | 起点 331 例 / 71291（阶段 0 之前） |
-> | 阶段 0 输出一致性 | 28 个转储目标**逐位相同** | 关掉已知噪声源（`HE_LUMEN_PROBE_FILTER=off`），单线程 vs 渲染线程壳 |
-> | 阶段 0 帧时间 | 管线 `Render` **+0.05%**（判据：不退化 > 3%） | `06.GILab` 121 帧、样例自测每帧均值 |
-> | 附录 B1 世界依赖 | 渲染期 **82** 处 / 加载期 15 处（目标 = 渲染期 0） | `Tools/check_threading.py --world-deps`；快照层在白名单内 |
-> | T0.7 资源持有者 | **277** 处 / 76 个文件（只允许下降） | `Tools/check_threading.py --handles` |
-> | 帧内同步 RHI 调用 | `Engine/Render` **376** 处、`Samples` **127** 处 | `Tools/check_threading.py` + §13 附录 D |
-> | 全帧转储噪声底噪 | **≈ 4.5k 像素**（同二进制两趟） | 见 §9 T1.3a；因此单条路径迁移改用"参考实现 + 逐位比较"判据 |
->
-> 判据口径的两点提醒（都已写进 §9）：① 迁移类改动一律用**旧实现逐行转写 + `memcmp` 逐位比较**
-> （全帧转储在单条路径尺度上不可判定）；② 闸门基线（B1 82、持有者 277）是**上限**，随收敛手动下调。
->
-> **端到端复核（2026-09-24，阶段 1 收尾时的绿灯基线）**：7 个目标（`HugEngineTests` / `06.GILab` /
-> `07.Nanite` / `03.Sponza-Forward` / `05.Sponza-PathTracing` / `02.Cube` / `04.Sponza-Deferred`）
-> 全部编译通过；单测 **384 例 / 71703 断言**；两项闸门都在基线（B1 渲染期 82、持有者 277）；
-> `acceptance_sweep.ps1 -OnlyNanite` **PASS**（两类 pass 指纹 `1C15AB72E688B530` / `750CC247BF8B9C3D`
-> 未变，CULL DIFF / PIC CMP / TAKEOVER CMP 全过，`nanite_leak=0`）⇒ 阶段 0 与本阶段改动**未破坏既有验收**。
->
-> **第二次端到端复核（2026-09-24，E-2② + E-3 半程之后）**：7 个目标全部编译通过；单测
-> **390 例 / 71750 断言**；两项闸门仍在基线（B1 渲染期 82 / 持有者 277）；
-> `acceptance_sweep.ps1 -OnlyNanite` **PASS** 且两类指纹**完全未变**；`06.GILab` 冒烟与
-> E-2② 之前的转储逐位对比 = **4539 像素**（与同二进制噪声底噪同量级）⇒ 骨骼矩阵改走快照、
-> 材质映射唯一化、收集侧算材质这三项改动**均无可测回归**。
-
-> **第三次复核：§15.1 第①段（实例缓冲状态搬迁 + 实例数据进快照）之后（2026-10-09）**
->
-> | 项 | 数字 | 说明 / 复现 |
-> |---|---|---|
-> | 构建 | 7 个目标全绿（`HugEngineTests` / `02.Cube` / `03.Sponza-Forward` / `04.Sponza-Deferred` / `05.Sponza-PathTracing` / `06.GILab` / `07.Nanite`）+ `07.AISamples` | 无 `error C` / `error LNK` |
-> | 单测规模 | **397 例 / 71829 断言全通过** | `build\bin\Release\HugEngineTests.exe` |
-> | `06.GILab` 冒烟 | 同二进制双跑 **0 像素**（逐位一致） | `HE_LUMEN_PROBE_FILTER=off`；告警行 42 → 42 |
-> | `02.Cube` 实例化实跑（Forward + Deferred） | GPU 剔除读回与 CPU 复算**逐帧相等**（4820/4820、4839/4839）；SSBO 只建一次后原地复用（退役恒 0）；`VUID=0` | 唯一含实例化网格的样例；见 §9 T1.5 第①段 |
-> | 帧内同步 RHI 调用 | **380**（376 → 380，**口径漂移，非新增调用**） | `Tools/check_threading.py`；理由见 §9 T1.5 第①段"口径说明一" |
-> | 附录 B1 世界依赖 | 渲染期 **78** / 加载期 13（80 → 78，**行合并少计一行，非进展**） | 同上"口径说明二"；基线仍留 80 |
-> | 组件指针依赖 | 渲染期 **18**（不变） | 第②段（`DrawItem::mesh` 去指针）才会真正下降 |
-> | T0.7 资源持有者 | **277** / 75 个文件（不变） | 基线 277 |
-> | `acceptance_sweep.ps1 -OnlyNanite` | **PASS**：两类指纹 `1C15AB72E688B530` / `750CC247BF8B9C3D` **未变**，CULL DIFF / PIC CMP / TAKEOVER CMP 全过，`vuid` off=41 / on=42（新增类型 0） | 端到端回归确认 |
->
-> **本段顺带修掉一个隐藏缺陷**：三条管线的 `CollectLights` 原先在帧中调用 `m_Snapshot.Clear()`，
-> 会连带抹掉同帧已填好的 `draws`/`skinMatrices`/`instances`。蒙皮消费侧有"退回组件数据"的兜底
-> （所以 E-2② 的快照路径实际没被走到、也没被发现），实例化没有兜底 ⇒ 表现为"一个实例都不画"。
-> 这个问题是**先有鸡还是先有蛋**的典型：它由第①段引入的"无兜底消费侧"暴露出来，属既有缺陷。
->
-> **未做**：第②③段（`DrawItem` 去指针 / 帧入口收快照 ⇒ B1 归零）与 T2.4/T2.2。
-
-> **第四次复核：§15.1 第②段（`Prepare` 收快照 + `DrawItem` 去指针）之后（2026-10-09）**
->
-> | 项 | 数字 | 说明 / 复现 |
-> |---|---|---|
-> | 构建 | 7 个目标全绿（`HugEngineTests` / `02.Cube` / `03.Sponza-Forward` / `04.Sponza-Deferred` / `05.Sponza-PathTracing` / `06.GILab` / `07.Nanite`） | 无 `error C` / `error LNK` |
-> | 单测规模 | **398 例 / 71832 断言全通过** | +1 例（两类网格的 `bInstanced` 标记） |
-> | `06.GILab` 冒烟 | 同二进制双跑 **0 像素**；**与第①段二进制逐位对比 0 像素**（28 个转储目标全一致） | `HE_LUMEN_PROBE_FILTER=off` |
-> | `02.Cube` 双管线实跑 | Forward 26 draws / 8150 tris、实例可见 4820 = CPU 复算；Deferred 首帧实例化日志齐全、可见 4839；`VUID=0` | Deferred 比 Forward 少 1 条 = 贴花卡片被正确排除 |
-> | 组件指针依赖 | 渲染期 **18 → 13**（只剩 `RTPass`）；基线 18 → **13** | 闸门首次真实下降（第②段的本段判据） |
-> | 附录 B1 世界依赖 | 渲染期 **78 → 76**；基线 80 → **76** | `SceneRenderer::Prepare` 的声明 + 定义 |
-> | 帧内同步 RHI 调用 / 资源持有者 | **380** / **277**（均不变） | —— |
->
-> **顺带修掉一处口径缺口**：`DeferredPipeline::BuildObjects` 原先用默认选项（不排除贴花卡片），
-> 而 GBuffer 消费侧靠 `Prepare(..., excludeDecals=true)` 排除 —— `Prepare` 改吃快照后这个口径
-> 只能由收集侧决定，否则贴花卡片会既被投影又被当普通网格画进 GBuffer，并与 `GPUScene` /
-> `MeshBatcher` 的集合错位（三者 `objectIndex` 按顺序对齐）。
->
-> **未做**：第③段（帧入口收快照 ⇒ B1 归零，含 `RTPass` 的 13 处组件指针）与 T2.4/T2.2。
-
----
-
-## 7. 风险与回退
-
-| 风险 | 触发征兆 | 缓解 | 回退 |
-|---|---|---|---|
-| **R1 数据竞争（快照不完整）** | 画面偶发闪烁/物体跳跃；TSan 或 `--sync-validation` 告警 | 阶段 1 强制"双跑比对"；快照字段评审；把"渲染是否还需要读世界"做成 grep 断言 | `enableRenderThread=false` |
-| **R2 资源生命周期**（渲染线程仍在用而游戏线程已释放） | 校验层 "object was destroyed"；偶发访问违例 | 全部释放走 `FrameRetireQueue`（已有）；新资源创建经 `ResourceCreationService` 统一登记 | 同上 |
-| **R3 帧延迟增加**（多一帧缓冲） | 输入延迟主观变差 | 帧在飞数保持 3；必要时提供"低延迟模式"（帧在飞 2） | 降帧在飞数 |
-| **R4 性能反而退化**（线程切换/背压抖动） | 帧时间方差变大 | 命令队列整帧批量交接；空闲用条件变量而非自旋；阶段 0 的壳模式先量基线 | 关开关 |
-| **R5 调试困难**（RenderDoc 时序错位） | 抓帧时命令与代码对不上 | 保留 `r.Debug.DrawMarker`（`Engine.h:22`）；渲染线程内打帧边界 marker | — |
-| **R6 ImGui 竞态** | 编辑器偶发崩溃/花屏 | 阶段 4 才动 UI；期间 UI 与场景同在渲染线程录制 | 编辑器单独走旧路径 |
-| **R7 范围蔓延**（顺手加 RHI 线程/多帧并行） | 阶段 2 迟迟不收敛 | **本文 §1.4 明确不做**；任何扩展先开新文档 | — |
-
-**总开关**：`EngineConfig::renderThreadingMode` 必须始终可回退到 `RenderThreadingMode::SingleThreaded`（默认值），
-且三种模式共享同一套快照与命令队列代码（差异只在"谁来消费"）。
-> **实现口径变更（2026-09-24，T0.5 落地时）**：原方案写的是布尔 `enableRenderThread`；实施时改为**三态参数**
-> `RenderThreadingMode{SingleThreaded, RenderThread, RenderThreadAndRHI}`。理由：该参数同时决定 §12 附录 C 的
-> 三线程升级路径，一次定清可以避免以后再改配置语义；且"关 = 就地执行 / 开 = 另一根线程执行"这种两段式开关
-> 本就在 §12.8 的 A2 里要再引一个 `enableRHIThread`，改成三态后单参数即可覆盖三种形态。
-> 运行期入口：`SetRenderThreadingMode()` / 环境变量 `HE_RENDER_THREADING_MODE`（`0|1|2` 或名称；非法值只告警、保持原模式，不静默退回）。
-
-### 7.1 三种模式的**当前**功能状态（2026-09-24 按代码核实，务必不要误读）
-
-> **一句话**：三种模式里**只有单线程是完整可用的**；另外两种目前只是"能选、能被读到"，
-> **选了之后画质与行为与单线程一致，并没有真的并行**。阶段 0 的验收判据正是在这种"壳模式"下测的
-> （28 个转储目标逐位一致、管线 `Render` +0.05%），**不构成"多线程已工作"的证据**。
-
-| 模式 | 现状（2026-10 更新） | 证据 / 缺口 |
-|---|---|---|
-| `SingleThreaded`(0) | ✅ **完整可用**（唯一回退态） | —— |
-| `RenderThread`(1) | ✅ **已实现并验证**（T2.1/T2.2/T2.4 落地） | 起真渲染线程、整帧 RHI 在它上面执行；模式 0/1 转储逐位一致、归属断言 0；`06.GILab` 曾默认此模式 |
-| `RenderThreadAndRHI`(2) | ✅ **已实现并验证**（A-2 + A-4） | 新增 `Render/Threading/RHIThread`（`ISubmitRouter` 实现 + 二级队列）：渲染线程只录制，`Submit`/`Present` 交给 RHI 线程（**唯一提交者**）；`ThreadAffinity` 增加"提交者"第三角色（`HE_ASSERT_SUBMIT_THREAD()`）；呈现参数在渲染线程捕获、`AcquireNextImage`/`WaitIdle` 先排空路由。**判据：06.GILab 模式 0 vs 模式 2 的 20 个 GI 转储目标逐字节一致、断言 0、VUID 与模式 0 相同、到第 40 帧墙钟 9.57 s vs 9.59 s**；`06.GILab` 现**默认**模式 2 |
-
-> **模式 2 的范围**：落地的是 §12 的 **A-2 + A-4**，交接单位是"已录制完成的命令列表"（渲染线程仍产 `vkCmd*`）。
-> **A-1（纯数据命令流）与 A-3（资源句柄化）仍未做**（见 §12.3），属"渲染线程零 API 调用"的严格形态。
-
-**三线程严格形态仍需做**：**A-1** 抽象 RHI 命令流（记录/执行分离）｜**A-3** 资源创建命令化 + 句柄化
-（改造面最大，200+ 处资源持有者）｜**A-5 收尾** ImGui/PSO/读回的正式命令化（当前用"`WaitIdle` 先排空路由"规避竞争）。
-
----
-
-## 8. 工作量与排期建议
-
-> **2026-10 重排（三线程已落地）见 §8.1**：原表保留为历史计划。三线程（A-2 + A-4）落地后优先级
-> 发生了变化 —— **"深度 >= 2"升为第一优先**（没有它，三线程只是"换一根线程串行"：实测三种模式
-> 帧率相同，因为样例仍是每帧严格握手）。
-
-| 阶段 | 内容 | 建议投入 | 依赖 |
-|---|---|---|---|
-| 阶段 0 | 地基（断言 + 队列壳 + 背压骨架） | 3~5 人日 | — |
-| 阶段 0 预埋 | T0.6 命令流契约 + T0.7 资源句柄化（**为 §12 的三线程升级留口**） | +5~8 人日 | 与阶段 0 同期 |
-| **（可选）三线程升级** | 仅做 A-1/A-2/A-3 三步（§12.8），**在阶段 2 之后才做** | **+6~12 人日**（已预埋）/ +15~30 人日（未预埋） | 阶段 2 起 |
-| 阶段 1 | 场景快照（核心） | **8~15 人日** | 阶段 0 |
-| 阶段 2 | 起渲染线程（设备/交换链/管线/样例/编辑器） | **10~18 人日** | 阶段 1 |
-| 阶段 3 | 并行录制推广 | 5~10 人日 | 阶段 2 |
-| 阶段 4 | 编辑器与 ImGui 收口 | 4~8 人日 | 阶段 2 |
-| 阶段 5 | 验收与调优 | 3~6 人日 | 阶段 3/4 |
-
-**建议顺序**：`阶段 0 → 阶段 1 → （阶段 3 可与阶段 2 并行验证）→ 阶段 2 → 阶段 4 → 阶段 5`
-理由：阶段 1（快照）是唯一**没有它就无法安全起线程**的环节，且它本身独立可交付（改善架构、不改变行为）。
-
-### 8.1 三线程落地后的重排（2026-10）
-
-> **2026-10-22 现状**：**P1 ✅ 完成**（timeline fence 读回，`27d5033`）、**P3 ✅ 完成**（T3.1 `5ba4705`、
-> T3.2 `ac496e2`；T2.3 有证据地推迟到 A-3）、**P2 部分完成**（L1 契约/翻译 `9a294e7`、L2 提交管道
-> `9afe25c`、L3 前置命令 `0b8afe3`；**L3 已撤销**——论证见 §12.11 与 `6fa349a`；**L4-3 是 all-or-nothing
-> 的独立项目**，见 §12.12 / `ffb5be8`）。
-> 另有 **L4-1/L4-2 完成**：帧外壳（acquire / present / Begin / End / Submit）已收口到
-> `rhi::FramePresenter`（`cfaabe8`、`b9e8c3d`、`f1419bd`、`a0aa1bd`）。
-> A-3 已推进 **19 批**（见 §16 的提交清单与剩余清单）。
-
-**先重新分析：哪些结论变了、哪些没变。**
-
-| 原判断 | 现在的实际 |
-|---|---|
-| 三线程是"可选升级，阶段 2 之后再说" | **已落地**（A-2 + A-4）：模式 2 = 游戏线程 + 渲染线程 + RHI 线程（唯一提交者），`06.GILab` 默认它；判据是 20 个 GI 转储逐字节一致 / 断言 0 / VUID 与模式 0 相同 |
-| "T2.6 是分水岭" | **仍成立，但含义变了**：分水岭不再是"要不要为将来留口"，而是"**要不要把已经存在的第三根线程真正用起来**" |
-| 阶段 3 可与阶段 2 并行 | 仍成立，但排在"深度 >= 2"之后才有意义（否则帧率不变，优化无处体现） |
-| （若有"线程化会提帧率"的期待） | **不会**：三模式实测同帧率（每帧 `SubmitAndWait` 严格握手 ⇒ 关键路径串行）；收益必须靠深度 >= 2 |
-
-**新顺序（按"收益 / 依赖 / 风险"排）**
-
-| 优先级 | 任务 | 为什么在这个位置 | 判据 |
-|---|---|---|---|
-| **P0** | **深度 >= 2**：每飞行帧命令缓冲 + 去掉命令 1 的每帧握手（改成队列背压）+ 06.GILab 的 `NextFrame`/装配/阴影驱动搬进命令 | 三线程已就位，"提交不再阻塞录制"这一收益**只有去掉握手才拿得到**；这也是轻帧样例（02.Cube）帧时间不达标的解法 | 模式 0/1/2 转储逐位一致；模式 2 vs 0/1 的**游戏线程等待时间**下降、帧时间不退化 >3% |
-| **P0（并行）** | **T5.1 Profiler 三段计时**（游戏 / 渲染 / 等待） | P0 的收益没有读数就判不了；代价很小 | Stats 面板出现三段；读数与墙钟一致 |
-| **P1** | **A-5 读回的正式命令化** | ⚠ 先按实测修正了口径：06 里 `WaitIdle` 只出现在**诊断路径**，稳态帧循环没有读回 ⇒ 收益低，按"清理项"做。**✅ 已完成**：dump 读回改成 **timeline fence**——录制侧给本帧挂 `SetTimelineSignal`（句柄在拥有线程上创建），读取侧 `router->FlushAndWait()`（模式 2 让 RHI 线程先提交）+ `WaitForFence`（只等那一次提交），不再设备级 `vkDeviceWaitIdle` | 转储 20/20 逐字节一致、无新增 VUID ✓ |
-| **P2** | **T2.6 + A-1 合并**：`RenderThreadContext` 从"RHI 唯一出口"升级为"**只吐命令流**" | A-1 是 T2.6 的完成形态；`RHICommand` 契约已在 T0.6 预埋，越晚做代价越高 | `RenderThreadContext` 不再暴露 device（grep 断言）；三模式转储一致 |
-| **P3** | **T3.1 + T3.2**（✅ 已完成）+ **T2.3**（推迟到 A-3）：抽 `ParallelRecordHelper` + Deferred 接入并行录制 | 文档原话"T2.3 与 T3.2 应合起来排期"（避免先搬线程再为并行录制改一遍）；T3.1 先抽公共件 | T3.2 录制耗时下降、输出逐像素一致 |
-| **P4** | **T3.3 / T3.4**：PT/Nanite 并行录制评估、分块与 worker 数调优 | 依赖 T3.1 的公共件；Nanite 可能"评估后不做"，允许只记结论 | 结论在案；小场景（draw < 64）不退化 |
-| **P5** | **T2.5 + T4.1~T4.4**：编辑器主循环 + ImGui 归属 / 去后门 / 面板只读快照 / 热重载替换 | 编辑器侧是三线程之外的最后一块；样例侧 T4.1 已完成 | 编辑器 UI 正常、无跨线程读 ECS、后门接口从 `IRHIDevice` 移除 |
-| **P6** | **T5.2 / T5.3**：背压参数调优、资源创建异步化（可选） | 调优必须在 P0/P1 有读数之后 | 稳态帧率不低于改前、空闲 CPU < 1% |
-| **P7** | **A-3 资源句柄化**（分批） | 面最大（200+ 处持有者），是 A-1 严格形态的前置；**单独排期**，不做完不影响前三线程收益 | 每批：编译 + 单测 + 三模式转储一致 |
-
-**与旧排期的差异（一句话）**：旧顺序把"三线程"放在最后当可选项；新顺序是"**三线程已就位 ⇒ 立刻兑现它的收益（深度 >= 2 + 读回命令化），再回头补记录/执行分离（T2.6 + A-1），最后才是推广与编辑器**"。
-
-**仍然偏后的判断**：A-3 句柄化排在最后不是因为它不重要，而是因为它**不阻塞任何前三线程收益**，且改造面最大、最容易和生产优化互相干扰。
-
----
-
-### 12.11 A-1 落地设计：必须是 **pass 级**，不是 draw 级
-
-> 本节记录 2026-10 试点时的结论。契约与翻译层已落地（`RHI/RHICommandList.h` 的类型/载荷、
-> `RHI/RHICommandReplay.{h,cpp}`），但接线的粒度推翻了原设想。
-
-**为什么 draw 级试点不成立**（三条都来自代码事实）：
-
-1. 引擎里**所有逐 draw 录制都发生在 render pass 内**（`BeginOffscreenPassMRT` / `BeginRenderPass` 之后）。
-   而 secondary 命令缓冲**不能被 RHI 线程"回放"**——它已经是录制好的命令缓冲，`ExecuteSecondary`
-   必须在拥有线程上调用。⇒ 把 draw 记进命令流、再由 RHI 线程翻译，只能落到 **primary 列表**上。
-2. primary 列表上的逐 draw 录制只存在于 **MTCR 关闭的串行路径**（`m_MultiThreadRecord == false`）。
-   正常运行时 MTCR 默认开 ⇒ 该路径**不被转储覆盖**，用它当试点等于"改了一条没有判据的代码"。
-3. GBuffer 也一样：CPU 路径刚接并行录制（T3.2）⇒ 逐 draw 进 secondary；GPU 路径是 indirect。
-
-**结论**：A-1 的最小可验证单元是 **pass 级**——把"一个 pass 的完整内容"命令化：
-
-| 需要新增/使用的命令 | 说明 |
-|---|---|
-| `BeginPass` / `EndPass`（新） | 携带 pass 描述（附件/清屏/视口/`allowSecondary`），执行端据此开/关 pass |
-| 现有 `SetPipeline` / `SetDescriptorSet` / `SetPushConstants` / `SetVertexBuffer` / `SetIndexBuffer` / `DrawIndexed` | pass 内的绘制序列（已落地 ✓） |
-| 现有 `PipelineBarrier` / `CopyBuffer` | pass 之间/之外的资源转换与拷贝 |
-| 现有 `MarkSubmitBoundary` | 一帧的提交边界（RHI 线程在此之后提交） |
-
-**执行端模型**：RHI 线程按 `MarkSubmitBoundary` 切帧，顺序翻译；遇到 `BeginPass` 就开 pass、
-后续 draw 直接录进 primary（**一次翻译、零往返**），`EndPass` 关闭。这样"渲染线程零 Vulkan 调用"才成立，
-且 secondary 并行录制（MTCR）保持现状——它本就发生在 RHI 拥有线程之外、由 `RecordThread` 授权。
-
-**改动面（6 处）**：`ISubmitRouter::RouteSubmit` / `IRHIDevice::Submit`+`ExecuteSubmit`（加
-`RHICommandList* stream = nullptr`，不破坏样例调用点）→ `VulkanDevice` 透传 → `RHIThread` 在
-`ExecuteSubmit` 之前 `ReplayCommandStream` → `ForwardPipeline`（或 GBuffer）的 **pass 函数整体**改成 append →
-判据。
-
-**判据**：模式 0/1/2 转储 **20/20 逐字节一致**（冻结配置 A/B）、0 新增 VUID、断言 0；外加
-**grep 断言**：渲染线程调用的 pass 函数体内不再出现 `cmd->vkCmd*` 风格的绑定/绘制调用（只剩 append）。
-
-**已知风险**：pass 描述里含附件句柄与清屏值（须能进命令流）、barrier 的"谁等谁"语义在延迟翻译后
-仍要对（现有 `m_ResourceStates` 记账发生在录制期 ⇒ 需要把它一起搬进命令流或改为执行期推导）、
-延迟销毁队列的时序。
-
-**可达性（2026-10 追加，重要）**：即使 pass 级改造做完，也**到不了**"渲染线程零 Vulkan 调用"——
-因为帧的外壳仍是 API 调用：`VulkanCommandList::Begin/End`（命令缓冲生命周期）、
-`AcquireNextImage`、`Submit`（现在已交给 RHI 线程）、以及窗口 resize 时的重建。要把它们也命令化，
-等于把**整个帧**都变成命令流（交给 RHI 线程从头执行）——那时渲染线程才真的"只 append"。
-
-因此 A-1 的正确分层是：
-
-| 层 | 内容 | 现状 |
-|---|---|---|
-| L1 契约 + 翻译层 | `RHICommand`/`RHICommandList` + `ReplayCommandStream` | ✅ 已完成（`9a294e7`） |
-| L2 提交管道 | `Submit/RouteSubmit/ExecuteSubmit` 携带命令流，RHI 线程提交前翻译 | ✅ 已完成（`9afe25c`） |
-| L3 pass 级命令化 | `BeginPass`/`EndPass` + pass 内绘制序列进流 | ⬜ 未做（本文 §12.11 的 6 处改动） |
-| L4 帧级命令化 | 命令缓冲 Begin/End、Acquire、Present、重建也进流 ⇒ 渲染线程真正零 API | ⬜ 未做；这是"零 Vulkan 调用"的**必要条件**，也是 A-3 句柄化的直接消费者 |
-
-结论：**P2 的"零 Vulkan 调用"目标在 L3+L4 都完成前不应声称达成**；本阶段的合法成果是 L1+L2（已落地并
-按"行为中立"验收），以及 L3/L4 的设计与判据。
-
-### 12.12 L4 盘点（2026-10）与分步计划
-
-**盘点一：剩余 `unique_ptr<IRHI*>` 持有者约 180 处**（`grep -c 'std::unique_ptr<rhi::IRHI'` 于
-`Engine/**/*.h`）。分布（按数量级）：Lumen 最多（`LumenScene.h` 单文件 40+），其次 Nanite
-（`NaniteCull/NaniteRaster/NaniteScene/NaniteStream`）、`RTPass.h`、`SSAO`、Shadow 三种技术、
-`GBufferRenderer.h`、`LightingPass.h`、`DecalPass.h`、`InstanceCuller` 等。
-
-⇒ **A-3 是长期路线**（与文档自估的 15~30 人日一致），**不应阻塞 L4**：L4 只依赖"帧外壳"的
-命令化，不依赖把全部资源改成句柄。
-
-**盘点二：`AcquireNextImage` / `Present` 的调用点集中在样例的渲染命令里**，7 个样例各一对、
-形状一致（`swapchain->AcquireNextImage()` → 录制 → `swapchain->Present(vsync)`），另有失败分支
-（`frameAborted` / `continue`）。
-
-**L4 分步（每步一提交、同一套判据）**：
-
-| 步 | 内容 | 判据 |
-|---|---|---|
-| **L4-1** | **把 acquire/present 收口到引擎侧**（样例不再直接持有 swapchain 的帧序操作）：新增一个 `IFramePresenter`（或 `RHI` 层的 `BeginFrame/EndFrame`），内部封装 `AcquireNextImage` + `Present` + 失败分支；7 个样例机械替换 | 20/20 转储一致、0 新 VUID、断言 0 |
-| **L4-2** | **命令缓冲生命周期收口**：`Begin/End` 从样例移到引擎（与 L4-1 同一入口），样例只调 `BeginFrame/Record/EndFrame` | 同上 |
-| **L4-3** | **整帧命令流**：L4-1/L4-2 之后，帧外壳的每个 API 都变成命令流里的一条（L1/L2 已就绪），RHI 线程自己 `Begin → 翻译 → End → Submit → Present` ⇒ **渲染线程真正零 Vulkan 调用** | 同上 + grep 断言"渲染线程路径不再出现 `vkCmd*`/`vkAcquire*`/`vkQueuePresent`" |
-
-**为什么先 L4-1 而不是继续 A-3**：L4-1 只动 14 个调用点、形状一致、判据现成；而 A-3 的 180 处
-持有者需要按模块分批（每批都要 A/B），更适合作为并行长期路线。两者在 L4-3 汇合（那时帧外壳的
-资源创建才真正需要句柄）。
-
-**L4-3 的可行性结论（2026-10，做完 L4-1/L4-2 之后）——它是 all-or-nothing**
-
-L4-3 的正确形态是：**RHI 线程**执行 `BeginCommandBuffer → 翻译整帧命令流 → EndCommandBuffer →
-Submit → Present`，渲染线程只 append。由此推出一个硬约束：
-
-> **同一张命令缓冲不能既由渲染线程录制、又由 RHI 线程录制。**
-
-因为 `vkCmd*` 必须落在 `Begin` 与 `End` 之间，而 `End` 之后**只允许** `EndCommandBuffer` 一次；
-把"部分 pass 命令化、其余留给渲染线程直录"混在一起，必然出现"渲染线程在 RHI 线程的 Begin/End
-之间插命令"的竞态 ⇒ 非法。⇒ **L4-3 没有增量做法**：要么整帧全部变成 append（渲染线程零 Vulkan 调用
-成立），要么维持现状。
-
-代价量化（按现有代码）：`Deferred` 路径的 `RenderGraph` 各 pass（GBuffer/Lighting/SSR/SSAO/GI 合成）、
-`Forward` 路径的 HDR pass 内 10 个调用点、阴影三种技术、后处理链、`FlushComputeWork`、以及
-`RenderGraph::Execute` 自身对 `IRHICommandList*` 的贯穿 —— 粗略 50+ 个录制点，且每个都要先有
-`BeginPass`/`EndPass`/`ExecuteSecondary`/`ExecuteIndirect` 等命令形态（L3 里已部分备好）。
-
-**结论与建议**：
-- L4-1/L4-2 已经把"帧外壳"收口到 `FramePresenter`（acquire/present/Begin/End/Submit 都在一处），
-  这是 L4-3 的**必要前置且已完成**；
-- L4-3 本身应作为**独立项目**排期（预计数周），不适合与 A-3 混在做增量批次里；
-- 在 L4-3 之前，最有价值的增量工作是继续 **A-3 的 180 处持有者**（每批 1 次 A/B、可随时停下），
-  因为它同时降低 L4-3 的难度（帧内创建不再需要跨线程句柄往返）。
-
-#### L3 执行清单（Forward 非 RG 路径，按调用点）
-
-选 Forward 的 HDR pass 作首个 L3 试点：它的结果**在转储里可见**（`hdr.f16` 是 20 个目标之一），
-且这条路径不走 RenderGraph（不需要改 RG 的 `Execute` 签名）。需要 commandize 的调用点：
-
-| # | 调用点 | 现状 | 要 append 的命令 |
-|---|---|---|---|
-| 1 | `ForwardPipeline::BeginHDRPass` | `cmd->BeginRenderPass(desc)`（2 附件 + 清屏 + w/h） | `BeginPass`（新；附件/清屏值进 arena） |
-| 2 | `PrepareGI` → `GI_IBL::Render` / RSM | 若干 `SetPipeline`/`BindDescriptorSet`/`Draw` | 已有类型 + `SetVertexBuffer`/`SetIndexBuffer`/`DrawIndexed` |
-| 3 | `RenderSkybox` → `SkyboxPass::Render` | 1 次全屏 draw（`BindDescriptorSet` + `Draw`） | 同上 |
-| 4 | `RenderScene`（MTCR 分支） | `ExecuteSecondary` × N（次级列表由 worker 录制） | `ExecuteSecondary`（新；载荷 = 列表指针） |
-| 5 | `RenderScene`（indirect 分支） | `SetVertexBuffer`/`SetIndexBuffer`/`BindDescriptorSet` + `ExecuteIndirect` | 已有类型 + `ExecuteIndirect`（新） |
-| 6 | `RenderScene`（实例化段） | 同 5，`DrawIndexed(count)` 带实例数 | `DrawIndexed` 载荷加 `instanceCount` |
-| 7 | `EndHDRPass` | `cmd->EndRenderPass()` + 屏障 | `EndPass` + 现有 `PipelineBarrier` |
-| 8 | `RenderToneMapPass` | 一次 pass + 1 draw | 同 1/3 |
-| 9 | AA（`m_AntiAliasing->SetInput` + `Render`） | 一次 pass + 1 draw | 同 1/3 |
-| 10 | 帧外壳（`Begin/End`、`Acquire`、`Submit`、`Present`） | —— | **属 L4**，不在本试点范围 |
-
-新增命令类型共 **4 个**：`BeginPass`、`EndPass`、`ExecuteSecondary`、`ExecuteIndirect`（+ `DrawIndexed`
-载荷补 `instanceCount`），全部 ≤64B 或走 arena；翻译层各加一个 `case`。
-
-**判据**：模式 0/1/2 冻结配置 A/B **20/20 逐字节一致**（`hdr.f16` 必须一致，否则说明 pass 描述有偏差）、
-0 新增 VUID、断言 0；外加 grep 断言：上表 1~9 号函数体内不再出现 `cmd->` 的 pass/绑定/绘制调用。
-
-**2026-10 追加（推翻上表：L3 单独不成立）**
-
-`VulkanCommandList::Submit()` 提交的是**已经 `EndCommandBuffer` 的**
-`m_CmdBuffers[m_FrameIndex]`（`VulkanCommandList_Submit.cpp:148`、`:161`）；而 L2 的翻译发生在
-`ExecuteSubmit`（= 提交之前、`End` **之后**）⇒ 命令会被追加到"已经结束的命令缓冲"后面 ⇒ **顺序错、且非法**
-（一旦有生产者就是硬错误，不是悄悄画错）。
-
-因此：
-
-1. **"只命令化某个 pass"（上表的 L3）在架构上不成立**：除非回放能发生在**录制位置**上，而那要求
-   渲染线程根本不碰命令列表、由 RHI 线程从头录整帧 = **L4**；
-2. **L2 的 `stream` 管道只在"整帧命令流"时才有意义**：那时 RHI 线程自己做
-   `BeginCommandBuffer → 翻译整帧流 → EndCommandBuffer → Submit`。⇒ 在 L4 落地前，
-   `stream` 应当**没有生产者**（保持 `nullptr`），否则会写出非法命令缓冲；
-3. 结论：**P2 的剩余部分整体等价于 L4（帧级命令化）**，而 L4 的直接前置是
-   **A-3 资源句柄化**（帧内创建必须命令化）+ `AcquireNextImage`/`Present` 命令化。
-   ⇒ 原计划里"L3 pass 级试点"**撤销**，改为 **L4 + A-3 的联合排期**；L1（契约/翻译）与 L2（管道）保留为
-   **L4 的既有基础设施**，并按"行为中立"验收（已验证：20/20 一致、无新增 VUID）。
-
----
-
-## 9. 附录 A：任务总表（可勾选）
-
-- [x] T0.1 线程归属断言（`ThreadAffinity` + `HE_ASSERT_RENDER_THREAD`）
-  - 落地：`Engine/RHI/RHI/ThreadAffinity.h`（原子拥有者 + 宏）；认领点 `CreateDevice`，注销点 `~VulkanDevice`；
-    断言点 `Shutdown` / `Submit` / `SubmitAll` / `SignalFenceOnQueue` / `WaitFenceOnQueue` /
-    `AcquireNextImage` / `Present` / `VulkanCommandList::Begin` / `BeginSecondary` / `BeginLightweight` / `End` / `Submit`。
-  - 实测（2026-09-24，multi_thread 分支）：单测 **334 例 / 71303 断言全通过**（含新增的
-    `TestThreadAffinity.cpp` 三态用例与 `TestThreadAffinityDisabled.cpp` 关闭路径用例）；
-    `06.GILab` 实跑 120 帧零断言触发、28 个转储正常、`vuid_lines=42` 无新增。
-- [x] T0.2 帧内同步 RHI 调用清点清单
-  - 产出 **§13 附录 D**：`Engine/Render` 帧内 **376** 处 / 加载期 247 处，`Samples` 帧内 **127** 处；
-    按 `SWAPCHAIN / WAIT / CREATE / MAP / UPLOAD_DESC` 分类，每类给出处置与所属阶段、代表 `file:line`
-    与最集中的文件（方向与量级已按文件聚合排序）。
-  - 配套脚本 `Tools/check_threading.py`（`--detail` 明细、`--root` 换目录、`--gate` 闸门），
-    是附录 B 各阶段退出判据的可执行版本。
-- [x] T0.3 `RenderCommandQueue` + `RenderThread` 壳实现（行为等价）
-  - 落地：`Engine/Render/Threading/{RenderThreadContext.h, RenderCommandQueue.h/.cpp, RenderThread.h/.cpp}`
-    （**RHI-free**，单测直接编译这几个 .cpp）+ `Samples/06.GILab` 接线 —— 模式 ≠ 单线程时，每帧的
-    `curPipeline->Render(...)` 经 `BeginFrame/Enqueue/Publish` 交给 `FrameScheduler::SubmitAndPump()`
-    在**调用线程**上消费；单线程模式走旧路径，两条路径共用同一份渲染代码。
-  - 判据实测（2026-09-24）：关掉已知噪声源（`HE_LUMEN_PROBE_FILTER=off`）后，单线程与壳模式两次运行的
-    **28 个转储目标全部逐位相同（`total differing pixels = 0`）**；默认滤波下差异**仅**出现在已知的
-    Lumen 屏幕探针家族（`lumen_irradiance` + 4×`prov6_*` + `hdr`），与本次改动无关。
-  - 遗留：其余 6 个样例与编辑器的接线随 **T2.4**（同源改造：循环体 → 投递 + `SubmitFrame`）。
-  - 已知并记录的偏离：阶段 0 的命令载荷仍按**引用**捕获，铁律 2 要求的"按值捕获"要等阶段 1 的
-    `FrameSceneSnapshot` 把渲染输入变成不可变数据后才能真正满足（T1.2/T2.4）。
-- [x] T0.4 帧票据与背压骨架
-  - 落地：`FrameTicket`（帧号 + 槽位）、在飞计数（发布计入 / `RetireFrame` 递减并唤醒）、
-    背压两种语义 —— `SubmitFrameBlocking`（游戏线程**唯一**允许的等待点）与 `TrySubmitFrame`
-    （在飞满时拒绝并把该帧计入丢弃数）；观测项：已发布 / 已回收 / 丢弃 / 背压等待次数。
-  - 判据实测（2026-09-24）：单测把上限设为 1 ⇒ 第 2 次非阻塞提交被拒且 `DroppedFrameCount()==1`；
-    **阻塞提交在子线程上确实等到 `RetireFrame` 才返回**（轮询观测 + 背压等待计数 = 1），
-    即 T0.4 要求的"人为把上限设为 1 时能观察到游戏线程阻塞"有可测形态。
-- [x] T0.5 `EngineConfig::enableRenderThread` / `renderThreadSpinWaitUs`
-  - **实施口径**：改为三态参数 `RenderThreadingMode{SingleThreaded=0, RenderThread=1, RenderThreadAndRHI=2}`
-    （单线程渲染 / 游戏线程+渲染线程 / 游戏线程+渲染线程+RHI 线程），默认 `SingleThreaded`；
-    `EngineConfig::renderThreadingMode` + `renderThreadSpinWaitUs`（默认 0 = 不自旋，空闲不烧核），
-    并提供 `UsesRenderThread()` / `UsesRHIThread()` 判据。
-  - 落地：`Engine/Core/Core/RenderThreadingMode.h`（枚举 + 规范名 + 解析 + 进程级读写）、
-    `Engine/Core/Core/Engine.{h,cpp}`（配置字段 + `Initialize` 落地 + 环境变量覆盖 + 非法值告警）。
-  - 实测（2026-09-24）：单测 **341 例 / 71345 断言全通过**（新增 6 例：默认值、三态×判据真值表、
-    规范名、解析（数字/名称/别名/大小写）、非法输入必须 `nullopt`、进程级读写一致性）；
-    `06.GILab` 实跑三种配置的日志分别为 `渲染线程模式 = game+render+rhi（2）`、
-    非法值 `triple` → 告警并保持 `single-threaded`、不设环境变量 → `single-threaded（0）`，28 个转储正常。
-- [x] T0.6 **（预埋，见 §12）** RHI 命令流记录端契约 + `RHICommand` 载荷形态
-  - 落地：`Engine/RHI/RHI/RHICommandList.h`（头文件实现，**不接入生产路径**）：
-    `RHICommand`（类型擦除 + 64B 内联载荷 + arena 偏移）、`RHICommandType`（骨架代表值）、
-    `RHICommandList`（`Enqueue` / `EnqueueArena` / `AllocArena` / `MarkSubmitBoundary` / `Reset`
-    + 执行端读取用的 `PayloadAt` / `ArenaPayloadAt`，不匹配返回 nullptr 以便容错）。
-  - 7 例单测：内联按值拷贝与读回、64B 边界、错类型/越界读取为 nullptr、arena 不重叠与偏移读回、
-    **子对齐载荷的绝对地址对齐**、提交边界、`Reset` 复用不残留。
-  - 实测（2026-09-24）：单测 **356 例 / 71443 断言全通过**（改前 349 / 71383）。
-  - 【单测当场抓到的契约缺陷】初版用 `std::vector<u8>` 存 arena、只对齐**偏移量** ⇒ 绝对地址不保证
-    对齐（64B 用例量到 48）。已改为**固定容量、64B 对齐的块**（对齐建立在绝对地址上；容量耗尽即断言，
-    可增长块分配器随 §12 的 A-1 落地）。
-- [x] T0.7 **（预埋，见 §12）** 资源句柄化（`RHIBufferHandle` / `RHITextureHandle` + generation）
-  - 落地：`Engine/RHI/RHI/RHIHandles.h`（头文件实现）：两种句柄（`index == 0` 为无效、`generation` 代次）
-    + 句柄表 `RHIResourceTable<THandle, TResource>`（`Add` / `Get` / `Remove` / `LiveCount` /
-    `SlotCount` / `FreeSlotCount`）+ `RHIBufferTable` / `RHITextureTable` 别名。
-    **本阶段不强制迁移**任何现有持有者，`unique_ptr` 保持为兼容层（§12.5 的"渐进迁移"）。
-  - 为什么代次是关键：槽位会被回收复用，只有下标的句柄在复用后会**静默指向另一个资源**
-    （不崩、画面莫名错乱，最难查的一类 bug）。`Remove` 提升槽位代次 ⇒ 旧句柄一律解析为 nullptr，
-    错误立刻表现为"资源为空"。
-  - 6 例单测：登记/解析（下标从 1 开始）、`Remove` 后失效且幂等、**槽位复用后代次前进且旧句柄
-    绝不指向新资源**、越界/伪造代次/跨表句柄一律 nullptr、多轮复用槽位不增长、两种句柄互不干扰。
-  - 实测（2026-09-24）：单测 **362 例 / 71495 断言全通过**（改前 356 / 71443）。
-  - grep 闸门已接入 `Tools/check_threading.py --handles`：实测 **277 处 / 76 个文件**（正是 §12.5
-    所说"200+ 处持有者"）。该基数是**上限而非目标** —— 迁移可以渐进，但**新增一处**即说明新代码
-    没走句柄，闸门会失败。
-- [x] T1.1 `FrameSceneSnapshot` 定义（与 `ShaderTypes.slang` 对齐 + `static_assert`）
-  - 落地：`Engine/Render/Threading/FrameSceneSnapshot.h`（值语义、无指针、RHI-free）：
-    `SnapshotDrawItem`（内嵌 `GPUObjectData` + `prevWorldMatrix` + `meshIndex`/`objectID`/
-    `visibilityFlags` + 间接绘制三元组）、`SnapshotLight`（**逐字段镜像** `GPULight`，
-    带 `ToGpu()` / `FromGpu()`）、`FrameSceneSnapshot`（帧号/槽位/相机/dt/视口/draws/lights/
-    skinMatrices/`sourceWorldVersion` + `Clear()` / `Reserve()` / `IsEmpty()`）。
-  - 两条硬约束写进文件头：① **只放值不放指针**（资源只放索引与 ID，由渲染线程自查表），
-    否则"交接后只读"是假的；② **布局与着色器同源** —— 小结构逐字段镜像 + 静态断言，
-    大结构直接内嵌 GPU 结构，杜绝两份字段定义漂移。
-  - 布局钉子（本任务的核心判据）：`SnapshotLight` 与 `GPULight` 的**大小与每个字段偏移**逐一
-    `static_assert`（只锁大小不够：字段互换位置时大小不变但着色器会读错）；
-    `SnapshotDrawItem` 锁"可平凡拷贝 + 16B 对齐"，`CameraData` 锁"值类型"。
-  - 实测（2026-09-24）：单测 **366 例 / 71530 断言全通过**（改前 362 / 71495）。
-  - 实现细节留痕：`ShaderTypes.slang` 必须在 `he::render` 命名空间内包含（与
-    `Pipeline/Material.h` 同一用法），否则 `float4` / `float4x4` 在全局作用域不可见。
-- [x] T1.2 `SceneSnapshotBuilder`（集中现有 Collect 遍历）—— ✅ 完成（光源/物体/环境/骨骼/粒子/天空盒/材质收集；详见 §9 正文与 §14 附录 E）
-  - **T1.2a 已完成（光源，2026-09-24）**：`Engine/Render/Threading/SceneSnapshotBuilder.{h,cpp}` ——
-    `BuildLights(world, sg, resolvers, snapshot)`，口径与 `CollectLights` 逐字段对齐
-    （遍历顺序 方向光→点光→聚光、关闭跳过、`kGPUMaxLights` 截断、色温叠加、物理模式**负范围/`-1` 标记**、
-    聚光归一化方向 + 内外锥角、阴影索引，且"未知类型也落一条"的旧行为一并保留）。
-    新增 `SceneSnapshotResolvers`（全局物理光开关 + 阴影索引回调），使快照层**不读全局 CVar、
-    不反向依赖阴影系统**，收集逻辑成为纯函数、可单测；`PhysicalLight.h` 的物理光判据拆出
-    "全局开关"重载，保证唯一判据。
-    单测 8 例，实测 **374 例 / 71574 断言全通过**。
-  - **T1.2b 已完成（物体收集，2026-09-24）**：`SceneSnapshotBuilder::BuildObjects` 集中
-    `GPUScene::Collect` 的首次全量遍历（组件类型顺序、无索引跳过、贴花排除开关、广告牌/文字的
-    相机对齐矩阵、世界 AABB、`objectID`、`visibilityFlags`，与 `FillObj` 逐字段对齐）；
-    单组件映射抽成模板 `CollectObjectItem<TComponent>` 以便单测（组件存储按精确类型分桶，
-    假组件无法进入遍历）。`SnapshotDrawItem` 增加 `materialIndex`（≠ `object.materialID`）。
-    实测：单测 **379 例 / 71666 断言全通过**。
-  - **T1.2c 待做（已查明设计阻塞点，2026-09-24）**：材质参数（`GPUObjectData` 的非矩阵/非 AABB 字段）
-    目前仍由 `SceneRenderer::Prepare(world, sg, camera, objectBuffer, excludeDecals)` 在**带视锥剔除的
-    渲染侧遍历**里填。查清后有 3 个必须先定的问题：
-    ① **`SceneRenderer` 有自己的第二套遍历**，且与 `GPUScene::Collect`/`BuildObjects` **口径不一致**：
-    它额外包含 `SplineMeshComponent`（样条网格），而后者不包含 —— **新发现的第 5 处收集口径漂移**
-    （前四处见 `SceneSnapshotBuilder.h`：Rect 光、点光方向、聚光归一化、shadowRadius）；
-    ② 它的 DrawList 元素携带 **`MeshComponent*` 指针**，而快照**不允许带指针** ⇒ 需要先有一个
-    **mesh 注册表**（`meshIndex` ↔ 顶点/索引缓冲 + 材质路径），把"指针"换成索引；这也是 §4.2 里
-    `SnapshotDrawItem::meshId` 的隐含前提；
-    ③ 材质填充依赖 **5 条纹理路径字符串**（决定 `textureMask`）⇒ 快照化的更简做法是在**收集侧**就跑
-    `FillObjectData`（纯计算），把**算好的 `GPUObjectData` 字段**放进快照（`SnapshotDrawItem::object`
-    生来就是这个用途），而不是把字符串搬进快照。
-    结论：T1.2c 应先定 **mesh 注册表**，再谈材质快照化；在此之前 `SceneRenderer` 保持现状。
-  - **E-1 已完成（mesh 注册表本体，2026-09-24）**：`Engine/Render/Threading/MeshRegistry.h`
-    （头文件实现）—— `MeshRegistryEntry` + `Register`（同 key 重复=更新，索引不变）/`Unregister`
-    （幂等、索引复用、旧索引解析为 nullptr）/`Find`（越界/已注销 ⇒ nullptr）/`Count`/`Clear`，
-    索引从 1 起（0 为哨兵）。头文件写明"只借不拥有""**禁止帧内注销**"两条纪律，并显式记录
-    **已知限制**：索引复用后旧索引会指向新条目 ⇒ 将来把条目换成带 generation 的 `RHIBufferHandle`
-    （与 §12 A-3 对齐）。单测 4 例；实测 **388 例 / 71729 断言全通过**。
-    下一步 **E-2**：骨骼上传改遍历快照的骨骼条目 + 用 `meshIndex` 从注册表取缓冲。
-  - **E-2 已完成（2026-09-24）**：
-    - 前置：`MeshComponent::meshIndex` 字段（注册时回填）；`CollectObjectItem` 透传它（+ 断言钉子）；
-      `MeshRegistryEntry::skinMatrixBuffer`（骨骼上传的**写入目标**，只登记顶点/索引缓冲不够）；
-      注册改为**每帧刷新**（骨骼缓冲会重建 ⇒ 一次性注册会留过期指针；`Register` 同 key = 更新、索引不变）
-      + 语义钉子测试；`SnapshotDrawItem::sourceEntity`（逐实体状态机的对齐依据）。
-    - 本体：`ForwardPipeline` 的骨骼循环按 `sourceEntity` 取 `m_Snapshot.skinMatrices` 切片作为**矩阵来源**，
-      三处使用点改用该切片、边界显式退回组件；**缓冲生命周期（脏标记/容量/扩建/bindless/退役队列）
-      完全不动**（属渲染侧资源管理，将来归 T2.3）。
-    - 为让快照在骨骼循环之前完整，`ForwardPipeline::Render` 增加了 `BuildObjects` 调用。
-    - 判据说明（如实）：该路径**没有转储 harness**（`03.Sponza-Forward` 无 dump 脚本），因此是
-      「编译 + 单测 + 同帧同源论证」；`BuildObjects` 先于该循环、中间无游戏 tick ⇒ 数据逐位相同。
-  - **E-3 已做一半（2026-09-24）**：① 把「组件 → `PBRMaterial`」10 项映射从 `SceneRenderer::Prepare`
-    抽成 `SceneSnapshotBuilder::MakePBRMaterial`（**唯一实现**，两侧共用，避免将来漂移），并加**逐字段
-    参考比对**测试（旧映射逐行转写）；② `CollectObjectItem` 用 `if constexpr (is_base_of_v<MeshComponent,…>)`
-    在**收集侧**调用 `FillObjectData(item.object, MakePBRMaterial(comp))` —— 材质字段在收集侧算完，
-    渲染侧因此不必拿 `MeshComponent*`，也不必把 5 条纹理路径搬进快照。
-    **E-3 后半待做**：`SceneRenderer::Prepare` 改为消费快照（`entry` 去掉 `MeshComponent*`、材质取
-    `item.object`、`DrawItem` 用 `meshIndex` 从注册表取缓冲；**剔除仍留渲染线程**），判据为
-    逐字段/逐位 + `06.GILab` 28 个转储粗筛。
-  - **E-4 已完成（口径统一为"修正"，2026-09-24，用户裁决 A）**：`SplineMeshComponent` 纳入
-    `SceneSnapshotBuilder::BuildObjects`（→ `GPUScene` → GPU 剔除/间接绘制），**插入位置与
-    `SceneRenderer::Prepare` 严格一致**（Decal 之后、实例化之前）。原漂移的两个后果：
-    ① `FillGPUScene` 按枚举顺序对齐 ⇒ 一边多一类/一边少一类会让**后续类型的 `objectIndex` 全部错位**
-    （致命）；② GPU 剔除覆盖不到样条网格。
-    **判据（如实）**：当前样例无样条网格 ⇒ 无法前后逐位对比；依据是"两处收集口径必须一致"这一硬约束。
-    **欠账**：一旦有样条网格内容，补一次逐位/逐像素复核（已在此处登记）。
-    回归检查：`06.GILab` 冒烟 4539 像素（底噪同量级）；单测 390 例 / 71750 断言。
-  - **渲染期剩余 World 读的登记与裁决（2026-09-24，T1.5 推进中发现）**：
-    天空盒已收敛（Deferred + Forward，见下）；以下两处**刻意暂缓**，因为直接改会引入**未经验证的
-    行为变更**，按"遇到选择取推荐项"的约定，推荐处理是**先登记、等有验证内容再改**：
-    1. **场景包围盒**（`DeferredPipeline_FrameGraph` 的 `MeshComponent + TransformComponent` 遍历，
-       每 `kSceneBoundsRefreshFrames` 帧算一次）：旧代码用的是 `TransformComponent::GetLocalMatrix()`
-       （**局部**矩阵）去变换 `GetBounds()`，而快照 `SnapshotDrawItem::object` 里存的是**世界** AABB
-       （收集时用 `SceneGraph::GetWorldMatrix`）。两者对根级对象相同、对挂父节点的对象**不同**
-       ⇒ 换成快照 = 修正一处坐标系不一致（很可能本就该用世界矩阵），但 RSM 的拟合范围会随之变化，
-       而当前样例（06.GILab）不验证 RSM ⇒ **无法给出前后对比**。推荐：改之前先准备一个用 RSM 的
-       验证场景，或把这一改动与 RSM 的其它口径统一一起做。
-    2. **RSM 方向光**（同文件的 `world.ForEach<DirectionalLight>`：取 `enabled && castShadow` 的第一盏
-       作为 RSM 拟合方向）：快照里的光源同样含方向光方向，但"是否投影"要靠 light→shadow 索引的
-       语义映射，且同属 RSM 路径 ⇒ 与上一条并入同一次改动。
-    说明：这两处**不影响 B1 的下降路径**（它们不新增也不减少 `World&` 签名），先做下面的"帧入口收快照"
-    更能推进阶段 1 的退出条件。
-  - **E-3 附加进展（2026-09-24）**：`DrawItem` 增加 `meshIndex`（组件透传），Forward 的两处
-    "用组件地址反查对象条目"改为**优先整数 `meshIndex`**、未注册时兜底地址比较。
-    **闸门诚实说明**：`--mesh-ptrs` 仍为渲染期 20 处 —— 兜底分支仍有 `static_cast<MeshComponent*>`；
-    该度量只在**删掉 `DrawItem::mesh` 字段本身**时才会下降（这正是 E-3 后半的工作）。
-  - **T1.2b 待做**：物体收集（`GPUScene::Collect` 的遍历 + 材质参数 + 间接绘制参数），
-    以及本任务退出判据要求的"与旧路径并行跑一帧、逐字段比对（`HE_SNAPSHOT_VERIFY`）" ——
-    该判据在 T1.3 让管线消费快照时最自然（可直接对比 UBO/SSBO 字节）。
-  - **顺带发现的三处口径问题**（已登记，不在本任务内改）：
-    ① 聚光方向：Deferred 归一化、Forward 不归一化；
-    ② 点光 `directionType.xyz`：Forward 写 (0,-1,0)、Deferred 留 0；
-    ③ `PhysicalLight.h::KelvinToRGB` 的二次近似在 6500K 给出 (1, 0.46, 0)、2000K 给出 (1,0,1)，
-       与黑体常识不符，疑似系数抄错（仅 `colorTemperature > 0` 时生效）——建议单独立项核查。
-- [x] T1.3 `CollectLights` / `GPUScene::Collect` 改消费快照 —— ✅ 完成（三管线；旧遍历代码已删除，非并存）
-  - **T1.3a 已完成（Deferred 光源，2026-09-24）**：`DeferredPipeline::CollectLights` 改走
-    `SceneSnapshotBuilder::BuildLights` + **一次性**上传（旧实现每个光源 Map/Unmap 一次）；
-    新增 `SceneSnapshotLightOptions` 口径开关，默认值 = Deferred 现行行为（迁移先保一致，
-    "统一两条管线的口径"留作另一次可单独验证/回退的改动）。
-    等价性判据：单测把**改动前的内联逻辑逐行转写**为参考实现，用覆盖全部分支的场景
-    逐元素 `memcmp` 比较 ⇒ **逐位一致**。
-  - **重要实测（影响本方案的验收口径）**：当前构建下 `06.GILab` **同一二进制两趟**、
-    即使带 `HE_LUMEN_PROBE_FILTER=off`，也差约 **4.5k 像素**（`hdr` 719 px / maxULP 21 /
-    meanAbs 5.9e-8；`lumen_irradiance` 764 px / maxULP 552）⇒ 本方案里"逐像素一致"这类判据
-    在**单条收集路径迁移**的尺度上不可判定（本次改动与基线的 4574 px 差异正落在该噪声底噪之内）。
-    根因与画质线登记的「Lumen 屏幕探针逐趟不确定」同源（根因已定位为 mesh 级 SDF 泛洪的**就地**
-    读-写竞争；修复曾以 `f6566b6` 提交后按要求回退，补丁留在 `build/verify/jfa_only.patch`）。
-    **在此之前，迁移类改动一律用"参考实现 + 逐位比较"的单元级判据**，全帧转储只用于粗筛并如实标注噪声。
-  - **T1.3b-1 已完成（口径开关 + 三口径等价性，2026-09-24）**：`SceneSnapshotBuilder` 支持
-    `RectLight`（`directionType.w=3`、`coneAngles` 复用为宽×高）与四个口径开关
-    （`includeRectLights` / `pointLightWritesDirection` / `normalizeSpotDirection` / `writeShadowRadius`），
-    默认值 = Deferred 现状。**三条管线的光源口径共有 4 处历史漂移**（Rect 光、点光 `directionType.xyz`、
-    聚光归一化、`shadowRadius`），迁移先逐条保持，统一另立改动。
-    等价性：把 Deferred 与 Forward 的收集逻辑**逐行转写**为两份参考实现，场景覆盖三类光源 + Rect +
-    色温 + 物理照度/光强 + 关闭 + 超上限，在物理开关两态下**三口径全部逐位一致**（376 例 / 71647 断言）。
-  - **T1.3b-2 已完成（Forward / PathTracing 接线，2026-09-24）**：两条管线的 `CollectLights` 都改走
-    `SceneSnapshotBuilder`（Forward 显式打开三处历史口径开关；PathTracing `writeShadowRadius=true`
-    且不设阴影解析器 ⇒ `shadowIndex` 恒 -1），各新增 `m_LightSnapshot` 成员。**至此三条管线的光源
-    收集全部集中到一处**。Forward 的 `pc.atmosphere`（读物理天空组件，待 T1.4 快照化）与"无光源补
-    默认方向光"（策略）保留在管线内。
-    实测：三管线样例（03/05/06）编译通过；Deferred 冒烟与 T1.3a 之后逐位对比 = 4539 像素 = 该构建
-    同二进制两趟的噪声底噪 ⇒ 无新差异。**未做**：03/05 的实跑（缺转储对照 harness，已记为待办）。
-  - **T1.3b-3 已完成（`GPUScene` 消费快照，2026-09-24）**：`GPUScene::Collect(world, sg, camera)`
-    改为"构建快照 → `CollectFromSnapshot`"（过渡签名保留，调用点不必一次全改）；新增内联
-    `MakeObjectRecord`（与旧 `FillObj` 逐字段对齐、`meshIndex`/间接参数可透传）并**删除旧的约 60 行
-    遍历/增量代码**（不并存，避免两份口径）。增量逻辑保留（集合变化 ⇒ 整表重建；否则只更新矩阵变化的条目）。
-    验收：单测 **381 例 / 71672 断言全通过**（`MakeObjectRecord` 与逐行转写的旧 `FillObj`
-    `memcmp` **逐位一致**）；`06.GILab` 冒烟与上一提交逐位对比 = **15 像素**，远低于同二进制噪声底噪
-    （4539 像素）⇒ 无可测差异。
-    > **判据替换说明**：T1.2 原要求 `HE_SNAPSHOT_VERIFY`（与旧路径并行跑一帧逐字段比对）。因全帧转储
-    > 当前底噪约 4.5k 像素（见 T1.3a 记录），改用**更强**的判据：旧实现逐行转写为参考实现后做**逐位**
-    > 比较，并用冒烟转储粗筛。后续所有迁移沿用此法。
-  - **T1.3b 待做**：Forward / PathTracing 的光源收集同样改走快照（各自带历史口径开关）；
-    `GPUScene::Collect` 改消费快照（依赖 T1.2b 的物体收集）。
-- [x] T1.4 骨骼/材质/Decal/粒子快照化 —— ✅ 完成（骨骼 / 材质 / 粒子 / 环境 / 天空盒 / **Decal** 全部进快照；
-  各消费侧均已切换：粒子模拟、骨骼上传、bindless 材质上传、`DecalPass`。至此"渲染期读 ECS 取数据"的部分收口）
-  - **Decal 快照化规格（2026-09-24 已从代码读全，可直接照做）**：`DecalPass::Render` 的签名是
-    `(cmd, he::World&, he::SceneGraph&, const CameraData&, GBufferRenderer&)`，世界用在**两个**
-    `world.ForEach<DecalComponent>`：`:207`（判空：`opacity > 0`）与 `:244`（逐贴花绘制）。
-    ⇒ 新增 `SnapshotDecal`：`worldMatrix`（取代 `sg.GetWorldMatrix(e)`，见 `:249`）、`size`（`:247/:272`）、
-    `projectionDepth`（`:273`）、`rotation`（`:257`）、`baseColorFactor`（`:274`）、`metallicFactor`（`:275`）、
-    `roughnessFactor`（`:277`）、`opacity`（`:208/:245/:274`）、`materialID`（`:276/:278`）、
-    `hasBaseColorTexture`（由 `!d.baseColorTexture.empty()` 预先算好，见 `:276`）；
-    `FrameSceneSnapshot::decals` + `SceneSnapshotBuilder::BuildDecals(world, sg, out)`。
-    **注意**：Deferred 的物体收集 `excludeDecals`（贴花卡片不进 `draws`）⇒ 贴花矩阵必须由本数组单独携带。
-    消费侧 `Render(cmd, const FrameSceneSnapshot&, const CameraData&, GBufferRenderer&)`，`hasDecal` 改
-    `!snapshot.decals.empty()`；**调用点需一并改**（`grep` 定位，可能在 06.GILab 或 Deferred 帧图），
-    且 `BuildDecals` 要在其之前。预期 **B1 渲染期 81 → 79**；判据 = 构建 + 单测 + `06.GILab` 冒烟逐位
-    （含同二进制双跑对照）。
-  - **起点（环境参数，2026-09-24）**：新增 `FrameSceneSnapshot::atmosphere`（xyz = 太阳方向、
-    w = 浑浊度，与两个 PushConstant 的 `atmosphere` 逐字段一致）与
-    `SceneSnapshotBuilder::BuildEnvironment`（找不到/未启用物理天空时复位为关闭，与旧行为逐字段一致）；
-    `ForwardPipeline` 与 `DeferredPipeline_FrameGraph` 均已改用它 ⇒ **两条光栅管线都不再直接读世界**
-    （PathTracing 不使用空中透视）。单测 1 例 3 子用例；实测 **382 例 / 71681 断言全通过**；
-    `06.GILab` 冒烟与上一提交逐位对比 4554 像素（噪声底噪 4539）⇒ 无可测差异。
-    **未做**：骨骼矩阵 / 材质参数（T1.2c）/ Decal / 粒子的快照化。
-  - **骨骼矩阵进快照（2026-09-24）**：`SnapshotDrawItem` 增加 `skinMatrixOffset`/`skinMatrixCount`，
-    `SceneSnapshotBuilder::AppendSkinMatrices` 把 `SkeletalMeshComponent::boneMatrices` 追加进
-    `FrameSceneSnapshot::skinMatrices` 扁平数组（条目只记切片），`BuildObjects` 在骨骼网格支调用。
-    单测 1 例（两段互不覆盖 / 共享数组内容 / 无骨骼不污染）；实测 **383 例 / 71691 断言全通过**。
-    **消费侧未做**：把骨骼矩阵写进 `boneBuffer` 的那段遍历仍读组件 —— 它依赖"组件 → 缓冲"的指针映射
-    即 T1.2c 待定的 **mesh 注册表**，两者一并做（届时快照已是现成数据源）。
-  - **粒子发射器进快照（2026-09-24）**：`ParticleComponent` 增加 `rendererId`（注册方回填；
-    两个注册粒子的样例已补），`FrameSceneSnapshot` 新增 `SnapshotParticleEmitter{rendererId,
-    emitPosition}` 与 `particles`，`SceneSnapshotBuilder::BuildParticles` 按组件收集。
-    **只需这两个字段**：粒子模拟/绘制早就按 id 索引驱动渲染器自有缓冲（`DispatchCompute(cmd, id, dt,
-    viewProj)`），渲染期唯一读组件的地方就是"发射位置"。
-    单测 1 例；实测 **384 例 / 71701 断言全通过**；`02.Cube` / `04.Sponza-Deferred` 编译通过。
-    **消费侧未做**：`DispatchCompute` 仍从 `CompState::comp` 取位置与参数，下一步改从快照取
-    （对外接口只需多两个入参，之后 `CompState` 不必在帧内读组件指针）。
-  - **粒子消费侧闭环（2026-09-24）**：`DispatchCompute` 增加 `params` / `emitPosition` 两个入参，
-    emit 分支里约 15 处 `comp->GetParam()` / `comp->GetWorldEmitPosition()` 改为用入参；
-    `DeferredPipeline` / `PathTracingPipeline` 的模拟循环改为"先 `BuildParticles` → 遍历
-    `m_Snapshot.particles` 按 `rendererId` 派发"。**帧内模拟路径不再读 `ParticleComponent`**
-    （`CompState::comp` 仍在，但只被绘制路径的加载期语义数据使用）。
-    实测：单测 384 例 / 71703 断言；5 个目标编译通过；冒烟 4615 像素（底噪 4539）⇒ 无连带回归。
-    > 查清：emit 分支每帧读**约 15 个字段**（`ParticleComponent::GetParam()` 的方向/形状/速度/寿命/
-    > 尺寸/纹理行列……），只搬"位置"不够 ⇒ 快照条目已改为**整份携带 `ParticleSystemParam`**，
-    > 消费侧切换因此降为机械替换（实测单测 384 例 / 71703 断言）。
-- [x] T1.5 渲染期移除 World/SceneGraph 引用（grep 断言）—— ✅ 完成（2026-10-09）：附录 B1 世界依赖**渲染期 0 / 加载期 0**（80 → 0）、组件指针 0/0；`python Tools/check_threading.py --world-deps --mesh-ptrs --handles --gate` 复测通过
-  - **闸门与基线已就位（2026-09-24）**：`Tools/check_threading.py --world-deps` 统计 `Engine/Render/`
-    内 `World&` / `SceneGraph&` 的出现处，按**所属函数名**分"渲染期 / 加载期"（与调用点清点同一份
-    白名单；快照层 `Engine/Render/Threading/` 在**白名单内** —— 它是渲染侧唯一允许读世界的地方）。
-    **实测：渲染期 82 处 / 加载期 15 处**（阶段 1 退出目标 = 渲染期 **0**）。
-    > 口径说明：同一函数的**声明与定义各算一处**（.h + .cpp），故数值大于函数个数；作为闸门只需
-    > 前后一致、单调下降。迁移期它是**上限**（`--gate` 超基线即失败），随每次收敛手动下调。
-  - 渲染期命中最多的文件（= T1.4/T1.5 的收敛对象）：`Pipeline/ForwardPipeline.h`(12)、
-    `Pipeline/ForwardPipeline.cpp`(7)、`Pipeline/DeferredPipeline.h`(6)、
-    `Pipeline/PathTracingPipeline.h`(5)、`Pipeline/RTPass.cpp`(4)、`Pipeline/GBufferRenderer.h`(3)、
-    `Pipeline/RTPass.h`(3)、`Shadow/CSMTechnique.{h,cpp}`（各 3）、`Pipeline/DeferredPipeline.cpp`(2)、
-    `Pipeline/DeferredPipeline_FrameGraph.cpp`(2)、`Pipeline/ForwardPipeline_FrameGraph.cpp`(2)……
-  - **第①段·实例缓冲状态搬迁 + 实例数据进快照（2026-10-09）** —— ✅ 完成（§15.1 ①）
-    契约：`FrameSceneSnapshot` 新增 `SnapshotInstance{meshIndex, transformOffset, transformCount,
-    transformVersion, enableFrustumCull, localBoundsMin/Max, sourceEntity}` 与扁平数组
-    `instanceTransforms`（与 `skinMatrices` 同款切片；`Clear`/`Reserve` 同步扩展），
-    `SceneSnapshotBuilder::BuildInstances` 按组件收集 —— **含实例数为 0 的组件**：渲染侧靠
-    "本帧又见到这个 meshIndex"来推进退役队列并回收已销毁组件留下的缓冲与 bindless 槽位。
-    组件侧：`InstancedMeshComponent` 只留 `instanceTransforms` + `instanceTransformVersion`
-    （`SetInstanceTransforms` 递增，取代原来的 `bTransformsDirty`）；逐网格 GPU 状态（实例 SSBO、
-    容量、脏判据、退役队列、逐实例剔除的命令缓冲、可见数）全部搬到渲染侧
-    `InstanceCuller::InstanceState`（按 `meshIndex` 索引），新增 `BeginInstancesFrame`
-    （帧边界：推进退役队列 + 回收上帧未见的条目）与
-    `UploadInstanceTransforms(device, meshIndex, transforms, count, version, ownerEntity)`。
-    `ownerEntity` 用来识别"注册表索引被回收后复用给新网格"—— 否则新的组件版本号可能恰好等于
-    旧条目已上传的版本号，直接画出**上一个组件的实例**。
-    三个消费侧（`ForwardPipeline::RenderScene` / `GBufferRenderer_CPU` / `GBufferRenderer_GPU`）
-    全部改为遍历 `snapshot.instances`、按 `meshIndex` 从 `MeshRegistry` 取顶点/索引缓冲与索引数
-    （`GBufferContext` 新增 `meshRegistry`，`GBufferRenderer::Render` 新增快照入参）
-    ⇒ **渲染期不再遍历世界、也不再读 `InstancedMeshComponent`**。
-    **顺带修掉一个隐藏缺陷**：三条管线的 `CollectLights` 原先在帧中调用 `m_Snapshot.Clear()`
-    （本意只是重建光源数组），它会把同帧**已填好**的 `draws`/`skinMatrices`/`instances` 一起抹掉。
-    蒙皮消费侧有"退回组件数据"的兜底，所以 E-2② 之后这条快照路径实际上从未被走到也没人发现；
-    实例化没有兜底 ⇒ 直接表现为"一个实例都不画"。现已删除那三处 `Clear()`
-    （`SceneSnapshotBuilder::BuildLights` 自己会清 `lights`，其余数组各自由自己的收集器清）。
-    证据（2026-10-09）：
-    · 单测 **397 例 / 71829 断言全通过**（+3 例 / +40 断言）：`BuildInstances` 切片与组件数组
-      `memcmp` **逐位一致**、版本号语义、实例状态表的每飞行帧分槽、快照预留与纯值类型；
-    · `02.Cube`（唯一的实例化样例：10000 实例 + 每帧改变换 + 逐实例剔除）**双管线实跑**：
-      Forward `SSBO 句柄 7（容量 10000）、退役 0（原地复用，未新建）`、
-      `可见 4820/10000；CPU 参考复算 4820`；Deferred `首帧：实例 10000（对象 #22）、
-      实例 SSBO 句柄 6、命令句柄 7、可见列表句柄 4`、`可见 4839/10000；CPU 参考复算 4839`
-      —— GPU 读回与样例内置的 CPU 复算**逐帧相等**，"缓冲只建一次、之后原地复用"不变式成立，
-      两条路径 `VUID/Validation Error = 0`；
-    · `06.GILab` 冒烟（`HE_LUMEN_PROBE_FILTER=off`）**同二进制双跑 = 0 像素**（逐位一致）；
-      该样例**没有实例化网格**，故此处只用于确认无连带回归（告警行数 42 → 42，零新增）；
-    · 四项闸门：帧内同步 RHI **380** / B1 渲染期 **78** / 组件指针渲染期 **18** /
-      资源持有者 **277**（75 个文件）—— **三项基线一律不下调**，理由见下。
-    > **口径说明一：帧内同步 RHI 376 → 380 不是新增调用。** 这 4 处是
-    > `Tools/check_threading.py` 的"所属函数名"启发式**归属漂移**：`UploadInstanceTransforms`
-    > 的新签名跨了 3 行（旧签名单行，函数名可识别），于是它体内的 `desc.initialData` /
-    > `CreateBuffer` / `Map()` 由"归属上传函数 ⇒ 加载期"变成"归属上一处单行函数名 ⇒ 渲染期"；
-    > `Cull` 里那处 `commandBuffer->Map()` 同理（它本来就每帧执行，属**纠正**而非新增）。
-    > 代码是从组件逐行搬过来的同一批调用，故本项按"未变"记账。
-    > **口径说明二：B1 80 → 78 也不是进展。** 该脚本按**行**计数 `World&`/`SceneGraph&`，
-    > 而我把 `GBufferRenderer::Render` 的 `he::World& world,` 与 `he::SceneGraph& sg,` 合并到了
-    > 同一行 ⇒ 少计一行。本段真实的世界依赖下降发生在**函数体内**（删掉的三处
-    > `world.ForEach<InstancedMeshComponent>`），而 B1 只量签名、量不到它。
-    > 同理不下调基线，避免用格式变化去"刷"闸门；B1 的真实归零留给第③段。
-  - **第②段·`Prepare` 收快照 + `DrawItem` 去组件指针（2026-10-09）** —— ✅ 完成（§15.1 ②）
-    收集（遍历 ECS、算材质、算世界矩阵与 AABB）早已由 `SceneSnapshotBuilder` 在游戏线程做完，
-    `SceneRenderer::Prepare` 只剩"视锥剔除 + GPUObjectData 上传"。改为读 `FrameSceneSnapshot` 之后：
-    · 签名去掉 `he::World&` / `he::SceneGraph&` ⇒ **B1 渲染期 78 → 76**（声明 + 定义各 1 处）；
-    · `GPUObjectData` 直接整块拷贝快照条目（不再就地重算材质）⇒ 从根上消除"两边各算一份再漂移"；
-    · 剔除口径（世界 AABB + 并行分块 + `MAX_OBJECTS` 截断）、可见顺序、`objectIndex` 分配方式逐条不变。
-    `DrawItem::mesh` 删除：顶点/索引缓冲与索引数一律按 `meshIndex` 查 `MeshRegistry`
-    （Forward 与 GBuffer 共四处绘制循环 + Forward 的三角形计数），"未注册时按组件地址兜底"的三处
-    分支一并删除 ⇒ **组件指针闸门 18 → 13**。
-    快照新增 `bInstanced`（实例化/骨骼网格标记）：`Prepare` 原先"遍历世界时现场判定"它，
-    改吃快照后必须由收集侧给出，否则消费侧会把实例化网格当普通网格再画一遍。
-    `GBufferContext::excludeDecals` 随之成为死配置，一并删除。
-    **顺带修掉一处口径缺口**：`DeferredPipeline` 的 `BuildObjects` 原先用默认选项（**不排除贴花卡片**），
-    而它的 GBuffer 消费侧此前靠 `Prepare(..., excludeDecals=true)` 排除 —— `Prepare` 改吃快照后这个
-    口径只能由收集侧决定，否则贴花卡片会**既被 `DecalPass` 投影、又被当普通网格画进 GBuffer**，
-    并与 `GPUScene` / `MeshBatcher` 的收集集合错位（三者 `objectIndex` 按顺序对齐）。
-    现按 `m_ExcludeDecalCards` 传参（`02.Cube` 实测：Deferred 25 条 vs Forward 26 条 = 恰好少那张卡片）。
-    证据：单测 **398 例 / 71832 断言全通过**（新增 1 例：两类网格的 `bInstanced` 标记）；
-    `06.GILab` 冒烟（`HE_LUMEN_PROBE_FILTER=off`）同二进制双跑 0 像素，且**与第①段的二进制逐位对比
-    0 像素**（28 个转储目标全一致）⇒ 本次重写无可测差异；`02.Cube` 双管线实跑：Forward 26 draws /
-    8150 tris、实例可见 4820 = CPU 复算，Deferred 首帧实例化日志齐全、可见 4839、两条路径 VUID = 0；
-    四项闸门：组件指针渲染期 **13**（只剩 `RTPass`）、B1 **76**、帧内 RHI 380、资源持有者 277
-    —— `MESH_PTR_BASELINE` 18 → 13、`WORLD_DEP_BASELINE` 80 → 76。
-    > **本段之后组件指针闸门剩 13 处，全在 `Pipeline/RTPass.{h,cpp}`**（BLAS 缓存键
-    > `unordered_map<MeshComponent*, BLASEntry>`、`CollectMeshList` 的指针载荷、
-    > `HasGeometryChanged`/`HashGeometry`/`CreateVertexPullBuffer` 等，以及一条**全仓库无调用点**的
-    > 顶点拉取死路径）。它属 §14.5 给 E-3② 定的第①类（与 E-4 口径统一一起做），且与第③段同源
-    > （`RTPass::BuildAS(world, sg)` 本身也是 B1 的收敛对象）—— 故并入第③段处理，本段不单独动它。
-  - **第③段（分批进行中，2026-10-09）** —— 目标：`--world-deps` 渲染期 **76 → 0**
-    - **第 1 批（已提交）**：`GBufferRenderer` 家族（接口 + CPU/GPU 策略 + 实现）去掉 `World&`/`SceneGraph&`
-      —— 第①②段之后它们体内已不再使用世界；`GPUScene::Collect(world, sg, camera)` 过渡重载**删除**，
-      两条管线改为直接 `CollectFromSnapshot(m_Snapshot)`（本帧本就有快照 ⇒ 省掉每帧一次重复的物体收集，
-      口径还更一致：贴花排除已由 `BuildObjects` 烘进快照）。⇒ **B1 76 → 69**（加载期 13 → 11）。
-    - **同批顺带修掉一处 B1 量不到的渲染期世界读**：`SkyboxPass::Update(ctx)` 原先
-      `ctx.world->ForEach<PhysicalSkyComponent / SkyboxComponent>` 并**缓存组件指针**
-      （`m_CachedSkybox` / `m_CachedPhysSky`）。B1 只统计 `World&`/`SceneGraph&` **引用**，
-      经 `SubsystemContext::world` 指针进入的这类读取它一条都量不到 —— 而它们同样是换线程即竞争。
-      现已改为只读快照：`SkyboxPass` 缓存值 + RHI 资源指针（cubemap/sampler/intensity）。
-      为此快照新增 `SnapshotPhysicalSky`（intensity/sunDirection/turbidity/groundAlbedo/sunIntensity，
-      口径 = 第一个启用的组件，与 `he::GetPhysicalSkySun` 逐条一致）与 `SnapshotSkybox::intensity`。
-      > **由此登记一类"B1 盲区"**（后续批次逐个收）：`SubsystemContext::world/sceneGraph`、
-      > `GIProviderContext::world/sceneGraph`（`GI/IGIProvider.h`）、`he::SyncPhysicalSkyToSun(world)`
-      > （三条管线每帧调用，且它**写世界**）。⇒ **B1 = 0 不等于"渲染期不读世界"**，真实判据要把
-      > 这些指针通路一并收掉，否则 T2.4 起线程后它们就是数据竞争。
-    - **判据（第 1 批实测）**：单测 398 例 / 71832 断言；`06.GILab` 冒烟（`HE_LUMEN_PROBE_FILTER=off`）
-      同二进制双跑 **4630 像素**、与②的二进制对比 **15 像素 / maxULP=1**（仅在 Lumen 探针类目标上）
-      ⇒ 远低于该次同二进制底噪，无可测差异；四项闸门：B1 **69**（基线随之下调）、组件指针 13、
-      帧内 RHI 380、持有者 277。
-      > **底噪的重要修正（务必按此判据）**：同一二进制两趟的差异**是间歇的** —— 本会话前几对
-      > （inst5/6、inst7/8、inst9/10）为 **0 像素**，而 inst11/12 为 **4630 像素**，
-      > 与 §9 T1.3a 记录的 ≈4.5k 一致。⇒ **任何一次"0 像素"都不构成"判据已通过"的证据**，
-      > 必须**成对**给出（同批二进制双跑 + 改动前后对比），并允许"改动前后"落在同一次底噪之内。
-    - **第 2 批设计（已查清，零决策）**：阴影系统 + **样例→管线的快照交接**（二者必须同批做）。
-      - **为什么必须同批**：Forward 路径的阴影收集由**样例**发起 —— `02.Cube:1252`、`03.Sponza-Forward:689`、
-        `06.GILab:983`、`07.Nanite:1077`、`07.AISamples:190` 各自构造 `shadowCtx` 调
-        `shadowSys->Update(shadowCtx)`，**都在 `pipeline.Render(...)` 之前**；而当前快照是管线在
-        `Render` 内部建的 ⇒ 样例拿不到。故必须让样例在渲染前**先建快照**（这正是 T2.4 的形态）。
-      - **接口形态（建议）**：`ForwardPipeline::BuildFrameSnapshot(world, sg, camera)` +
-        `GetFrameSnapshot()` + `GetMeshRegistry()`；`Render(cmd, const FrameSceneSnapshot&, camera, dt)`
-        （不再自己建快照）。`DeferredPipeline`/`PathTracingPipeline` 同形。样例每帧：
-        `pipeline.BuildFrameSnapshot(...)` → 填 `shadowCtx.snapshot/ meshRegistry` → `shadowSys->Update(...)`
-        → `pipeline.Render(cmd, pipeline.GetFrameSnapshot(), camera, dt)`。
-      - **快照新增**：`SnapshotDrawItem::bShadowCaster`（口径 = 组件类属**精确** `MeshComponent`/`Cube`/`Sphere`
-        且 `castShadow == true`；`if constexpr` 在 `CollectObjectItem` 里判定，`SplineMesh` 派生但走精确类型桶
-        故天然排除）与 `std::vector<SnapshotShadowLight> shadowLights`（只收 `enabled && castShadow`，
-        按 方向光→点光→聚光→面光 分类型、同类型按实体顺序 —— 各技术的过滤只认自己的类型，故跨类型顺序无关）。
-      - **`SnapshotShadowLight` 字段（四个技术的 `CollectLights` 实测所需，一处不漏）**：
-        `type`（`he::LightType`）、`direction`（方向光/聚光方向、面光法线，**不归一化**：CSM 与 Spot 在
-        消费侧 `glm::normalize`、Rect 也一样，照抄原口径）、`position`（`sg.GetWorldPosition(e)`，方向光为 0）、
-        `range`、`outerConeAngle`（Spot）、`softness`（Rect）、`shadowBias`/`shadowNormalBias`/`shadowStrength`、
-        `sourceEntity`。`outEntities` 用 `he::Entity{(EntityID)sourceEntity}` 还原（`Entity` 就是 `{u64 id}`）。
-      - **`IShadowTechnique` 新签名**：`CollectLights(const FrameSceneSnapshot&, const CameraData&, out, entities)`、
-        `Render(cmd, const FrameSceneSnapshot&, const MeshRegistry&, shadowData, start)`。**技术顺序与
-        `m_PerTechniqueCounts` 的编排不变**（`GPUShadowData` 的下标即 shader 的 `shadowIndex`，
-        由 `ShadowSystem::GetShadowIndex` 的 Entity→下标映射决定，不能动）。
-      - **阴影网格遍历**（四个技术的 `rm` lambda）：改为遍历 `snapshot.draws` 取 `bShadowCaster`，
-        顶点/索引缓冲与索引数从 `MeshRegistry::Find(item.meshIndex)` 取 —— 顺序与旧的
-        `Mesh→Cube→Sphere` 完全一致（快照的枚举顺序就是 Mesh→Cube→Sphere→…，过滤后相对顺序不变）。
-      - **`SubsystemContext` 新增 `const MeshRegistry* meshRegistry`**（前向声明即可）；
-        `ShadowSystem::Update` 改读 `ctx.snapshot`（缺省直接返回 = 本次不收集），
-        `ShadowSystem` 缓存本帧快照指针与注册表供 `Render` 用。
-      - **顺带登记两个既有问题**（本批只记录，不改行为）：
-        ① `SceneGraph::UpdateTransforms()` 目前**只在渲染期的 `ForwardPipeline::RenderScene` 里调用一次**
-        （`SceneGraph.cpp:66` 只重算 `dirty` 节点），而快照在它**之前**构建 ⇒ 变换在同一帧内被改脏时，
-        快照里的世界矩阵比渲染期看到的**旧一帧**。当前样例无此情形（冒烟逐位一致），但换线程后必须
-        把它移到游戏线程、且在构建快照**之前**；② Forward 路径的 `ShadowSystem::Update` **只由样例调用**，
-        管线自身从不调用（`ForwardPipeline.cpp` 只调 `Render`）⇒ 若样例不调，`HasActiveShadows()` 恒 false、
-        阴影整条链静默不工作（Deferred 路径由帧图自己调，正常）。
-    - **第 2 批（已提交）**：按上面的规格落地 —— 阴影系统全链路改吃快照 + **样例先建快照**。
-      · 快照新增 `SnapshotShadowLight`（四个技术实际用到的字段一处不漏）与 `shadowLights`、
-        `SnapshotDrawItem::bShadowCaster`（口径 = 精确 `MeshComponent`/`Cube`/`Sphere` 且 `castShadow`）、
-        `SceneSnapshotBuilder::BuildShadowLights`；
-      · `IShadowTechnique` 与四个技术的 `CollectLights`/`Render` 改收
-        `(snapshot, camera)` / `(cmd, snapshot, registry, data, start)`，网格遍历改为
-        `snapshot.draws` 过滤 `bShadowCaster` + 按 `meshIndex` 查注册表；技术顺序与
-        `m_PerTechniqueCounts` 编排未动（`GPUShadowData` 下标 = shader 的 `shadowIndex`）；
-      · `SubsystemContext` 新增 `snapshot` / `meshRegistry`；`ShadowSystem::Update` 改读
-        `ctx.snapshot`（缺省直接返回），`Render` 用缓存的快照 + 注册表；
-      · `ForwardPipeline::BuildFrameSnapshot`（**幂等**，`NextFrame()` 复位）+ `GetFrameSnapshot` /
-        `GetMeshRegistry`；`BuildEnvironment` 从 `CollectLights` 移进快照构建（`SkyboxPass` 也要
-        `physicalSky`，且必须在帧图构建之前）；5 个样例改为**先 `BuildFrameSnapshot` → 再阴影收集**，
-        并把 `shadowCtx.snapshot` / `meshRegistry` 指向它（这正是 T2.4 的形态；第③段第 3 批会把
-        `Render` 也改成收快照、样例不再让管线自建）。
-      · **本批引入并当场修掉的一个回归**：Deferred 的快照构建漏了 `BuildShadowLights`
-        ⇒ `shadowLights` 为空 ⇒ `HasActiveShadows()` 恒 false ⇒ **Deferred 阴影静默消失**。
-        它由"检查 Deferred 路径是否真的画了阴影"（对照 `[CSMTechnique] Cascade0 绘制物体数`）发现，
-        而不是靠像素对比（该量在 06.GILab 的 HDR 里占比很小）—— 这条经验值得留住：
-        **迁移后要找一个"语义计数"型的证据**，不能只依赖像素对比。
-      · 判据：单测 398 例 / 71832 断言；**06.GILab（Deferred）阴影级联 0 的绘制物体数
-        `103`（新旧二进制完全相同）** —— 比"像素无差异"强得多的等价性证据；`02.Cube`（Forward，
-        走样例驱动的阴影收集）同样出现该诊断且 `VUID=0`；冒烟同批双跑 **299 像素**、
-        与第 1 批二进制对比 **314 像素**（`hdr` 仅 4 像素 / maxULP=1）⇒ 落在同批底噪内；
-        四项闸门：B1 **69 → 51**（基线随之下调）、组件指针 13、帧内 RHI 380、持有者 277。
-    - **第 3 批（已提交）**：GI 子系统里唯一真正读世界的地方 —— `GI_RSM::RenderRSMPass` 的几何遍历
-      （`world.ForEach<he::MeshComponent>`）—— 改吃快照 + 网格注册表；`ForwardPipeline::PrepareGI`
-      随之去掉 `World&`/`SceneGraph&`（它此前只为转交给 RSM 才收世界）。⇒ **B1 51 → 47**。
-      · **快照契约顺带升级**：把"每个消费者各一个 bool"的做法收敛成**网格类别** `SnapshotMeshClass`
-        （`Base`/`Cube`/`Sphere`/`Billboard`/`Text`/`Decal`/`Spline`/`Instanced`/`Skeletal`）+
-        `castsShadow`，`bShadowCaster` 由两者推出。**这不是抽象洁癖，而是口径差异的如实表达**：
-        阴影技术收 `Base`/`Cube`/`Sphere` 且 `castShadow`；RSM **只收 `Base`**（旧实现只遍历
-        `ForEach<MeshComponent>`，不含 Cube/Sphere —— 若照阴影口径收就会改变 RSM 内容）；
-        后面 `RTPass`（`Base`/`Cube`/`Sphere`）与 `MeshBatcher`（含 `Instanced`、**不含**
-        `Spline`/`Skeletal`）也各自不同。一个类别标签同时服务四个消费者。
-      · `GIProviderContext` 新增 `snapshot`/`meshRegistry`（放在结构体**末尾**：前几项有按位置聚合
-        初始化的用法），`DeferredPipeline::MakeGIContext` 统一注入 ⇒ 帧图里 6 处构造点不再需要
-        `world`/`sg`。**顺带查清**：全 GI 源（SSGI/DDGI/Lumen/RTGI/IBL/AO）**没有任何一处**读
-        `ctx.world`/`ctx.sceneGraph`，只有 RSM 那一处 —— 即 `GIProviderContext` 的 world 指针
-        本就是过渡遗留，可在第 5 批直接删除。
-      · 判据：单测 **398 例 / 71840 断言**（新增 8 条断言覆盖类别标签与 `bShadowCaster` 的
-        类别 ∧ `castShadow` 口径）；冒烟 `rsm_pos`/`rsm_rad`/`rsm_nrm`/`rsm_indirect` **全部 identical**
-        —— 本批的功能等价性证据（RSM 的几何输入换了来源、输出逐位不变）；
-        同批双跑 **4539 像素**、与第 2 批二进制对比 **4838 像素**，且差异**全部**落在
-        `hdr`(723 px / maxULP 21) 与 `lumen_irradiance`/`prov6_*`(823 px / maxULP 552) 上 ——
-        与 §9 T1.3a 记录的噪声底噪（`hdr` 719 px / maxULP 21 / `lumen_irradiance` 764 px / maxULP 552）
-        **几乎逐项吻合** ⇒ 是已知的探针噪声，非本批差异。
-    - **第 4 批（已提交）**：先收掉管线侧两处"能独立完成"的世界依赖 ——
-      · `ForwardPipeline::RenderSkybox(cmd, world, camera)` → `(cmd, camera)`：天空盒数据自第 1 批起
-        就只从快照取（`SkyboxPass` 只读 `ctx.snapshot`），`World&` 已纯属遗留 ⇒ 去掉。
-      · `ResolveFrameCamera(World&, fallback)` → `ResolveFrameCamera(const CameraComponent*,
-        const TransformComponent*, fallback)`：它本是**场景查询**（`GetPrimaryCamera()` +
-        `GetComponent<TransformComponent>()`），查询交回调用方（样例），渲染模块只做
-        "组件 → CameraData"的纯映射 ⇒ `Engine/Render/` 里少一处渲染期读世界。
-        两个调用点（`02.Cube`、`07.AISamples`）改为自己查主相机与 Transform。
-      ⇒ **B1 47 → 43**。判据：单测 398 例 / 71840 断言；冒烟同批双跑 **4554 像素**、
-      与第 3 批二进制对比 **hdr 719 px / maxULP 21 / meanAbs 5.91e-08、
-      lumen_irradiance 与 prov6_* 764 px / maxULP 552 / meanAbs 2.56e-07** ——
-      **与 §9 T1.3a 记录的噪声签名逐项相同**（不是"量级接近"，是数值全等）⇒ 无可测差异；
-      `02.Cube`（相机路径改动的样例）阴影级联 0 绘制物体数 **12**（与第 2/3 批二进制相同）、
-      实例可见 4820 = CPU 复算、`VUID=0`。
-    - **第 4 批剩余（下一步，最大的一块）与一处必须一并做的迁移**：把三条管线的帧入口改成收快照，
-      需要先解决**骨骼网格的逐网格缓冲状态仍在组件上**（`SkeletalMeshComponent` 的
-      `boneBuffer`/`boneBufferCapacity`/`bBonesDirty`/`boneSSBOHandle`/退役队列）——
-      `ForwardPipeline::RenderScene` 的骨骼循环正是靠它才必须收 `World&`，形态与第①段的实例缓冲
-      完全相同（**矩阵走快照、缓冲生命周期留渲染侧**，按 `meshIndex` 索引；注意
-      `MeshRegistryEntry::skinMatrixBuffer` 现在指向组件缓冲，迁移后应指向渲染侧表里的那份）。
-      连同上面第 1 条的 `FrameSnapshotAssembler` 设计一起做，才是"帧入口收快照"的完整落地。
-    - **第 5 批之一（已提交）**：把**骨骼缓冲状态搬离组件** —— 这是"管线帧入口收快照"的最后一块
-      前置（`ForwardPipeline::RenderScene` 的骨骼循环正是靠它才必须收 `World&`）。
-      · 新增 `render::SkinnedMeshBuffers`（`Engine/Render/Pipeline/`）：逐 `meshIndex` 的骨骼 SSBO、
-        容量、退役队列、已上传版本、`ownerEntity`；`BeginFrame` 推进退役 + 回收上帧未见的条目；
-        `Upload(device, meshIndex, ownerEntity, mats, count, version)` —— 与第①段的
-        `InstanceCuller::InstanceState` **同构**（这个仓库"逐网格 GPU 缓冲状态搬离组件"的标准做法）。
-      · 组件侧只留数据源：`SkeletalMeshComponent` 去掉 `boneBuffer`/`boneBufferCapacity`/
-        `bBonesDirty`/`boneSSBOHandle`/`retiredBoneBuffers`/`AdvanceRetireQueue`/`RetireBoneBuffer`，
-        改为 `u32 boneMatrixVersion`（`SkeletalMeshSystem` 每次重算骨骼矩阵 `++`）。
-      · 快照条目新增 `skinMatrixVersion` 与 `bHasSkeleton`（= 旧骨骼循环的 `sm.skeleton` 判据），
-        由 `AppendSkinMatrices` 一次取齐；Forward 的骨骼循环改为遍历 `meshClass == Skeletal` 的条目
-        （矩阵取扁平切片、缓冲按 `meshIndex` 查注册表、SSBO 由状态表管理）⇒ **循环内不再有任何世界访问**。
-      · `MeshRegistryEntry::skinMatrixBuffer` 删除（write-only 字段、只有测试读它，且它指向的组件缓冲
-        已不存在）。
-      · 判据：单测 **398 例 / 71841 断言**；`02.Cube`（唯一含骨骼网格的样例）首帧统计与上一批二进制
-        **完全一致**（`RenderScene: 25 draws, 8150 tris, 4 lights` —— 该计数含每帧的骨骼绘制 +1）、
-        阴影级联 0 绘制物体数 12 一致、`VUID=0`；`06.GILab` 冒烟同批双跑 **4539 像素**、
-        与上一批二进制对比 **0 像素**（28 个转储目标逐位一致）。
-      > **帧内同步 RHI 调用 380 → 383 又是归属漂移**（与第①段同款）：这 3 处
-      > （`CreateBuffer` / `Map` / `desc.initialData`）是从 `ForwardPipeline.cpp` 原地搬过来的
-      > 同一批调用，新文件里启发式的"所属函数名"落到 `BeginFrame`，而不再落到名字含 `Upload`
-      > 的函数上。调用点一个没变。**附录 B1 不变（43）**——本批消除的是 B1 量不到的
-      > **函数体内**世界依赖，正是它让下一批的签名改动能真的落地。
-    - **第 4 批之一（已提交）**：**新增 `FrameSnapshotAssembler`**（`Engine/Render/Threading/`，
-      白名单层）承载"取齐本帧渲染输入"，管线的帧入口只**配置口径**：
-      · `FrameSnapshotAssemblySettings`（光源/物体选项、构建哪些数组）由管线在 `Initialize` 配置
-        ⇒ 三条管线的历史口径差异仍然显式可查，而读世界的代码只有一份、且在白名单层；
-      · 装配器负责两处"必须在收集之前的**世界写**"，**顺带修掉两个顺序缺陷**：
-        `SyncPhysicalSkyToSun`（旧代码放在渲染期，而快照在那之前构建 ⇒ 快照里的方向光照度慢一拍）、
-        `SceneGraph::UpdateTransforms`（旧代码在 `RenderScene` 开头，同样晚于快照构建 ⇒
-        同帧被改脏的变换会让快照旧一帧）。两者现在都在 `AssembleScene` 开头、早于任何收集。
-      · 每帧一次装配（`BeginFrame` 复位 + `AssembleScene` 幂等）⇒ 样例为阴影收集先装配时管线不重复收集。
-      · 快照新增 `lightSourceEntities`（与 `lights` 同序同长）与 `sceneBoundsMin/Max`：前者让
-        `shadowIndex` 能在阴影收集之后用**不收世界**的 `ResolveLightShadowIndices` 补齐
-        （光源收集因此完全离开渲染期）；后者把 `RefreshRSMFrustum` 原先"自己遍历世界算包围盒"
-        改成读快照（按既有公式：网格包围盒 × 组件**局部**变换 —— 刻意不改口径）。
-      · `MeshBatcher::Build` 改吃快照 + 注册表：收集集用 `SnapshotMeshClass` 如实表达
-        （`Base`/`Cube`/`Sphere`/`Billboard`/`Text`/(`Decal`)/`Instanced`，**不含** `Spline`/`Skeletal`，
-        与旧遍历范围逐条一致）；材质字段（含 `textureMask`）直接取快照 `GPUObjectData` ⇒ 与 GBuffer 同源；
-        注册表新增 `vertexCount`（合批要按顶点数搬运并累加 `baseVertex`）。
-      · Forward 的 `CollectLights`/`RenderScene`/`RunGPUCulling`/`BuildFrameGraph`/`RefreshRSMFrustum`
-        全部去 `world`/`sg` ⇒ **B1 43 → 27**。
-      · 判据：单测 398 例 / 71841 断言；`02.Cube` 首帧统计与上一批二进制**完全一致**
-        （`RenderScene: 25 draws, 8150 tris, 4 lights`；阴影级联 0 绘制物体数 12）、`VUID=0`；
-        `06.GILab` 冒烟同批双跑 **4615 像素**、与上一批二进制对比 **0 像素**（28 个目标逐位一致）
-        —— 注意这次改动**包含收集顺序变化**（两个世界写提前），结果仍是 0 像素。
-      > **剩余 27 的分布与"必须同批"的约束**：`DeferredPipeline.h` 6 + `.cpp` 2 + `_FrameGraph.cpp` 2、
-      > `PathTracingPipeline.h` 5（+ `.cpp`）、`RTPass.h` 3 + `.cpp` 4、`ForwardPipeline.{h,cpp}` 各 2
-      > （帧入口签名本身）、`IRenderPipeline.h` 1。**`IRenderPipeline::Render` 的签名一变，
-      > 三条管线与 `RTPass` 就必须同批改完**（接口强制）—— 这正是本批先把"装配器 + 各 helper 去世界"
-      > 做完、把入口签名留到最后的原因：那一改要一次覆盖 Deferred/PathTracing 的
-      > `BuildFrameGraph`/`CollectLights` 与 `RTPass::BuildAS`（后者还要一并收掉它剩下的 13 处组件指针）。
-    - **第 4 批之二（已提交）**：**Deferred 与 PathTracing 也统一走装配器** ⇒ 三条管线的光源收集与
-      场景收集全部离开渲染期，**B1 27 → 24**。
-      · Deferred：口径 = 排除贴花卡片（`DecalPass` 投影）、构建贴花与粒子数组；`CollectLights`
-        改为只**消费**快照，并在与旧实现**同一时机**（阴影收集之后、消费之前）用不收世界的
-        `ResolveLightShadowIndices` 解析光源 `shadowIndex` —— 时机不变是刻意的：旧代码正是在
-        `CollectLights` 里调 `BuildLights` 传 resolver。帧图里重复的天空盒/环境收集随之删除
-        （装配器已收），`SyncPhysicalSkyToSun` 也从帧图移到装配器。
-      · PathTracing：口径 = 构建粒子、光源写 `shadowRadius`、**不设** shadowIndex 解析器
-        （收集器填 -1，与旧行为一致：PT 的阴影包含在路径里）。
-      · 两条管线都加上与 Forward 同构的 `m_Assembler` / `m_FrameSnapshot` / `FrameSnap()`，
-        快照访问统一走 `FrameSnap()`。
-      · 判据：单测 398 例 / 71841 断言；`04.Sponza-Deferred` 与 `05.Sponza-PathTracing` 各跑 22 秒
-        **无 VUID、无 ERROR**（这两条路径本批改动最直接）；`06.GILab` 冒烟同批双跑 **4539 像素**，
-        与上一批二进制对比的差异**全部**落在 `hdr`(719 px/maxULP 21/meanAbs 5.91e-08) 与
-        `lumen_irradiance`/`prov6_*`(764 px/maxULP 552/meanAbs 2.56e-07) —— 即 §9 T1.3a 记录的
-        **噪声签名本身**（同批双跑的底噪也是 4539）。
-      > **剩余 24 = 帧入口签名 + `RTPass`**：`DeferredPipeline.h` 4、`PathTracingPipeline.h` 4、
-      > `RTPass.h` 3 + `.cpp` 4、`DeferredPipeline_FrameGraph.cpp` 2、`PathTracingPipeline.cpp` 2、
-      > `ForwardPipeline.{h,cpp}` 各 2、`IRenderPipeline.h` 1。
-      > **下一步必须先做 `RTPass`**（它同时也是"组件指针 13 处"闸门的最后持有者）。已查清它需要
-      > 快照补齐一批 **RT 专用材质字段**：贴图均值回落（`hasMaterialAvg`/`baseColorAvg`/
-      > `metallicAvg`/`roughnessAvg`）、`ior`/`transmission`、`attenuationColor`/`attenuationDistance`
-      > —— 否则 `BuildSceneMaterialTexture`（11 行 × N 列的 RT 材质纹理 + 三角形法线/UV 纹理）
-      > 无法脱离组件构建；另需把 `m_BLASMap` 的键从 `MeshComponent*` 换成 `meshIndex`、
-      > `HashGeometry`/`HasGeometryChanged` 改吃注册表条目、`CollectMeshList` 改为按
-      > `SnapshotMeshClass ∈ {Base, Cube, Sphere}` 过滤快照，并删掉那条**无调用点**的顶点拉取死路径。
-    - **第 5 批（已提交）**：**`RTPass` 改吃快照 + 网格注册表** ⇒ **B1 24 → 17**，且
-      **组件指针依赖 渲染期 13 → 0（E-3 的收敛目标达成）**。
-      · 收集集用 `SnapshotMeshClass ∈ {Base, Cube, Sphere}` 表达（与旧实现遍历
-        `MeshComponent`/`Cube`/`Sphere` 的精确类型范围**与顺序**逐条一致）；世界矩阵直接取
-        快照条目的 `object.worldMatrix`（不再经 `SceneGraph::GetWorldMatrix`）。
-      · **BLAS 缓存键从 `MeshComponent*` 换成 `meshIndex`**；`HashGeometry`/`HasGeometryChanged`
-        改吃 `MeshRegistryEntry`（顶点数 + 索引数 + 两个缓冲的设备地址 —— 与旧哈希同口径）。
-      · `BuildSceneMaterialTexture`（11 行 × N 列材质纹理 + 三角形法线/UV 纹理）改为从快照与
-        注册表取值：材质字段取 `GPUObjectData`（收集侧 `MakePBRMaterial` + `FillObjectData` 算好，
-        与 GBuffer 路径同源，含 `textureMask`），三角形属性从注册表缓冲读。
-      · **快照新增 `SnapshotRTMaterial`**（RT/PT 专用补充）：贴图均值回落
-        （`hasMaterialAvg`/`baseColorAvg`/`metallicAvg`/`roughnessAvg`）、`ior`/`transmission`、
-        `attenuationColor`/`attenuationDistance`。这批字段**不在** `GPUObjectData` 里，缺了它们
-        RT 材质纹理无法脱离组件构建；只对 RT 可见子集填。
-      · 删除一条**无调用点**的死路径（`CreateVertexPullBuffer` + `UpdateVertexDataDescriptorSet`
-        + `RTVertexPacked`）：它把 VB/IB 打包成 32B 布局绑到 set=1，而 PT 早已改用材质纹理的法线/UV
-        查询三角形属性（`ClosestHit` 里访问 `StructuredBuffer` 已知 GPU fault）。它此前还虚增了
-        帧内同步 RHI 计数（378 而非 384）。
-      · 判据：单测 398 例 / 71841 断言；`04.Sponza-Deferred` 与 `05.Sponza-PathTracing` 各跑 20 秒
-        无 VUID、无 ERROR；`06.GILab` 冒烟同批双跑 **4539 像素**、与上一批二进制对比 **0 像素**
-        （28 个目标逐位一致）。
-      > **一条教训（已入 §9 纪律）**：上一批用脚本替换基线注释块时，替换区间跨到了
-      > `MESH_PTR_BASELINE`，把中间的 `MESH_PTR_PATTERN` 定义一起删掉了 —— `--mesh-ptrs` 会
-      > `NameError` 崩掉，而当时只跑了 `--world-deps --gate` 所以没暴露。**复测四项闸门必须带全
-      > 四个开关**，不能只看自己关心的那一个。
-      > **剩余 17 = 纯帧入口签名**：`DeferredPipeline.h` 4、`PathTracingPipeline.h` 4、
-      > `DeferredPipeline_FrameGraph.cpp` 2、`PathTracingPipeline.cpp` 2、`ForwardPipeline.{h,cpp}`
-      > 各 2、`IRenderPipeline.h` 1 —— 即 `Render`/`BuildFrameGraph` 的 `World&`/`SceneGraph&`
-      > 与接口声明本身。下一批一次改完即 **B1 = 0**：接口强制三条管线同批，而各管线的内部 helper
-      > 与前置依赖（装配器、光源收集、阴影下标解析、MeshBatcher、RTPass）都已在本轮备齐。
-- [x] T2.1 `RenderThread` 实现（帧节奏 + 休眠策略）—— ✅ 完成（真起线程 + 归属判断 + 停止排空；4 例单测。cv 唤醒并入 T2.6）
-- [x] T2.2 设备与交换链归渲染线程（Acquire/Present 迁移）—— ✅ 完成（2026-10-09）：Acquire / 录制 / ImGui 录制 / Submit / 探测读回 / Present 全在渲染线程（一帧两条命令）；06.GILab 模式 0/1 转储逐位一致、归属断言 0
-- [x] T2.3 `ResourceCreationService` —— **判定不做**（当前没有消费者：创建点全在 owner 线程）—— **推迟到 A-3（P7）**：核实结果是当前**没有消费者**
-  —— `ForwardPipeline` 的所有创建点都在 `Initialize`/`Resize`/`UploadMaterialBindless` 扩容路径上，而
-  模式 1/2 的 **owner 就是渲染线程**（创建本来就在它上面，合法）。只有在 A-3 把创建挪去 RHI 线程之后，
-  "渲染线程请求创建 → 拥有线程执行"才有意义 ⇒ 现在实现只会是死代码。
-- [x] **T2.4 之一（已提交）**： 6.GILab 的渲染命令载荷改为**按值捕获**（此前 `[&]` 按引用捕获
-  `curPipeline`/`cmdList`/`camCtrl` ⇒ 真正异步时随时被游戏线程改写）。现在整帧渲染输入收进
-  POD 载荷按值交接：管线指针 + 本帧快照指针 + 命令缓冲 + 相机/时长的值拷贝。
-  · **判据**：单测 398 例 / 71841 断言；02.Cube 首帧统计不变（25 draws / 8150 tris / 阴影级联 12）、
-    `VUID=0`；06.GILab 冒烟与上一批二进制对比 **0 像素**、同批双跑 **0 像素**；四项闸门不变。
-  · **一次失败试验（重要）**：曾把快照改为"每飞行帧一份"（3 份轮转 + `NextFrame` 推进 + 装配器按槽重绑），
-    理由是按值交接的载荷里那个快照指针在异步执行时不该被下一帧改写。实测**真实回归**：
-    `lumen_irradiance`/`prov6_*` 差 8.26M 像素（meanAbs 0.28~0.53）、`hdr` 6.18M 像素；
-    回退后逐位一致 ⇒ **当下有消费者对"快照缓冲的同一性"有隐含依赖**
-    （最可疑：`ShadowSystem::m_CachedSnapshot` 这个跨调用缓存的指针、以及帧图构建期读到的快照指针）。
-    **结论**：多份轮转必须与 T2.2（渲染线程自己持有命令缓冲 + 自己 Submit/Present）一起做 ——
-    让真实异步去暴露并修正这些隐含依赖，而不是先改存储形态。三个管线保留了 `SnapBuf()` 访问器，
-    下次切换只动访问器与 `NextFrame`。
-  · 剩余（T2.4 后续）：其余 6 个样例同源改造（循环体 → 投递 + `SubmitFrame`）+ ImGui CPU 侧。
-
-- **T2.2 就绪度实测（本轮，`06.GILab` 的 `HE_RENDER_THREAD_STRICT=1` 开关，默认关闭）**：
-  · **归属机制有两套且当前不一致**：RHI 侧是 `rhi::ThreadAffinity`（`HE_ASSERT_RENDER_THREAD` 读它；
-    `VulkanDevice` 在创建设备时 `Claim()` 给**创建线程 = 游戏线程**），`RenderThread` 侧是
-    `s_RenderThreadHash`（`ThreadMain` 设置、`IsCurrent()` 读它）。**起线程不会转移 RHI 归属** ⇒
-    "起了线程也没报错"不能当作正确性证据。
-  · **mode 1 + 真线程的实测**：首条违规 = `Engine/RHI/Vulkan/VulkanCommandList.cpp:278`
-    （录制期的一次性小上传），出现在**渲染线程**执行管线录制时；随后运行**停在 Frame 1**
-    （RenderGraph 执行 15 passes 之后不再推进）⇒ 除归属外还有**帧推进的同步缺口**。
-  · **步骤 (a) 已完成（已提交）**：`RenderThread::SetThreadStartHook` + 样例注入 `Claim()`（认领必须在
-    新线程里做，而 Threading 层保持 RHI-free ⇒ 由调用方注入）。**验证证据 = 首条违规的转移**：
-    转移前是渲染线程录制路径（`VulkanCommandList.cpp:278`），转移后渲染线程录制合法、首条变成
-    **游戏线程的 `AcquireNextImage`（`VulkanSwapChain.cpp:232`）** ⇒ 归属确实转移，且步骤 (b) 的
-    工单第一项就是 `Acquire`。
-  · **因此 T2.2 的搬迁清单**：(a) 渲染线程启动时把 RHI 归属转移过去（`ThreadMain` 里 `Claim()`、
-    `Stop()` 里恢复/`Release()`）；(b) 把 `Acquire` / 录制 / ImGui 录制 / `Submit` / `Present` /
-    探针 `WaitIdle` 全部搬进渲染命令，其中 ImGui 要做"**CPU 侧建 UI、录制侧 `EndFrame(cmdList)`**"
-    的拆分（UI 控件仍在游戏线程，draw data 在渲染线程录制）；(c) 设计帧推进的同步（背压 + 帧票据 +
-    呈现完成）。做完 (a)(b)(c) 后 `HE_RENDER_THREAD_STRICT` 才应默认打开。
-- **T2.2 步骤 (c) 的核心原语（已提交）**：`RenderCommandQueue::WaitFrameRetired(frameIndex, timeoutMs)`
-  （记录"已退休到的帧号"——帧按 FIFO 消费 ⇒ 退休也有序）与 `FrameScheduler::SubmitAndWait(...)`
-  的**严格握手提交**（壳模式就地执行即刻满足；真线程模式等渲染线程回收）。
-  【为什么要先做它】步骤 (b) 要"把每帧 RHI 调用搬进渲染命令"，而这件事必须**逐项验证**：
-  每搬一项，转储都应保持逐位一致。严格握手让每帧串行，从而把"执行位置搬了但语义没变"
-  单独测出来；否则执行位置与录制一旦并发，任何差异都分不清是 bug 还是时序。
-  【判据】单测 399 例 / 71850 断言（新增 1 例 9 断言：壳模式即时满足、未发布帧号等待超时、
-  真线程模式 2s 内完成并确认已退休）；四项闸门不变；06.GILab 冒烟改动前后 15 像素
-  （5 个 Lumen 探针目标各 3 像素、maxULP=1、meanAbs=1.1e-11 —— 最小可能的浮点噪声），
-  同批双跑底噪 4554 像素 ⇒ 本批只加原语、未改渲染路径。
-
-- **步骤 (b) 的一次尝试与回退（本轮，未落地代码）**：把 `06.GILab` 一帧的全部 RHI 调用
-  （Acquire → 录制 → ImGui 录制 → 调试绘制 → End → Submit → 探测读回 → Present）抽成一个
-  `renderFrame` lambda，模式 0 直接调用、模式 1/2 经队列 + `SubmitAndWait` 严格握手；ImGui 控件
-  （CPU 侧）留在游戏线程、`imgui.EndFrame(cmdList)` 移入命令。**它能编译**，但实测改变了语义，
-  故**回退**（工作区与判据恢复到本轮之前：回退后重建对比 98 像素 ≈ 底噪）。
-  · **证据 1（顺序语义）**：严格路径（mode 1 + 真线程）与默认路径的转储差 **37,190,248 像素**
-    （`lumen_irradiance`/`prov6_*` maxRel 7364、`hdr` 6.15M）——探针是时域累积，任何"早一帧/晚一帧"
-    都会放大成这种量级。
-  · **原因**：该形状把**控件树挪到了管线渲染之前**，而面板里有大量"每帧写管线/GI 设置"的代码
-    （如环境强度/档位），原先写在渲染之后 ⇒ 设置下一帧才生效，现在同一帧就生效 ⇒ 时域结果整体
-    平移一帧。
-  · **证据 2（teardown 归属）**：严格路径唯一断言 = `VulkanDevice.cpp:331`（"设备销毁只在拥有线程"）
-    ⇒ 退出路径的 `device->WaitIdle()` / `Shutdown()` 仍在游戏线程，而归属已认领给渲染线程；
-    **`RenderThread::Stop()` 侧还没有对应的 Release**（步骤 (a) 只做了认领）。
-  · **修正后的形状（下一步照此做）**：一帧**两条命令**，以保持原有顺序不变 ——
-    ① `[Acquire + cmdList->Begin + 管线 Render]` → 握手；
-    ② 游戏线程建 UI（控件写在渲染之后，与今天一致）；
-    ③ `[ImGui BeginRenderPass + imgui.EndFrame(cmdList) + EndRenderPass + 调试绘制 + End + Submit +
-    探测读回 + Present]` → 握手。
-    另外给 `RenderThread` 补一个 **stop 钩子/Release**（或在样例退出前 `Release()` 再 `Stop()`），
-    使 teardown 合法。
-
-- **步骤 (b)(c) 落地（已提交，`06.GILab`）**：按上面的"修正后的形状"实现——一帧**两条**渲染命令，
-  保持原有帧内顺序不变：① `[Acquire + cmdList->Begin + 管线 Render]`；② 游戏线程建 UI（控件仍在管线
-  渲染**之后**）；③ `[ImGui BeginRenderPass + imgui.EndFrame(cmdList) + EndRenderPass + 调试绘制 +
-  End + Submit + 探测读回 + Present]`。两条命令统一走 `submitRender`：模式 0 直接在本线程执行，
-  模式 1/2 经队列 + **严格握手**。另外：**模式 1/2 起真渲染线程成为默认行为**
-  （壳模式对照见库层 `RenderThread` 的"未启动"形态）、启动/停止钩子认领与撤销 RHI 归属、
-  控件里的 `SetSwapChain`/`OnResize` 改为置标志由下一条命令在渲染线程执行。
-  · **判据（`HE_LUMEN_PROBE_FILTER=off`、`HE_NO_VSYNC=1`、120 帧 28 个转储目标）**：
-    模式 0 与改动前二进制 **0 像素**；**模式 1（真渲染线程）与模式 0 0 像素**（逐位一致）；
-    模式 1 无归属断言、无握手超时；`vuid_lines=42` 与既有基线一致；
-    **帧时间 448.9 → 454.2 ms/帧 = +1.18%**（在"不退化 >3%"预算内）；
-    单测 399 例 / 71850 断言；四项闸门：帧内 RHI 378、B1 0/0、组件指针 0/0、持有者 277。
-  · **未做**：其余 6 个样例与编辑器的同源改造（T2.4 收尾）；模式 2（三线程/RHI 线程）不在本轮范围。
-
-- **T2.4 扩展到 `07.AISamples`（已提交）**：同一"两条命令 + 真渲染线程"形状（帧前准备留在游戏线程；
-  ① `[Acquire + cmdList->Begin + 管线 Render + BackBuffer pass 开始]`；② `[imgui.EndFrame + EndDebugLabel
-  + EndRenderPass + End + Submit + Present]`；控件仍在两条命令之间）。
-  · **踩到并修掉一处搬迁遗漏**：样例在 `PollEvents()` 之后还有一句**独立**的 `AcquireNextImage`
-    （位于替换区间之外）⇒ 迁移后变成"游戏线程与渲染命令各 acquire 一次"，模式 1 下触发
-    `VulkanSwapChain.cpp:232` 的归属断言。**教训**：搬迁前先枚举该样例**全部**同类调用点
-    （`Acquire/Present/Submit/Begin/End/WaitIdle`），不要只处理"结构最像参照样例"的那一段。
-  · **判据**：模式 0 与模式 1 各跑 45 秒，**断言 0、VUID 0**；日志显示 `ForwardPipeline::RenderScene`
-    出现在"已起真渲染线程"之后 ⇒ 帧确实由渲染线程执行。（07.AISamples 无转储机制，故以"无归属违规 +
-    与 06.GILab 同形（后者有转储逐位一致证据）"作为本样例的证据。）
-  · **T2.4 剩余**：`02.Cube` / `03.Sponza-Forward` / `04.Sponza-Deferred` / `05.Sponza-PathTracing` /
-
-- **T2.4 扩展到 `02.Cube`（已提交，进度 6/7）**：用**显式锚点切分**（它的 acquire 是两行
-  `if (...) continue;` 形式，且 acquire 与 `cmdList->Begin` 之间有约 270 行帧前准备 —— 整段原样保留
-  在两条命令之前，这正是第 20/21 轮两次失败的原因）拆成两条命令；起线程按需（`HE_RENDER_THREAD_STRICT`）。
-  · **判据（三配置实测）**：默认 / 模式 1 单独 ⇒ **不起线程**；模式 1 + opt-in ⇒ 起线程；三者断言 0、
-    VUID 0、都正常出帧（`RenderScene` 各一次）；模式 1+opt-in 日志 1009 行 vs 默认 1450~1471 行
-    （= 已知的流水线深度代价，故仍为 opt-in）。
-  · 注：`02.Cube` 目前是"两条命令各握手一次"的形状（`06.GILab` 已是"命令 2 只发布"），待流水线深度
-    补齐时一并对齐。**T2.4 剩余**：`07.Nanite`。
-
-- **T2.4 收口：`07.Nanite` 也完成同源改造（已提交，进度 7/7）**：两条命令 + 按需起线程；
-  窗口回调与控件里的 `SetSwapChain`（都是 RHI）改为置标志、由渲染命令落地；跨两条命令共用的
-  `s_accPipelineMs` 提升到帧体层级。
-  · **判据（三配置各 30 秒）**：默认 / 模式 1 单独 ⇒ 不起线程；模式 1 + opt-in ⇒ 起线程；
-    三者**断言 0、VUID 0**，日志 198821 / 199483 / 196656 行（重帧样例，异步代价很小）。
-  · **T2.4 至此 7/7 样例完成**（`06.GILab` 默认异步且已实测；其余 6 个正确性已验证、异步为 opt-in，
-    待流水线深度补齐后逐个测量并默认打开）。
-
-- **流水线深度：帧槽位随命令冻结（本轮已提交）**：`FrameSceneSnapshot::frameSlot` 由装配器写入
-  （管线经 `SetFrameSlot` 告知），三条管线新增 `RenderFrameSlot()`（读"本次命令携带的快照里的槽位"，
-  回退实时计数器），渲染期所有 `m_CurrentFrameSlot` 使用点改用它（两个帧图 17 处 + 三个 .cpp 27 处；
-  保留"推进槽位/初始化归零"两行，面向游戏线程的 `GetCurrent*()` 访问器不变）。
-  【为什么】游戏线程跑到渲染线程前面时，渲染期读实时计数器会取到**别的帧槽位**的每帧资源
-  （描述符集/光源缓冲/UBO/实例剔除句柄）⇒ 画面错乱。至此"游戏线程跑到前面"会引入的两个竞争
-  都已消除（另一个是渲染期快照读取已冻结为 `FrameSnap()`）⇒ **流水线深度只差"每飞行帧命令缓冲
-  + 去掉命令 1 的每帧等待（改由队列满背压）"**。
-  · **判据**：单测 399 例 / 71850 断言；四项闸门不变；06.GILab 模式 1 同批双跑 **0 像素**（逐位可复现）、
-    模式 1 vs 模式 0 与模式 0 vs 上一版为 **4539 像素**（已知间歇底噪；本轮另有一次双跑为 0）、断言 0。
-
-- **深度 3 流水线的尝试（本轮，未落地代码，已回退）**：按上面设计实现了 —— 每飞行帧一个命令缓冲
-  （`cmdLists[3]`，`cmdList` 改成指针按槽位换绑）、**一帧 = 一个队列帧含两条命令**（帧首
-  `renderQueue.BeginFrame()` 取槽位、两条命令依次 `Enqueue`、帧末 `SubmitAndPump` 一次发布 ⇒ 背压由
-  `SubmitFrameBlocking` 在队列满时提供），并新增 `RenderCommandQueue::CurrentFrameSlot()`。
-  · **结果**：模式 0 与上一版 **0 像素**（默认路径不变 ✓），但**模式 1 挂死**（冒烟脚本 300 秒超时杀掉；
-    重跑一次 `lumen_passes=0`、转储文件缺失）⇒ 那个"模式 1 vs 模式 0 = 0 像素"是**空比较**（两边都缺）。
-  · **已 git 回退**（含 `CurrentFrameSlot()`），回退后重建通过。**未落地代码。**
-  · **下一步的定位方向（写清楚，下次接着做）**：(a) 先加**每帧可观测**（队列的 in-flight / pending /
-    retired 计数 + 渲染线程已执行帧数）打印，确认是"背压死等"还是"渲染线程停止消费"；
-    (b) 特别怀疑**槽位配对**：队列槽位（每渲染帧一个）与管线快照/帧槽位（`m_SnapshotSlot`、
-    `m_CurrentFrameSlot`）是**三个独立计数器**，深度 3 时它们的前后关系可能让"某帧的命令缓冲"
-    与"另一帧的渲染期资源"配错（`RenderFrameSlot()` 现在取的是快照里的槽位，而命令缓冲取的是
-    队列槽位 —— 两者必须一致）；(c) 转储/读数路径的排空点与探测读回的可见性也要在深度 >1 下重新推演。
-  · **结论**：在"每帧一次握手"的当前形状下，`06.GILab`（重帧）已达标（+1.22%），轻帧样例的默认异步
-    仍**不能**打开；深度 ≥2 需要上面 (a)(b)(c) 的诊断，属于下一批工作。
-
-  · **诊断结果（本轮）：挂死的真因是"样例记账被搬到了渲染线程"**。加了每帧的队列可观测后
-    （`inFlight/pending/retired/published` + 渲染线程 `execFrames/execCmds`）实测：
-    `[QUEUE] frame=0 ... published=0 execFrames=0` 被打印了 **13.9 万次** ⇒ 游戏线程的帧循环
-    **从未推进**。追下去发现：`frameIndex++`、`++s_n`（帧计时累加）与**转储触发** `s_n >= 120`
-    都落在 `recordUiAndPresent`（= 命令 2）里 ⇒ 它们现在**在渲染线程上执行**，游戏线程自己的
-    循环计数与转储触发因此永不推进 ⇒ 冒烟脚本等不到转储，300 秒超时（与我们观察到的现象完全一致）。
-    【为什么现在的形状没暴露】当前提交的形状里两条命令**都要握手**，游戏线程会等命令 2 跑完才继续，
-    于是这些"搬到渲染线程的记账"恰好也在游戏线程继续之前完成 ⇒ 碰巧正确；一旦改成"只发布"，
-    记账就真的跑到游戏线程后面去了。
-  · **修复清单（下一步）**：把命令 2 里的**非 RHI 记账搬回游戏线程** —— `frameIndex++`、`++s_n`、
-    帧计时累加、帧率/步骤 37 打印（读 `s_accPipelineMs`）；**转储**是混合体（触发+记账属游戏线程，
-    读回属 RHI）⇒ 触发与记账留游戏线程、读回留在渲染命令里（或用"转储前排空"保证可见性）。
-    搬完后再重做深度 ≥2，并按(a)(b)复核槽位配对。
-  · **纪律**：把一整段"帧尾块"整体搬进渲染命令时，必须逐行分辨"哪些是 RHI、哪些是游戏线程记账"
-    —— 后者留在外面。这条与"每帧只做一次的幂等标记必须由每帧必然发生处复位"是同一类教训。
-
-  · **修复清单第 1 步的实现与结论（本轮，未落地代码，已回退）**：按清单把 `frameIndex++`、帧率/步骤 37
-    记账、转储前排空与**转储判定**从命令 2 搬到游戏线程（转储执行仍留在命令 2，触发改为读一个标志
-    `dumpThisFrame`）。**能编译，但语义变了**：模式 1 与模式 0 的转储差 **61,841,201 像素**、
-    `lumen_passes` 410 vs 242 ⇒ **转储帧整体错开了一帧**。根因：`dumpThisFrame` 是**外层可变变量**、
-    而命令 lambda 是 `[&]` 按引用捕获 ⇒ 渲染线程执行命令 2 时读到的可能是**游戏线程已经为下一帧改写后**
-    的值（这正是"记账搬到游戏线程"想消除的那个竞争，只是从"渲染线程读 frameIndex"变成了
-    "渲染线程读 dumpThisFrame"）。
-  · **正确的修法（下一步）**：把"帧号与转储判定"作为**命令载荷按值携带**——即命令 lambda 必须
-    **按值**捕获本帧的 `frameIndex`（与 `dumpThisFrame`），而不是读外层可变变量。这与 T2.6
-    "类型化载荷"的方向一致（届时帧号/标志属于载荷字段）。**已 git 回退**（回退后重建通过），
-    未落地代码。
-    `07.Nanite` 共 5 个样例（形状相同，各自还需按上面的教训先枚举全部 RHI 调用点）。
-
-- **T2.4 扩展到 `03.Sponza-Forward`（已提交，进度 3/7）**：同形改造（两条命令 + 真渲染线程）；
-  按上一轮教训先枚举了全部 RHI 调用点，因此没有漏掉**窗口回调**里的整串 RHI
-  （`swapchain->Resize`/`cmdList->SetSwapChain`/`pipeline.OnResize`）—— 改为回调只置尺寸标志、
-  由渲染命令落地。
-  · **判据**：模式 0/模式 1 各 30 秒，`VUID 0`；模式 1 日志中 `[CSMTechnique] Cascade0 绘制物体数: 104`
-    出现在"已起真渲染线程"之后 ⇒ 帧由渲染线程录制与提交。
-  · **发现一处既有条件（与本批无关）**：两种模式下各有 1 条同源断言
-    `VulkanCommandList.cpp:197` = `BeginSecondary`（RenderGraph 的 worker/secondary 并行录制路径）。
-    它在**模式 0**（本批改动完全不起作用）同样出现 ⇒ 既有；`06.GILab` 不用 secondary 录制故无此断言。
-    **待办**：secondary/并行录制的归属问题（要么归到渲染线程，要么给它自己的归属语义）——
-    这条会挡在"模式 1 全样例零断言"之前。
-  · **T2.4 剩余**：`02.Cube` / `04.Sponza-Deferred` / `05.Sponza-PathTracing` / `07.Nanite` 共 4 个样例。
-
-- **T2.4 扩展到 `04.Sponza-Deferred`（已提交，进度 4/7）**：同形改造（两条命令；命令 2 里还包含
-  `pipeline.FlushComputeWork()` 这个 AsyncCompute 提交点；窗口回调的 RHI 改为置标志由命令落地）。
-  · **判据**：模式 0 与模式 1 各 30 秒，**断言 0、VUID 0**，日志 124958 / 126984 行 ⇒ 两种模式都
-    稳定连续出帧（日志量足以排除"卡在初始化"的假通过）。
-  · **T2.4 剩余**：`02.Cube` / `05.Sponza-PathTracing` / `07.Nanite` 共 3 个样例。
-
-- **T2.4 扩展到 `05.Sponza-PathTracing`（已提交，进度 5/7）**：同形改造（命令 2 里含对照用途的
-  `WaitIdle` 与探测读回；窗口回调 RHI 延迟落地，两个管线都 `OnResize`）。
-  · **判据**：模式 0/模式 1 各 30 秒，**断言 0**；两模式各有 **1 条同源 VUID**（第③段第 5 批记录过的
-    PT 首帧图像布局告警，既有条件、两模式一致）；日志 268512 / 263568 行 ⇒ 稳定连续出帧；
-    模式 1 日志中 `RTPass: TLAS 构建 (105 instances)` 出现在"已起真渲染线程"之后 ⇒ 光追工作在
-    渲染线程上执行。
-  · **T2.4 剩余**：`02.Cube` / `07.Nanite` 共 2 个样例。
-  · **`02.Cube` 的一次尝试与回退（本轮，未落地代码）**：它的帧结构与 03/04/05 **不同** ——
-    `AcquireNextImage` 是**两行形式**（`if (...) continue;`，无花括号），且 acquire 与
-    `cmdList->Begin` 之间有 **~270 行游戏线程帧前准备**（相机/装配/阴影分支）。用"从 acquire 之后
-    找第一个 8 空格 `}`"的启发式去切这段区域时切错了位置 ⇒ 帧前准备被切坏，两种模式下样例都在
-    进入循环后立刻停住（日志停在 "02.Cube demo started"/"已起真渲染线程"，无任何帧日志）。
-    **已 git 回退**（回退后重建通过）。
-    **教训（已入纪律）**：区域切分**不要用启发式**——每个样例都要先用**显式锚点**（该样例 acquire
-    块的确切收尾文本）确定边界；`02.Cube` 下次做时应显式写出 `i_acqend`（= `continue;` 那一行之后），
-    并把"帧前准备"整段原样保留在两条命令之前。
-
-  · **第二次尝试（本轮）：修好切分后 02.Cube 能正确渲染，但暴露出一个更重要的问题，故仍回退。**
-    根因确认：上一轮那次"停住"是我的启发式把 acquire 的第二行 `continue;` 留在了帧体层级 ⇒
-    变成"每帧立刻 continue"。改用**显式锚点**（`            continue;\n` 之后）后：
-    模式 0 与模式 1 **断言 0、VUID 0**，且 `RenderScene: 25 draws, 8150 tris, 4 lights` 与
-    阴影级联 12 都与既有基线一致（模式 1 里这两条日志出现在"已起真渲染线程"之后 ⇒ 渲染线程在工作）。
-  · **但帧时间判据不成立**：同一 28 秒窗口内，模式 0 日志 2008 行 / `任务 25`（逐实例剔除统计）40 条，
-    模式 1 只有 992 行 / **0 条** ⇒ 严格握手（每帧两次"发布 + 等做完"的同步往返）对**快帧样例**
-    的开销不可接受。06.GILab 是 450 ms/帧的重帧，同样设计只 +1.18%；02.Cube 帧很轻，两次往返
-    就把它压下去。
-  · **因此顺序要调整（重要）**：**先把"严格握手"换成队列的在飞流水线**（游戏线程只在队列满时等待，
-    即 T2.6 的 cv 唤醒 + 多飞行帧），**再**迁移剩余样例 —— 否则"模式 1 帧时间不退化 >3%"的判据在
-    轻帧样例上必然失败。而多飞行帧又要求"每飞行帧一份快照"（第 10 轮试过、因**有消费者持有快照
-    指针/依赖缓冲同一性**而回退）⇒ 下一步的依赖顺序是：
-    (a) 先消除"快照指针被跨帧持有 / 依赖快照缓冲同一性"的消费者（已定位最可疑者：
-        `ShadowSystem::m_CachedSnapshot` 与帧图构建期读到的快照指针）；
-    (b) 再多槽快照 + 队列在飞流水线（去掉每帧等待）；
-    (c) 然后才测模式 0/1 的帧时间，并继续迁移 `02.Cube` / `07.Nanite`。
-
-  · **步骤 (a) 的第一项已落地（已提交）**：`IShadowSystem::SetFrameSnapshot(snapshot, registry)`
-    （默认空实现）+ `ShadowSystem` 实现，由两个帧图在**注册 Shadow pass 之前无条件调用**
-    （Forward 用 `SnapBuf()`、Deferred 用 `FrameSnap()`）。原先快照指针只在 `Update` 里缓存 ⇒
-    "本帧没调 Update 却调了 Render"会用到**上一帧**的指针（单份快照时被掩盖，多槽时就会读到别的槽位
-    —— 第 10 轮多槽回归的机制类）。现在绑定与是否 Update 无关、每帧必然发生。
-    **判据**：单测 399 例 / 71850 断言；四项闸门不变；06.GILab 冒烟模式 0 与已验收二进制 **0 像素**、
-    模式 1 与模式 0 **0 像素**（判据保持）。
-
-- **03.Cube… 更正：`02.Cube` 第三次尝试的结论与"完整流水线"的前置条件（本轮，未落地代码）**：
-  用已验证的**显式锚点切分** + 新的**流水线化形状**（命令 1 握手、命令 2 只发布）迁移 `02.Cube`：
-  正确性全通（模式 0/1 断言 0、VUID 0；`RenderScene: 25 draws, 8150 tris, 4 lights` 出现在起线程之后），
-  **但帧时间仍不达标**：同 30 秒窗口内 模式 0 日志 1360 行 / `任务 25` 32 条，模式 1 仅 985 行 / **0 条**
-  （≈ 慢 28%；相比"两次握手"版本已是 72% vs 49%，说明"命令 2 只发布"确实省了一半同步，但不够）。
-  · **根因**：命令 1 的**严格握手**把"游戏线程准备下一帧"与"渲染线程录制本帧"串行化了 ——
-    而录制是帧内最重的部分（06.GILab 里 ~443 ms）。所以这不是同步往返的常数开销，而是**流水线深度只有 1**。
-  · **要真正达标（>3%）必须补齐三件**：(a) **每飞行帧一个命令缓冲**（现在只有一个 `cmdList`，
-    游戏线程提前开始下一帧的 `Begin` 会与渲染线程的录制并发）；(b) **多槽快照**（每飞行帧一份，
-    第 10 轮试过、因跨帧快照指针缓存而回退 —— 该缓存已被本轮的 `SetFrameSnapshot` 消除，可再试）；
-    (c) 去掉命令 1 的每帧等待，改成"只在队列满时等待"（背压）+ 帧票据对账。
-  · **已 git 回退**（回退后重建通过）。迁移配方（显式锚点 + 两条命令 + 只发布）本身已验证可用。
-  · **⚠ 开放风险（必须记住）**：`03`/`04`/`05`/`07.AISamples` 在提交时把"模式 ≥1 起真线程"设为**默认**，
-    但当时只验证了**正确性**（0 断言/0 VUID），**没有测过帧时间**。按本轮的实测（轻帧样例上
-    当前流水线深度会显著变慢），这些样例在模式 1 下很可能**不满足 >3%** 判据 ⇒
-    **下一步要么补测（03/05 可复用其日志行数做代理），要么把默认起线程改为按样例开关**。
-
-  · **已按后者处理（已提交）**：`03`/`04`/`05`/`07.AISamples` 的起线程改为**显式 opt-in**
-    （`HE_RENDER_THREAD_STRICT=1`，且仍需模式 ≥1）；`06.GILab` 保持默认（唯一实测达标者：
-    转储 0 像素、帧时间 +1.22%）。**实测三种配置**（04）：默认/模式 1 单独 ⇒ 不起线程（新默认语义）、
-    模式 1 + opt-in ⇒ 起线程；三者断言 0、VUID 0，日志行数同量级 ⇒ 默认路径回到与改动前一致，
-    异步路径仍可按需复现与测量。**待流水线深度补齐（每飞行帧命令缓冲 + 多槽快照 + 队列背压）后**
-    再逐个测量并把默认打开。
-
-- **多槽快照第二次尝试（本轮，未落地代码）**：在 `SetFrameSnapshot` 消除阴影跨帧指针缓存之后重试
-  "每飞行帧一份快照"（`m_Snapshots[3]` + `NextFrame` 推进 + 装配器重绑）——**回归以完全相同的数值
-  复现**（总差 47,531,045 像素；`hdr` 6,184,882 / maxULP 4462、`lumen_irradiance` 8,264,232 /
-  maxAbs 1 / meanAbs 0.276，与第 10 轮逐项相同）⇒ **阴影缓存不是原因**，该回归是**确定性**的，
-  且与"跨帧缓存快照**指针**"无关（本仓已无可疑的存储点：`FrameSceneSnapshot*` 成员只有三条管线与
-  `ShadowSystem`，后者已改为每帧无条件绑定）。
-  · **下一步的排查方法（已定）**：既然确定性，就用**二分**定位 —— 保留 3 份分配但让 `SnapBuf()`
-    恒返回第 0 份（若回归消失 ⇒ 问题在"消费侧读到非当前槽"；若仍在 ⇒ 问题在"装配侧写错槽"）；
-    再在装配器与每个消费点各打一条"槽位号 + draws.size()"的每帧日志（只跑一帧即可看出错配的
-    那一对生产者/消费者）。
-  · **注意**：在单线程（模式 0）下"装配 → 消费"发生在同一帧、同一线程，多槽本应完全等价 ⇒
-    回归必然来自某个**跨帧持有**：要么是引用/指针，要么是**依赖"三个槽位数组的地址稳定"**
-    （例如按地址做过哈希/比较、或把 `draws.data()` 之类缓存过）。排查时优先验证后者
-    （`m_Snapshots` 是数组 ⇒ 各槽地址不同但稳定；单份成员地址也稳定 —— 两者差别是"同一时刻存在
-    三份不同地址的数据"）。
-  · **已 git 回退**（回退后重建通过）。**流水线深度（每飞行帧命令缓冲 + 多槽快照 + 队列背压）
-    仍被这条排查挡着**，在查清之前不继续。
-
-  · **诊断结果（本轮，二分已完成第一步）**：把数组保留 3 份、但 `NextFrame()` **不推进槽位**
-    （永远用第 0 份）⇒ **转储 0 像素**（与单份等价）。这一步排除了"地址/数组形态"这一类假设
-    （若各槽地址不同就会出错，这里不会），把原因**锁定为"轮转本身"**：即某个消费点读到了
-    **非当前槽**（stale read）。也再次确认静态排查的结论：仓库里没有缓存快照**地址**的地方
-    （没有 `snapshot.*.data()`、也没有 `&FrameSnap()`），所以 stale read 只能来自
-    **"取快照的时机早于本帧的槽位推进/装配"** 或 **"某处保留了上一帧取到的快照引用"**。
-  · **下一步（已定，下一步执行）**：在 (a) 装配器写入点、(b) 管线 `Render` 入口、(c) 各消费点
-    （`SkyboxPass::Update`、`MakeGIContext`、`SetFrameSnapshot`、`GIManager`/Lumen 等）各打一条
-    "帧号 + 槽位号 + `draws.size()`"的日志，跑 3 帧即可看出**写入与读取的槽位/规模不一致的那一对**；
-    重点怀疑顺序问题：`m_FrameSnapshot = &snapshot` 与帧图构建（`BuildFrameGraph` 里多处
-    `FrameSnap()` 在**构建期**求值）之间是否严格有序、以及是否有 lambda 在**下一帧**才执行。
-  · **已 git 回退**（回退后重建通过）。流水线深度仍被这条排查挡着；不过现在它的范围已经从
-    "不知道哪来的"缩小到"某一处取快照的时机不对"。
-
-  · **已查清并修复（已提交）——根因不是"stale read"，而是"只装配过一次"**：
-    按上面的计划加了临时诊断（装配写入点 / 管线 `Render` 入口 / `SkyboxPass` 各打一条"地址 + 规模"，
-    跑前 4 帧），日志立刻给出答案：`[DIAG-write]` **只出现一次**，而 `[DIAG-render]` 每帧都出现，
-    且轮转到第 1/2 槽时 `draws=0` ⇒ **那两槽从未被装配**。
-    真正的原因：`AssembleScene` 用 `m_Assembled` 做"每帧只装配一次"的幂等，靠管线在 `NextFrame()`
-    里调 `BeginFrame()` 复位 —— 而**只有 `ForwardPipeline` 调了**，`Deferred`/`PathTracing` 都没有
-    ⇒ 这两条管线的快照**只在第一帧装配**。**静态场景把这条缺陷完全掩盖了**（内容一直有效，
-    所以 8 个批次的所有冒烟都是 0 像素或底噪），而在多槽轮转下"其它槽永远为空"就表现为巨大差异。
-    修好后：多槽 vs 单份 **0 像素**、同批双跑 **0 像素**、模式 1（真线程 + 多槽）vs 模式 0 **0 像素**。
-  · **顺带记一条纪律**：**"每帧只做一次"这类幂等标记必须由"每帧必然发生的地方"复位**，
-    且**静态基准无法验证它** —— 需要一条**动态场景**（或至少一帧内改变场景）的判据来兜底。
-  · **多槽快照（流水线深度的最后一块前置）现已启用并验证**，下一步可做"每飞行帧命令缓冲 +
-    队列背压（去掉命令 1 的每帧等待）"，然后复测轻帧样例（`02.Cube`）的模式 1 帧时间。
-
-  · **流水线深度的又一块前置已落地（已提交）**：把管线**渲染期**的 `SnapBuf()`（游戏线程推进的槽位）
-    改为 `FrameSnap()`（`Render` 入口收到的那份，随命令冻结）—— RSM/`GPUScene`/`SceneRenderer::Prepare`/
-    `SetFrameSnapshot` 四处；装配器绑定继续用 `SnapBuf()`（那是游戏线程该用的）。这样渲染线程只依赖
-    载荷里的指针，与并行推进的槽位无关，消除了"游戏线程跑到前面"会引入的两个竞争之一。
-    另一个是管线按 `m_CurrentFrameSlot` 取每帧资源（描述符集/UBO/光源缓冲）—— **改读快照里已有的
-    `frameSlot` 字段**（装配时填）即可，留给"每飞行帧命令缓冲 + 队列背压"那一步一起做。
-  · **判据**：单测 399 例 / 71850 断言；四项闸门不变；06.GILab 冒烟 模式 0 与上一版 **0 像素**、
-    模式 1 与模式 0 为 4539（= 已知间歇底噪）、模式 1 断言 0。
-  · **教训**：读数前必须先确认渲染线程模式 —— 模式 0（SingleThreaded）时队列不参与、渲染线程空转，
-    第一次测量因此"什么都没测到"。
-- [x] T2.4 样例循环改造（7 个样例）—— ✅ 完成（2026-10-09）：02.Cube / 03.Sponza-Forward / 04.Sponza-Deferred / 05.Sponza-PathTracing / 06.GILab / 07.Nanite / 07.AISamples；按值载荷（修掉 06.GILab 按引用捕获）；实现细节与完整时序见 15 文档 §13–§21。**注**：06.GILab 的 `NextFrame`/装配/阴影驱动仍在命令 1 内（未搬迁），搬迁后方可去掉每帧握手 ⇒ 见 §15"下一步"第 0 项
-- [ ] T2.5 编辑器主循环改造 —— **用户明确不做 Editor**
-- [x] T2.6前置 **A-2 RHI 线程（唯一提交者）** —— ✅ 完成（2026-10）：`Render/Threading/RHIThread` +
-  `RHI/SubmitRouter.h` + `ThreadAffinity` 第三角色；06.GILab 默认模式 2
-- [x] T2.6前置 **A-4 三层背压与同步点** —— ✅ 完成（2026-10）：有界队列（2 项）、呈现参数在渲染线程捕获、
-  `AcquireNextImage`/`WaitIdle` 先排空路由
-- [x] T2.6 `RenderThreadContext`：出口层已完成 + 537 处解析调用已搬迁（附录 H / §19.5）；**剩余**：PostProcess 13 文件、`GPUCulling`、RT 子类，以及「泵帧侧真正推入上下文」的收尾
-- [x] A-1 `RHI` 命令流 —— L1 契约+翻译 ✅、L2 提交管道 ✅；L3 单 pass 命令化**撤销**（§12.11）；L4-3 整帧命令化为独立项目（§12.12）
-- [x] A-3 资源句柄化 —— **64 批全部完成**（§16.2/§16.4），仅两处记录在案的例外
-- [x] A-5（**读回部分**）—— ✅ 完成：06 的 dump 读回改为 timeline fence（`SetTimelineSignal` +
-  `FlushAndWait` + `WaitForFence`），去掉设备级 `WaitIdle`；判据 = 20/20 逐字节一致、无新增 VUID
-- [x] A-5 —— PSO 句柄版队列已落地（`6d944ae`）；接生产者需先做 desc 生命周期改造（§16.7.4，暂缓）。ImGui 的 PSO/纹理由第三方后端直接创建，判为**范围外**（§16.7.2）
-- [x] T3.1 `ParallelRecordHelper` 抽取 —— ✅ 完成（`5ba4705`）：池 + 分块 + 归属声明 + 按块序合并抽成
-  `Pipeline/ParallelRecordHelper`，Forward 改用它；判据 = 冻结配置 A/B 逐字节一致
-- [x] T3.2 Deferred 接入并行录制 —— ✅ 完成（`ac496e2`）：GBuffer CPU 路径改并行录制；踩出两处必要修正
-  （次级列表不继承绑定 ⇒ 每块自己绑描述符集；GBuffer 的 pass 必须 `allowSecondary=true`，否则命中
-  `vkCmdExecuteCommands-contents-09680`）；判据 = 20/20 逐字节一致 + 无新增 VUID
-- [x] T3.3 评估完成 —— 结论**不做**（PT/Nanite 都只有 1 条 draw，无并行收益；附录 F §17.2）
-- [x] T3.4 完成 —— 新增 `kMinDrawsForParallel = 64` 阈值并接入两个调用方（`a70aa36`；附录 F §17.3）
-- [x] T4.1 ImGui 后端录制归属 —— **样例侧已实现**（`imgui.EndFrame(cmdList)` 已在命令 2 内、由渲染线程执行）；**编辑器侧待 T2.5**
-- [ ] T4.2 消除 ImGui 专用 RHI 后门 —— 与 Editor 同属 T2.5 范围，用户明确不做
-- [ ] T4.3 面板改读快照 —— 与 Editor 同属 T2.5 范围，用户明确不做
-- [ ] T4.4 热重载 PSO 替换改渲染线程执行 —— 与 Editor 同属 T2.5 范围，用户明确不做
-- [x] T5.1 —— **判定不做**（现有 `CpuSections` 是渲染线程内子阶段；三段计时的价值集中在背压观测，已由帧率/CPU 占用间接验证；埋点位置记录在附录 G §18.1）
-- [x] T5.2 —— **无需调优**（`kMaxFramesInFlight=3` 在模式 2 下稳定，附录 G §18.2）
-- [x] T5.3 —— **判定不做**（稳态帧内无创建；A-3 已解决所有权；触发条件记录在附录 G §18.3）
-- [x] T5.4 文档更新（2026-10-09：原文档 24 合并入 15 的 §13–§21，本文头部与 T5.4 行同步）
-
----
-
-## 10. 附录 B：自动化迁移检查
-
-以下断言建议做成脚本（如 `Tools/check_threading.py`）在阶段退出时跑一遍：
-
-| 检查 | 期望 |
-|---|---|
-| **B1** `Engine/Render/` 渲染期函数签名是否出现 `he::World&` / `SceneGraph&` | 阶段 1 后为 **0**（加载期例外需逐个白名单） |
-| **B2** `Samples/` 是否出现 `AcquireNextImage` / `Present` / `CreateCommandList` / `Submit` | 阶段 2 后为 **0** |
-| **B3** `Engine/Render/` 帧循环路径内是否出现 `CreateBuffer` / `CreateTexture` / `CreateGraphicsPipeline` | 阶段 2 后为 **0**（Initialize/OnResize 白名单） |
-| **B4** 是否出现无超时的 `WaitForFence(...UINT64_MAX)` 在帧循环内 | 为 **0**（铁律 3） |
-| **B5** `IRHIDevice` 的创建/销毁入口是否都有 `HE_ASSERT_RENDER_THREAD()` | 覆盖 100% |
-| **B6** 渲染输出一致性（`cmp_dumps.py` 前后对比） | 每阶段退出时**逐像素一致** |
-
----
-
-## 11. 参考
-
-- [Parallel Rendering Overview for Unreal Engine（Epic 官方）](https://dev.epicgames.com/documentation/unreal-engine/parallel-rendering-overview-for-unreal-engine?application_version=5.4&lang=zh-CN)——Render Thread / RHI Thread / 并行命令录制的职责划分
-- 本仓库：[15.多线程架构与渲染实现分析.md](../HugEngine引擎介绍/15.多线程架构与渲染实现分析.md)、[02.架构UML与可扩展性分析.md](../HugEngine引擎介绍/02.架构UML与可扩展性分析.md)（§17 代码级债务）、[04.功能缺口与对标分析.md](../HugEngine引擎介绍/04.功能缺口与对标分析.md)（§16 债务清单）、[22.开发与验证手册.md](../HugEngine引擎介绍/22.开发与验证手册.md)（验证工具与流程）
-
----
-
-## 12. 附录 C：升级到 UE 三线程模型的增量路径
-
-> 本附录回答："本方案（方案 B）将来若要转成 UE 的 **Game → Render → RHI** 三线程模型，需要改什么、哪些决定必须提前做。"
-> 阅读顺序：§12.5（必须提前定的决定）→ §12.6（逐任务改动）→ §12.8（落地策略）。
-
-### 12.1 一句话：分水岭在 T2.6
-
-| 如果 T2.6 的 `RenderThreadContext` 被设计成… | 那么升级到 A 是… |
-|---|---|
-| **吐命令流**（渲染线程只 push `RHICommand`，不碰 Vulkan API） | **加一层线程 + 换执行位置**（增量 +6~12 人日，见 §12.9） |
-| 直接调 Vulkan（`IRHIDevice::Create*`、`vkCmd*`） | **重写渲染层**（命令流与句柄化都要事后补，面极大） |
-
-因此 §5 阶段 0 额外预埋了 **T0.6（命令流契约）** 与 **T0.7（资源句柄化）** 两个任务。
-
-### 12.2 本质差异
-
-```
-B（本方案）:   渲染线程 ──► IRHICommandList（直接产 vkCmd*）──► vkQueueSubmit ──► Acquire/Present
-A（UE 三线程）: 渲染线程 ──► RHI 命令流（纯数据，零 API 调用）
-                              RHI 线程 ──► 翻译成 vkCmd* ──► vkQueueSubmit ──► Acquire/Present
-```
-
-职责对照（对应 UE 的 `FRHICommandListExecutor` / `FDynamicRHI` / `FRHIThread`）：
-
-| 环节 | B（渲染线程一人全包） | A（拆成两段） |
-|---|---|---|
-| 剔除 / 收集 / 建帧图 | 渲染线程 | 渲染线程（不变） |
-| 记录"要做什么" | 直接生成 `vkCmd*` | **只 append `RHICommand`**（渲染线程） |
-| 翻译成 API 调用 | 记录时立即发生 | **RHI 线程** |
-| `vkQueueSubmit` / `Acquire` / `Present` | 渲染线程 | **RHI 线程（唯一提交者）** |
-| fence 与背压 | 两层（游戏↔渲染） | **三层**（游戏↔渲染↔RHI） |
-
-### 12.3 必须新增的 5 件东西
-
-| # | 新增件 | 说明 | 难度 |
-|---|---|---|---|
-| **A-1** | **抽象 RHI 命令流**（记录/执行分离） | 渲染线程 push 类型擦除的命令载荷，RHI 线程 pop 并翻译。**不要用 `std::function`**：每帧数千条命令会造成堆分配与虚调用开销，UE 用"类型擦除 + 内联参数存储"（`FRHICommand`） | **最高** |
-| **A-2** | **RHI 线程** | 命令流唯一消费者、唯一提交者；`Submit` / `SubmitAll` / `AcquireNextImage` / `Present` / fence 全归它 | 中 |
-| **A-3** | **资源创建命令化 + 句柄化** | `std::unique_ptr<IRHIBuffer>` 的"同步立即给所有权"语义必须换成句柄（创建在 RHI 线程执行） | **面最广** |
-| **A-4** | **三层背压与同步点** | 游戏→渲染、渲染→RHI 各自有在飞上限；语义对齐 UE 的 `FRHIThread::Sync()` | 中 |
-| **A-5** | **ImGui / PSO / 读回的命令化** | UI 产 `ImDrawData` → 命令流；PSO 走已有异步队列；`Map()` 改轮询或延迟取值 | 中 |
-
-### 12.4 现状接口的改造面（含两个有利条件）
-
-| 现状 | 位置 | 对 A 的含义 |
-|---|---|---|
-| `CreateSwapChain` / `CreateCommandList` / `CreateBuffer` / `CreateTexture` / `CreateSampler` / `CreatePipelineState` 均返回 **`std::unique_ptr<T>`** | `Engine/RHI/RHI/RHI.h:52-58` | ⚠️ **最大改造面**：同步所有权语义 ⇒ 必须句柄化（A-3） |
-| `CreateTextureMipStorageView` / `CreateTextureMipSampledView` 返回 **`void*`**；`CreateImGuiDescriptorPool` / `CreateImGuiRenderPass` 返回 **`void*`** | `RHI.h:127-135`、`RHI.h:163-167` | ⚠️ A 方案中"立即返回原生句柄"全部作废，须改为命令流内的抽象引用 |
-| `Submit()` 在命令列表上、`Submit(IRHICommandList*)` / `SubmitAll(Span<...>)` 在 device 上 | `Engine/RHI/RHI/CommandList.h:283`、`RHI.h:172`、`RHI.h:208` | A 方案中只允许 RHI 线程调用 |
-| ✅ `CreateDescriptorSetLayout` 返回 **`DescriptorSetLayoutHandle`**、`CreateFence` 返回 **`RHIFenceHandle`** | `RHI.h:99`、`RHI.h:188` | **句柄式 API 已有先例**，可照此推广到 buffer/texture/PSO |
-| ✅ 已有 `EnqueuePSOCreate` / `ProcessPSOCreateQueue` / `GetPendingPSOCreateCount` | `RHI.h:82-86` | **PSO 异步创建的雏形已存在**，A-5 只需扩展它，不必从零设计 |
-
-### 12.5 B 方案里"必须提前定"的 5 个决定
-
-| B 阶段的决定 | A 阶段的要求 | 建议提前到 |
-|---|---|---|
-| 资源创建同步返回 `unique_ptr`，各 Pass 用 `unique_ptr` 成员持有 | 改为**句柄 + 延迟解析**（并由 `FrameRetireQueue` 承担生命周期） | **阶段 0（T0.7）**——否则要二次动全工程 200+ 处持有者 |
-| `BufferDesc::initialData` 同步上传（`VulkanResources.cpp:486,651`） | 拷贝入队，RHI 线程执行 | 阶段 0 |
-| device 由渲染线程持有并直接调 `Create*` | device 归 RHI 线程；渲染线程只拿"命令接口" | 阶段 2（T2.6，分水岭） |
-| 交换链归渲染线程 | 归 **RHI 线程** | 阶段 2 起就抽象成 `ISwapChainController`，不让管线直接持有 |
-| ImGui 后端直接写命令缓冲（`EditorApp.cpp:536-542`） | UI 只产 `ImDrawData` → 命令流 | 阶段 4，但接口**不得暴露** `VkCommandBuffer` |
-
-### 12.6 逐任务改动表
-
-| 原任务 | A 方案的改法 | 增量 |
-|---|---|---|
-| T0.1 线程断言 | 断言分**双角色**：记录期 = 渲染线程、执行期 = RHI 线程 | 小 |
-| **T0.6（新增）** | `RHICommandList` 记录端契约 + `RHICommand` 载荷（§12.7） | **大** |
-| **T0.7（新增）** | 资源句柄化（`RHIBufferHandle` / `RHITextureHandle` + generation） | **大** |
-| T0.3 / T0.4 命令队列与帧票据 | 基本不变，额外加一层 RHI 背压计数 | 小 |
-| **T1.x 场景快照（阶段 1）** | ✅ **完全复用，零改动** | **0** |
-| T2.2 交换链迁移 | 目标线程从"渲染线程"改为 **RHI 线程** | 小 |
-| T2.3 资源创建服务 | 从"转发到渲染线程执行"改为"**命令化，RHI 线程执行**" | 中 |
-| **T2.6 `RenderThreadContext`** | 从"RHI 唯一出口"升级为"**只能吐命令流**"，不再暴露 device | **大** |
-| **阶段 2.5（新增）** | RHI 线程落地：消费命令流 + 唯一提交 + fence 管理 | **大** |
-| T3.1~T3.4 并行录制 | worker 产出的命令流片段由 **RHI 线程合并翻译**（UE 的 `TranslateCommandList` 模式） | 中 |
-| T4.1~T4.4 编辑器 / ImGui | UI 命令化；后门接口改为命令流内的描述符池引用（`RHI.h:163-169` 移除） | 中 |
-| T5.x 验收调优 | 增加三层背压调优、提交批优化、`enableRHIThread` 运行期开关 | 中 |
-
-### 12.7 命令流接口草案
-
-```cpp
-// Engine/RHI/RHI/RHICommandList.h —— 记录端（渲染线程唯一可调，对应 UE 的 FRHICommandList）
-namespace he::rhi {
-
-/// 一条命令的载荷：类型擦除 + **内联存储**。
-/// 为什么内联：每帧可能有数千条命令，逐条堆分配会成为新的瓶颈（UE 同做法）。
-struct RHICommand {
-    u32 type;                            // 命令类型（SetPipeline / DrawIndexed / PipelineBarrier / …）
-    u32 payloadSize;                     // 实际参数字节数
-    alignas(16) u8 inlinePayload[64];    // 小参数直接内联；超出 64B 的走列表私有 arena
-};
-
-/// 命令列表 = 命令流 + 参数 arena。渲染线程写，RHI 线程读；交接后只读（铁律 2）。
-class RHICommandList {
-public:
-    /// 记录一条命令：参数按值内联，禁止捕获会被游戏线程继续修改的引用
-    template <typename TPayload>
-    void Enqueue(u32 type, const TPayload& payload) {
-        static_assert(sizeof(TPayload) <= 64, "参数超过 64B，请走 AllocArena 通道");
-        // … 追加到 m_Commands
-    }
-
-    /// 大块数据（常量缓冲、上传源、SBT 记录）写入本列表私有 arena，RHI 线程执行期读取
-    [[nodiscard]] void* AllocArena(u64 size, u64 alignment = 16);
-
-    /// 标记本列表为此帧的提交边界（RHI 线程翻译完成后执行一次 submit）
-    void MarkSubmitBoundary() { m_HasSubmit = true; }
-
-private:
-    std::vector<RHICommand> m_Commands;
-    // … arena / 提交标记 / 目标队列类型
-};
-
-/// 资源句柄：取代 unique_ptr 的同步所有权语义；generation 用于检测悬挂引用
-struct RHIBufferHandle  { u32 index = 0; u32 generation = 0; };
-struct RHITextureHandle { u32 index = 0; u32 generation = 0; };
-
-} // namespace he::rhi
-```
-
-```cpp
-// Engine/RHI/Threading/RHIThread.h —— 执行端（对应 UE 的 FRHICommandListExecutor + FRHIThread）
-namespace he::rhi {
-
-/// RHI 线程：命令流的唯一消费者与唯一提交者。
-/// 职责：翻译 RHICommand → 平台 API；执行 queue submit；Acquire/Present；fence 管理。
-/// 对应关系：等价于 UE 的 r.RHIThread.Enable=1 模式。
-class RHIThread {
-public:
-    bool Start(IRHIDevice* device);          // 设备由本线程创建与持有
-    void Stop();
-
-    /// 渲染线程：提交一帧命令流（有界队列，满则渲染线程阻塞 —— 第二层背压）
-    void EnqueueCommandList(RHICommandList&& list);
-
-    /// 渲染线程：同步点（仅当确实需要"GPU 已完成某事"时使用，禁止进入帧循环）
-    void Sync();
-
-    static bool IsCurrent();
-
-private:
-    void ThreadMain();                        // 消费命令流 → 翻译 → 提交 → 呈现
-    std::thread     m_Thread;
-    RHICommandQueue m_Queue;                  // 有界
-    // … fence / 提交批 / 背压计数
-};
-
-} // namespace he::rhi
-```
-
-### 12.8 落地策略：把 A 做成"加开关"，而不是重写
-
-| 步骤 | 内容 | 验收 |
-|---|---|---|
-| **A1** | 命令流落地，**执行位置 = 渲染线程就地执行**（翻译与执行都在渲染线程） | 行为与 B **逐像素一致**、帧时间不退化 ⇒ 证明命令流层本身不引入开销 |
-| **A2** | 新增 `RHIThread`，执行位置切到它（`enableRHIThread` 开关）；**两个位置共用同一套命令流代码** | 主线程与渲染线程零 API 调用；提交在 RHI 线程；validation（含 sync）零告警 |
-| **A3** | 三层背压调优 + **提交批优化**（合并 barrier、批量描述符更新、批量提交） | `vkQueueSubmit` 调用次数下降；渲染线程可跑前于 RHI 线程 |
-
-> 运行期开关直接对齐 UE 的 `r.RHIThread.Enable`：**关 = 渲染线程就地执行；开 = RHI 线程执行**。
-> 这也解释了为何 UE 能把它做成可选——它的结构从第一天起就是"记录/执行分离"。
-
-### 12.9 代价与收益
-
-| 项 | 评估 |
-|---|---|
-| 额外工作量（不预埋） | 命令流层 + RHI 线程 + 句柄化改造：在 B 的 33~62 人日之上 **+15~30 人日** |
-| 额外工作量（阶段 0 预埋 T0.6/T0.7） | 增量降到 **+6~12 人日**（预埋成本约 +5~8 人日） |
-| 收益兑现条件 | ① 落地 **D3D12 后端**（描述符堆/PSO 开销大，RHI 线程收益显著）；② 实测"提交 + 驱动时间"占比 > 10~15%；③ 需要渲染线程在提交期间继续跑下一帧 |
-| 新增风险 | 三层时序难以调试；**命令流翻译本身可能成为新瓶颈**——这正是必须先做 A1（就地执行版）验证的原因 |
-| 与 §7 风险表的关系 | §7 的 R1~R7 全部适用；额外增加 R8「命令流翻译开销」与 R9「三层背压抖动」 |
-
-### 12.10 不建议的做法
-
-| 做法 | 为什么不好 |
-|---|---|
-| 先把 B 做完，再回头把 `vkCmd*` 调用"包装"成命令流 | 等于把渲染层重写一遍；且 `unique_ptr` 资源持有者已扩散到 200+ 处 |
-| 用 `std::function` 作为命令载荷 | 每帧数千次堆分配 + 间接调用；应为类型擦除 + 内联存储 |
-| 一开始就上三线程 | 录制耗时（16.4 ms，见 §1.5）才是当前瓶颈，三线程治不了它；且前置改造面最大 |
-| 让渲染线程与 RHI 线程都能调 `IRHIDevice::Create*` | 资源创建就必须线程安全化，等于把 RHI 改成两套锁；应保持"创建只在 RHI 线程" |
-
----
-
-## 13. 附录 D：阶段 0 T0.2 帧内同步 RHI 调用清单
-
-> **性质**：阶段 0 T0.2 的产出（**只读盘点，不改代码**）。这张清单是阶段 2（T2.2/T2.3/T2.6）的派工单，
-> 也是附录 B 各阶段退出闸门的可执行版本。
-
-### 13.1 怎么复现
-
-```powershell
-python Tools\check_threading.py                  # 汇总（Engine/Render）
-python Tools\check_threading.py --detail         # 附每条 file:line + 所属函数
-python Tools\check_threading.py --root Samples   # 样例侧（附录 B 的 B2 口径）
-python Tools\check_threading.py --gate           # 闸门：帧内命中 > 0 时退出码 1（各阶段退出用）
-```
-
-### 13.2 判定口径（刻意保守）
-
-- **类别**：`SWAPCHAIN`（拿图/呈现）、`WAIT`（等待型提交 / 空闲等待）、`CREATE`（设备调用形态
-  `x->Create*()`，含 `CreateTransient*`）、`MAP`（映射缓冲访问：直写上传或 GPU→CPU 读回）、
-  `UPLOAD_DESC`（`desc.initialData` 创建期上传）。
-- **帧内 vs 加载期**：取该行**所属函数名**，含 `Initialize / Init / Shutdown / Resize / Load / Upload /
-  Setup / Construct / OnCreate` 之一 ⇒ 加载期，其余一律帧内。白名单**故意不含 `Build` / `Create`**：
-  `BuildFrameGraph` 这类名字里有 Build 的函数**每帧都跑**，含进去会把真正的帧内创建藏起来。
-- **已知两类噪声**（清单用于排序与派工，不当作证明）：
-  1. **辅助函数误判为帧内**：如 `AA_TAA::CreateHistoryTextures` 只在 `Initialize` 里被调用，但函数名
-     不含白名单词 ⇒ 记成帧内（保守方向：多报，不会漏报）；
-  2. **头文件声明/文件作用域**：如 `RenderGraph.h` 内的声明行记为 `<文件作用域>` ⇒ 记成帧内。
-  反向的漏报风险同样存在（多行函数签名会让"所属函数"退化成上一个可识别的函数名）。
-
-### 13.3 清点结果（2026-09-24，multi_thread 分支）
-
-`Engine/Render`（196 个文件）：
-
-| 类别 | 帧内 | 加载期 | 处置（方案对应任务） |
-|---|---|---|---|
-| `SWAPCHAIN` | **0** | 0 | 交换链调用全在样例侧 ⇒ 见下表 + C2 |
-| `WAIT` | **2** | 2 | 阶段 2：只允许渲染线程，帧内禁止（铁律 3）；加载期保留 |
-| `CREATE` | **211** | 209 | 阶段 2 T2.3：帧内改走 `ResourceCreationService`（步 1 同步转发，仅限加载/重建） |
-| `MAP` | **142** | 22 | 阶段 2 T2.6：读回改"登记 + N 帧后取值"（`FrameRetireQueue`）；直写改入队拷贝（铁律 2） |
-| `UPLOAD_DESC` | **21** | 14 | 阶段 2 T2.3：创建期上传经创建服务在渲染线程执行 |
-| **合计** | **376** | 247 | 阶段 2 退出时帧内必须为 0（加载期用例保留但需经创建服务） |
-
-`Samples`（7 个样例 + 编辑器）：
-
-| 类别 | 帧内 | 加载期 | 说明 |
-|---|---|---|---|
-| `SWAPCHAIN` | **18** | 0 | 与 C2 一致：`AcquireNextImage` / `Present` 全在样例主循环，T2.2 整体迁入渲染线程 |
-| `WAIT` | **15** | 1 | 样例里的等待型提交，随 T2.4 的循环改造一起收口 |
-| `CREATE` | **66** | 2 | 样例侧资源创建（多为加载期语义，但因函数名未命中白名单而记帧内） |
-| `MAP` | **6** | 0 | — |
-| `UPLOAD_DESC` | **22** | 0 | — |
-| **合计** | **127** | 3 | 附录 B 的 **B2**：阶段 2 后样例侧这些调用应为 0 |
-
-### 13.4 代表点与优先级（帧内命中按文件聚合）
-
-| 类别 | 最集中的文件（帧内命中数） | 已核对的具体点 |
-|---|---|---|
-| `CREATE` | `Lumen/LumenScene_SurfaceCache.cpp×32`、`Nanite/NaniteRaster.cpp×26`、`Lumen/LumenSDF.cpp×18`、`Pipeline/ParticleRenderer.cpp×17`、`Pipeline/RTPass.cpp×12`、`Pipeline/LightingPass.cpp×11` | `RenderGraph.cpp:441/447` —— 帧图 `Execute` 内瞬态分配失败时**直接调用 `device->CreateTexture/CreateBuffer`**；`AA_FXAA.cpp:114`、`AA_SMAA.cpp:285` 等 PSO 辅助函数 |
-| `MAP` | `Pipeline/ParticleRenderer.cpp×20`、`Lumen/LumenScene_SurfaceCache.cpp×18`、`Nanite/NaniteRenderer.cpp×15`、`Nanite/NaniteRaster.cpp×13`、`Nanite/NaniteCull.cpp×12`、`Lumen/LumenSDF.cpp×9` | `SceneRenderer.cpp:102`（对象数据直写）、`AA_TAA.cpp:198`（TAA 常量直写）、`DDGITracePass.cpp:152`/`GI_RSM.cpp:201`（GI 常量直写）、`NaniteRenderer.cpp:736` 起（GPU 计数读回） |
-| `UPLOAD_DESC` | `Pipeline/RTPass.cpp×6`、`Lumen/LumenScene_SurfaceCache.cpp×3`、`Nanite/NaniteStream.cpp×3`、`Pipeline/LightingPass.cpp×3` | `LumenSDF.cpp:2249`、`NaniteRaster.cpp:145`（dummy VB 零填充） |
-| `WAIT` | `Lumen/LumenScene_Irradiance.cpp:166`、`Nanite/NaniteStream.cpp:388` | 两处都在帧内路径上 ⇒ 阶段 2 起必须改造（铁律 3） |
-
-**结论**：阶段 2 的主要工作量集中在 **Lumen 表面缓存 / Nanite（光栅、剔除、流式）/ 粒子 / RT**，以及
-**帧图 `Execute` 的兜底创建路径**；这三块正好也是《Lumen设计与实现》里 CPU 录制耗时的大头，
-因此 T2.3 与 T3.2 应当合起来排期，避免"先搬到渲染线程、再为并行录制改一遍"。
-
-### 13.5 作为闸门
-
-阶段退出时用 `--gate`：帧内命中非 0 即失败。各阶段期望：
-
-| 阶段 | 期望 |
-|---|---|
-| 阶段 0（本阶段） | 只登记、不设闸门（本附录即产出） |
-| 阶段 1 | `Engine/Render` 渲染期不再出现 `he::World&` / `SceneGraph&`（附录 B 的 B1，另行纳入脚本） |
-| 阶段 2 | `--root Engine/Render --gate` 与 `--root Samples --gate` 均通过（帧内为 0） |
-| 阶段 3/4 | 保持为 0，且 `WAIT` 帧内不得回升（铁律 3） |
-
----
-
----
-
-## 14. 附录 E：mesh 注册表设计草案（T1.2c / T1.4 骨骼消费侧的前置）
-
-> **为什么单独一节**：T1.2c（材质参数快照化）与骨骼消费侧都卡在同一件事上 —— 渲染侧目前通过
-> **`MeshComponent*` 指针**拿到顶点/索引缓冲与材质数据（`SceneRenderer::Prepare` 的 `DrawItem`、
-> `ForwardPipeline` 的骨骼上传），而**快照不允许带指针**（§4.2 的硬约束）。本节把这块的设计一次定清，
-> 后续按它实施即可；实施前**不需要**再改口径。
-
-### 14.1 目标与边界
-
-- **目标**：让"快照里的 `meshIndex`"成为渲染侧取网格资源的唯一入口 ⇒ 删除渲染期对
-  `MeshComponent*` 的依赖（这正是附录 B1 里 82 处的**主要来源**）。
-- **不做**：不改顶点布局、不改绘制路径的绑定顺序、不改实例化/蒙皮的数据来源（它们已经索引化或另有入口）。
-
-### 14.2 API 草案
-
-```cpp
-// Engine/Render/Threading/MeshRegistry.h —— 渲染侧网格注册表（阶段 1）
-namespace he::render {
-
-/// 一条网格记录（只存**渲染侧可达**的值；不持有组件所有权）
-struct MeshRegistryEntry {
-    rhi::IRHIBuffer* vertexBuffer = nullptr;   // 顶点缓冲（所有权仍在组件/资产，注册表只借指针）
-    rhi::IRHIBuffer* indexBuffer  = nullptr;
-    u32  indexCount = 0;                       // 索引数（间接绘制参数的兜底来源）
-    u32  materialID = 0;                       // bindless 纹理基索引（与组件同源）
-    bool instanced  = false;                   // 实例化网格：顶点由实例路径提供
-};
-
-class MeshRegistry {
-public:
-    /// 注册或**更新**（同一 key 重复注册 = 更新，用于组件重建缓冲的场景）；返回从 1 起的 meshIndex
-    u32  Register(const void* key, const MeshRegistryEntry& entry);
-    /// 注销：索引回到空闲表，且**旧 meshIndex 从此解析为 nullptr**（悬挂引用立刻可见，而不是指错资源）
-    void Unregister(const void* key);
-    [[nodiscard]] const MeshRegistryEntry* Find(u32 meshIndex) const;   // 越界/已注销 ⇒ nullptr
-    [[nodiscard]] u32 Count() const;
-    void Clear();
-};
-
-} // namespace he::render
-```
-
-### 14.3 生命周期规则（必须遵守，否则又是一类悬挂）
-
-1. **谁注册**：持有组件/资产的一侧（加载期或组件创建时）；`key` 用组件地址，注册表**只借不拥有**缓冲。
-2. **禁止帧内注销**：注销要在"确认渲染侧不再引用该索引"之后（沿用 `FrameRetireQueue` 的 N 帧延迟思路）；
-   帧内注销会让当帧已录制的绘制指到空记录 ⇒ 与"快照按帧轮换"同一类问题。
-3. **索引从 1 起**，0 保留为"未注册"哨兵（与 `RHIBufferHandle` 的约定一致）。
-4. 与 **T0.7 句柄化**的关系：注册表内部将来换成 `RHIBufferHandle`（而不是裸 `IRHIBuffer*`），
-   这样缓冲释放后的悬挂引用由**代次**检出；本阶段的裸指针版本是过渡（已在注释里标明）。
-
-### 14.4 两个首个消费者（实施顺序）
-
-| 步骤 | 内容 | 判据 |
-|---|---|---|
-| **E-1** | **骨骼上传**（`ForwardPipeline` 里把 `sm.boneMatrices` 写进 `sm.boneBuffer` 的那段）改为：遍历快照的骨骼条目（`skinMatrixOffset/Count`），用 `meshIndex` 从注册表取骨骼缓冲 | 与旧实现**逐位一致**（旧实现逐行转写为参考实现 + `memcmp`） |
-| **E-2** | **`SceneRenderer::Prepare`** 的材质填充：材质输入改为"收集侧跑 `FillObjectData` 并把结果放进 `SnapshotDrawItem::object`"（§9 T1.2c 已定），`DrawItem` 不再携带 `MeshComponent*`；**视锥剔除仍在渲染线程**（它只需要快照里的世界 AABB） | 同上；并核对 `06.GILab` 的 28 个转储目标 |
-| **E-3** | **第 5 处口径漂移的裁决**：`SceneRenderer` 收集 `SplineMeshComponent` 而 `GPUScene`/`BuildObjects` 不收集 —— 二者必须取其一（建议**统一为收集**，并在提交里给出前后对比） | 提交里写明"修正"还是"改版"及其依据 |
-
-**E-3 配方（已查清，照做即可；2026-09-24）**：
-
-- 可复用的现成件（都在 `Engine/Render/Pipeline/Material.h`，全部 `inline`）：
-  `PBRMaterial`（:77）、`GetDefaultMaterial()`（:109）、`FillObjectData(GPUObjectData&, const PBRMaterial&)`（:129）。
-- 现在要抽出来的映射在 `Engine/Render/SceneRenderer.cpp:110-125`（组件字段 → `PBRMaterial` 的
-  10 项：`baseColorFactor / emissiveFactor / metallicFactor / roughnessFactor / aoFactor /
-  alphaCutoff / alphaMode / doubleSided / unlit / 5 条纹理路径`）。
-- **落点**：把该映射做成 `SceneSnapshotBuilder::MakePBRMaterial(const he::MeshComponent&)`
-  （`static`，实现在 builder 的 .cpp 里；`SceneRenderer` 改为调用它 ⇒ 只有一份口径）。
-  `CollectObjectItem` 在填完 `materialID` 后调用它并 `FillObjectData(item.object, mat)` ——
-  **在收集侧把材质算完**（纯计算），快照因此不必携带纹理路径字符串。
-- `SceneRenderer::Prepare` 改为消费快照（`entry` 不再需要 `MeshComponent*`）：
-  剔除仍用快照的世界 AABB 在渲染线程做；`DrawItem` 里的网格引用换成 `meshIndex`
-  （顶点/索引缓冲从 `MeshRegistry::Find` 取，E-1/E-2 已就绪）。
-- 判据：① `FillObjectData` 的输出与旧路径**逐位**比较（把 `SceneRenderer.cpp:110-125` 的映射
-  逐行转写为参考实现 + `memcmp`）；② `06.GILab` 的 28 个转储目标粗筛（噪声底噪 ≈4.5k 像素）。
-
-**注册所有权（E-2 开工前必须先定 —— 已定，避免下一轮再决策）**：注册表由**创建/替换网格缓冲的那一侧**
-填充，即 `MeshComponent::SetMeshData` 的调用点（资产加载器 / 样例的加载期），**不在渲染帧内**注册；
-组件销毁时在同一处注销（且必须帧外，见 §14.3 第 2 条）。渲染侧只做 `Find`。
-这样"谁创建谁注册"与缓冲所有权一致，也保证注册表在帧内**只读**（与快照同一条纪律）。
-
-**E-2 的具体步骤（建议按此顺序，每步单独提交 + 逐位判据）**：1. 给 `ForwardPipeline` 加 `MeshRegistry m_MeshRegistry;`（成员）与最小注册点：**加载期**遍历一次
-   `SkeletalMeshComponent`，用组件地址作 key 注册其顶点/索引缓冲与 `indexCount`；
-2. 骨骼上传改为：遍历快照里 `skinMatrixCount > 0` 的条目 → `Find(item.meshIndex)` 取缓冲 →
-   写入 `skinMatrices[offset, offset+count)`；旧实现（遍历组件 + `sm.boneBuffer`）逐行转写为参考实现
-   做 `memcmp` 逐位比较；
-3. 完成 E-2 后复测 `--world-deps`（预期 `ForwardPipeline.cpp` 的 7 处与 `.h` 的 12 处各降若干），
-   并把 `WORLD_DEP_BASELINE` 手动下调到新值。
-
-**E-2 代码骨架（真实字段名/调用，可直接照抄；`meshIndex` 字段已于 2026-09-24 落在 `MeshComponent` 上）**：
-
-```cpp
-// ① 注册（加载期；只做一次 —— 用 bool m_MeshRegistryReady 守；必须在首次构建快照之前）
-//    ForwardPipeline.cpp / DeferredPipeline.cpp 同款
-if (!m_MeshRegistryReady) {
-    world.ForEach<he::SkeletalMeshComponent>([&](he::Entity, he::SkeletalMeshComponent& sm) {
-        if (sm.GetIndexCount() == 0u) return;                 // 与收集口径一致：无索引不登记
-        MeshRegistryEntry e;
-        e.vertexBuffer = sm.GetVertexBuffer().get();          // 只借指针，所有权仍在组件
-        e.indexBuffer  = sm.GetIndexBuffer().get();
-        e.indexCount   = sm.GetIndexCount();
-        e.materialID   = sm.materialID;
-        e.instanced    = true;                                // 骨骼网格：顶点由蒙皮路径提供
-        sm.meshIndex   = m_MeshRegistry.Register(&sm, e);      // 回填：快照靠它索引
-    });
-    m_MeshRegistryReady = true;
-}
-
-// ② 消费（骨骼上传：遍历快照条目而不是组件）
-SceneSnapshotBuilder::BuildObjects(world, sg, camera, {}, nullptr, m_Snapshot);   // 若尚未构建
-for (const SnapshotDrawItem& item : m_Snapshot.draws) {
-    if (item.skinMatrixCount == 0u) continue;
-    const MeshRegistryEntry* entry = m_MeshRegistry.Find(item.meshIndex);
-    if (!entry) continue;                                     // 未注册/已注销 ⇒ 跳过（可见化，而不是指错资源）
-    // …把 m_Snapshot.skinMatrices[item.skinMatrixOffset, +skinMatrixCount) 写进 entry 对应的骨骼缓冲
-}
-```
-
-> 判据：把"遍历组件 + `sm.boneBuffer`"的旧实现**逐行转写**成参考实现，与上面①②的结果做 `memcmp`
-> 逐位比较（全帧转储只作粗筛，原因见 §9 T1.3a 的噪声底噪记录）。
-
-### 14.6 会话交接点（2026-09-24 更新，`multi_thread` 分支，81 条提交未推送）
-
-**当前绿灯状态（最近一次复测）**：单测 **390 例 / 71750 断言全通过**；四项闸门**都在基线**
-（帧内同步 RHI 调用 376 / B1 世界依赖渲染期 **82** / 组件指针渲染期 **20** / 资源持有者 277）；
-`acceptance_sweep.ps1 -OnlyNanite` **PASS** 且两类指纹（`1C15AB72E688B530` / `750CC247BF8B9C3D`）
-未变；`06.GILab` 冒烟在 Forward/Deferred 双管线完整快照之后 = **0 像素差异**。
-
-**已完成的阶段 1 工作**（详见 §9）：快照契约、光源/物体/环境/骨骼/粒子收集、三管线消费、
-E-1 注册表本体、E-2① 注册点（**三条管线对称**）、E-2② 骨骼矩阵走快照、E-3① 材质映射唯一化、
-E-3② 前半（收集侧算材质）、E-4 样条网格口径统一、快照稳态零分配（两处补漏）、
-Forward/Deferred 完整快照 + 自校准容量预留。
-
-**下一步（E-3② 后半，按 §14.5 的三类清单做）**：
-1. 删掉 `SceneRenderer::DrawItem::mesh`（组件指针闸门的核心），消费者改用 `meshIndex`：
-   顶点/索引缓冲从各管线自己的 `MeshRegistry::Find` 取（三条管线的注册已就绪）；
-   视锥剔除继续用快照的世界 AABB 在渲染线程做。
-2. Forward 的两处"地址反查对象条目"已有整数优先版（`meshIndex`），删字段后把兜底分支一并去掉。
-3. `RTPass` 的 BLAS 缓存键从 `MeshComponent*` 换成 `meshIndex`（13 处），并处理缓存重建。
-4. 每步完成后复测 `python Tools/check_threading.py --mesh-ptrs` 并把 `MESH_PTR_BASELINE` 下调
-   （当前 20 → 目标 0）。
-
-**再之后**：T1.5（三条管线的帧入口签名从 `(world, sg, camera)` 改为收 `const FrameSceneSnapshot&`，
-样例在游戏线程构建快照）⇒ B1 从 82 开始下降；然后进入阶段 2（真线程 + 设备/交换链迁移 + 样例循环）。
-
-**开工前的固定命令（顺序不可省）**：
-```powershell
-# 1) 确认没有并发构建（否则会出现"假挂死"）
-Get-Process cl,MSBuild -ErrorAction SilentlyContinue
-# 2) 后台构建（前台会被 600s 上限截断并留下孤儿 cl，让后续构建看起来卡死）
-cmd /c "cmake --build build --config Release --target HugEngineTests 06.GILab 03.Sponza-Forward > build\verify\b.log 2>&1"
-# 3) 看退出码与 error C/error LNK —— 确认全绿之后再单独执行提交（不要把构建与提交串成一条命令）
-python Tools\check_threading.py --world-deps --mesh-ptrs --handles --gate
-```
-
-### 14.5 判据与闸门
-- 注册表本体：单测覆盖"注册/更新/注销/复用/越界与已注销返回 nullptr"（与 `TestRHIHandles.cpp` 同款）。
-- 两个消费者：沿用本方案统一判据 —— **旧实现逐行转写为参考实现 + 逐位比较**（全帧转储只做粗筛）。
-- **B1 计数必须下降**：`Tools/check_threading.py --world-deps` 每完成一步就复测并把基线手动下调
-  （当前 82）。
-  > **口径修正（2026-09-24，E-2② 实测）**：E-1/E-2 消除的是**组件指针依赖**（`MeshComponent*`），
-  > 而 B1 统计的是**签名里的 `World&` / `SceneGraph&`** —— 两者不是同一个度量。实测 E-2② 完成后
-  > B1 仍为 82（骨骼循环本身仍在 `Render(world, …)` 之内）。**B1 真正开始下降是在 T1.5**
-  > （把管线帧入口从"收 `world/sg`"改成"收快照"）。本附录的 E-1/E-2 因此按"组件依赖是否消失"
-  > 衡量（代码检查 + 逐位判据），不按 B1 计数衡量。
-- **组件指针依赖有独立闸门（2026-09-24 新增）**：`python Tools/check_threading.py --mesh-ptrs`
-  统计 `Engine/Render/` 内 `*Component*` 的出现处，按所属函数名分**渲染期 / 加载期**
-  （与 B1 共用同一套分类口径与白名单），基线即上限并接入 `--gate`。
-  **实测基线：渲染期 20 处 / 加载期 4 处**，命中清单（= E-3 后半的收敛对象）：
-  `Pipeline/RTPass.cpp`(9)、`SceneRenderer.cpp`(4)、`Pipeline/RTPass.h`(4)、`SceneRenderer.h`(1)、
-  `Pipeline/ForwardPipeline.{h,cpp}`(各 1)。**E-3 每推进一步就复测并把 `MESH_PTR_BASELINE` 下调。**
-  > **首次下调（2026-09-24）**：`ForwardPipeline::DrawMesh` 是**私有且零调用的死代码**（全仓库核查，
-  > 其余 `DrawMesh*` 命中都是无关的 RHI `DrawMeshTasks`）⇒ 删除声明与定义，渲染期命中
-  > **20 → 18**，基线随之下调为 18。这类"重构遗留的死函数"也是组件指针依赖的来源之一，
-  > 值得在收敛过程中顺手清掉（判据：全仓库无调用点 + 构建通过）。
-  > **20 处的分类与替代方案（2026-09-24 逐条查清；没有"顺手能啃掉"的边角，都是结构性的）**：
-  > ① **RT 的 BLAS 缓存**（`RTPass.h:177/183` 等 4 处 + `.cpp` 9 处）：`unordered_map<MeshComponent*, BLASEntry>`
-  > —— 按组件地址做键 ⇒ 换成**按 `meshIndex`（或 `sourceEntity`）为键**，并在 E-4 的口径统一后重建缓存；
-  > ② **绘制辅助函数与查找**（`ForwardPipeline.h:137` `DrawMesh(cmd, MeshComponent*, …)`、
-  > `.cpp:1372` 定义、`.cpp:1112/1240` 用组件地址反查 `DrawItem`）—— 换成按 `meshIndex`/`sourceEntity`
-  > 查找，`DrawMesh` 的入参改成 `meshIndex` + 从注册表取缓冲；
-  > ③ **`SceneRenderer` 的 `Entry`/`DrawItem`**（`.cpp` 4 处 + `.h` 1 处）—— 见 E-3 配方：
-  > `Entry` 不再需要组件指针，`DrawItem` 用 `meshIndex`。
-  > 建议顺序：③（E-3 配方已就绪）→ ②（顺带把 `sourceEntity` 用起来）→ ①（涉及 RT 缓存重建，
-  > 与 E-4 口径统一一起做）。
-
----
-
-> **文档版本**：v1.3（2026-09-24）
-
----
-
-## 15. 第二轮交接快照（2026-09-24 晚；新会话请从这里开始）
-
-> **2026-10-09 更新（§15.1 第①②段完成）**：本节的"分支与状态 / 四项闸门 / 验收 / 已完成 / 下一步"
-> 五段已按第①②段落地后的实测刷新；**§15.1 的第③段亦已完成**（帧入口收快照 ⇒ 附录 B1 世界依赖
-> 渲染期 0 / 加载期 0；该节收尾说明写在该节里）。
->
-> **2026-10-09 更新（文档合并，T5.4）**：原《24.渲染线程化实现情况》已并入
-> [15.多线程架构与渲染实现分析.md](../HugEngine引擎介绍/15.多线程架构与渲染实现分析.md) 的 §13–§21；
-> 一并修正了 15 的过期结论（原"没有持久化的 Render 线程"）与 `FrameSnapshotAssembler` 幂等标记缺陷的补正；
-> 本文头部性质对应改为"计划 + 实施记录"。
->
-> **2026-10-09 更新（收尾：并入 main 并推送）**：本节五段已按当前状态刷新。**工作已全部合并进 `main`
-> 并推送**（`origin/main` = `b2aace6`），`multi_thread` 分支**已删除**（本地 + 远端），`main` 成为唯一分支。
-> 新增落地项：§15.1 **第③段（B1 → 0）**、**T2.2**、**T2.4（7/7 样例）**、相机控制回归修复（06/03/04/05）、
-> `06.GILab` "渲染线程模式"下拉 + **默认模式 1**、文档合并（24 → 15 的 §13–§21）、**T5.4 勾选**。
-
-**分支与状态**：**`main`（唯一分支）**，与 `origin/main` **完全同步**（`b2aace6`；本轮 187 条提交已推送）。
-原 `multi_thread` 分支已删除（本地 + 远端；内容全部在 `main` 上，删除前核对 `main` 缺失提交数 = 0）。
-工作区干净（仅未跟踪占位文件 `docs/计划实现功能/占位.md`，不要动它）。
-
-**四项闸门（都在基线，只允许下降）**：帧内同步 RHI 调用 **378**（= 376 + 归属漂移；见 §9 T1.5 的
-口径说明）｜附录 B1 世界依赖 渲染期 **0** / 加载期 0 —— **阶段 1 退出目标达成**
-（80 → 76 → 69 → 51 → 47 → 43 → 27 → 24 → 17 → 0，逐批见 §9 第②段与第③段各批；自此只允许保持 0）｜
-组件指针依赖 渲染期 **0** / 加载期 0（**18 → 13 → 0**，E-3 收敛目标达成）｜T0.7 资源持有者 **277** / 75 文件。
-复测：`python Tools/check_threading.py --world-deps --mesh-ptrs --handles --gate`
-（**务必带全四个开关** —— 只看其中一项会漏掉别的闸门回归，§9 已记录一次由此漏掉工具损坏的事故；
-注意 `--gate` 的退出码目前恒为 1：`帧内同步 RHI = 378 > 0` 是**阶段 2** 的退出条件，
-四项**基线**本身都已满足。）
-
-**验收**：单测 **399 例 / 71850 断言全通过**；`acceptance_sweep.ps1 -OnlyNanite` **PASS** 且两类
-pass 指纹（`1C15AB72E688B530` / `750CC247BF8B9C3D`）未变；`06.GILab` 冒烟必须带
-`HE_LUMEN_PROBE_FILTER=off`（默认滤波下同一二进制两趟差 **≈ 2.25M 像素**，判据会被淹没）。
-**底噪是间歇的**：关掉滤波后同一二进制两趟本会话实测 **0 像素**（inst5/6、7/8、9/10）
-与 **4630 像素**（inst11/12）都出现过 —— 因此判据必须**成对**给出
-（同批二进制双跑 + 改动前后对比），单次 0 像素不构成证据；至今各步的"改动前后"对比分别为
-第①段 0、第②段 0、第③段第 1 批 15 像素（maxULP=1，均在 Lumen 探针类目标上）⇒ 均落于同批底噪内。
-`02.Cube`（唯一含实例化网格的样例）双管线实跑：GPU 剔除读回与 CPU 复算逐帧相等、实例 SSBO
-只建一次后原地复用、Deferred 比 Forward 少 1 条（贴花卡片被正确排除）。
-**模式 0 / 模式 1 判据（2026-10-09 收尾实测）**：`06.GILab` 模式 1 vs 模式 0 转储**逐位一致**
-（同批双跑 0 像素；误差落于已知间歇底噪 4539/4615 像素内）、两模式转储各 28 个齐全、**归属断言 0**；
-帧时间：**重帧配置（Lumen 开，约 450 ms/帧）+0.72% ~ +1.29%**（噪声 ±2%，可信）；轻帧配置
-（Lumen 关，6~9 ms/帧）差异落在噪声内（同模式自身波动可达 ±31%），**需多次取中位数才能判定**。
-
-**已完成**：阶段 0 全部（T0.1–T0.7 + 两条退出判据）；阶段 1 的快照契约、光源/物体/环境/骨骼/粒子/
-天空盒/材质/贴花收集、三管线消费（光源 + `GPUScene`）、E-1 注册表、E-2① 注册点（三管线对称）、E-2② 骨骼
-矩阵走快照、E-3① 材质映射唯一化、E-3② 前半（收集侧算材质）、E-4 样条口径统一、稳态零分配（`Reserve`
-补漏 + 自校准预留）、Forward/Deferred 完整快照；**阶段 2 的 T2.1 渲染线程真起线程**（含 4 例单测）；
-**§15.1 第①段**（实例缓冲状态搬迁 + 实例数据进快照，含顺带修掉的 `CollectLights` 误清快照缺陷）；
-**§15.1 第②段**（`Prepare` 收快照 + `DrawItem` 去组件指针，含顺带修掉的 Deferred 贴花口径缺口）；
-**§15.1 第③段第 1 批**（GBuffer 家族去 `World&`、`GPUScene` 过渡重载删除、`SkyboxPass` 改读快照）；
-**第③段第 2 批**（阴影系统全链路改吃快照 + 样例先建快照，含顺带修掉的 Deferred 阴影静默消失回归）；
-**第③段其余各批（B1 → 0）**——帧入口收快照（三管线 + 帧图）、`RTPass`/`MeshBatcher`/`ResolveFrameCamera`
-去世界、`SubsystemContext`/`GIProviderContext` 收口 ⇒ **附录 B1 渲染期 0 / 加载期 0**；
-**T2.2**（一帧两条渲染命令：Acquire/录制/ImGui 录制/Submit/探测读回/Present 全在渲染线程；
-窗口回调与 GUI 里的 RHI 改为置标志、由命令落地）；**T2.4**（**7/7 样例**：`02.Cube`、`03`、`04`、`05`、
-`06.GILab`、`07.Nanite`、`07.AISamples`；按值载荷 + 帧号/转储判定按值携带，修掉 `06.GILab` 按引用捕获）；
-**多槽快照 + 装配器复位缺陷修复**（Deferred/PT 曾只在第一帧装配）；**帧槽位随命令冻结**（`RenderFrameSlot()`）；
-**命令 2 只发布**（去掉每帧第二次握手）；**相机控制回归修复**（06/03/04/05 四处，帧体拆分时被误删）；
-**`06.GILab` 渲染线程模式下拉**（运行时切换，帧首生效）+ **默认模式 1**；**文档合并与 T5.4**。
-
-**下一步（2026-10-09 刷新）**：
-0. **把 06.GILab 的帧推进/装配/阴影收集搬回游戏线程**（`NextFrame()`/`AssembleScene(...)`/Forward 阴影驱动
-   目前仍在命令 1 内 ⇒ 模式 1 下跑在渲染线程；`06.GILab.cpp:1053/1057/1068-1079`）。这是**流水线深度 ≥2**
-   与 **T2.6** 的前置：搬迁 + 每飞行帧命令缓冲 + 命令 1 类型化按值载荷 + 队列满背压，四件一起做才能去掉
-   命令 1 的每帧握手（详见 15 文档 §15.6 的目标形态与 §15.7 的接入清单）。
-1. **轻帧配置的性能判定**：每模式各跑 5 次取**中位数**（当前单次波动 ±31%，不足以判定是否退化 >3%）；达标后
-   才把其余样例的"默认异步"打开。
-2. **流水线深度 ≥2**（去掉命令 1 的每帧握手，让轻帧样例受益）：每飞行帧命令缓冲 + 命令 1 的类型化按值载荷
-   + 队列满背压；前置已全部就位（多槽快照、渲染期读数冻结、帧槽位随命令冻结、帧号按值、`CurrentFrameSlot()`）。
-3. **模式 2（游戏线程 + 渲染线程 + RHI 线程）未实现**：需要第三根线程与二级命令队列、把 `Submit`/`Present`/
-   `WaitIdle` 的提交者唯一化、`ThreadAffinity` 扩展为"录制者 ≠ 提交者"、命令缓冲两级所有权（见 §12 附录 C）。
-4. **`03.Sponza-Forward` 的既有断言**（`VulkanCommandList.cpp:197 HE_ASSERT_RENDER_THREAD`，加载期 697 行后退出）：
-   已用"撤回改动再跑"对照证明与渲染线程化无关；修掉后该样例才能做视觉确认。
-5. **secondary/并行录制（`BeginSecondary`）的线程归属**；**T2.6**（类型化载荷 + cv 唤醒）。
-6. **T2.5 / T3.x / T4.x / T5.1–T5.3**（MTCR 扩展、ImGui 归属与后门、面板只读快照、热重载替换、Profiler 三段计时、
-   背压参数调优、资源创建异步化）仍属后续范围。
-
-**（以下为 2026-09-24 版历史计划；其第③段各批与 T2.4/T2.2 均已完成，见上）**
-1. **§15.1 第③段第 4 批（下一步，最大的一块）**：**三条管线的帧入口改收 `const FrameSceneSnapshot&`**
-   ⇒ **B1 → 0**。当前 47 的分布：`ForwardPipeline.{h,cpp}` 11+7、`DeferredPipeline.h` 6 +
-   `.cpp` 2 + `_FrameGraph.cpp` 2、`PathTracingPipeline.h` 5（+ .cpp，在 top-12 之外）、
-   `ForwardPipeline_FrameGraph.cpp` 2、`IRenderPipeline.h` 1、`Camera.{h,cpp}` 1+1、
-   `RTPass.{h,cpp}` 3+4、`MeshBatcher` 2（在 top-12 之外）。
-   **落地要点（第 2/3 批已经铺好的路）**：
-   · **快照构建必须移出 `Engine/Render`** —— `ForwardPipeline::BuildFrameSnapshot(world, sg, camera)`
-     本身带 `World&`/`SceneGraph&`，**它就是 B1 命中**（第 2 批引入，当时未计入预期）。正确形态是
-     **样例直接调 `SceneSnapshotBuilder`**（它在 `Engine/Render/Threading/` 白名单内）：
-     样例持久持有一个 `FrameSceneSnapshot`（首帧 `Reserve`），每帧按
-     `RegisterMeshes → BuildObjects → BuildInstances → BuildShadowLights → BuildSkybox →
-     BuildEnvironment → BuildMaterials → BuildDecals/BuildParticles（按管线需要）` 填充，
-     然后交给 `pipeline.Render(cmd, snapshot, camera, dt)`。
-   · 管线侧：删 `BuildFrameSnapshot`/`m_SnapshotBuiltThisFrame`，把 `m_Snapshot` 换成
-     `const FrameSceneSnapshot* m_FrameSnapshot`（Render 入口赋值，帧图 lambda 在 Render 内执行 ⇒
-     引用安全），并逐个收掉 helper 的 `World&`/`SceneGraph&`：`CollectLights`（光源收集也要移出
-     Render —— 它需要 `sg` 与阴影下标解析器）、`RenderScene`、`RunGPUCulling`、`RenderSkybox`、
-     `RefreshRSMFrustum`、`BuildFrameGraph`。
-   · **光源收集的顺序约束**：`SnapshotLight::shadowIndex` 由 `m_ShadowSystem->GetShadowIndex(e)` 解析，
-     而该映射在 `ShadowSystem::Update` 里建立 ⇒ 快照的"光源部分"必须在阴影收集**之后**填；
-     建议快照增设 `lightSourceEntities` 平行数组 + 一个**无 world 参数**的
-     `SceneSnapshotBuilder::ResolveLightShadowIndices(snapshot, resolver)`，由样例在阴影收集之后调用
-     （`BuildLights` 先留 `shadowIndex = -1`）。这样既保持"阴影下标是本帧的"，又不让管线收世界。
-   · `RunGPUCulling` 里的 `MeshBatcher::Build(world)` 是**一次性**构建（`m_BatchBuilt` 门控）⇒
-     移到样例首帧调用（或第 5 批把 `MeshBatcher::Build` 改成吃快照 + 注册表）。
-2. **§15.1 第③段第 5 批**：`RTPass`（`RTPass.{h,cpp}` 的 3+4 处 B1 + 13 处组件指针：BLAS 缓存键、
-   `CollectMeshList` 指针载荷、`HasGeometryChanged`/`HashGeometry`、以及一条无调用点的顶点拉取死路径；
-   RT 可见子集 = `Base`/`Cube`/`Sphere`，现在可以用 `SnapshotMeshClass` 表达）、
-   `MeshBatcher::Build`(2，注意它的收集集含 `Instanced`、**不含** `Spline`/`Skeletal`，与快照全集不同)、
-   `ResolveFrameCamera`(2，`Camera.{h,cpp}` —— 它是**场景查询**，应挪出 `Engine/Render`
-   或改吃已解析的值)、以及 `IRenderPipeline.h` 的 1 处。
-3. **§15.1 第③段第 6 批（B1 盲区收尾）**：`SubsystemContext::world/sceneGraph` 与
-   `GIProviderContext::world/sceneGraph`（后者已查明全 GI 源无一处使用，可直接删）、
-   `he::SyncPhysicalSkyToSun(world)`（每帧写世界）、`SceneGraph::UpdateTransforms()`
-   （只在渲染期调用）—— 它们不被 B1 统计，但换线程后就是数据竞争。
-   **这批才是"渲染期真的不读世界"的判据。**
-4. **T2.4** 样例循环改造（06.GILab 试点 → 7 个样例）：**按值**交接（修掉 06.GILab 的按引用捕获）、
-   渲染线程执行；第 4 批已把"游戏线程建快照"这一步做掉。
-5. **T2.2** 设备与交换链归渲染线程（`CreateDevice` 的归属 claim 迁移、`Acquire/Present` 迁移）；
-6. **按需 T2.3**（资源创建同步转发）、**T2.6**（`RenderThreadContext` 为 RHI 唯一出口 + 队列 cv 唤醒）；
-7. **判据**：模式 0 / 模式 1 同场景转储**逐位一致** + 帧时间**不退化 >3%**（06.GILab 121 帧自测）。
-   **模式 2 本轮不做**（你已明确）；T2.5/T3.x/T4.x/T5.x 属后续范围。
-
-**开工前固定命令（顺序不可省）**：先查并发构建（`Get-Process cl,MSBuild`）→ **后台**构建
-（前台会被 600s 截断并留孤儿 `cl`，表现为"假挂死"）→ 看退出码与 `error C`/`error LNK` →**确认全绿后
-再单独提交**（不要把构建与提交串成一条命令）。
-
-### 15.1 走向 B1 → 0 的**剩余三段**（2026-09-24 已查清，零决策；① 已于 2026-10-09 完成）
-
-**第 ① 段：实例数据进快照 —— ✅ 完成（2026-10-09）**
-- 落地内容与实测数字见 §9 T1.5 的"第①段"条目与 §6 的"第三次复核"表。要点：
-  快照新增 `SnapshotInstance` + `instanceTransforms` 扁平数组 + `BuildInstances`；
-  `InstancedMeshComponent` 只留 CPU 数据源与 `instanceTransformVersion`；
-  逐网格 GPU 缓冲状态搬到 `InstanceCuller::InstanceState`（按 `meshIndex`，含 `BeginInstancesFrame`
-  的回收与 `ownerEntity` 的索引复用识别）；三个消费侧全部改读快照。
-- **落地时修正了两处原方案**：① 原方案说"原重载内部转发、保持两条路径共用"——实际三个消费侧全部
-  切到快照后就没有第二条路径了，旧重载直接删除（避免留一份"吃组件"的死代码）；
-  ② 原方案没预见到 `CollectLights` 里的 `m_Snapshot.Clear()` 会把实例数组一起抹掉（见 §6 第三次复核）。
-- 组件侧只保留 `instanceTransforms`（CPU 数据源）+ 版本号；`enableFrustumCull` 与局部 AABB 由快照携带。
-
-**第 ② 段：`SceneRenderer::Prepare` 收快照，`DrawItem` 去指针 —— ✅ 完成（2026-10-09）**（前半）
-- 落地内容与实测数字见 §9 T1.5 的"第②段"条目与 §6 的"第四次复核"表。要点：
-  `Prepare(const FrameSceneSnapshot&, const CameraData&, rhi::IRHIBuffer*)`（签名去掉 `World&`/`SceneGraph&`）、
-  `DrawItem::mesh` 删除（四处绘制循环改按 `meshIndex` 查 `MeshRegistry`）、快照新增 `bInstanced`、
-  `GBufferContext::excludeDecals` 删除 ⇒ 组件指针闸门 **18 → 13**、B1 **78 → 76**。
-- **落地时修正**：`DeferredPipeline::BuildObjects` 必须显式传 `excludeDecals = true`（原方案没提，
-  因为原先这个口径藏在 `Prepare` 的实参里）；否则贴花卡片会被画两遍且与 `GPUScene` 集合错位。
-- **仍未做的 13 处组件指针全在 `Pipeline/RTPass.{h,cpp}`**（BLAS 缓存键、`CollectMeshList` 的指针载荷、
-  `HasGeometryChanged`/`HashGeometry`、以及一条无调用点的顶点拉取死路径）。它与第③段同源
-  （`RTPass::BuildAS(world, sg)` 本身是 B1 的收敛对象），故并入第③段：RTPass 需要一个
-  "RT 可见子集"的快照视图（当前它自己按 `MeshComponent`/`Cube`/`Sphere` 遍历世界，
-  子集与 `BuildObjects` 的全集**不同**，转换时要显式保住这个子集与顺序）。
-
-**第 ③ 段：帧入口收快照 ⇒ B1 归零**（未开工）
-- `GBufferRenderer::Render`（第①段已加 `const FrameSceneSnapshot&` 入参）、
-  `IRenderPipeline::Render` 与三条管线实现改收快照；样例在游戏线程构建完整快照
-  （`RegisterMeshes`/`BuildObjects`/`BuildInstances`/`BuildLights`/`BuildMaterials`/`BuildSkybox`/
-  `BuildEnvironment`/`BuildParticles`/`BuildDecals` 均已就绪）。
-- **B1 归零还要处理"非管线入口"的世界依赖**（它们同样计入 80）：`MeshBatcher::Build(World&)`、
-  `GPUScene::Collect(World&, SceneGraph&)`、`ResolveFrameCamera(World&, …)`（在 `Engine/Render/` 内，
-  样例在游戏线程调用 ⇒ 需要挪出 `Engine/Render` 或改吃已解析的值）、四类阴影技术
-  （`IShadowTechnique` 及 CSM/Spot/Point/Rect 的 `CollectLights`/`Render`）、`GI_RSM::RenderRSMPass`、
-  `RTPass` 的四处。这一步是**机械但面广**的改动，建议按子系统分批提交。
-- 判据：`--world-deps` 渲染期 **80 → 0**（附录 B 断言通过）+ 每次改动都跑
-  `06.GILab` 冒烟（**同二进制双跑做噪声对照**，且必须带 `HE_LUMEN_PROBE_FILTER=off`：
-  默认滤波下噪声底噪约 2.25M 像素，判据会被淹没）。
-
-**之后**：T2.4 样例按值交接与渲染线程执行（修掉 06.GILab 的按引用捕获）→ T2.2 设备与交换链归渲染 线程 → 模式 0/1 判据（转储逐位一致 + 帧时间不退化 >3%）。—— **✅ 均已完成（2026-10-09）**，实测见本节"验收"与 §9。
-
-<details><summary>过程中记录（T2.4 按值载荷的三次尝试）</summary>
-
-  · **第 2 步的实现（本轮，未落地代码，已回退）**：把命令 2 改成带参数的 lambda（recordUiAndPresent(renderFrameIndex, dumpThisFrame)），调用点按值捕获这两个值，帧计数与帧率记账留在游戏线程。能编译能跑、28 个转储齐全、0 断言，但**转储仍早一帧**（模式 0 vs 已验收基线 = 60,781,523 像素；lumen_passes 240 vs 242）。
-  · **根因（已锁定到一行）**：冻结语句写成了先 frameIndex++ 再取 renderFrameIndex ⇒ 冻结的是自增后的值；而原判定发生在命令里、自增之前 ⇒ 判定早一帧。正确写法是 const u64 renderFrameIndex = frameIndex; 必须在 frameIndex++ 之前（本轮因脚本替换未命中未落地；为不留破坏转储语义的状态已 git 干净回退）。
-  · **已修复并提交（本轮）**：命令 2 改为 recordUiAndPresent(u64 renderFrameIndex, bool dumpThisFrame)，帧计数与帧率记账留游戏线程、帧号与转储判定**按值捕获**交给命令；**冻结语句放在 frameIndex++ 之前**。复测：模式 0 vs 已验收基线 4615（= 已知底噪）、模式 1 vs 模式 0 4615、模式 1 同批双跑 **0 像素**、两模式转储各 28 个齐全、断言 0；帧时间 443.6 → 449.3 ms = **+1.29%**（3% 内）；单测 399 例 / 71850 断言；四项闸门不变。
-  · **至此游戏线程跑到前面的全部已知竞争都已消除**（多槽快照、渲染期快照读取冻结、帧槽位随命令冻结、帧号与转储判定按值携带）⇒ **下一步可做深度 >= 2**（每飞行帧命令缓冲 + 一帧一个队列帧 + 背压；RenderCommandQueue::CurrentFrameSlot() 已就位），随后复测轻帧样例（02.Cube）的模式 1 帧时间并决定是否默认打开异步。
-  · **复测回退后的已提交状态（每帧一次握手形状）**：模式 0 vs 基线 0 像素；模式 1 vs 模式 0 = 4539（已知底噪）；28 个转储齐全；断言 0 ⇒ 判据仍成立。
-  · **下一步**：把上述两行互换 → 重跑两次冒烟（应回到 0/底噪）→ 再做深度 ≥2。
-
-</details>
-
-> **性质**：**计划 + 实施记录**。§15.1 ①②③ 与 T2.2/T2.4 已落地并过判据（**模式 0/1 已实现**；**模式 2 未实现**）；
-> T3/T4/T5 其余项仍为计划。开工后每完成一个任务，回到 §9 勾选并在 §6 记录实测数字。
-> **v1.1 变更**：新增 §12 附录 C「升级到 UE 三线程模型的增量路径」；阶段 0 增加预埋任务 **T0.6（RHI 命令流契约）** 与 **T0.7（资源句柄化）**，二者是 §12 所列升级路径的前置条件。
-> **v1.2 变更**：T0.5 的开关改为**三态** `RenderThreadingMode`（单线程 / 游戏+渲染 / 游戏+渲染+RHI，见 §5 与 §7 的口径说明）；新增 §13 附录 D「阶段 0 T0.2 帧内同步 RHI 调用清单」与配套脚本 `Tools/check_threading.py`（含 `--gate` 闸门模式）。
-> **v1.3 变更**：新增 §14 附录 E「mesh 注册表设计草案」（T1.2c 与 T1.4 骨骼消费侧的前置：API、生命周期规则、两个首个消费者、第 5 处口径漂移的裁决与判据）；§6 增补"阶段 0/1 累计实测"与端到端绿灯复核记录。
-> **v1.4 变更（2026-10-09）**：§15.1 **第①段完成**（实例缓冲状态搬迁 + 实例数据进快照，含顺带修掉的
-> `CollectLights` 误清快照缺陷）；§6 增补"第三次复核"；§9 T1.5 增补第①段条目与两条**口径说明**
-> （帧内 RHI 376 → 380 是启发式归属漂移、B1 80 → 78 是行合并少计，两者都不下调基线）；
-> §15 交接快照按实测刷新（单测 397 例 / 71829 断言、`06.GILab` 冒烟须带 `HE_LUMEN_PROBE_FILTER=off`，
-> 否则默认滤波下同二进制双跑差约 2.25M 像素）。
-> **v1.6 变更（2026-10-09）**：§15.1 **第③段完成（B1 → 0）**、**T2.2**、**T2.4（7/7）**、相机控制回归修复、
-> `06.GILab` 渲染线程模式下拉 + 默认模式 1、多槽快照与装配器复位缺陷修复、帧槽位随命令冻结、命令 2 只发布、
-> 文档合并（24 → 15 的 §13–§21）与 T5.4 勾选；**工作已合并入 `main` 并推送，`multi_thread` 分支已删除**。
-> **v1.5 变更（2026-10-09）**：§15.1 **第②段完成**（`Prepare` 收快照 + `DrawItem` 去组件指针，
-> 含顺带修掉的 Deferred 贴花口径缺口）；§6 增补"第四次复核"；§9 T1.5 增补第②段条目并把剩余
-> 13 处组件指针（全在 `RTPass`）的处置写清楚（并入第③段）；两项基线随实测下调
-> （组件指针 18 → 13、B1 80 → 76）。
-
----
-
-## 16. 第三轮交接快照（2026-10-22；新会话建议从本节开始）
-
-### 16.1 结论摘要
-
-| 项 | 状态 | 关键提交 |
-|---|---|---|
-| **P1**（A-5 读回命令化） | ✅ 完成：dump 读回改 timeline fence（`SetTimelineSignal` + `router->FlushAndWait()` + `WaitForFence`），去掉设备级 `vkDeviceWaitIdle` | `27d5033` |
-| **P3**（并行录制） | ✅ 完成：T3.1 抽 `ParallelRecordHelper`、T3.2 Deferred GBuffer 接入；T2.3 推迟到 A-3（创建点全在 owner 线程，现在做是死代码） | `5ba4705`、`ac496e2` |
-| **L4-1**（acquire/present 收口） | ✅ 完成：新增 `rhi::FramePresenter`，8 个样例改用 `BeginFrame/EndFrame` | `cfaabe8`、`b9e8c3d` |
-| **L4-2**（录制生命周期收口） | ✅ 完成：`BeginRecording/EndRecording`，除 `Editor` 外全部样例 | `f1419bd`、`a0aa1bd` |
-| **P2 / A-1**（命令流） | 🟡 L1 契约+翻译 ✅（`9a294e7`）、L2 提交管道 ✅（`9afe25c`）、L3 前置命令 ✅（`0b8afe3`）；**L3 撤销**（§12.11）；**L4-3 = all-or-nothing 独立项目**（§12.12） | 见左 |
+# HugEngine 渲染线程化实施方案（方案 B：Game Thread → Render+RHI 单线程）
+
+> **版本**：v1.6（2026-09-22 编写；2026-10-09 更新：§15.1 ①②③ 与 T2.2/T2.4 已落地并过判据，工作已合并入 main 并推送）
+> **基线提交**：`4af2d15`（引擎介绍目录编号化之后）
+> **性质**：**计划 + 实施记录**。§15.1 的 ①②③ 与 T2.4/T2.2 已落地并通过判据（**模式 0/1 已实现**；**模式 2 未实现**）；T3/T4/T5 其余项仍为计划。实现细节、完整时序与验收数据见 [15.多线程架构与渲染实现分析.md](../HugEngine引擎介绍/15.多线程架构与渲染实现分析.md) §13–§21。
+> **关联文档**：
+> - [15.多线程架构与渲染实现分析.md](../HugEngine引擎介绍/15.多线程架构与渲染实现分析.md)（JobSystem / MTCR / AsyncCompute 现状）
+> - [02.架构UML与可扩展性分析.md](../HugEngine引擎介绍/02.架构UML与可扩展性分析.md)（分层、时序、可扩展性债务）
+> - [04.功能缺口与对标分析.md](../HugEngine引擎介绍/04.功能缺口与对标分析.md)（§16 有代码证据的架构债务）
+> - [05.渲染管线实现分析.md](../HugEngine引擎介绍/05.渲染管线实现分析.md)（三条管线的每帧结构）
+> - [20.编辑器实现分析.md](../HugEngine引擎介绍/20.编辑器实现分析.md)（ImGui 集成与后端泄漏点）
+>
+> **本文怎么读**：
+> - 只想了解**选型结论** → §1
+> - 要**排期/派活** → §5 分阶段任务 + §9 任务总表
+> - 要**动手写代码** → §3 三条铁律 + §4 接口草案 + §5 对应阶段
+> - 要**判断风险** → §2 现状约束 + §7 风险与回退
+
+---
+
+## 目录
+
+1. [目标架构](#1-目标架构)
+2. [现状约束盘点（迁移必须处理的 8 件事）](#2-现状约束盘点迁移必须处理的-8-件事)
+3. [三条线程铁律（契约）](#3-三条线程铁律契约)
+4. [核心抽象设计（接口草案）](#4-核心抽象设计接口草案)
+5. [分阶段实施（阶段 0~5）](#5-分阶段实施阶段-05)
+6. [验收指标](#6-验收指标)
+7. [风险与回退](#7-风险与回退)
+8. [工作量与排期建议](#8-工作量与排期建议)
+9. [附录 A：任务总表（可勾选）](#9-附录-a任务总表可勾选)
+10. [附录 B：自动化迁移检查](#10-附录-b自动化迁移检查)
+11. [参考](#11-参考)
+12. [附录 C：升级到 UE 三线程模型的增量路径](#12-附录-c升级到-ue-三线程模型的增量路径)
+
+---
+
+## 1. 目标架构
+
+### 1.1 一句话目标
+
+> **让渲染的"收集 → 录制 → 提交 → Present"全部离开游戏线程，跑在一根独立的渲染线程上；游戏线程只投递命令与不可变快照，永不触碰 RHI。**
+
+### 1.2 目标线程模型
+
+| 线程 | 数量 | 职责 | 禁止事项 |
+|---|---|---|---|
+| **游戏线程（主线程）** | 1 | 窗口与输入、ECS 系统 tick（Movement / Physics / Nav / Spline / 相机 / Skeletal / Text / CollisionDebug）、产出**帧快照**、投递渲染命令、ImGui 的 CPU 侧（`NewFrame` + 面板 + `Render()` 产出 `ImDrawData`） | **任何 RHI 调用**；任何对已提交快照数据的写 |
+| **渲染线程（本次新增）** | 1 | 消费命令与快照 → 剔除与收集 → 建帧图 → **录制** → **提交** → `AcquireNextImage`/`Present`；持有并驱动所有 RHI 对象 | 读写 ECS 世界；阻塞等待 GPU（除非是明确的帧同步点） |
+| **JobSystem 工作线程** | `hardware_concurrency()`（当前 12） | **并行录制**（每线程一个 secondary command list）；场景分块并行 | 触碰 RHI 的**非录制**部分（创建/提交/呈现） |
+| **Jolt 物理线程池** | 2 | 物理步进内部并行（不变） | — |
+| AI 推理 / 热重载监听 / 崩溃看门狗 | 各 1（按需） | 不变 | 触碰 RHI 创建或提交（热重载的 PSO 替换改为请求渲染线程执行） |
+
+### 1.3 一帧时序（含背压）
+
+```
+游戏线程                                    渲染线程
+   │                                            │
+   │ PollEvents / AcquireNextImage  ──────────► │（交换链归渲染线程）
+   │ ECS 系统 tick                              │
+   │ 产出 FrameSceneSnapshot（不可变）           │
+   │ EnqueueFrame(snapshot, camera, dt) ──────► │  ← 若在飞帧数 ≥ 3，游戏线程在此阻塞
+   │ ImGui NewFrame + 面板 + Render()           │
+   │ EnqueueUI(ImDrawData 快照) ──────────────► │
+   │ 下一帧循环（不必等渲染完成）                 │ 剔除 → 收集 → 建帧图 → 并行录制
+   │                                            │ → vkQueueSubmit → Present
+   │                                            │ 回收帧票据（唤醒可能阻塞的游戏线程）
+```
+
+关键点：**游戏线程与渲染线程并行推进**，两者之间只有"快照交接 + 有界队列"；渲染线程落后超过 `kMaxFramesInFlight`（= **3**，`Engine/RHI/RHI/Types.h:17`）时才对游戏线程施加背压。
+
+### 1.4 与 UE 的职责映射
+
+| UE 概念 | 本方案的对应物 | 说明 |
+|---|---|---|
+| Game Thread | 游戏线程（主线程） | 不变 |
+| Render Thread | **渲染线程**（本次新增） | 承担 UE 渲染线程的全部职责：剔除、MDC/绘制收集、RDG 建图、记录 RHI 命令 |
+| RHI Thread | **不存在**（本次明确不做） | 渲染线程即"Render + RHI 合并"，等价于 UE 的 `r.RHIThread.Enable=0`；**将来升级到三线程的增量路径见 §12** |
+| `ENQUEUE_RENDER_COMMAND` | `RenderCommandQueue` | 游戏 → 渲染的命令投递 |
+| Scene Proxy / FPrimitiveSceneProxy | `FrameSceneSnapshot` | 游戏线程产出的不可变渲染数据 |
+| `FParallelCommandListSet` | JobSystem + `m_SecRecordLists` | 已有雏形（仅 ForwardPipeline），本方案推广到全部管线 |
+| `FRHIGPUFence` | `RHIFenceHandle`（已存在） | `CreateFence/WaitForFence/GetFenceValue` |
+
+### 1.5 选型依据（为什么不是三线程）
+
+1. **瓶颈在录制不在提交**：《Lumen设计与实现》实测 **CPU 录制 16.4 ms vs GPU 3.4 ms**，RHI 线程只能挪走提交（1~3 ms 量级）；
+2. **录制基础已具备**：`VulkanCommandList` 自建命令池（`Engine/RHI/Vulkan/VulkanCommandList.cpp:107,132`），`ForwardPipeline.cpp:366-375` 已预分配每线程 secondary CB；
+3. **跨帧释放基础已具备**：`Engine/RHI/RHI/FrameRetireQueue.h`（N 帧延迟释放）+ `Engine/RHI/Vulkan/DeferredDestructionQueue.h`；
+4. **三线程的阻塞项都很贵**：阻塞式资源创建、阻塞 `Map()`、等待型提交、ImGui 原生句柄耦合（见 §2）；
+5. **可升级性**：本方案阶段 2 要求渲染线程通过**记录/执行分离**的方式持有 RHI（先记命令流、再统一执行），因此将来加第三根 RHI 线程只是"换个线程执行同一命令流"。
+
+---
+
+## 2. 现状约束盘点（迁移必须处理的 8 件事）
+
+| # | 约束 | 代码证据 | 对方案的硬性影响 |
+|---|---|---|---|
+| **C1** | **渲染路径直接读 ECS World** | `DeferredPipeline::CollectLights(pc, world, sg, camera)`（`Engine/Render/Pipeline/DeferredPipeline.cpp:810`，调用点 `DeferredPipeline_FrameGraph.cpp:554,981,1184`）；`GPUScene::Collect(World&, SceneGraph&, const CameraData&)`（`GPUScene.cpp:52`）；`ForwardPipeline::CollectLights`（`ForwardPipeline.cpp:545`） | **最大障碍**。渲染线程读 World 时游戏线程正在 tick → 数据竞争。必须先做**帧快照**（阶段 1），否则渲染线程不能起 |
+| **C2** | **交换链操作在样例主循环** | `AcquireNextImage()`：`Samples/06.GILab/06.GILab.cpp:876`、`Samples/02.Cube/02.Cube.cpp:970`；`Present()`：`06.GILab.cpp:1794`、`02.Cube.cpp:1671` | Vulkan 交换链需外部同步 ⇒ Acquire/Present 必须**整体迁入渲染线程**，样例循环不再直接调用 |
+| **C3** | **资源创建同步阻塞 + 每帧仍有上传** | `vmaCreateBuffer`/`vmaCreateImage` 于调用线程立即执行（`Engine/RHI/Vulkan/VulkanResources.cpp:134,365`）；`BufferDesc::initialData` 每次创建 staging 并一次性提交（`VulkanResources.cpp:486,651`）；每帧级上传点遍布 Lumen/Nanite/Decal（如 `LumenSDF.cpp:299,305,1335`、`NaniteScene.cpp:167`、`DecalPass.cpp:74`） | 需要 `ResourceCreationService`（阶段 0），且**上传路径要能跨线程排队**；`initialData` 语义要明确"是否允许来自游戏线程的指针" |
+| **C4** | **阻塞读回** | `VulkanBuffer::Map()`（`VulkanResources.cpp:179`）；AutoExposure 读回路径 | 读回必须改为"渲染线程登记 + N 帧后取值"（`FrameRetireQueue` 已有账本） |
+| **C5** | **等待型提交** | `SignalFenceOnQueue` / `WaitFenceOnQueue` 提交后立即等待（`Engine/RHI/Vulkan/VulkanDevice.cpp:932,958`） | 这些调用必须**只允许在渲染线程**出现，且不得进入帧循环关键路径 |
+| **C6** | **ImGui 与场景共用命令缓冲与 RenderPass，且经原生句柄** | `Engine/RHI/RHI/RHI.h:163-169`（ImGui 专用后门：`CreateImGuiDescriptorPool`/`CreateImGuiRenderPass`/`GetImGuiCommandBuffer`）；`Samples/Editor/EditorApp.cpp:536-542`（场景与 UI 同一 CB） | UI 的 **CPU 侧**（`NewFrame`/面板/`Render()`）可留在游戏线程；**后端录制**必须迁到渲染线程（阶段 4） |
+| **C7** | **RHI 无线程归属机制** | 全仓 `GetCurrentThreadId` 只出现在 `Engine/Core/Core/CrashHandler.cpp` | 阶段 0 第一件事：加 `IsOwnerThread()` + 断言，否则违规调用只能靠"偶发崩溃"发现 |
+| **C8** | **RHI 调用面极宽** | `IRHICommandList` 有 45+ 个虚函数（`Engine/RHI/RHI/CommandList.h:36-283`），`IRHIDevice` 另有创建/提交/栅栏 API（`RHI.h:172,188-208`） | 不追求"让 RHI 线程安全"，而是**规定只有渲染线程能调**；录制期通过 secondary CB 分发到 worker（CE 已安全，见 C9） |
+| **C9** | ✅ **已有的有利条件**：录制期命令池是每 list 独立的 | `m_CmdPools[i]` + `m_SecondaryPool`（`VulkanCommandList.cpp:107,132`）；`ForwardPipeline.cpp:366-375` 每线程 secondary CB 池；`ForwardPipeline.cpp:1290-1300` 并行录制 + 主线程 `ExecuteSecondary` | 并行录制**不需要改 RHI**，只需把方案推广到 Deferred/PathTracing（阶段 3） |
+
+> **C1 是本方案的核心工作量**：快照层不做，渲染线程就只能"和游戏线程抢 World"，那是不可调试的。
+
+---
+
+## 3. 三条线程铁律（契约）
+
+这三条要写进 `Engine/RHI` 的头文件注释，并用断言强制：
+
+| 铁律 | 内容 | 强制手段 |
+|---|---|---|
+| **铁律 1** | **RHI 只属于渲染线程**：`IRHIDevice::Create*` / `Destroy*`、`IRHICommandList::*`、`Submit` / `SubmitAll`、`SignalFenceOnQueue` / `WaitFenceOnQueue`、交换链 `AcquireNextImage` / `Present` —— **只能在渲染线程调用** | `HE_ASSERT(IsRenderThread())` 加在上述路径入口（Debug/RelWithDebInfo 生效） |
+| **铁律 2** | **游戏线程只产出不可变数据**：任何交给渲染线程的结构（快照、命令参数、上传数据）在交接后**不得再被游戏线程修改**；需要复用则用双/三缓冲按帧轮换 | 快照用 `FrameSceneSnapshot` 值语义 + 按 `frameSlot` 轮换；上传数据在入队时**拷贝**到队列自有内存 |
+| **铁律 3** | **渲染线程不阻塞等 GPU**：帧循环内不得出现 `WaitForFence(UINT64_MAX)` 之类的无限等待；必须等待时只允许"等待 N-`kMaxFramesInFlight` 帧之前已完成" | Code review + 在 `WaitFenceOnQueue` 加注释说明允许的调用点白名单 |
+
+**游戏线程唯一允许等待的位置**：提交新帧时若在飞帧数已达 `kMaxFramesInFlight`，则等待最老一帧的完成信号（背压，不是 GPU 同步）。
+
+---
+
+## 4. 核心抽象设计（接口草案）
+
+> 以下为**接口草案**，用于确定职责边界；实现细节可在编码阶段调整。所有代码均含中文注释（项目规范）。
+
+### 4.1 `RenderCommandQueue`（游戏线程 → 渲染线程）
+
+**设计要点**：类型化命令 + 一次性 lambda 通道；命令参数**必须按值捕获**（铁律 2）。批量提交整帧命令，减少锁竞争。
+
+```cpp
+// Engine/Render/Threading/RenderCommandQueue.h
+namespace he::render {
+
+/// 渲染命令队列：游戏线程入队，渲染线程消费。
+/// 设计约束：
+///   1. 入队的数据必须**按值捕获**（铁律 2：交接后游戏线程不再修改）；
+///   2. 整帧提交（BeginFrame/EndFrame），避免每条命令一次锁；
+///   3. 队列容量有上限，超限说明渲染线程长期落后 → 由 RenderThread 施加背压。
+class RenderCommandQueue {
+public:
+    /// 游戏线程：开始本帧命令收集（拿到本帧的 slot）
+    void BeginFrame(u32 frameSlot);
+
+    /// 游戏线程：入队一条命令。fn 在渲染线程执行，禁止捕获 World/SceneGraph 引用
+    void Enqueue(std::function<void(class RenderThreadContext&)> fn);
+
+    /// 游戏线程：结束收集并发布给渲染线程（一次移动，不拷贝）
+    void PublishFrame();
+
+    /// 渲染线程：取出下一帧待执行命令；无命令时返回 false（由调用方决定等待/休眠）
+    bool TryConsumeFrame(std::vector<std::function<void(class RenderThreadContext&)>>& outCommands);
+
+    /// 在飞帧数（用于背压判断）
+    [[nodiscard]] u32 InFlightFrameCount() const;
+
+private:
+    std::mutex                          m_Mutex;
+    std::condition_variable             m_Cv;
+    std::vector<std::function<void(class RenderThreadContext&)>> m_Pending;
+    u32                                 m_InFlight = 0;
+};
+
+} // namespace he::render
+```
+
+### 4.2 `FrameSceneSnapshot`（游戏线程产出的不可变渲染数据）
+
+**设计要点**：这是**替换 `CollectLights(pc, world, sg, camera)` 与 `GPUScene::Collect(world, sg, camera)` 直接读 World 的关键**。快照要覆盖渲染真正需要的全部输入，且**不含任何 Entity/组件指针**。
+
+```cpp
+// Engine/Render/Threading/FrameSceneSnapshot.h
+namespace he::render {
+
+/// 单个可见物体的渲染输入（与 ECS 完全解耦：只有值，没有指针）
+struct SnapshotDrawItem {
+    float4x4 worldMatrix;      // 世界矩阵（已含父级与缩放）
+    float4x4 prevWorldMatrix;  // 上一帧世界矩阵（TAA/运动矢量/重投影需要）
+    u32      meshId;           // 网格资源 ID（渲染线程查表拿 GPU 缓冲）
+    u32      materialId;       // 材质 ID（4 个连续 bindless 槽，与 ForwardPipeline 现有约定一致）
+    u32      objectIndex;      // SSBO 槽位
+    u32      flags;            // 可见性/实例化/骨骼等位标记
+};
+
+/// 光源条目（替代 CollectLights 里的 World 遍历）
+struct SnapshotLight {
+    u32    type;               // 0=Dir 1=Point 2=Spot 3=Rect
+    float3 position;
+    float3 direction;
+    float3 color;
+    float  intensity;
+    float  range;
+    u32    shadowIndex;        // -1 = 不投影
+    // …按 GPULight 逐字段对齐，便于渲染线程直接 memcpy 进 UBO
+};
+
+/// 一帧的完整渲染输入。由游戏线程在 tick 结束后构造，交接后视为只读。
+struct FrameSceneSnapshot {
+    u64                 frameIndex = 0;
+    CameraData          camera;             // 含本帧 viewProj（TAA 抖动在渲染线程叠加，见阶段 2）
+    float               deltaTime  = 0.0f;
+    std::vector<SnapshotDrawItem>  draws;
+    std::vector<SnapshotLight>     lights;
+    std::vector<float4x4>          skinMatrices;   // 骨骼矩阵（扁平数组，替代读组件）
+    u32                            viewportWidth  = 0;
+    u32                            viewportHeight = 0;
+    // 需要时继续扩展；扩展前先确认"渲染是否真的需要它"
+};
+
+} // namespace he::render
+```
+
+> **判据（阶段 1 退出条件）**：`Engine/Render/` 内不再出现对 `he::World&` / `he::SceneGraph&` 的**渲染期**引用（`Engine/Render/` 目录 grep 断言，见附录 B）。
+
+### 4.3 `RenderThread`（调度器）
+
+```cpp
+// Engine/Render/Threading/RenderThread.h
+namespace he::render {
+
+/// 渲染线程：唯一的 RHI 消费者。
+/// 生命周期与 IRHIDevice / IRHISwapChain 绑定：设备在渲染线程上创建与销毁。
+class RenderThread {
+public:
+    /// 启动：在内部线程上完成设备初始化（含管线 Initialize、资源创建）
+    bool Start(rhi::Backend backend, const rhi::DeviceDesc& desc);
+
+    /// 停止：排空命令队列 → WaitIdle → 销毁管线与设备
+    void Stop();
+
+    /// 游戏线程：提交一帧（快照 + 命令）。若在飞帧数达上限则阻塞（背压点）
+    void SubmitFrame(FrameSceneSnapshot&& snapshot);
+
+    /// 游戏线程：投递一个"资源创建请求"，返回句柄（不阻塞；渲染线程执行创建）
+    template <typename T>
+    std::shared_ptr<T> RequestResource(const rhi::ResourceDesc& desc);
+
+    /// 游戏线程：请求一次设备级同步（仅用于加载期/退出期，不得进入帧循环）
+    void FlushAndWait();
+
+    /// 当前是否运行在渲染线程（供断言使用）
+    static bool IsCurrent();
+
+private:
+    void ThreadMain();          // 线程主体：命令循环 + 帧节奏
+    std::thread              m_Thread;
+    RenderCommandQueue       m_Commands;
+    // …帧票据、fence、背压计数
+};
+
+} // namespace he::render
+```
+
+**帧票据与背压**：
+
+```cpp
+/// 帧完成票据：渲染线程 Present 后回收，游戏线程据此解除背压
+struct FrameTicket {
+    u64 frameIndex;
+    u64 fenceValue;   // 与渲染线程的 timeline fence 对应
+};
+```
+
+### 4.4 `ResourceCreationService`（资源创建 → 渲染线程）
+
+**设计要点**：分两步走，降低一次性改造风险。
+
+| 步 | 形态 | 用在哪 | 风险 |
+|---|---|---|---|
+| **步 1（阶段 2 采用）** | **同步转发**：游戏线程入队创建请求 → 渲染线程执行 → 用 `std::promise` 回传（游戏线程阻塞等待） | 加载期、编辑器导入、resize 重建 | 简单、正确；但**阻塞**，因此**禁止**在帧循环内使用 |
+| **步 2（阶段 5 可选）** | **异步**：返回 `Future<Handle>`；帧内使用"上帧请求、下帧就绪"的两段式 | 帧内动态创建（如 Nanite 流式页） | 复杂度高，只在实测需要时做 |
+
+```cpp
+// Engine/Render/Threading/ResourceCreationService.h
+namespace he::render {
+
+/// 资源创建服务：把"创建 GPU 资源"从游戏线程搬到渲染线程执行。
+/// 步 1（本方案默认）：同步转发，仅供加载期/重建期使用；
+/// 步 2（后续可选）：异步 Future，供帧内动态资源使用。
+class ResourceCreationService {
+public:
+    /// 同步创建（游戏线程阻塞直到渲染线程完成）。**禁止在帧循环内调用**：
+    /// 帧内创建会让游戏线程等待渲染线程，破坏并行前提。
+    rhi::IRHIBuffer* CreateBufferSync(const rhi::BufferDesc& desc);
+    rhi::IRHITexture* CreateTextureSync(const rhi::TextureDesc& desc);
+
+    /// 上传数据：拷贝入队（铁律 2），由渲染线程在下一帧执行拷贝
+    void UploadAsync(rhi::IRHIBuffer* dst, const void* data, u64 size, u64 offset = 0);
+};
+
+} // namespace he::render
+```
+
+### 4.5 线程归属断言
+
+```cpp
+// Engine/RHI/RHI/ThreadAffinity.h
+namespace he::rhi {
+
+/// 设备拥有线程（= 渲染线程）。设备创建时记录，销毁时清空。
+class ThreadAffinity {
+public:
+    void Claim()   { m_Owner = std::this_thread::get_id(); m_Claimed = true; }
+    void Release() { m_Claimed = false; }
+    [[nodiscard]] bool IsOwner() const {
+        return !m_Claimed || m_Owner == std::this_thread::get_id();
+    }
+private:
+    std::thread::id m_Owner;
+    bool            m_Claimed = false;
+};
+
+} // namespace he::rhi
+
+/// 在 RHI 的创建/销毁/录制/提交入口统一使用：
+///   HE_ASSERT(IsRenderThread() && "RHI 调用必须在渲染线程（见三条铁律）");
+#define HE_ASSERT_RENDER_THREAD() /* Debug/RelWithDebInfo 生效 */
+```
+
+---
+
+## 5. 分阶段实施（阶段 0~5）
+
+> 每阶段都满足：**可独立回退**（配置开关）且**有客观验收判据**（不靠"看起来没问题"）。
+
+### 阶段 0 · 地基（不改变现有行为）
+
+**目标**：把"跨线程会炸"的地方先圈出来并封好，为起线程做准备。**本阶段结束时引擎行为与现在逐像素一致。**
+
+| 任务 | 内容 | 主要文件 | 判据 |
+|---|---|---|---|
+| **T0.1** | 引入 `ThreadAffinity` + `HE_ASSERT_RENDER_THREAD()`，加在 `IRHIDevice` 创建/销毁、`IRHICommandList` 录制、`Submit`/`SubmitAll`、`WaitFenceOnQueue` 入口（先记录拥有线程 = 主线程，行为不变） | `Engine/RHI/RHI/*.h`、`Engine/RHI/Vulkan/VulkanDevice.cpp` | 现有样例全跑通、零断言触发；断言可被 `HE_DISABLE_THREAD_ASSERT` 关闭 |
+| **T0.2** | 清点并登记"帧内同步 RHI 调用"（上传 / 读回 / 等待型提交），产出清单（文件:行号 + 所属阶段） | 只读盘点，不改代码 | 清单里每条都标注"迁到渲染线程 / 改为异步 / 保留（加载期）" |
+| **T0.3** | `RenderCommandQueue` + `RenderThread` **壳实现**：游戏线程入队，主线程（当前线程）消费——**行为完全等价于现在** | `Engine/Render/Threading/`（新增） | 样例帧序与改前一致；`cmp_dumps` 前后 dump 逐像素相同 |
+| **T0.4** | 帧票据与背压骨架（`FrameTicket` + 在飞帧计数），上限 `kMaxFramesInFlight` | 同上 | 人为把上限设为 1 时能观察到游戏线程阻塞（可测） |
+| **T0.5** | `EngineConfig` 新增**三态渲染线程模式** `RenderThreadingMode`（`SingleThreaded` 默认 / `RenderThread` / `RenderThreadAndRHI`，取代原 `enableRenderThread` 布尔 —— 见下方说明）与 `renderThreadSpinWaitUs`；运行期可切换（`SetRenderThreadingMode`）+ `HE_RENDER_THREADING_MODE` 覆盖 | `Engine/Core/Core/RenderThreadingMode.h`（新增）、`Engine/Core/Core/Engine.{h,cpp}` | 编译期与运行期开关均可切换；关闭时走旧路径 |
+| **T0.6** | **（为 §12 预埋，可选但强烈建议）** 定义 RHI 命令流的**记录端契约**与 `RHICommand` 载荷形态（类型擦除 + 内联参数），暂不改变执行方式 | `Engine/RHI/RHI/RHICommandList.h`（新增） | 契约评审通过；本轮不接入生产路径，只落头文件与单测 |
+| **T0.7** | **（为 §12 预埋，可选但强烈建议）** 资源句柄化：新增 `RHIBufferHandle` / `RHITextureHandle`（含 generation），并让新代码优先用句柄；`unique_ptr<IRHIBuffer>` 保留为兼容层 | `Engine/RHI/RHI/RHI.h`、`Engine/RHI/RHI/RHIHandles.h`（新增） | 新代码不再新增 `unique_ptr<IRHIBuffer>` 成员（grep 断言）；旧代码可渐进迁移 |
+
+**退出判据**：阶段 0 全绿 = 现有样例在 `enableRenderThread=false/true`（壳模式）下**输出一致**、帧时间不退化 > 3%。
+> ✅ **已达成（2026-09-24，multi_thread 分支）**：
+> - **输出一致**：`06.GILab`（Cornell Box，121 帧）在单线程与渲染线程壳下，关掉已知噪声源
+>   （`HE_LUMEN_PROBE_FILTER=off`）后 **28 个转储目标全部逐位相同**；默认滤波下差异**仅**出现在已有的
+>   Lumen 屏幕探针家族（`lumen_irradiance` + 4×`prov6_*` + `hdr`），与本次改动无关。
+> - **帧时间不退化**：样例自测的每帧均值（最近 120 帧）—— 墙钟 465.190 → 465.143 ms、
+>   CPU 侧 465.620 → 465.526 ms、管线 `Render` 464.057 → 464.279 ms（**+0.05%**，远低于 3% 预算）。
+> - 逐任务记录见 §9（T0.1~T0.7 全部勾选）与 §13 附录 D（帧内同步调用清点）。
+> **T0.6/T0.7 是本方案唯一的"现在不做、以后要付大代价"的两件事**，理由见 §12：RHI 命令流与资源句柄化是升级到三线程模型的前置条件，而在阶段 0 预埋只需 +5~8 人日，等到阶段 2 之后再补则要动全工程 200+ 处资源持有者。
+
+### 阶段 1 · 场景快照（把渲染与 World 解耦）
+
+**目标**：消除 C1。**这是本方案的核心工作量，也是最值得先做的一步**——即使最终不起渲染线程，快照层也能立刻改善架构（渲染不再穿过 ECS）。
+
+| 任务 | 内容 | 主要文件 | 判据 |
+|---|---|---|---|
+| **T1.1** | 定义 `FrameSceneSnapshot`（§4.2），字段与现有 `GPULight`/`GPUObjectData`/`PushConstantData` 逐字段对齐 | `Engine/Render/Threading/FrameSceneSnapshot.h` | 字段表评审通过（与 `ShaderTypes.slang` 一致，含 `static_assert`） |
+| **T1.2** | 游戏线程侧新增 `SceneSnapshotBuilder::Build(world, sg, camera) → snapshot`（把现在散在 `CollectLights`/`GPUScene::Collect` 里的遍历集中到这里） | `Engine/Render/Threading/SceneSnapshotBuilder.{h,cpp}` | 与旧路径**并行跑一帧双份**，逐字段比对一致（临时 `HE_SNAPSHOT_VERIFY` 开关） |
+| **T1.3** | `CollectLights` / `GPUScene::Collect` 改为**消费快照**（保留旧签名做过渡，内部转发到快照实现） | `DeferredPipeline.cpp:810`、`ForwardPipeline.cpp:545`、`GPUScene.cpp:52` | 三条管线（Forward / Deferred / PathTracing）渲染输出与改前**逐像素一致**（`cmp_dumps.py`） |
+| **T1.4** | 骨骼矩阵、材质快照、Decal/粒子等其余渲染输入的快照化 | `SceneRenderer.*`、各 Pass | 同上 |
+| **T1.5** | 移除渲染期对 World 的引用（保留加载期一次性访问） | `Engine/Render/` | **附录 B 的 grep 断言通过**：渲染期函数签名不再出现 `he::World&` / `SceneGraph&` ✅ 已完成（2026-10-09）：附录 B1 渲染期 0 / 加载期 0（80 → 0）、组件指针 0/0 |
+
+**退出判据**：全部样例在开关两种状态下输出一致；`Engine/Render/` 渲染期无 World 依赖；Lumen/Nanite 的流式路径有明确"谁在何时读世界"的记录。
+
+### 阶段 2 · 起渲染线程
+
+**目标**：真正让渲染跑在独立线程（C2/C3/C5/C6 落地）。
+
+| 任务 | 内容 | 主要文件 | 判据 |
+|---|---|---|---|
+| **T2.1** | `RenderThread` 实现（线程主体、命令循环、帧节奏、休眠策略：空闲时条件变量等待 + 可配的自旋窗口） | `Engine/Render/Threading/RenderThread.cpp` | 空闲帧 CPU 占用 < 1%（不得自旋烧核） |
+| **T2.2** | 设备与交换链**改由渲染线程创建/持有**；`AcquireNextImage` / `Present` 迁入渲染线程 | `VulkanDevice.cpp`、`VulkanSwapChain.*`、样例循环 | 样例里不再出现交换链调用；`HE_ASSERT_RENDER_THREAD` 无触发 ✅ 已完成（2026-10-09）：整帧 RHI（Acquire/录制/Submit/读回/Present）归渲染线程；模式 0/1 转储逐位一致、归属断言 0 |
+| **T2.3** | 管线 `Initialize/Shutdown`、`OnResize`、资源创建走 `ResourceCreationService`（步 1 同步转发） | 三条管线、`Engine/Render/Threading/ResourceCreationService.*` | 加载期与 resize 正常；帧循环内无同步创建（grep 断言） |
+| **T2.4** | 样例循环改造：`PollEvents` + tick + `SubmitFrame` + ImGui CPU 侧；删除主线程的渲染与提交代码 | `Samples/01~07` | 全部样例可运行；帧时间不退化 ✅ 已完成（2026-10-09）：7/7 样例（02/03/04/05/06.GILab/07.Nanite/07.AISamples），按值载荷 |
+| **T2.5** | 编辑器改造：`EditorApp` 主循环同样改为投递；ImGui 后端录制先保持"渲染线程内录制" | `Samples/Editor/EditorApp.cpp` | 编辑器可用；UI 与场景仍在同一 RenderPass（阶段 4 再解） |
+| **T2.6** | 关键：**渲染线程的 RHI 调用改用"记录 → 执行"两段式**（为将来加 RHI 线程留口）——至少把 `Submit` 与资源创建收口到 `RenderThreadContext` 的两个方法 | `Engine/Render/Threading/RenderThreadContext.h` | 记录/执行边界在代码上可见（`RenderThreadContext` 是唯一 RHI 出口） |
+
+**退出判据**：
+1. 主线程**零 RHI 调用**（断言 + grep 双重保证）；
+2. 游戏 tick 与渲染**真正并行**（帧时间从"游戏 + 渲染"变为"取较大者"，可用 profiler 观测）；
+3. `vkQueueSubmit` 不在游戏线程时间线上；
+4. Validation（含 `--sync-validation`）零新增告警；
+5. 全部样例 + 编辑器 + 46 个测试文件通过。
+
+### 阶段 3 · 并行录制推广
+
+**目标**：把 ForwardPipeline 已有的 MTCR 推广到全部管线（C9 的有利条件用起来）。
+
+| 任务 | 内容 | 主要文件 | 判据 |
+|---|---|---|---|
+| **T3.1** | 抽出 `ParallelRecordHelper`（secondary CB 池 + 分块 + `ExecuteSecondary` 合并），三条管线共用 | `Engine/Render/Pipeline/ParallelRecordHelper.{h,cpp}` | Forward 行为不变（重构不改变输出） |
+| **T3.2** | Deferred 的 GBuffer 与 Lighting 段接入并行录制 | `DeferredPipeline_FrameGraph.cpp` | 录制耗时下降；输出逐像素一致 |
+| **T3.3** | PathTracing / Nanite 光栅段的并行录制评估与接入（Nanite 是 indirect + mesh shader，可能不适合按 draw 分块） | `PathTracingPipeline.cpp`、`NaniteRaster.cpp` | 逐项结论记录在案（含"不做"的理由） |
+| **T3.4** | 分块策略与 worker 数调优（按 draw 数 vs 按 index 数分块；避免小规模场景下并行反而变慢） | `ParallelRecordHelper.*` | 小场景（draw < 64）不退化；大场景（Sponza）线性加速 |
+
+**退出判据**：Lumen 场景（06.GILab）的 **CPU 录制耗时显著下降**（目标：16.4 ms → < 8 ms，12 线程可用），且 GPU 时间不变。
+
+### 阶段 4 · 编辑器与 ImGui 收口
+
+| 任务 | 内容 | 判据 |
+|---|---|---|
+| **T4.1** | ImGui 后端录制归属明确化：CPU 侧（`NewFrame`/面板/`Render()`）留游戏线程，`RenderDrawData` 在渲染线程执行（标准做法） | 编辑器 UI 正常、无竞态 |
+| **T4.2** | 消除 `RHI.h:163-169` 的 ImGui 专用后门（改为通过标准 RHI 抽象拿描述符池/渲染通道/命令缓冲） | 后门接口从 `IRHIDevice` 移除 |
+| **T4.3** | 面板对渲染数据的访问改为只读快照（Details/Stats/Viewport 拾取等） | 面板仍可用；无跨线程读 ECS |
+| **T4.4** | 着色器热重载：文件监控线程只发"重编译请求"，PSO/字节码替换在渲染线程执行（当前 `SHADER_HOT_RELOAD` 替换路径在主线程 `Poll()`） | 热重载仍生效；替换发生在渲染线程 |
+
+### 阶段 5 · 性能验收与调优
+
+| 任务 | 内容 | 判据 |
+|---|---|---|
+| **T5.1** | `ProfilerManager` 增加"游戏 / 渲染 / 等待（背压）"三段计时并输出到 Stats 面板 | 三段耗时可见 |
+| **T5.2** | 背压参数调优（帧在飞数、自旋时长、命令队列容量） | 稳态帧率不低于改前；空闲 CPU 占用 < 1% |
+| **T5.3** | 资源创建异步化（步 2）——**仅在实测有帧内创建需求时做** | 若不做，记录原因 |
+| **T5.4** | 文档更新：本文标记为已实现；`15.多线程架构与渲染实现分析.md` 补"渲染线程"一节 | 文档与代码一致 → ✅ **已完成（2026-10-09）**：本文头部性质改为"计划 + 实施记录"；15 已并入"渲染线程化实现情况"（§13–§21，原独立文档 24 合并而来），并修正其过期结论 |
+
+---
+
+## 6. 验收指标
+### 最终验收（阶段 1 ①②③ + T2.2/T2.4）
+| 判据 | 结果 |
+| --- | --- |
+| 附录 B1 世界依赖（渲染期 / 加载期） | **0 / 0**（基线已归零；80 → 76 → 69 → 51 → 47 → 43 → 27 → 24 → 17 → 0） |
+| 组件指针依赖（渲染期 / 加载期） | **0 / 0**（18 → 13 → 0） |
+| 帧内同步 RHI 调用 / T0.7 资源持有者 | 378（含归属漂移，调用点未增）/ 277 |
+| 单测 | **399 例 / 71850 断言**全通过 |
+| 模式 0 vs 模式 1（06.GILab，120 帧 28 个转储目标） | 同批双跑 **0 像素**（模式 0）；模式 1 vs 模式 0 = 4539 像素（= 已知间歇底噪；多轮另测得 0 像素）；两模式各 28 个转储齐全；模式 1 归属断言 **0** |
+| 帧时间（模式 1 vs 模式 0） | 多轮实测 **+0.72% ~ +2.84%**，均在"不退化 >3%"预算内（成本 = 每帧一次握手；深度 ≥2 可去掉） |
+| T2.4 | 7/7 样例完成"两条渲染命令 + 按值载荷"改造；`06.GILab` 按引用捕获缺陷已修并验证；`06.GILab` 默认起真渲染线程，其余 6 个为按需（未测帧时间前不默认） |
+| T2.2 | `06.GILab` 的 `Acquire`/录制（含 ImGui 录制）/`Submit`/`Present`/`WaitIdle` 全部在渲染线程执行（由上述转储一致 + 零归属断言 + 归属违规反转实验共同佐证） |
+
+| 指标 | 现状（实测/推断） | 阶段 2 目标 | 阶段 3 目标 |
+|---|---|---|---|
+| 渲染所在线程 | 主线程 | **独立渲染线程** | 同左 |
+| 游戏 tick 与渲染 | 串行相加 | **并行（取较大者）** | 同左 |
+| CPU 录制耗时（Lumen 场景） | **16.4 ms** | < 12 ms | **< 8 ms** |
+| `vkQueueSubmit` 位置 | 主线程帧内 | 渲染线程 | 渲染线程 |
+| 主线程 RHI 调用 | 大量 | **0**（断言 + grep） | 0 |
+| GPU 空闲率 | 偏高（CPU 受限） | 下降 | 进一步下降 |
+| Validation 告警（含 sync） | 基线 | **零新增** | 零新增 |
+| 渲染输出一致性 | 基线 | 逐像素一致 | 逐像素一致 |
+| 空闲帧 CPU 占用 | — | < 1% | < 1% |
+
+> 一致性验收工具：`Tools/pt/dump_pt.ps1` + `Tools/pt/analyze_pt.py`、`Tools/gi/dump_gi.ps1`、`Tools/gi/*check.ps1`（详见 [22.开发与验证手册.md](../HugEngine引擎介绍/22.开发与验证手册.md) §5/§7）。
+
+> **阶段 0 实测数字（2026-09-24，multi_thread 分支，`06.GILab` Cornell Box，121 帧，样例自测每帧均值）**：
+>
+> | 指标 | 单线程渲染 | 渲染线程壳（`HE_RENDER_THREADING_MODE=1`） | 变化 |
+> |---|---|---|---|
+> | 墙钟 / 帧 | 465.190 ms | 465.143 ms | −0.01% |
+> | CPU 侧 / 帧 | 465.620 ms | 465.526 ms | −0.02% |
+> | 管线 `Render` / 帧 | 464.057 ms | 464.279 ms | **+0.05%**（判据：不退化 > 3%） |
+> | 转储一致性 | 28 个目标逐位相同（关掉已知 Lumen 噪声源后） | 同左 | 0 差异 |
+>
+> 说明：这两次运行都是**壳模式**（命令在同一线程执行），因此这里的差值只反映"入队 + 发布 + 回收票据"
+> 的开销；真正把渲染搬到另一根线程是阶段 2，届时"游戏 tick 与渲染并行"才会体现在墙钟帧时上。
+
+> **阶段 0 / 1 累计实测（截至 2026-09-24，`multi_thread` 分支）**
+>
+> | 项 | 数字 | 说明 / 复现 |
+> |---|---|---|
+> | 单测规模 | **384 例 / 71703 断言全通过** | 起点 331 例 / 71291（阶段 0 之前） |
+> | 阶段 0 输出一致性 | 28 个转储目标**逐位相同** | 关掉已知噪声源（`HE_LUMEN_PROBE_FILTER=off`），单线程 vs 渲染线程壳 |
+> | 阶段 0 帧时间 | 管线 `Render` **+0.05%**（判据：不退化 > 3%） | `06.GILab` 121 帧、样例自测每帧均值 |
+> | 附录 B1 世界依赖 | 渲染期 **82** 处 / 加载期 15 处（目标 = 渲染期 0） | `Tools/check_threading.py --world-deps`；快照层在白名单内 |
+> | T0.7 资源持有者 | **277** 处 / 76 个文件（只允许下降） | `Tools/check_threading.py --handles` |
+> | 帧内同步 RHI 调用 | `Engine/Render` **376** 处、`Samples` **127** 处 | `Tools/check_threading.py` + §13 附录 D |
+> | 全帧转储噪声底噪 | **≈ 4.5k 像素**（同二进制两趟） | 见 §9 T1.3a；因此单条路径迁移改用"参考实现 + 逐位比较"判据 |
+>
+> 判据口径的两点提醒（都已写进 §9）：① 迁移类改动一律用**旧实现逐行转写 + `memcmp` 逐位比较**
+> （全帧转储在单条路径尺度上不可判定）；② 闸门基线（B1 82、持有者 277）是**上限**，随收敛手动下调。
+>
+> **端到端复核（2026-09-24，阶段 1 收尾时的绿灯基线）**：7 个目标（`HugEngineTests` / `06.GILab` /
+> `07.Nanite` / `03.Sponza-Forward` / `05.Sponza-PathTracing` / `02.Cube` / `04.Sponza-Deferred`）
+> 全部编译通过；单测 **384 例 / 71703 断言**；两项闸门都在基线（B1 渲染期 82、持有者 277）；
+> `acceptance_sweep.ps1 -OnlyNanite` **PASS**（两类 pass 指纹 `1C15AB72E688B530` / `750CC247BF8B9C3D`
+> 未变，CULL DIFF / PIC CMP / TAKEOVER CMP 全过，`nanite_leak=0`）⇒ 阶段 0 与本阶段改动**未破坏既有验收**。
+>
+> **第二次端到端复核（2026-09-24，E-2② + E-3 半程之后）**：7 个目标全部编译通过；单测
+> **390 例 / 71750 断言**；两项闸门仍在基线（B1 渲染期 82 / 持有者 277）；
+> `acceptance_sweep.ps1 -OnlyNanite` **PASS** 且两类指纹**完全未变**；`06.GILab` 冒烟与
+> E-2② 之前的转储逐位对比 = **4539 像素**（与同二进制噪声底噪同量级）⇒ 骨骼矩阵改走快照、
+> 材质映射唯一化、收集侧算材质这三项改动**均无可测回归**。
+
+> **第三次复核：§15.1 第①段（实例缓冲状态搬迁 + 实例数据进快照）之后（2026-10-09）**
+>
+> | 项 | 数字 | 说明 / 复现 |
+> |---|---|---|
+> | 构建 | 7 个目标全绿（`HugEngineTests` / `02.Cube` / `03.Sponza-Forward` / `04.Sponza-Deferred` / `05.Sponza-PathTracing` / `06.GILab` / `07.Nanite`）+ `07.AISamples` | 无 `error C` / `error LNK` |
+> | 单测规模 | **397 例 / 71829 断言全通过** | `build\bin\Release\HugEngineTests.exe` |
+> | `06.GILab` 冒烟 | 同二进制双跑 **0 像素**（逐位一致） | `HE_LUMEN_PROBE_FILTER=off`；告警行 42 → 42 |
+> | `02.Cube` 实例化实跑（Forward + Deferred） | GPU 剔除读回与 CPU 复算**逐帧相等**（4820/4820、4839/4839）；SSBO 只建一次后原地复用（退役恒 0）；`VUID=0` | 唯一含实例化网格的样例；见 §9 T1.5 第①段 |
+> | 帧内同步 RHI 调用 | **380**（376 → 380，**口径漂移，非新增调用**） | `Tools/check_threading.py`；理由见 §9 T1.5 第①段"口径说明一" |
+> | 附录 B1 世界依赖 | 渲染期 **78** / 加载期 13（80 → 78，**行合并少计一行，非进展**） | 同上"口径说明二"；基线仍留 80 |
+> | 组件指针依赖 | 渲染期 **18**（不变） | 第②段（`DrawItem::mesh` 去指针）才会真正下降 |
+> | T0.7 资源持有者 | **277** / 75 个文件（不变） | 基线 277 |
+> | `acceptance_sweep.ps1 -OnlyNanite` | **PASS**：两类指纹 `1C15AB72E688B530` / `750CC247BF8B9C3D` **未变**，CULL DIFF / PIC CMP / TAKEOVER CMP 全过，`vuid` off=41 / on=42（新增类型 0） | 端到端回归确认 |
+>
+> **本段顺带修掉一个隐藏缺陷**：三条管线的 `CollectLights` 原先在帧中调用 `m_Snapshot.Clear()`，
+> 会连带抹掉同帧已填好的 `draws`/`skinMatrices`/`instances`。蒙皮消费侧有"退回组件数据"的兜底
+> （所以 E-2② 的快照路径实际没被走到、也没被发现），实例化没有兜底 ⇒ 表现为"一个实例都不画"。
+> 这个问题是**先有鸡还是先有蛋**的典型：它由第①段引入的"无兜底消费侧"暴露出来，属既有缺陷。
+>
+> **未做**：第②③段（`DrawItem` 去指针 / 帧入口收快照 ⇒ B1 归零）与 T2.4/T2.2。
+
+> **第四次复核：§15.1 第②段（`Prepare` 收快照 + `DrawItem` 去指针）之后（2026-10-09）**
+>
+> | 项 | 数字 | 说明 / 复现 |
+> |---|---|---|
+> | 构建 | 7 个目标全绿（`HugEngineTests` / `02.Cube` / `03.Sponza-Forward` / `04.Sponza-Deferred` / `05.Sponza-PathTracing` / `06.GILab` / `07.Nanite`） | 无 `error C` / `error LNK` |
+> | 单测规模 | **398 例 / 71832 断言全通过** | +1 例（两类网格的 `bInstanced` 标记） |
+> | `06.GILab` 冒烟 | 同二进制双跑 **0 像素**；**与第①段二进制逐位对比 0 像素**（28 个转储目标全一致） | `HE_LUMEN_PROBE_FILTER=off` |
+> | `02.Cube` 双管线实跑 | Forward 26 draws / 8150 tris、实例可见 4820 = CPU 复算；Deferred 首帧实例化日志齐全、可见 4839；`VUID=0` | Deferred 比 Forward 少 1 条 = 贴花卡片被正确排除 |
+> | 组件指针依赖 | 渲染期 **18 → 13**（只剩 `RTPass`）；基线 18 → **13** | 闸门首次真实下降（第②段的本段判据） |
+> | 附录 B1 世界依赖 | 渲染期 **78 → 76**；基线 80 → **76** | `SceneRenderer::Prepare` 的声明 + 定义 |
+> | 帧内同步 RHI 调用 / 资源持有者 | **380** / **277**（均不变） | —— |
+>
+> **顺带修掉一处口径缺口**：`DeferredPipeline::BuildObjects` 原先用默认选项（不排除贴花卡片），
+> 而 GBuffer 消费侧靠 `Prepare(..., excludeDecals=true)` 排除 —— `Prepare` 改吃快照后这个口径
+> 只能由收集侧决定，否则贴花卡片会既被投影又被当普通网格画进 GBuffer，并与 `GPUScene` /
+> `MeshBatcher` 的集合错位（三者 `objectIndex` 按顺序对齐）。
+>
+> **未做**：第③段（帧入口收快照 ⇒ B1 归零，含 `RTPass` 的 13 处组件指针）与 T2.4/T2.2。
+
+---
+
+## 7. 风险与回退
+
+| 风险 | 触发征兆 | 缓解 | 回退 |
+|---|---|---|---|
+| **R1 数据竞争（快照不完整）** | 画面偶发闪烁/物体跳跃；TSan 或 `--sync-validation` 告警 | 阶段 1 强制"双跑比对"；快照字段评审；把"渲染是否还需要读世界"做成 grep 断言 | `enableRenderThread=false` |
+| **R2 资源生命周期**（渲染线程仍在用而游戏线程已释放） | 校验层 "object was destroyed"；偶发访问违例 | 全部释放走 `FrameRetireQueue`（已有）；新资源创建经 `ResourceCreationService` 统一登记 | 同上 |
+| **R3 帧延迟增加**（多一帧缓冲） | 输入延迟主观变差 | 帧在飞数保持 3；必要时提供"低延迟模式"（帧在飞 2） | 降帧在飞数 |
+| **R4 性能反而退化**（线程切换/背压抖动） | 帧时间方差变大 | 命令队列整帧批量交接；空闲用条件变量而非自旋；阶段 0 的壳模式先量基线 | 关开关 |
+| **R5 调试困难**（RenderDoc 时序错位） | 抓帧时命令与代码对不上 | 保留 `r.Debug.DrawMarker`（`Engine.h:22`）；渲染线程内打帧边界 marker | — |
+| **R6 ImGui 竞态** | 编辑器偶发崩溃/花屏 | 阶段 4 才动 UI；期间 UI 与场景同在渲染线程录制 | 编辑器单独走旧路径 |
+| **R7 范围蔓延**（顺手加 RHI 线程/多帧并行） | 阶段 2 迟迟不收敛 | **本文 §1.4 明确不做**；任何扩展先开新文档 | — |
+
+**总开关**：`EngineConfig::renderThreadingMode` 必须始终可回退到 `RenderThreadingMode::SingleThreaded`（默认值），
+且三种模式共享同一套快照与命令队列代码（差异只在"谁来消费"）。
+> **实现口径变更（2026-09-24，T0.5 落地时）**：原方案写的是布尔 `enableRenderThread`；实施时改为**三态参数**
+> `RenderThreadingMode{SingleThreaded, RenderThread, RenderThreadAndRHI}`。理由：该参数同时决定 §12 附录 C 的
+> 三线程升级路径，一次定清可以避免以后再改配置语义；且"关 = 就地执行 / 开 = 另一根线程执行"这种两段式开关
+> 本就在 §12.8 的 A2 里要再引一个 `enableRHIThread`，改成三态后单参数即可覆盖三种形态。
+> 运行期入口：`SetRenderThreadingMode()` / 环境变量 `HE_RENDER_THREADING_MODE`（`0|1|2` 或名称；非法值只告警、保持原模式，不静默退回）。
+
+### 7.1 三种模式的**当前**功能状态（2026-09-24 按代码核实，务必不要误读）
+
+> **一句话**：三种模式里**只有单线程是完整可用的**；另外两种目前只是"能选、能被读到"，
+> **选了之后画质与行为与单线程一致，并没有真的并行**。阶段 0 的验收判据正是在这种"壳模式"下测的
+> （28 个转储目标逐位一致、管线 `Render` +0.05%），**不构成"多线程已工作"的证据**。
+
+| 模式 | 现状（2026-10 更新） | 证据 / 缺口 |
+|---|---|---|
+| `SingleThreaded`(0) | ✅ **完整可用**（唯一回退态） | —— |
+| `RenderThread`(1) | ✅ **已实现并验证**（T2.1/T2.2/T2.4 落地） | 起真渲染线程、整帧 RHI 在它上面执行；模式 0/1 转储逐位一致、归属断言 0；`06.GILab` 曾默认此模式 |
+| `RenderThreadAndRHI`(2) | ✅ **已实现并验证**（A-2 + A-4） | 新增 `Render/Threading/RHIThread`（`ISubmitRouter` 实现 + 二级队列）：渲染线程只录制，`Submit`/`Present` 交给 RHI 线程（**唯一提交者**）；`ThreadAffinity` 增加"提交者"第三角色（`HE_ASSERT_SUBMIT_THREAD()`）；呈现参数在渲染线程捕获、`AcquireNextImage`/`WaitIdle` 先排空路由。**判据：06.GILab 模式 0 vs 模式 2 的 20 个 GI 转储目标逐字节一致、断言 0、VUID 与模式 0 相同、到第 40 帧墙钟 9.57 s vs 9.59 s**；`06.GILab` 现**默认**模式 2 |
+
+> **模式 2 的范围**：落地的是 §12 的 **A-2 + A-4**，交接单位是"已录制完成的命令列表"（渲染线程仍产 `vkCmd*`）。
+> **A-1（纯数据命令流）与 A-3（资源句柄化）仍未做**（见 §12.3），属"渲染线程零 API 调用"的严格形态。
+
+**三线程严格形态仍需做**：**A-1** 抽象 RHI 命令流（记录/执行分离）｜**A-3** 资源创建命令化 + 句柄化
+（改造面最大，200+ 处资源持有者）｜**A-5 收尾** ImGui/PSO/读回的正式命令化（当前用"`WaitIdle` 先排空路由"规避竞争）。
+
+---
+
+## 8. 工作量与排期建议
+
+> **2026-10 重排（三线程已落地）见 §8.1**：原表保留为历史计划。三线程（A-2 + A-4）落地后优先级
+> 发生了变化 —— **"深度 >= 2"升为第一优先**（没有它，三线程只是"换一根线程串行"：实测三种模式
+> 帧率相同，因为样例仍是每帧严格握手）。
+
+| 阶段 | 内容 | 建议投入 | 依赖 |
+|---|---|---|---|
+| 阶段 0 | 地基（断言 + 队列壳 + 背压骨架） | 3~5 人日 | — |
+| 阶段 0 预埋 | T0.6 命令流契约 + T0.7 资源句柄化（**为 §12 的三线程升级留口**） | +5~8 人日 | 与阶段 0 同期 |
+| **（可选）三线程升级** | 仅做 A-1/A-2/A-3 三步（§12.8），**在阶段 2 之后才做** | **+6~12 人日**（已预埋）/ +15~30 人日（未预埋） | 阶段 2 起 |
+| 阶段 1 | 场景快照（核心） | **8~15 人日** | 阶段 0 |
+| 阶段 2 | 起渲染线程（设备/交换链/管线/样例/编辑器） | **10~18 人日** | 阶段 1 |
+| 阶段 3 | 并行录制推广 | 5~10 人日 | 阶段 2 |
+| 阶段 4 | 编辑器与 ImGui 收口 | 4~8 人日 | 阶段 2 |
+| 阶段 5 | 验收与调优 | 3~6 人日 | 阶段 3/4 |
+
+**建议顺序**：`阶段 0 → 阶段 1 → （阶段 3 可与阶段 2 并行验证）→ 阶段 2 → 阶段 4 → 阶段 5`
+理由：阶段 1（快照）是唯一**没有它就无法安全起线程**的环节，且它本身独立可交付（改善架构、不改变行为）。
+
+### 8.1 三线程落地后的重排（2026-10）
+
+> **2026-10-22 现状**：**P1 ✅ 完成**（timeline fence 读回，`27d5033`）、**P3 ✅ 完成**（T3.1 `5ba4705`、
+> T3.2 `ac496e2`；T2.3 有证据地推迟到 A-3）、**P2 部分完成**（L1 契约/翻译 `9a294e7`、L2 提交管道
+> `9afe25c`、L3 前置命令 `0b8afe3`；**L3 已撤销**——论证见 §12.11 与 `6fa349a`；**L4-3 是 all-or-nothing
+> 的独立项目**，见 §12.12 / `ffb5be8`）。
+> 另有 **L4-1/L4-2 完成**：帧外壳（acquire / present / Begin / End / Submit）已收口到
+> `rhi::FramePresenter`（`cfaabe8`、`b9e8c3d`、`f1419bd`、`a0aa1bd`）。
+> A-3 已推进 **19 批**（见 §16 的提交清单与剩余清单）。
+
+**先重新分析：哪些结论变了、哪些没变。**
+
+| 原判断 | 现在的实际 |
+|---|---|
+| 三线程是"可选升级，阶段 2 之后再说" | **已落地**（A-2 + A-4）：模式 2 = 游戏线程 + 渲染线程 + RHI 线程（唯一提交者），`06.GILab` 默认它；判据是 20 个 GI 转储逐字节一致 / 断言 0 / VUID 与模式 0 相同 |
+| "T2.6 是分水岭" | **仍成立，但含义变了**：分水岭不再是"要不要为将来留口"，而是"**要不要把已经存在的第三根线程真正用起来**" |
+| 阶段 3 可与阶段 2 并行 | 仍成立，但排在"深度 >= 2"之后才有意义（否则帧率不变，优化无处体现） |
+| （若有"线程化会提帧率"的期待） | **不会**：三模式实测同帧率（每帧 `SubmitAndWait` 严格握手 ⇒ 关键路径串行）；收益必须靠深度 >= 2 |
+
+**新顺序（按"收益 / 依赖 / 风险"排）**
+
+| 优先级 | 任务 | 为什么在这个位置 | 判据 |
+|---|---|---|---|
+| **P0** | **深度 >= 2**：每飞行帧命令缓冲 + 去掉命令 1 的每帧握手（改成队列背压）+ 06.GILab 的 `NextFrame`/装配/阴影驱动搬进命令 | 三线程已就位，"提交不再阻塞录制"这一收益**只有去掉握手才拿得到**；这也是轻帧样例（02.Cube）帧时间不达标的解法 | 模式 0/1/2 转储逐位一致；模式 2 vs 0/1 的**游戏线程等待时间**下降、帧时间不退化 >3% |
+| **P0（并行）** | **T5.1 Profiler 三段计时**（游戏 / 渲染 / 等待） | P0 的收益没有读数就判不了；代价很小 | Stats 面板出现三段；读数与墙钟一致 |
+| **P1** | **A-5 读回的正式命令化** | ⚠ 先按实测修正了口径：06 里 `WaitIdle` 只出现在**诊断路径**，稳态帧循环没有读回 ⇒ 收益低，按"清理项"做。**✅ 已完成**：dump 读回改成 **timeline fence**——录制侧给本帧挂 `SetTimelineSignal`（句柄在拥有线程上创建），读取侧 `router->FlushAndWait()`（模式 2 让 RHI 线程先提交）+ `WaitForFence`（只等那一次提交），不再设备级 `vkDeviceWaitIdle` | 转储 20/20 逐字节一致、无新增 VUID ✓ |
+| **P2** | **T2.6 + A-1 合并**：`RenderThreadContext` 从"RHI 唯一出口"升级为"**只吐命令流**" | A-1 是 T2.6 的完成形态；`RHICommand` 契约已在 T0.6 预埋，越晚做代价越高 | `RenderThreadContext` 不再暴露 device（grep 断言）；三模式转储一致 |
+| **P3** | **T3.1 + T3.2**（✅ 已完成）+ **T2.3**（推迟到 A-3）：抽 `ParallelRecordHelper` + Deferred 接入并行录制 | 文档原话"T2.3 与 T3.2 应合起来排期"（避免先搬线程再为并行录制改一遍）；T3.1 先抽公共件 | T3.2 录制耗时下降、输出逐像素一致 |
+| **P4** | **T3.3 / T3.4**：PT/Nanite 并行录制评估、分块与 worker 数调优 | 依赖 T3.1 的公共件；Nanite 可能"评估后不做"，允许只记结论 | 结论在案；小场景（draw < 64）不退化 |
+| **P5** | **T2.5 + T4.1~T4.4**：编辑器主循环 + ImGui 归属 / 去后门 / 面板只读快照 / 热重载替换 | 编辑器侧是三线程之外的最后一块；样例侧 T4.1 已完成 | 编辑器 UI 正常、无跨线程读 ECS、后门接口从 `IRHIDevice` 移除 |
+| **P6** | **T5.2 / T5.3**：背压参数调优、资源创建异步化（可选） | 调优必须在 P0/P1 有读数之后 | 稳态帧率不低于改前、空闲 CPU < 1% |
+| **P7** | **A-3 资源句柄化**（分批） | 面最大（200+ 处持有者），是 A-1 严格形态的前置；**单独排期**，不做完不影响前三线程收益 | 每批：编译 + 单测 + 三模式转储一致 |
+
+**与旧排期的差异（一句话）**：旧顺序把"三线程"放在最后当可选项；新顺序是"**三线程已就位 ⇒ 立刻兑现它的收益（深度 >= 2 + 读回命令化），再回头补记录/执行分离（T2.6 + A-1），最后才是推广与编辑器**"。
+
+**仍然偏后的判断**：A-3 句柄化排在最后不是因为它不重要，而是因为它**不阻塞任何前三线程收益**，且改造面最大、最容易和生产优化互相干扰。
+
+---
+
+### 12.11 A-1 落地设计：必须是 **pass 级**，不是 draw 级
+
+> 本节记录 2026-10 试点时的结论。契约与翻译层已落地（`RHI/RHICommandList.h` 的类型/载荷、
+> `RHI/RHICommandReplay.{h,cpp}`），但接线的粒度推翻了原设想。
+
+**为什么 draw 级试点不成立**（三条都来自代码事实）：
+
+1. 引擎里**所有逐 draw 录制都发生在 render pass 内**（`BeginOffscreenPassMRT` / `BeginRenderPass` 之后）。
+   而 secondary 命令缓冲**不能被 RHI 线程"回放"**——它已经是录制好的命令缓冲，`ExecuteSecondary`
+   必须在拥有线程上调用。⇒ 把 draw 记进命令流、再由 RHI 线程翻译，只能落到 **primary 列表**上。
+2. primary 列表上的逐 draw 录制只存在于 **MTCR 关闭的串行路径**（`m_MultiThreadRecord == false`）。
+   正常运行时 MTCR 默认开 ⇒ 该路径**不被转储覆盖**，用它当试点等于"改了一条没有判据的代码"。
+3. GBuffer 也一样：CPU 路径刚接并行录制（T3.2）⇒ 逐 draw 进 secondary；GPU 路径是 indirect。
+
+**结论**：A-1 的最小可验证单元是 **pass 级**——把"一个 pass 的完整内容"命令化：
+
+| 需要新增/使用的命令 | 说明 |
+|---|---|
+| `BeginPass` / `EndPass`（新） | 携带 pass 描述（附件/清屏/视口/`allowSecondary`），执行端据此开/关 pass |
+| 现有 `SetPipeline` / `SetDescriptorSet` / `SetPushConstants` / `SetVertexBuffer` / `SetIndexBuffer` / `DrawIndexed` | pass 内的绘制序列（已落地 ✓） |
+| 现有 `PipelineBarrier` / `CopyBuffer` | pass 之间/之外的资源转换与拷贝 |
+| 现有 `MarkSubmitBoundary` | 一帧的提交边界（RHI 线程在此之后提交） |
+
+**执行端模型**：RHI 线程按 `MarkSubmitBoundary` 切帧，顺序翻译；遇到 `BeginPass` 就开 pass、
+后续 draw 直接录进 primary（**一次翻译、零往返**），`EndPass` 关闭。这样"渲染线程零 Vulkan 调用"才成立，
+且 secondary 并行录制（MTCR）保持现状——它本就发生在 RHI 拥有线程之外、由 `RecordThread` 授权。
+
+**改动面（6 处）**：`ISubmitRouter::RouteSubmit` / `IRHIDevice::Submit`+`ExecuteSubmit`（加
+`RHICommandList* stream = nullptr`，不破坏样例调用点）→ `VulkanDevice` 透传 → `RHIThread` 在
+`ExecuteSubmit` 之前 `ReplayCommandStream` → `ForwardPipeline`（或 GBuffer）的 **pass 函数整体**改成 append →
+判据。
+
+**判据**：模式 0/1/2 转储 **20/20 逐字节一致**（冻结配置 A/B）、0 新增 VUID、断言 0；外加
+**grep 断言**：渲染线程调用的 pass 函数体内不再出现 `cmd->vkCmd*` 风格的绑定/绘制调用（只剩 append）。
+
+**已知风险**：pass 描述里含附件句柄与清屏值（须能进命令流）、barrier 的"谁等谁"语义在延迟翻译后
+仍要对（现有 `m_ResourceStates` 记账发生在录制期 ⇒ 需要把它一起搬进命令流或改为执行期推导）、
+延迟销毁队列的时序。
+
+**可达性（2026-10 追加，重要）**：即使 pass 级改造做完，也**到不了**"渲染线程零 Vulkan 调用"——
+因为帧的外壳仍是 API 调用：`VulkanCommandList::Begin/End`（命令缓冲生命周期）、
+`AcquireNextImage`、`Submit`（现在已交给 RHI 线程）、以及窗口 resize 时的重建。要把它们也命令化，
+等于把**整个帧**都变成命令流（交给 RHI 线程从头执行）——那时渲染线程才真的"只 append"。
+
+因此 A-1 的正确分层是：
+
+| 层 | 内容 | 现状 |
+|---|---|---|
+| L1 契约 + 翻译层 | `RHICommand`/`RHICommandList` + `ReplayCommandStream` | ✅ 已完成（`9a294e7`） |
+| L2 提交管道 | `Submit/RouteSubmit/ExecuteSubmit` 携带命令流，RHI 线程提交前翻译 | ✅ 已完成（`9afe25c`） |
+| L3 pass 级命令化 | `BeginPass`/`EndPass` + pass 内绘制序列进流 | ⬜ 未做（本文 §12.11 的 6 处改动） |
+| L4 帧级命令化 | 命令缓冲 Begin/End、Acquire、Present、重建也进流 ⇒ 渲染线程真正零 API | ⬜ 未做；这是"零 Vulkan 调用"的**必要条件**，也是 A-3 句柄化的直接消费者 |
+
+结论：**P2 的"零 Vulkan 调用"目标在 L3+L4 都完成前不应声称达成**；本阶段的合法成果是 L1+L2（已落地并
+按"行为中立"验收），以及 L3/L4 的设计与判据。
+
+### 12.12 L4 盘点（2026-10）与分步计划
+
+**盘点一：剩余 `unique_ptr<IRHI*>` 持有者约 180 处**（`grep -c 'std::unique_ptr<rhi::IRHI'` 于
+`Engine/**/*.h`）。分布（按数量级）：Lumen 最多（`LumenScene.h` 单文件 40+），其次 Nanite
+（`NaniteCull/NaniteRaster/NaniteScene/NaniteStream`）、`RTPass.h`、`SSAO`、Shadow 三种技术、
+`GBufferRenderer.h`、`LightingPass.h`、`DecalPass.h`、`InstanceCuller` 等。
+
+⇒ **A-3 是长期路线**（与文档自估的 15~30 人日一致），**不应阻塞 L4**：L4 只依赖"帧外壳"的
+命令化，不依赖把全部资源改成句柄。
+
+**盘点二：`AcquireNextImage` / `Present` 的调用点集中在样例的渲染命令里**，7 个样例各一对、
+形状一致（`swapchain->AcquireNextImage()` → 录制 → `swapchain->Present(vsync)`），另有失败分支
+（`frameAborted` / `continue`）。
+
+**L4 分步（每步一提交、同一套判据）**：
+
+| 步 | 内容 | 判据 |
+|---|---|---|
+| **L4-1** | **把 acquire/present 收口到引擎侧**（样例不再直接持有 swapchain 的帧序操作）：新增一个 `IFramePresenter`（或 `RHI` 层的 `BeginFrame/EndFrame`），内部封装 `AcquireNextImage` + `Present` + 失败分支；7 个样例机械替换 | 20/20 转储一致、0 新 VUID、断言 0 |
+| **L4-2** | **命令缓冲生命周期收口**：`Begin/End` 从样例移到引擎（与 L4-1 同一入口），样例只调 `BeginFrame/Record/EndFrame` | 同上 |
+| **L4-3** | **整帧命令流**：L4-1/L4-2 之后，帧外壳的每个 API 都变成命令流里的一条（L1/L2 已就绪），RHI 线程自己 `Begin → 翻译 → End → Submit → Present` ⇒ **渲染线程真正零 Vulkan 调用** | 同上 + grep 断言"渲染线程路径不再出现 `vkCmd*`/`vkAcquire*`/`vkQueuePresent`" |
+
+**为什么先 L4-1 而不是继续 A-3**：L4-1 只动 14 个调用点、形状一致、判据现成；而 A-3 的 180 处
+持有者需要按模块分批（每批都要 A/B），更适合作为并行长期路线。两者在 L4-3 汇合（那时帧外壳的
+资源创建才真正需要句柄）。
+
+**L4-3 的可行性结论（2026-10，做完 L4-1/L4-2 之后）——它是 all-or-nothing**
+
+L4-3 的正确形态是：**RHI 线程**执行 `BeginCommandBuffer → 翻译整帧命令流 → EndCommandBuffer →
+Submit → Present`，渲染线程只 append。由此推出一个硬约束：
+
+> **同一张命令缓冲不能既由渲染线程录制、又由 RHI 线程录制。**
+
+因为 `vkCmd*` 必须落在 `Begin` 与 `End` 之间，而 `End` 之后**只允许** `EndCommandBuffer` 一次；
+把"部分 pass 命令化、其余留给渲染线程直录"混在一起，必然出现"渲染线程在 RHI 线程的 Begin/End
+之间插命令"的竞态 ⇒ 非法。⇒ **L4-3 没有增量做法**：要么整帧全部变成 append（渲染线程零 Vulkan 调用
+成立），要么维持现状。
+
+代价量化（按现有代码）：`Deferred` 路径的 `RenderGraph` 各 pass（GBuffer/Lighting/SSR/SSAO/GI 合成）、
+`Forward` 路径的 HDR pass 内 10 个调用点、阴影三种技术、后处理链、`FlushComputeWork`、以及
+`RenderGraph::Execute` 自身对 `IRHICommandList*` 的贯穿 —— 粗略 50+ 个录制点，且每个都要先有
+`BeginPass`/`EndPass`/`ExecuteSecondary`/`ExecuteIndirect` 等命令形态（L3 里已部分备好）。
+
+**结论与建议**：
+- L4-1/L4-2 已经把"帧外壳"收口到 `FramePresenter`（acquire/present/Begin/End/Submit 都在一处），
+  这是 L4-3 的**必要前置且已完成**；
+- L4-3 本身应作为**独立项目**排期（预计数周），不适合与 A-3 混在做增量批次里；
+- 在 L4-3 之前，最有价值的增量工作是继续 **A-3 的 180 处持有者**（每批 1 次 A/B、可随时停下），
+  因为它同时降低 L4-3 的难度（帧内创建不再需要跨线程句柄往返）。
+
+#### L3 执行清单（Forward 非 RG 路径，按调用点）
+
+选 Forward 的 HDR pass 作首个 L3 试点：它的结果**在转储里可见**（`hdr.f16` 是 20 个目标之一），
+且这条路径不走 RenderGraph（不需要改 RG 的 `Execute` 签名）。需要 commandize 的调用点：
+
+| # | 调用点 | 现状 | 要 append 的命令 |
+|---|---|---|---|
+| 1 | `ForwardPipeline::BeginHDRPass` | `cmd->BeginRenderPass(desc)`（2 附件 + 清屏 + w/h） | `BeginPass`（新；附件/清屏值进 arena） |
+| 2 | `PrepareGI` → `GI_IBL::Render` / RSM | 若干 `SetPipeline`/`BindDescriptorSet`/`Draw` | 已有类型 + `SetVertexBuffer`/`SetIndexBuffer`/`DrawIndexed` |
+| 3 | `RenderSkybox` → `SkyboxPass::Render` | 1 次全屏 draw（`BindDescriptorSet` + `Draw`） | 同上 |
+| 4 | `RenderScene`（MTCR 分支） | `ExecuteSecondary` × N（次级列表由 worker 录制） | `ExecuteSecondary`（新；载荷 = 列表指针） |
+| 5 | `RenderScene`（indirect 分支） | `SetVertexBuffer`/`SetIndexBuffer`/`BindDescriptorSet` + `ExecuteIndirect` | 已有类型 + `ExecuteIndirect`（新） |
+| 6 | `RenderScene`（实例化段） | 同 5，`DrawIndexed(count)` 带实例数 | `DrawIndexed` 载荷加 `instanceCount` |
+| 7 | `EndHDRPass` | `cmd->EndRenderPass()` + 屏障 | `EndPass` + 现有 `PipelineBarrier` |
+| 8 | `RenderToneMapPass` | 一次 pass + 1 draw | 同 1/3 |
+| 9 | AA（`m_AntiAliasing->SetInput` + `Render`） | 一次 pass + 1 draw | 同 1/3 |
+| 10 | 帧外壳（`Begin/End`、`Acquire`、`Submit`、`Present`） | —— | **属 L4**，不在本试点范围 |
+
+新增命令类型共 **4 个**：`BeginPass`、`EndPass`、`ExecuteSecondary`、`ExecuteIndirect`（+ `DrawIndexed`
+载荷补 `instanceCount`），全部 ≤64B 或走 arena；翻译层各加一个 `case`。
+
+**判据**：模式 0/1/2 冻结配置 A/B **20/20 逐字节一致**（`hdr.f16` 必须一致，否则说明 pass 描述有偏差）、
+0 新增 VUID、断言 0；外加 grep 断言：上表 1~9 号函数体内不再出现 `cmd->` 的 pass/绑定/绘制调用。
+
+**2026-10 追加（推翻上表：L3 单独不成立）**
+
+`VulkanCommandList::Submit()` 提交的是**已经 `EndCommandBuffer` 的**
+`m_CmdBuffers[m_FrameIndex]`（`VulkanCommandList_Submit.cpp:148`、`:161`）；而 L2 的翻译发生在
+`ExecuteSubmit`（= 提交之前、`End` **之后**）⇒ 命令会被追加到"已经结束的命令缓冲"后面 ⇒ **顺序错、且非法**
+（一旦有生产者就是硬错误，不是悄悄画错）。
+
+因此：
+
+1. **"只命令化某个 pass"（上表的 L3）在架构上不成立**：除非回放能发生在**录制位置**上，而那要求
+   渲染线程根本不碰命令列表、由 RHI 线程从头录整帧 = **L4**；
+2. **L2 的 `stream` 管道只在"整帧命令流"时才有意义**：那时 RHI 线程自己做
+   `BeginCommandBuffer → 翻译整帧流 → EndCommandBuffer → Submit`。⇒ 在 L4 落地前，
+   `stream` 应当**没有生产者**（保持 `nullptr`），否则会写出非法命令缓冲；
+3. 结论：**P2 的剩余部分整体等价于 L4（帧级命令化）**，而 L4 的直接前置是
+   **A-3 资源句柄化**（帧内创建必须命令化）+ `AcquireNextImage`/`Present` 命令化。
+   ⇒ 原计划里"L3 pass 级试点"**撤销**，改为 **L4 + A-3 的联合排期**；L1（契约/翻译）与 L2（管道）保留为
+   **L4 的既有基础设施**，并按"行为中立"验收（已验证：20/20 一致、无新增 VUID）。
+
+---
+
+## 9. 附录 A：任务总表（可勾选）
+
+- [x] T0.1 线程归属断言（`ThreadAffinity` + `HE_ASSERT_RENDER_THREAD`）
+  - 落地：`Engine/RHI/RHI/ThreadAffinity.h`（原子拥有者 + 宏）；认领点 `CreateDevice`，注销点 `~VulkanDevice`；
+    断言点 `Shutdown` / `Submit` / `SubmitAll` / `SignalFenceOnQueue` / `WaitFenceOnQueue` /
+    `AcquireNextImage` / `Present` / `VulkanCommandList::Begin` / `BeginSecondary` / `BeginLightweight` / `End` / `Submit`。
+  - 实测（2026-09-24，multi_thread 分支）：单测 **334 例 / 71303 断言全通过**（含新增的
+    `TestThreadAffinity.cpp` 三态用例与 `TestThreadAffinityDisabled.cpp` 关闭路径用例）；
+    `06.GILab` 实跑 120 帧零断言触发、28 个转储正常、`vuid_lines=42` 无新增。
+- [x] T0.2 帧内同步 RHI 调用清点清单
+  - 产出 **§13 附录 D**：`Engine/Render` 帧内 **376** 处 / 加载期 247 处，`Samples` 帧内 **127** 处；
+    按 `SWAPCHAIN / WAIT / CREATE / MAP / UPLOAD_DESC` 分类，每类给出处置与所属阶段、代表 `file:line`
+    与最集中的文件（方向与量级已按文件聚合排序）。
+  - 配套脚本 `Tools/check_threading.py`（`--detail` 明细、`--root` 换目录、`--gate` 闸门），
+    是附录 B 各阶段退出判据的可执行版本。
+- [x] T0.3 `RenderCommandQueue` + `RenderThread` 壳实现（行为等价）
+  - 落地：`Engine/Render/Threading/{RenderThreadContext.h, RenderCommandQueue.h/.cpp, RenderThread.h/.cpp}`
+    （**RHI-free**，单测直接编译这几个 .cpp）+ `Samples/06.GILab` 接线 —— 模式 ≠ 单线程时，每帧的
+    `curPipeline->Render(...)` 经 `BeginFrame/Enqueue/Publish` 交给 `FrameScheduler::SubmitAndPump()`
+    在**调用线程**上消费；单线程模式走旧路径，两条路径共用同一份渲染代码。
+  - 判据实测（2026-09-24）：关掉已知噪声源（`HE_LUMEN_PROBE_FILTER=off`）后，单线程与壳模式两次运行的
+    **28 个转储目标全部逐位相同（`total differing pixels = 0`）**；默认滤波下差异**仅**出现在已知的
+    Lumen 屏幕探针家族（`lumen_irradiance` + 4×`prov6_*` + `hdr`），与本次改动无关。
+  - 遗留：其余 6 个样例与编辑器的接线随 **T2.4**（同源改造：循环体 → 投递 + `SubmitFrame`）。
+  - 已知并记录的偏离：阶段 0 的命令载荷仍按**引用**捕获，铁律 2 要求的"按值捕获"要等阶段 1 的
+    `FrameSceneSnapshot` 把渲染输入变成不可变数据后才能真正满足（T1.2/T2.4）。
+- [x] T0.4 帧票据与背压骨架
+  - 落地：`FrameTicket`（帧号 + 槽位）、在飞计数（发布计入 / `RetireFrame` 递减并唤醒）、
+    背压两种语义 —— `SubmitFrameBlocking`（游戏线程**唯一**允许的等待点）与 `TrySubmitFrame`
+    （在飞满时拒绝并把该帧计入丢弃数）；观测项：已发布 / 已回收 / 丢弃 / 背压等待次数。
+  - 判据实测（2026-09-24）：单测把上限设为 1 ⇒ 第 2 次非阻塞提交被拒且 `DroppedFrameCount()==1`；
+    **阻塞提交在子线程上确实等到 `RetireFrame` 才返回**（轮询观测 + 背压等待计数 = 1），
+    即 T0.4 要求的"人为把上限设为 1 时能观察到游戏线程阻塞"有可测形态。
+- [x] T0.5 `EngineConfig::enableRenderThread` / `renderThreadSpinWaitUs`
+  - **实施口径**：改为三态参数 `RenderThreadingMode{SingleThreaded=0, RenderThread=1, RenderThreadAndRHI=2}`
+    （单线程渲染 / 游戏线程+渲染线程 / 游戏线程+渲染线程+RHI 线程），默认 `SingleThreaded`；
+    `EngineConfig::renderThreadingMode` + `renderThreadSpinWaitUs`（默认 0 = 不自旋，空闲不烧核），
+    并提供 `UsesRenderThread()` / `UsesRHIThread()` 判据。
+  - 落地：`Engine/Core/Core/RenderThreadingMode.h`（枚举 + 规范名 + 解析 + 进程级读写）、
+    `Engine/Core/Core/Engine.{h,cpp}`（配置字段 + `Initialize` 落地 + 环境变量覆盖 + 非法值告警）。
+  - 实测（2026-09-24）：单测 **341 例 / 71345 断言全通过**（新增 6 例：默认值、三态×判据真值表、
+    规范名、解析（数字/名称/别名/大小写）、非法输入必须 `nullopt`、进程级读写一致性）；
+    `06.GILab` 实跑三种配置的日志分别为 `渲染线程模式 = game+render+rhi（2）`、
+    非法值 `triple` → 告警并保持 `single-threaded`、不设环境变量 → `single-threaded（0）`，28 个转储正常。
+- [x] T0.6 **（预埋，见 §12）** RHI 命令流记录端契约 + `RHICommand` 载荷形态
+  - 落地：`Engine/RHI/RHI/RHICommandList.h`（头文件实现，**不接入生产路径**）：
+    `RHICommand`（类型擦除 + 64B 内联载荷 + arena 偏移）、`RHICommandType`（骨架代表值）、
+    `RHICommandList`（`Enqueue` / `EnqueueArena` / `AllocArena` / `MarkSubmitBoundary` / `Reset`
+    + 执行端读取用的 `PayloadAt` / `ArenaPayloadAt`，不匹配返回 nullptr 以便容错）。
+  - 7 例单测：内联按值拷贝与读回、64B 边界、错类型/越界读取为 nullptr、arena 不重叠与偏移读回、
+    **子对齐载荷的绝对地址对齐**、提交边界、`Reset` 复用不残留。
+  - 实测（2026-09-24）：单测 **356 例 / 71443 断言全通过**（改前 349 / 71383）。
+  - 【单测当场抓到的契约缺陷】初版用 `std::vector<u8>` 存 arena、只对齐**偏移量** ⇒ 绝对地址不保证
+    对齐（64B 用例量到 48）。已改为**固定容量、64B 对齐的块**（对齐建立在绝对地址上；容量耗尽即断言，
+    可增长块分配器随 §12 的 A-1 落地）。
+- [x] T0.7 **（预埋，见 §12）** 资源句柄化（`RHIBufferHandle` / `RHITextureHandle` + generation）
+  - 落地：`Engine/RHI/RHI/RHIHandles.h`（头文件实现）：两种句柄（`index == 0` 为无效、`generation` 代次）
+    + 句柄表 `RHIResourceTable<THandle, TResource>`（`Add` / `Get` / `Remove` / `LiveCount` /
+    `SlotCount` / `FreeSlotCount`）+ `RHIBufferTable` / `RHITextureTable` 别名。
+    **本阶段不强制迁移**任何现有持有者，`unique_ptr` 保持为兼容层（§12.5 的"渐进迁移"）。
+  - 为什么代次是关键：槽位会被回收复用，只有下标的句柄在复用后会**静默指向另一个资源**
+    （不崩、画面莫名错乱，最难查的一类 bug）。`Remove` 提升槽位代次 ⇒ 旧句柄一律解析为 nullptr，
+    错误立刻表现为"资源为空"。
+  - 6 例单测：登记/解析（下标从 1 开始）、`Remove` 后失效且幂等、**槽位复用后代次前进且旧句柄
+    绝不指向新资源**、越界/伪造代次/跨表句柄一律 nullptr、多轮复用槽位不增长、两种句柄互不干扰。
+  - 实测（2026-09-24）：单测 **362 例 / 71495 断言全通过**（改前 356 / 71443）。
+  - grep 闸门已接入 `Tools/check_threading.py --handles`：实测 **277 处 / 76 个文件**（正是 §12.5
+    所说"200+ 处持有者"）。该基数是**上限而非目标** —— 迁移可以渐进，但**新增一处**即说明新代码
+    没走句柄，闸门会失败。
+- [x] T1.1 `FrameSceneSnapshot` 定义（与 `ShaderTypes.slang` 对齐 + `static_assert`）
+  - 落地：`Engine/Render/Threading/FrameSceneSnapshot.h`（值语义、无指针、RHI-free）：
+    `SnapshotDrawItem`（内嵌 `GPUObjectData` + `prevWorldMatrix` + `meshIndex`/`objectID`/
+    `visibilityFlags` + 间接绘制三元组）、`SnapshotLight`（**逐字段镜像** `GPULight`，
+    带 `ToGpu()` / `FromGpu()`）、`FrameSceneSnapshot`（帧号/槽位/相机/dt/视口/draws/lights/
+    skinMatrices/`sourceWorldVersion` + `Clear()` / `Reserve()` / `IsEmpty()`）。
+  - 两条硬约束写进文件头：① **只放值不放指针**（资源只放索引与 ID，由渲染线程自查表），
+    否则"交接后只读"是假的；② **布局与着色器同源** —— 小结构逐字段镜像 + 静态断言，
+    大结构直接内嵌 GPU 结构，杜绝两份字段定义漂移。
+  - 布局钉子（本任务的核心判据）：`SnapshotLight` 与 `GPULight` 的**大小与每个字段偏移**逐一
+    `static_assert`（只锁大小不够：字段互换位置时大小不变但着色器会读错）；
+    `SnapshotDrawItem` 锁"可平凡拷贝 + 16B 对齐"，`CameraData` 锁"值类型"。
+  - 实测（2026-09-24）：单测 **366 例 / 71530 断言全通过**（改前 362 / 71495）。
+  - 实现细节留痕：`ShaderTypes.slang` 必须在 `he::render` 命名空间内包含（与
+    `Pipeline/Material.h` 同一用法），否则 `float4` / `float4x4` 在全局作用域不可见。
+- [x] T1.2 `SceneSnapshotBuilder`（集中现有 Collect 遍历）—— ✅ 完成（光源/物体/环境/骨骼/粒子/天空盒/材质收集；详见 §9 正文与 §14 附录 E）
+  - **T1.2a 已完成（光源，2026-09-24）**：`Engine/Render/Threading/SceneSnapshotBuilder.{h,cpp}` ——
+    `BuildLights(world, sg, resolvers, snapshot)`，口径与 `CollectLights` 逐字段对齐
+    （遍历顺序 方向光→点光→聚光、关闭跳过、`kGPUMaxLights` 截断、色温叠加、物理模式**负范围/`-1` 标记**、
+    聚光归一化方向 + 内外锥角、阴影索引，且"未知类型也落一条"的旧行为一并保留）。
+    新增 `SceneSnapshotResolvers`（全局物理光开关 + 阴影索引回调），使快照层**不读全局 CVar、
+    不反向依赖阴影系统**，收集逻辑成为纯函数、可单测；`PhysicalLight.h` 的物理光判据拆出
+    "全局开关"重载，保证唯一判据。
+    单测 8 例，实测 **374 例 / 71574 断言全通过**。
+  - **T1.2b 已完成（物体收集，2026-09-24）**：`SceneSnapshotBuilder::BuildObjects` 集中
+    `GPUScene::Collect` 的首次全量遍历（组件类型顺序、无索引跳过、贴花排除开关、广告牌/文字的
+    相机对齐矩阵、世界 AABB、`objectID`、`visibilityFlags`，与 `FillObj` 逐字段对齐）；
+    单组件映射抽成模板 `CollectObjectItem<TComponent>` 以便单测（组件存储按精确类型分桶，
+    假组件无法进入遍历）。`SnapshotDrawItem` 增加 `materialIndex`（≠ `object.materialID`）。
+    实测：单测 **379 例 / 71666 断言全通过**。
+  - **T1.2c 待做（已查明设计阻塞点，2026-09-24）**：材质参数（`GPUObjectData` 的非矩阵/非 AABB 字段）
+    目前仍由 `SceneRenderer::Prepare(world, sg, camera, objectBuffer, excludeDecals)` 在**带视锥剔除的
+    渲染侧遍历**里填。查清后有 3 个必须先定的问题：
+    ① **`SceneRenderer` 有自己的第二套遍历**，且与 `GPUScene::Collect`/`BuildObjects` **口径不一致**：
+    它额外包含 `SplineMeshComponent`（样条网格），而后者不包含 —— **新发现的第 5 处收集口径漂移**
+    （前四处见 `SceneSnapshotBuilder.h`：Rect 光、点光方向、聚光归一化、shadowRadius）；
+    ② 它的 DrawList 元素携带 **`MeshComponent*` 指针**，而快照**不允许带指针** ⇒ 需要先有一个
+    **mesh 注册表**（`meshIndex` ↔ 顶点/索引缓冲 + 材质路径），把"指针"换成索引；这也是 §4.2 里
+    `SnapshotDrawItem::meshId` 的隐含前提；
+    ③ 材质填充依赖 **5 条纹理路径字符串**（决定 `textureMask`）⇒ 快照化的更简做法是在**收集侧**就跑
+    `FillObjectData`（纯计算），把**算好的 `GPUObjectData` 字段**放进快照（`SnapshotDrawItem::object`
+    生来就是这个用途），而不是把字符串搬进快照。
+    结论：T1.2c 应先定 **mesh 注册表**，再谈材质快照化；在此之前 `SceneRenderer` 保持现状。
+  - **E-1 已完成（mesh 注册表本体，2026-09-24）**：`Engine/Render/Threading/MeshRegistry.h`
+    （头文件实现）—— `MeshRegistryEntry` + `Register`（同 key 重复=更新，索引不变）/`Unregister`
+    （幂等、索引复用、旧索引解析为 nullptr）/`Find`（越界/已注销 ⇒ nullptr）/`Count`/`Clear`，
+    索引从 1 起（0 为哨兵）。头文件写明"只借不拥有""**禁止帧内注销**"两条纪律，并显式记录
+    **已知限制**：索引复用后旧索引会指向新条目 ⇒ 将来把条目换成带 generation 的 `RHIBufferHandle`
+    （与 §12 A-3 对齐）。单测 4 例；实测 **388 例 / 71729 断言全通过**。
+    下一步 **E-2**：骨骼上传改遍历快照的骨骼条目 + 用 `meshIndex` 从注册表取缓冲。
+  - **E-2 已完成（2026-09-24）**：
+    - 前置：`MeshComponent::meshIndex` 字段（注册时回填）；`CollectObjectItem` 透传它（+ 断言钉子）；
+      `MeshRegistryEntry::skinMatrixBuffer`（骨骼上传的**写入目标**，只登记顶点/索引缓冲不够）；
+      注册改为**每帧刷新**（骨骼缓冲会重建 ⇒ 一次性注册会留过期指针；`Register` 同 key = 更新、索引不变）
+      + 语义钉子测试；`SnapshotDrawItem::sourceEntity`（逐实体状态机的对齐依据）。
+    - 本体：`ForwardPipeline` 的骨骼循环按 `sourceEntity` 取 `m_Snapshot.skinMatrices` 切片作为**矩阵来源**，
+      三处使用点改用该切片、边界显式退回组件；**缓冲生命周期（脏标记/容量/扩建/bindless/退役队列）
+      完全不动**（属渲染侧资源管理，将来归 T2.3）。
+    - 为让快照在骨骼循环之前完整，`ForwardPipeline::Render` 增加了 `BuildObjects` 调用。
+    - 判据说明（如实）：该路径**没有转储 harness**（`03.Sponza-Forward` 无 dump 脚本），因此是
+      「编译 + 单测 + 同帧同源论证」；`BuildObjects` 先于该循环、中间无游戏 tick ⇒ 数据逐位相同。
+  - **E-3 已做一半（2026-09-24）**：① 把「组件 → `PBRMaterial`」10 项映射从 `SceneRenderer::Prepare`
+    抽成 `SceneSnapshotBuilder::MakePBRMaterial`（**唯一实现**，两侧共用，避免将来漂移），并加**逐字段
+    参考比对**测试（旧映射逐行转写）；② `CollectObjectItem` 用 `if constexpr (is_base_of_v<MeshComponent,…>)`
+    在**收集侧**调用 `FillObjectData(item.object, MakePBRMaterial(comp))` —— 材质字段在收集侧算完，
+    渲染侧因此不必拿 `MeshComponent*`，也不必把 5 条纹理路径搬进快照。
+    **E-3 后半待做**：`SceneRenderer::Prepare` 改为消费快照（`entry` 去掉 `MeshComponent*`、材质取
+    `item.object`、`DrawItem` 用 `meshIndex` 从注册表取缓冲；**剔除仍留渲染线程**），判据为
+    逐字段/逐位 + `06.GILab` 28 个转储粗筛。
+  - **E-4 已完成（口径统一为"修正"，2026-09-24，用户裁决 A）**：`SplineMeshComponent` 纳入
+    `SceneSnapshotBuilder::BuildObjects`（→ `GPUScene` → GPU 剔除/间接绘制），**插入位置与
+    `SceneRenderer::Prepare` 严格一致**（Decal 之后、实例化之前）。原漂移的两个后果：
+    ① `FillGPUScene` 按枚举顺序对齐 ⇒ 一边多一类/一边少一类会让**后续类型的 `objectIndex` 全部错位**
+    （致命）；② GPU 剔除覆盖不到样条网格。
+    **判据（如实）**：当前样例无样条网格 ⇒ 无法前后逐位对比；依据是"两处收集口径必须一致"这一硬约束。
+    **欠账**：一旦有样条网格内容，补一次逐位/逐像素复核（已在此处登记）。
+    回归检查：`06.GILab` 冒烟 4539 像素（底噪同量级）；单测 390 例 / 71750 断言。
+  - **渲染期剩余 World 读的登记与裁决（2026-09-24，T1.5 推进中发现）**：
+    天空盒已收敛（Deferred + Forward，见下）；以下两处**刻意暂缓**，因为直接改会引入**未经验证的
+    行为变更**，按"遇到选择取推荐项"的约定，推荐处理是**先登记、等有验证内容再改**：
+    1. **场景包围盒**（`DeferredPipeline_FrameGraph` 的 `MeshComponent + TransformComponent` 遍历，
+       每 `kSceneBoundsRefreshFrames` 帧算一次）：旧代码用的是 `TransformComponent::GetLocalMatrix()`
+       （**局部**矩阵）去变换 `GetBounds()`，而快照 `SnapshotDrawItem::object` 里存的是**世界** AABB
+       （收集时用 `SceneGraph::GetWorldMatrix`）。两者对根级对象相同、对挂父节点的对象**不同**
+       ⇒ 换成快照 = 修正一处坐标系不一致（很可能本就该用世界矩阵），但 RSM 的拟合范围会随之变化，
+       而当前样例（06.GILab）不验证 RSM ⇒ **无法给出前后对比**。推荐：改之前先准备一个用 RSM 的
+       验证场景，或把这一改动与 RSM 的其它口径统一一起做。
+    2. **RSM 方向光**（同文件的 `world.ForEach<DirectionalLight>`：取 `enabled && castShadow` 的第一盏
+       作为 RSM 拟合方向）：快照里的光源同样含方向光方向，但"是否投影"要靠 light→shadow 索引的
+       语义映射，且同属 RSM 路径 ⇒ 与上一条并入同一次改动。
+    说明：这两处**不影响 B1 的下降路径**（它们不新增也不减少 `World&` 签名），先做下面的"帧入口收快照"
+    更能推进阶段 1 的退出条件。
+  - **E-3 附加进展（2026-09-24）**：`DrawItem` 增加 `meshIndex`（组件透传），Forward 的两处
+    "用组件地址反查对象条目"改为**优先整数 `meshIndex`**、未注册时兜底地址比较。
+    **闸门诚实说明**：`--mesh-ptrs` 仍为渲染期 20 处 —— 兜底分支仍有 `static_cast<MeshComponent*>`；
+    该度量只在**删掉 `DrawItem::mesh` 字段本身**时才会下降（这正是 E-3 后半的工作）。
+  - **T1.2b 待做**：物体收集（`GPUScene::Collect` 的遍历 + 材质参数 + 间接绘制参数），
+    以及本任务退出判据要求的"与旧路径并行跑一帧、逐字段比对（`HE_SNAPSHOT_VERIFY`）" ——
+    该判据在 T1.3 让管线消费快照时最自然（可直接对比 UBO/SSBO 字节）。
+  - **顺带发现的三处口径问题**（已登记，不在本任务内改）：
+    ① 聚光方向：Deferred 归一化、Forward 不归一化；
+    ② 点光 `directionType.xyz`：Forward 写 (0,-1,0)、Deferred 留 0；
+    ③ `PhysicalLight.h::KelvinToRGB` 的二次近似在 6500K 给出 (1, 0.46, 0)、2000K 给出 (1,0,1)，
+       与黑体常识不符，疑似系数抄错（仅 `colorTemperature > 0` 时生效）——建议单独立项核查。
+- [x] T1.3 `CollectLights` / `GPUScene::Collect` 改消费快照 —— ✅ 完成（三管线；旧遍历代码已删除，非并存）
+  - **T1.3a 已完成（Deferred 光源，2026-09-24）**：`DeferredPipeline::CollectLights` 改走
+    `SceneSnapshotBuilder::BuildLights` + **一次性**上传（旧实现每个光源 Map/Unmap 一次）；
+    新增 `SceneSnapshotLightOptions` 口径开关，默认值 = Deferred 现行行为（迁移先保一致，
+    "统一两条管线的口径"留作另一次可单独验证/回退的改动）。
+    等价性判据：单测把**改动前的内联逻辑逐行转写**为参考实现，用覆盖全部分支的场景
+    逐元素 `memcmp` 比较 ⇒ **逐位一致**。
+  - **重要实测（影响本方案的验收口径）**：当前构建下 `06.GILab` **同一二进制两趟**、
+    即使带 `HE_LUMEN_PROBE_FILTER=off`，也差约 **4.5k 像素**（`hdr` 719 px / maxULP 21 /
+    meanAbs 5.9e-8；`lumen_irradiance` 764 px / maxULP 552）⇒ 本方案里"逐像素一致"这类判据
+    在**单条收集路径迁移**的尺度上不可判定（本次改动与基线的 4574 px 差异正落在该噪声底噪之内）。
+    根因与画质线登记的「Lumen 屏幕探针逐趟不确定」同源（根因已定位为 mesh 级 SDF 泛洪的**就地**
+    读-写竞争；修复曾以 `f6566b6` 提交后按要求回退，补丁留在 `build/verify/jfa_only.patch`）。
+    **在此之前，迁移类改动一律用"参考实现 + 逐位比较"的单元级判据**，全帧转储只用于粗筛并如实标注噪声。
+  - **T1.3b-1 已完成（口径开关 + 三口径等价性，2026-09-24）**：`SceneSnapshotBuilder` 支持
+    `RectLight`（`directionType.w=3`、`coneAngles` 复用为宽×高）与四个口径开关
+    （`includeRectLights` / `pointLightWritesDirection` / `normalizeSpotDirection` / `writeShadowRadius`），
+    默认值 = Deferred 现状。**三条管线的光源口径共有 4 处历史漂移**（Rect 光、点光 `directionType.xyz`、
+    聚光归一化、`shadowRadius`），迁移先逐条保持，统一另立改动。
+    等价性：把 Deferred 与 Forward 的收集逻辑**逐行转写**为两份参考实现，场景覆盖三类光源 + Rect +
+    色温 + 物理照度/光强 + 关闭 + 超上限，在物理开关两态下**三口径全部逐位一致**（376 例 / 71647 断言）。
+  - **T1.3b-2 已完成（Forward / PathTracing 接线，2026-09-24）**：两条管线的 `CollectLights` 都改走
+    `SceneSnapshotBuilder`（Forward 显式打开三处历史口径开关；PathTracing `writeShadowRadius=true`
+    且不设阴影解析器 ⇒ `shadowIndex` 恒 -1），各新增 `m_LightSnapshot` 成员。**至此三条管线的光源
+    收集全部集中到一处**。Forward 的 `pc.atmosphere`（读物理天空组件，待 T1.4 快照化）与"无光源补
+    默认方向光"（策略）保留在管线内。
+    实测：三管线样例（03/05/06）编译通过；Deferred 冒烟与 T1.3a 之后逐位对比 = 4539 像素 = 该构建
+    同二进制两趟的噪声底噪 ⇒ 无新差异。**未做**：03/05 的实跑（缺转储对照 harness，已记为待办）。
+  - **T1.3b-3 已完成（`GPUScene` 消费快照，2026-09-24）**：`GPUScene::Collect(world, sg, camera)`
+    改为"构建快照 → `CollectFromSnapshot`"（过渡签名保留，调用点不必一次全改）；新增内联
+    `MakeObjectRecord`（与旧 `FillObj` 逐字段对齐、`meshIndex`/间接参数可透传）并**删除旧的约 60 行
+    遍历/增量代码**（不并存，避免两份口径）。增量逻辑保留（集合变化 ⇒ 整表重建；否则只更新矩阵变化的条目）。
+    验收：单测 **381 例 / 71672 断言全通过**（`MakeObjectRecord` 与逐行转写的旧 `FillObj`
+    `memcmp` **逐位一致**）；`06.GILab` 冒烟与上一提交逐位对比 = **15 像素**，远低于同二进制噪声底噪
+    （4539 像素）⇒ 无可测差异。
+    > **判据替换说明**：T1.2 原要求 `HE_SNAPSHOT_VERIFY`（与旧路径并行跑一帧逐字段比对）。因全帧转储
+    > 当前底噪约 4.5k 像素（见 T1.3a 记录），改用**更强**的判据：旧实现逐行转写为参考实现后做**逐位**
+    > 比较，并用冒烟转储粗筛。后续所有迁移沿用此法。
+  - **T1.3b 待做**：Forward / PathTracing 的光源收集同样改走快照（各自带历史口径开关）；
+    `GPUScene::Collect` 改消费快照（依赖 T1.2b 的物体收集）。
+- [x] T1.4 骨骼/材质/Decal/粒子快照化 —— ✅ 完成（骨骼 / 材质 / 粒子 / 环境 / 天空盒 / **Decal** 全部进快照；
+  各消费侧均已切换：粒子模拟、骨骼上传、bindless 材质上传、`DecalPass`。至此"渲染期读 ECS 取数据"的部分收口）
+  - **Decal 快照化规格（2026-09-24 已从代码读全，可直接照做）**：`DecalPass::Render` 的签名是
+    `(cmd, he::World&, he::SceneGraph&, const CameraData&, GBufferRenderer&)`，世界用在**两个**
+    `world.ForEach<DecalComponent>`：`:207`（判空：`opacity > 0`）与 `:244`（逐贴花绘制）。
+    ⇒ 新增 `SnapshotDecal`：`worldMatrix`（取代 `sg.GetWorldMatrix(e)`，见 `:249`）、`size`（`:247/:272`）、
+    `projectionDepth`（`:273`）、`rotation`（`:257`）、`baseColorFactor`（`:274`）、`metallicFactor`（`:275`）、
+    `roughnessFactor`（`:277`）、`opacity`（`:208/:245/:274`）、`materialID`（`:276/:278`）、
+    `hasBaseColorTexture`（由 `!d.baseColorTexture.empty()` 预先算好，见 `:276`）；
+    `FrameSceneSnapshot::decals` + `SceneSnapshotBuilder::BuildDecals(world, sg, out)`。
+    **注意**：Deferred 的物体收集 `excludeDecals`（贴花卡片不进 `draws`）⇒ 贴花矩阵必须由本数组单独携带。
+    消费侧 `Render(cmd, const FrameSceneSnapshot&, const CameraData&, GBufferRenderer&)`，`hasDecal` 改
+    `!snapshot.decals.empty()`；**调用点需一并改**（`grep` 定位，可能在 06.GILab 或 Deferred 帧图），
+    且 `BuildDecals` 要在其之前。预期 **B1 渲染期 81 → 79**；判据 = 构建 + 单测 + `06.GILab` 冒烟逐位
+    （含同二进制双跑对照）。
+  - **起点（环境参数，2026-09-24）**：新增 `FrameSceneSnapshot::atmosphere`（xyz = 太阳方向、
+    w = 浑浊度，与两个 PushConstant 的 `atmosphere` 逐字段一致）与
+    `SceneSnapshotBuilder::BuildEnvironment`（找不到/未启用物理天空时复位为关闭，与旧行为逐字段一致）；
+    `ForwardPipeline` 与 `DeferredPipeline_FrameGraph` 均已改用它 ⇒ **两条光栅管线都不再直接读世界**
+    （PathTracing 不使用空中透视）。单测 1 例 3 子用例；实测 **382 例 / 71681 断言全通过**；
+    `06.GILab` 冒烟与上一提交逐位对比 4554 像素（噪声底噪 4539）⇒ 无可测差异。
+    **未做**：骨骼矩阵 / 材质参数（T1.2c）/ Decal / 粒子的快照化。
+  - **骨骼矩阵进快照（2026-09-24）**：`SnapshotDrawItem` 增加 `skinMatrixOffset`/`skinMatrixCount`，
+    `SceneSnapshotBuilder::AppendSkinMatrices` 把 `SkeletalMeshComponent::boneMatrices` 追加进
+    `FrameSceneSnapshot::skinMatrices` 扁平数组（条目只记切片），`BuildObjects` 在骨骼网格支调用。
+    单测 1 例（两段互不覆盖 / 共享数组内容 / 无骨骼不污染）；实测 **383 例 / 71691 断言全通过**。
+    **消费侧未做**：把骨骼矩阵写进 `boneBuffer` 的那段遍历仍读组件 —— 它依赖"组件 → 缓冲"的指针映射
+    即 T1.2c 待定的 **mesh 注册表**，两者一并做（届时快照已是现成数据源）。
+  - **粒子发射器进快照（2026-09-24）**：`ParticleComponent` 增加 `rendererId`（注册方回填；
+    两个注册粒子的样例已补），`FrameSceneSnapshot` 新增 `SnapshotParticleEmitter{rendererId,
+    emitPosition}` 与 `particles`，`SceneSnapshotBuilder::BuildParticles` 按组件收集。
+    **只需这两个字段**：粒子模拟/绘制早就按 id 索引驱动渲染器自有缓冲（`DispatchCompute(cmd, id, dt,
+    viewProj)`），渲染期唯一读组件的地方就是"发射位置"。
+    单测 1 例；实测 **384 例 / 71701 断言全通过**；`02.Cube` / `04.Sponza-Deferred` 编译通过。
+    **消费侧未做**：`DispatchCompute` 仍从 `CompState::comp` 取位置与参数，下一步改从快照取
+    （对外接口只需多两个入参，之后 `CompState` 不必在帧内读组件指针）。
+  - **粒子消费侧闭环（2026-09-24）**：`DispatchCompute` 增加 `params` / `emitPosition` 两个入参，
+    emit 分支里约 15 处 `comp->GetParam()` / `comp->GetWorldEmitPosition()` 改为用入参；
+    `DeferredPipeline` / `PathTracingPipeline` 的模拟循环改为"先 `BuildParticles` → 遍历
+    `m_Snapshot.particles` 按 `rendererId` 派发"。**帧内模拟路径不再读 `ParticleComponent`**
+    （`CompState::comp` 仍在，但只被绘制路径的加载期语义数据使用）。
+    实测：单测 384 例 / 71703 断言；5 个目标编译通过；冒烟 4615 像素（底噪 4539）⇒ 无连带回归。
+    > 查清：emit 分支每帧读**约 15 个字段**（`ParticleComponent::GetParam()` 的方向/形状/速度/寿命/
+    > 尺寸/纹理行列……），只搬"位置"不够 ⇒ 快照条目已改为**整份携带 `ParticleSystemParam`**，
+    > 消费侧切换因此降为机械替换（实测单测 384 例 / 71703 断言）。
+- [x] T1.5 渲染期移除 World/SceneGraph 引用（grep 断言）—— ✅ 完成（2026-10-09）：附录 B1 世界依赖**渲染期 0 / 加载期 0**（80 → 0）、组件指针 0/0；`python Tools/check_threading.py --world-deps --mesh-ptrs --handles --gate` 复测通过
+  - **闸门与基线已就位（2026-09-24）**：`Tools/check_threading.py --world-deps` 统计 `Engine/Render/`
+    内 `World&` / `SceneGraph&` 的出现处，按**所属函数名**分"渲染期 / 加载期"（与调用点清点同一份
+    白名单；快照层 `Engine/Render/Threading/` 在**白名单内** —— 它是渲染侧唯一允许读世界的地方）。
+    **实测：渲染期 82 处 / 加载期 15 处**（阶段 1 退出目标 = 渲染期 **0**）。
+    > 口径说明：同一函数的**声明与定义各算一处**（.h + .cpp），故数值大于函数个数；作为闸门只需
+    > 前后一致、单调下降。迁移期它是**上限**（`--gate` 超基线即失败），随每次收敛手动下调。
+  - 渲染期命中最多的文件（= T1.4/T1.5 的收敛对象）：`Pipeline/ForwardPipeline.h`(12)、
+    `Pipeline/ForwardPipeline.cpp`(7)、`Pipeline/DeferredPipeline.h`(6)、
+    `Pipeline/PathTracingPipeline.h`(5)、`Pipeline/RTPass.cpp`(4)、`Pipeline/GBufferRenderer.h`(3)、
+    `Pipeline/RTPass.h`(3)、`Shadow/CSMTechnique.{h,cpp}`（各 3）、`Pipeline/DeferredPipeline.cpp`(2)、
+    `Pipeline/DeferredPipeline_FrameGraph.cpp`(2)、`Pipeline/ForwardPipeline_FrameGraph.cpp`(2)……
+  - **第①段·实例缓冲状态搬迁 + 实例数据进快照（2026-10-09）** —— ✅ 完成（§15.1 ①）
+    契约：`FrameSceneSnapshot` 新增 `SnapshotInstance{meshIndex, transformOffset, transformCount,
+    transformVersion, enableFrustumCull, localBoundsMin/Max, sourceEntity}` 与扁平数组
+    `instanceTransforms`（与 `skinMatrices` 同款切片；`Clear`/`Reserve` 同步扩展），
+    `SceneSnapshotBuilder::BuildInstances` 按组件收集 —— **含实例数为 0 的组件**：渲染侧靠
+    "本帧又见到这个 meshIndex"来推进退役队列并回收已销毁组件留下的缓冲与 bindless 槽位。
+    组件侧：`InstancedMeshComponent` 只留 `instanceTransforms` + `instanceTransformVersion`
+    （`SetInstanceTransforms` 递增，取代原来的 `bTransformsDirty`）；逐网格 GPU 状态（实例 SSBO、
+    容量、脏判据、退役队列、逐实例剔除的命令缓冲、可见数）全部搬到渲染侧
+    `InstanceCuller::InstanceState`（按 `meshIndex` 索引），新增 `BeginInstancesFrame`
+    （帧边界：推进退役队列 + 回收上帧未见的条目）与
+    `UploadInstanceTransforms(device, meshIndex, transforms, count, version, ownerEntity)`。
+    `ownerEntity` 用来识别"注册表索引被回收后复用给新网格"—— 否则新的组件版本号可能恰好等于
+    旧条目已上传的版本号，直接画出**上一个组件的实例**。
+    三个消费侧（`ForwardPipeline::RenderScene` / `GBufferRenderer_CPU` / `GBufferRenderer_GPU`）
+    全部改为遍历 `snapshot.instances`、按 `meshIndex` 从 `MeshRegistry` 取顶点/索引缓冲与索引数
+    （`GBufferContext` 新增 `meshRegistry`，`GBufferRenderer::Render` 新增快照入参）
+    ⇒ **渲染期不再遍历世界、也不再读 `InstancedMeshComponent`**。
+    **顺带修掉一个隐藏缺陷**：三条管线的 `CollectLights` 原先在帧中调用 `m_Snapshot.Clear()`
+    （本意只是重建光源数组），它会把同帧**已填好**的 `draws`/`skinMatrices`/`instances` 一起抹掉。
+    蒙皮消费侧有"退回组件数据"的兜底，所以 E-2② 之后这条快照路径实际上从未被走到也没人发现；
+    实例化没有兜底 ⇒ 直接表现为"一个实例都不画"。现已删除那三处 `Clear()`
+    （`SceneSnapshotBuilder::BuildLights` 自己会清 `lights`，其余数组各自由自己的收集器清）。
+    证据（2026-10-09）：
+    · 单测 **397 例 / 71829 断言全通过**（+3 例 / +40 断言）：`BuildInstances` 切片与组件数组
+      `memcmp` **逐位一致**、版本号语义、实例状态表的每飞行帧分槽、快照预留与纯值类型；
+    · `02.Cube`（唯一的实例化样例：10000 实例 + 每帧改变换 + 逐实例剔除）**双管线实跑**：
+      Forward `SSBO 句柄 7（容量 10000）、退役 0（原地复用，未新建）`、
+      `可见 4820/10000；CPU 参考复算 4820`；Deferred `首帧：实例 10000（对象 #22）、
+      实例 SSBO 句柄 6、命令句柄 7、可见列表句柄 4`、`可见 4839/10000；CPU 参考复算 4839`
+      —— GPU 读回与样例内置的 CPU 复算**逐帧相等**，"缓冲只建一次、之后原地复用"不变式成立，
+      两条路径 `VUID/Validation Error = 0`；
+    · `06.GILab` 冒烟（`HE_LUMEN_PROBE_FILTER=off`）**同二进制双跑 = 0 像素**（逐位一致）；
+      该样例**没有实例化网格**，故此处只用于确认无连带回归（告警行数 42 → 42，零新增）；
+    · 四项闸门：帧内同步 RHI **380** / B1 渲染期 **78** / 组件指针渲染期 **18** /
+      资源持有者 **277**（75 个文件）—— **三项基线一律不下调**，理由见下。
+    > **口径说明一：帧内同步 RHI 376 → 380 不是新增调用。** 这 4 处是
+    > `Tools/check_threading.py` 的"所属函数名"启发式**归属漂移**：`UploadInstanceTransforms`
+    > 的新签名跨了 3 行（旧签名单行，函数名可识别），于是它体内的 `desc.initialData` /
+    > `CreateBuffer` / `Map()` 由"归属上传函数 ⇒ 加载期"变成"归属上一处单行函数名 ⇒ 渲染期"；
+    > `Cull` 里那处 `commandBuffer->Map()` 同理（它本来就每帧执行，属**纠正**而非新增）。
+    > 代码是从组件逐行搬过来的同一批调用，故本项按"未变"记账。
+    > **口径说明二：B1 80 → 78 也不是进展。** 该脚本按**行**计数 `World&`/`SceneGraph&`，
+    > 而我把 `GBufferRenderer::Render` 的 `he::World& world,` 与 `he::SceneGraph& sg,` 合并到了
+    > 同一行 ⇒ 少计一行。本段真实的世界依赖下降发生在**函数体内**（删掉的三处
+    > `world.ForEach<InstancedMeshComponent>`），而 B1 只量签名、量不到它。
+    > 同理不下调基线，避免用格式变化去"刷"闸门；B1 的真实归零留给第③段。
+  - **第②段·`Prepare` 收快照 + `DrawItem` 去组件指针（2026-10-09）** —— ✅ 完成（§15.1 ②）
+    收集（遍历 ECS、算材质、算世界矩阵与 AABB）早已由 `SceneSnapshotBuilder` 在游戏线程做完，
+    `SceneRenderer::Prepare` 只剩"视锥剔除 + GPUObjectData 上传"。改为读 `FrameSceneSnapshot` 之后：
+    · 签名去掉 `he::World&` / `he::SceneGraph&` ⇒ **B1 渲染期 78 → 76**（声明 + 定义各 1 处）；
+    · `GPUObjectData` 直接整块拷贝快照条目（不再就地重算材质）⇒ 从根上消除"两边各算一份再漂移"；
+    · 剔除口径（世界 AABB + 并行分块 + `MAX_OBJECTS` 截断）、可见顺序、`objectIndex` 分配方式逐条不变。
+    `DrawItem::mesh` 删除：顶点/索引缓冲与索引数一律按 `meshIndex` 查 `MeshRegistry`
+    （Forward 与 GBuffer 共四处绘制循环 + Forward 的三角形计数），"未注册时按组件地址兜底"的三处
+    分支一并删除 ⇒ **组件指针闸门 18 → 13**。
+    快照新增 `bInstanced`（实例化/骨骼网格标记）：`Prepare` 原先"遍历世界时现场判定"它，
+    改吃快照后必须由收集侧给出，否则消费侧会把实例化网格当普通网格再画一遍。
+    `GBufferContext::excludeDecals` 随之成为死配置，一并删除。
+    **顺带修掉一处口径缺口**：`DeferredPipeline` 的 `BuildObjects` 原先用默认选项（**不排除贴花卡片**），
+    而它的 GBuffer 消费侧此前靠 `Prepare(..., excludeDecals=true)` 排除 —— `Prepare` 改吃快照后这个
+    口径只能由收集侧决定，否则贴花卡片会**既被 `DecalPass` 投影、又被当普通网格画进 GBuffer**，
+    并与 `GPUScene` / `MeshBatcher` 的收集集合错位（三者 `objectIndex` 按顺序对齐）。
+    现按 `m_ExcludeDecalCards` 传参（`02.Cube` 实测：Deferred 25 条 vs Forward 26 条 = 恰好少那张卡片）。
+    证据：单测 **398 例 / 71832 断言全通过**（新增 1 例：两类网格的 `bInstanced` 标记）；
+    `06.GILab` 冒烟（`HE_LUMEN_PROBE_FILTER=off`）同二进制双跑 0 像素，且**与第①段的二进制逐位对比
+    0 像素**（28 个转储目标全一致）⇒ 本次重写无可测差异；`02.Cube` 双管线实跑：Forward 26 draws /
+    8150 tris、实例可见 4820 = CPU 复算，Deferred 首帧实例化日志齐全、可见 4839、两条路径 VUID = 0；
+    四项闸门：组件指针渲染期 **13**（只剩 `RTPass`）、B1 **76**、帧内 RHI 380、资源持有者 277
+    —— `MESH_PTR_BASELINE` 18 → 13、`WORLD_DEP_BASELINE` 80 → 76。
+    > **本段之后组件指针闸门剩 13 处，全在 `Pipeline/RTPass.{h,cpp}`**（BLAS 缓存键
+    > `unordered_map<MeshComponent*, BLASEntry>`、`CollectMeshList` 的指针载荷、
+    > `HasGeometryChanged`/`HashGeometry`/`CreateVertexPullBuffer` 等，以及一条**全仓库无调用点**的
+    > 顶点拉取死路径）。它属 §14.5 给 E-3② 定的第①类（与 E-4 口径统一一起做），且与第③段同源
+    > （`RTPass::BuildAS(world, sg)` 本身也是 B1 的收敛对象）—— 故并入第③段处理，本段不单独动它。
+  - **第③段（分批进行中，2026-10-09）** —— 目标：`--world-deps` 渲染期 **76 → 0**
+    - **第 1 批（已提交）**：`GBufferRenderer` 家族（接口 + CPU/GPU 策略 + 实现）去掉 `World&`/`SceneGraph&`
+      —— 第①②段之后它们体内已不再使用世界；`GPUScene::Collect(world, sg, camera)` 过渡重载**删除**，
+      两条管线改为直接 `CollectFromSnapshot(m_Snapshot)`（本帧本就有快照 ⇒ 省掉每帧一次重复的物体收集，
+      口径还更一致：贴花排除已由 `BuildObjects` 烘进快照）。⇒ **B1 76 → 69**（加载期 13 → 11）。
+    - **同批顺带修掉一处 B1 量不到的渲染期世界读**：`SkyboxPass::Update(ctx)` 原先
+      `ctx.world->ForEach<PhysicalSkyComponent / SkyboxComponent>` 并**缓存组件指针**
+      （`m_CachedSkybox` / `m_CachedPhysSky`）。B1 只统计 `World&`/`SceneGraph&` **引用**，
+      经 `SubsystemContext::world` 指针进入的这类读取它一条都量不到 —— 而它们同样是换线程即竞争。
+      现已改为只读快照：`SkyboxPass` 缓存值 + RHI 资源指针（cubemap/sampler/intensity）。
+      为此快照新增 `SnapshotPhysicalSky`（intensity/sunDirection/turbidity/groundAlbedo/sunIntensity，
+      口径 = 第一个启用的组件，与 `he::GetPhysicalSkySun` 逐条一致）与 `SnapshotSkybox::intensity`。
+      > **由此登记一类"B1 盲区"**（后续批次逐个收）：`SubsystemContext::world/sceneGraph`、
+      > `GIProviderContext::world/sceneGraph`（`GI/IGIProvider.h`）、`he::SyncPhysicalSkyToSun(world)`
+      > （三条管线每帧调用，且它**写世界**）。⇒ **B1 = 0 不等于"渲染期不读世界"**，真实判据要把
+      > 这些指针通路一并收掉，否则 T2.4 起线程后它们就是数据竞争。
+    - **判据（第 1 批实测）**：单测 398 例 / 71832 断言；`06.GILab` 冒烟（`HE_LUMEN_PROBE_FILTER=off`）
+      同二进制双跑 **4630 像素**、与②的二进制对比 **15 像素 / maxULP=1**（仅在 Lumen 探针类目标上）
+      ⇒ 远低于该次同二进制底噪，无可测差异；四项闸门：B1 **69**（基线随之下调）、组件指针 13、
+      帧内 RHI 380、持有者 277。
+      > **底噪的重要修正（务必按此判据）**：同一二进制两趟的差异**是间歇的** —— 本会话前几对
+      > （inst5/6、inst7/8、inst9/10）为 **0 像素**，而 inst11/12 为 **4630 像素**，
+      > 与 §9 T1.3a 记录的 ≈4.5k 一致。⇒ **任何一次"0 像素"都不构成"判据已通过"的证据**，
+      > 必须**成对**给出（同批二进制双跑 + 改动前后对比），并允许"改动前后"落在同一次底噪之内。
+    - **第 2 批设计（已查清，零决策）**：阴影系统 + **样例→管线的快照交接**（二者必须同批做）。
+      - **为什么必须同批**：Forward 路径的阴影收集由**样例**发起 —— `02.Cube:1252`、`03.Sponza-Forward:689`、
+        `06.GILab:983`、`07.Nanite:1077`、`07.AISamples:190` 各自构造 `shadowCtx` 调
+        `shadowSys->Update(shadowCtx)`，**都在 `pipeline.Render(...)` 之前**；而当前快照是管线在
+        `Render` 内部建的 ⇒ 样例拿不到。故必须让样例在渲染前**先建快照**（这正是 T2.4 的形态）。
+      - **接口形态（建议）**：`ForwardPipeline::BuildFrameSnapshot(world, sg, camera)` +
+        `GetFrameSnapshot()` + `GetMeshRegistry()`；`Render(cmd, const FrameSceneSnapshot&, camera, dt)`
+        （不再自己建快照）。`DeferredPipeline`/`PathTracingPipeline` 同形。样例每帧：
+        `pipeline.BuildFrameSnapshot(...)` → 填 `shadowCtx.snapshot/ meshRegistry` → `shadowSys->Update(...)`
+        → `pipeline.Render(cmd, pipeline.GetFrameSnapshot(), camera, dt)`。
+      - **快照新增**：`SnapshotDrawItem::bShadowCaster`（口径 = 组件类属**精确** `MeshComponent`/`Cube`/`Sphere`
+        且 `castShadow == true`；`if constexpr` 在 `CollectObjectItem` 里判定，`SplineMesh` 派生但走精确类型桶
+        故天然排除）与 `std::vector<SnapshotShadowLight> shadowLights`（只收 `enabled && castShadow`，
+        按 方向光→点光→聚光→面光 分类型、同类型按实体顺序 —— 各技术的过滤只认自己的类型，故跨类型顺序无关）。
+      - **`SnapshotShadowLight` 字段（四个技术的 `CollectLights` 实测所需，一处不漏）**：
+        `type`（`he::LightType`）、`direction`（方向光/聚光方向、面光法线，**不归一化**：CSM 与 Spot 在
+        消费侧 `glm::normalize`、Rect 也一样，照抄原口径）、`position`（`sg.GetWorldPosition(e)`，方向光为 0）、
+        `range`、`outerConeAngle`（Spot）、`softness`（Rect）、`shadowBias`/`shadowNormalBias`/`shadowStrength`、
+        `sourceEntity`。`outEntities` 用 `he::Entity{(EntityID)sourceEntity}` 还原（`Entity` 就是 `{u64 id}`）。
+      - **`IShadowTechnique` 新签名**：`CollectLights(const FrameSceneSnapshot&, const CameraData&, out, entities)`、
+        `Render(cmd, const FrameSceneSnapshot&, const MeshRegistry&, shadowData, start)`。**技术顺序与
+        `m_PerTechniqueCounts` 的编排不变**（`GPUShadowData` 的下标即 shader 的 `shadowIndex`，
+        由 `ShadowSystem::GetShadowIndex` 的 Entity→下标映射决定，不能动）。
+      - **阴影网格遍历**（四个技术的 `rm` lambda）：改为遍历 `snapshot.draws` 取 `bShadowCaster`，
+        顶点/索引缓冲与索引数从 `MeshRegistry::Find(item.meshIndex)` 取 —— 顺序与旧的
+        `Mesh→Cube→Sphere` 完全一致（快照的枚举顺序就是 Mesh→Cube→Sphere→…，过滤后相对顺序不变）。
+      - **`SubsystemContext` 新增 `const MeshRegistry* meshRegistry`**（前向声明即可）；
+        `ShadowSystem::Update` 改读 `ctx.snapshot`（缺省直接返回 = 本次不收集），
+        `ShadowSystem` 缓存本帧快照指针与注册表供 `Render` 用。
+      - **顺带登记两个既有问题**（本批只记录，不改行为）：
+        ① `SceneGraph::UpdateTransforms()` 目前**只在渲染期的 `ForwardPipeline::RenderScene` 里调用一次**
+        （`SceneGraph.cpp:66` 只重算 `dirty` 节点），而快照在它**之前**构建 ⇒ 变换在同一帧内被改脏时，
+        快照里的世界矩阵比渲染期看到的**旧一帧**。当前样例无此情形（冒烟逐位一致），但换线程后必须
+        把它移到游戏线程、且在构建快照**之前**；② Forward 路径的 `ShadowSystem::Update` **只由样例调用**，
+        管线自身从不调用（`ForwardPipeline.cpp` 只调 `Render`）⇒ 若样例不调，`HasActiveShadows()` 恒 false、
+        阴影整条链静默不工作（Deferred 路径由帧图自己调，正常）。
+    - **第 2 批（已提交）**：按上面的规格落地 —— 阴影系统全链路改吃快照 + **样例先建快照**。
+      · 快照新增 `SnapshotShadowLight`（四个技术实际用到的字段一处不漏）与 `shadowLights`、
+        `SnapshotDrawItem::bShadowCaster`（口径 = 精确 `MeshComponent`/`Cube`/`Sphere` 且 `castShadow`）、
+        `SceneSnapshotBuilder::BuildShadowLights`；
+      · `IShadowTechnique` 与四个技术的 `CollectLights`/`Render` 改收
+        `(snapshot, camera)` / `(cmd, snapshot, registry, data, start)`，网格遍历改为
+        `snapshot.draws` 过滤 `bShadowCaster` + 按 `meshIndex` 查注册表；技术顺序与
+        `m_PerTechniqueCounts` 编排未动（`GPUShadowData` 下标 = shader 的 `shadowIndex`）；
+      · `SubsystemContext` 新增 `snapshot` / `meshRegistry`；`ShadowSystem::Update` 改读
+        `ctx.snapshot`（缺省直接返回），`Render` 用缓存的快照 + 注册表；
+      · `ForwardPipeline::BuildFrameSnapshot`（**幂等**，`NextFrame()` 复位）+ `GetFrameSnapshot` /
+        `GetMeshRegistry`；`BuildEnvironment` 从 `CollectLights` 移进快照构建（`SkyboxPass` 也要
+        `physicalSky`，且必须在帧图构建之前）；5 个样例改为**先 `BuildFrameSnapshot` → 再阴影收集**，
+        并把 `shadowCtx.snapshot` / `meshRegistry` 指向它（这正是 T2.4 的形态；第③段第 3 批会把
+        `Render` 也改成收快照、样例不再让管线自建）。
+      · **本批引入并当场修掉的一个回归**：Deferred 的快照构建漏了 `BuildShadowLights`
+        ⇒ `shadowLights` 为空 ⇒ `HasActiveShadows()` 恒 false ⇒ **Deferred 阴影静默消失**。
+        它由"检查 Deferred 路径是否真的画了阴影"（对照 `[CSMTechnique] Cascade0 绘制物体数`）发现，
+        而不是靠像素对比（该量在 06.GILab 的 HDR 里占比很小）—— 这条经验值得留住：
+        **迁移后要找一个"语义计数"型的证据**，不能只依赖像素对比。
+      · 判据：单测 398 例 / 71832 断言；**06.GILab（Deferred）阴影级联 0 的绘制物体数
+        `103`（新旧二进制完全相同）** —— 比"像素无差异"强得多的等价性证据；`02.Cube`（Forward，
+        走样例驱动的阴影收集）同样出现该诊断且 `VUID=0`；冒烟同批双跑 **299 像素**、
+        与第 1 批二进制对比 **314 像素**（`hdr` 仅 4 像素 / maxULP=1）⇒ 落在同批底噪内；
+        四项闸门：B1 **69 → 51**（基线随之下调）、组件指针 13、帧内 RHI 380、持有者 277。
+    - **第 3 批（已提交）**：GI 子系统里唯一真正读世界的地方 —— `GI_RSM::RenderRSMPass` 的几何遍历
+      （`world.ForEach<he::MeshComponent>`）—— 改吃快照 + 网格注册表；`ForwardPipeline::PrepareGI`
+      随之去掉 `World&`/`SceneGraph&`（它此前只为转交给 RSM 才收世界）。⇒ **B1 51 → 47**。
+      · **快照契约顺带升级**：把"每个消费者各一个 bool"的做法收敛成**网格类别** `SnapshotMeshClass`
+        （`Base`/`Cube`/`Sphere`/`Billboard`/`Text`/`Decal`/`Spline`/`Instanced`/`Skeletal`）+
+        `castsShadow`，`bShadowCaster` 由两者推出。**这不是抽象洁癖，而是口径差异的如实表达**：
+        阴影技术收 `Base`/`Cube`/`Sphere` 且 `castShadow`；RSM **只收 `Base`**（旧实现只遍历
+        `ForEach<MeshComponent>`，不含 Cube/Sphere —— 若照阴影口径收就会改变 RSM 内容）；
+        后面 `RTPass`（`Base`/`Cube`/`Sphere`）与 `MeshBatcher`（含 `Instanced`、**不含**
+        `Spline`/`Skeletal`）也各自不同。一个类别标签同时服务四个消费者。
+      · `GIProviderContext` 新增 `snapshot`/`meshRegistry`（放在结构体**末尾**：前几项有按位置聚合
+        初始化的用法），`DeferredPipeline::MakeGIContext` 统一注入 ⇒ 帧图里 6 处构造点不再需要
+        `world`/`sg`。**顺带查清**：全 GI 源（SSGI/DDGI/Lumen/RTGI/IBL/AO）**没有任何一处**读
+        `ctx.world`/`ctx.sceneGraph`，只有 RSM 那一处 —— 即 `GIProviderContext` 的 world 指针
+        本就是过渡遗留，可在第 5 批直接删除。
+      · 判据：单测 **398 例 / 71840 断言**（新增 8 条断言覆盖类别标签与 `bShadowCaster` 的
+        类别 ∧ `castShadow` 口径）；冒烟 `rsm_pos`/`rsm_rad`/`rsm_nrm`/`rsm_indirect` **全部 identical**
+        —— 本批的功能等价性证据（RSM 的几何输入换了来源、输出逐位不变）；
+        同批双跑 **4539 像素**、与第 2 批二进制对比 **4838 像素**，且差异**全部**落在
+        `hdr`(723 px / maxULP 21) 与 `lumen_irradiance`/`prov6_*`(823 px / maxULP 552) 上 ——
+        与 §9 T1.3a 记录的噪声底噪（`hdr` 719 px / maxULP 21 / `lumen_irradiance` 764 px / maxULP 552）
+        **几乎逐项吻合** ⇒ 是已知的探针噪声，非本批差异。
+    - **第 4 批（已提交）**：先收掉管线侧两处"能独立完成"的世界依赖 ——
+      · `ForwardPipeline::RenderSkybox(cmd, world, camera)` → `(cmd, camera)`：天空盒数据自第 1 批起
+        就只从快照取（`SkyboxPass` 只读 `ctx.snapshot`），`World&` 已纯属遗留 ⇒ 去掉。
+      · `ResolveFrameCamera(World&, fallback)` → `ResolveFrameCamera(const CameraComponent*,
+        const TransformComponent*, fallback)`：它本是**场景查询**（`GetPrimaryCamera()` +
+        `GetComponent<TransformComponent>()`），查询交回调用方（样例），渲染模块只做
+        "组件 → CameraData"的纯映射 ⇒ `Engine/Render/` 里少一处渲染期读世界。
+        两个调用点（`02.Cube`、`07.AISamples`）改为自己查主相机与 Transform。
+      ⇒ **B1 47 → 43**。判据：单测 398 例 / 71840 断言；冒烟同批双跑 **4554 像素**、
+      与第 3 批二进制对比 **hdr 719 px / maxULP 21 / meanAbs 5.91e-08、
+      lumen_irradiance 与 prov6_* 764 px / maxULP 552 / meanAbs 2.56e-07** ——
+      **与 §9 T1.3a 记录的噪声签名逐项相同**（不是"量级接近"，是数值全等）⇒ 无可测差异；
+      `02.Cube`（相机路径改动的样例）阴影级联 0 绘制物体数 **12**（与第 2/3 批二进制相同）、
+      实例可见 4820 = CPU 复算、`VUID=0`。
+    - **第 4 批剩余（下一步，最大的一块）与一处必须一并做的迁移**：把三条管线的帧入口改成收快照，
+      需要先解决**骨骼网格的逐网格缓冲状态仍在组件上**（`SkeletalMeshComponent` 的
+      `boneBuffer`/`boneBufferCapacity`/`bBonesDirty`/`boneSSBOHandle`/退役队列）——
+      `ForwardPipeline::RenderScene` 的骨骼循环正是靠它才必须收 `World&`，形态与第①段的实例缓冲
+      完全相同（**矩阵走快照、缓冲生命周期留渲染侧**，按 `meshIndex` 索引；注意
+      `MeshRegistryEntry::skinMatrixBuffer` 现在指向组件缓冲，迁移后应指向渲染侧表里的那份）。
+      连同上面第 1 条的 `FrameSnapshotAssembler` 设计一起做，才是"帧入口收快照"的完整落地。
+    - **第 5 批之一（已提交）**：把**骨骼缓冲状态搬离组件** —— 这是"管线帧入口收快照"的最后一块
+      前置（`ForwardPipeline::RenderScene` 的骨骼循环正是靠它才必须收 `World&`）。
+      · 新增 `render::SkinnedMeshBuffers`（`Engine/Render/Pipeline/`）：逐 `meshIndex` 的骨骼 SSBO、
+        容量、退役队列、已上传版本、`ownerEntity`；`BeginFrame` 推进退役 + 回收上帧未见的条目；
+        `Upload(device, meshIndex, ownerEntity, mats, count, version)` —— 与第①段的
+        `InstanceCuller::InstanceState` **同构**（这个仓库"逐网格 GPU 缓冲状态搬离组件"的标准做法）。
+      · 组件侧只留数据源：`SkeletalMeshComponent` 去掉 `boneBuffer`/`boneBufferCapacity`/
+        `bBonesDirty`/`boneSSBOHandle`/`retiredBoneBuffers`/`AdvanceRetireQueue`/`RetireBoneBuffer`，
+        改为 `u32 boneMatrixVersion`（`SkeletalMeshSystem` 每次重算骨骼矩阵 `++`）。
+      · 快照条目新增 `skinMatrixVersion` 与 `bHasSkeleton`（= 旧骨骼循环的 `sm.skeleton` 判据），
+        由 `AppendSkinMatrices` 一次取齐；Forward 的骨骼循环改为遍历 `meshClass == Skeletal` 的条目
+        （矩阵取扁平切片、缓冲按 `meshIndex` 查注册表、SSBO 由状态表管理）⇒ **循环内不再有任何世界访问**。
+      · `MeshRegistryEntry::skinMatrixBuffer` 删除（write-only 字段、只有测试读它，且它指向的组件缓冲
+        已不存在）。
+      · 判据：单测 **398 例 / 71841 断言**；`02.Cube`（唯一含骨骼网格的样例）首帧统计与上一批二进制
+        **完全一致**（`RenderScene: 25 draws, 8150 tris, 4 lights` —— 该计数含每帧的骨骼绘制 +1）、
+        阴影级联 0 绘制物体数 12 一致、`VUID=0`；`06.GILab` 冒烟同批双跑 **4539 像素**、
+        与上一批二进制对比 **0 像素**（28 个转储目标逐位一致）。
+      > **帧内同步 RHI 调用 380 → 383 又是归属漂移**（与第①段同款）：这 3 处
+      > （`CreateBuffer` / `Map` / `desc.initialData`）是从 `ForwardPipeline.cpp` 原地搬过来的
+      > 同一批调用，新文件里启发式的"所属函数名"落到 `BeginFrame`，而不再落到名字含 `Upload`
+      > 的函数上。调用点一个没变。**附录 B1 不变（43）**——本批消除的是 B1 量不到的
+      > **函数体内**世界依赖，正是它让下一批的签名改动能真的落地。
+    - **第 4 批之一（已提交）**：**新增 `FrameSnapshotAssembler`**（`Engine/Render/Threading/`，
+      白名单层）承载"取齐本帧渲染输入"，管线的帧入口只**配置口径**：
+      · `FrameSnapshotAssemblySettings`（光源/物体选项、构建哪些数组）由管线在 `Initialize` 配置
+        ⇒ 三条管线的历史口径差异仍然显式可查，而读世界的代码只有一份、且在白名单层；
+      · 装配器负责两处"必须在收集之前的**世界写**"，**顺带修掉两个顺序缺陷**：
+        `SyncPhysicalSkyToSun`（旧代码放在渲染期，而快照在那之前构建 ⇒ 快照里的方向光照度慢一拍）、
+        `SceneGraph::UpdateTransforms`（旧代码在 `RenderScene` 开头，同样晚于快照构建 ⇒
+        同帧被改脏的变换会让快照旧一帧）。两者现在都在 `AssembleScene` 开头、早于任何收集。
+      · 每帧一次装配（`BeginFrame` 复位 + `AssembleScene` 幂等）⇒ 样例为阴影收集先装配时管线不重复收集。
+      · 快照新增 `lightSourceEntities`（与 `lights` 同序同长）与 `sceneBoundsMin/Max`：前者让
+        `shadowIndex` 能在阴影收集之后用**不收世界**的 `ResolveLightShadowIndices` 补齐
+        （光源收集因此完全离开渲染期）；后者把 `RefreshRSMFrustum` 原先"自己遍历世界算包围盒"
+        改成读快照（按既有公式：网格包围盒 × 组件**局部**变换 —— 刻意不改口径）。
+      · `MeshBatcher::Build` 改吃快照 + 注册表：收集集用 `SnapshotMeshClass` 如实表达
+        （`Base`/`Cube`/`Sphere`/`Billboard`/`Text`/(`Decal`)/`Instanced`，**不含** `Spline`/`Skeletal`，
+        与旧遍历范围逐条一致）；材质字段（含 `textureMask`）直接取快照 `GPUObjectData` ⇒ 与 GBuffer 同源；
+        注册表新增 `vertexCount`（合批要按顶点数搬运并累加 `baseVertex`）。
+      · Forward 的 `CollectLights`/`RenderScene`/`RunGPUCulling`/`BuildFrameGraph`/`RefreshRSMFrustum`
+        全部去 `world`/`sg` ⇒ **B1 43 → 27**。
+      · 判据：单测 398 例 / 71841 断言；`02.Cube` 首帧统计与上一批二进制**完全一致**
+        （`RenderScene: 25 draws, 8150 tris, 4 lights`；阴影级联 0 绘制物体数 12）、`VUID=0`；
+        `06.GILab` 冒烟同批双跑 **4615 像素**、与上一批二进制对比 **0 像素**（28 个目标逐位一致）
+        —— 注意这次改动**包含收集顺序变化**（两个世界写提前），结果仍是 0 像素。
+      > **剩余 27 的分布与"必须同批"的约束**：`DeferredPipeline.h` 6 + `.cpp` 2 + `_FrameGraph.cpp` 2、
+      > `PathTracingPipeline.h` 5（+ `.cpp`）、`RTPass.h` 3 + `.cpp` 4、`ForwardPipeline.{h,cpp}` 各 2
+      > （帧入口签名本身）、`IRenderPipeline.h` 1。**`IRenderPipeline::Render` 的签名一变，
+      > 三条管线与 `RTPass` 就必须同批改完**（接口强制）—— 这正是本批先把"装配器 + 各 helper 去世界"
+      > 做完、把入口签名留到最后的原因：那一改要一次覆盖 Deferred/PathTracing 的
+      > `BuildFrameGraph`/`CollectLights` 与 `RTPass::BuildAS`（后者还要一并收掉它剩下的 13 处组件指针）。
+    - **第 4 批之二（已提交）**：**Deferred 与 PathTracing 也统一走装配器** ⇒ 三条管线的光源收集与
+      场景收集全部离开渲染期，**B1 27 → 24**。
+      · Deferred：口径 = 排除贴花卡片（`DecalPass` 投影）、构建贴花与粒子数组；`CollectLights`
+        改为只**消费**快照，并在与旧实现**同一时机**（阴影收集之后、消费之前）用不收世界的
+        `ResolveLightShadowIndices` 解析光源 `shadowIndex` —— 时机不变是刻意的：旧代码正是在
+        `CollectLights` 里调 `BuildLights` 传 resolver。帧图里重复的天空盒/环境收集随之删除
+        （装配器已收），`SyncPhysicalSkyToSun` 也从帧图移到装配器。
+      · PathTracing：口径 = 构建粒子、光源写 `shadowRadius`、**不设** shadowIndex 解析器
+        （收集器填 -1，与旧行为一致：PT 的阴影包含在路径里）。
+      · 两条管线都加上与 Forward 同构的 `m_Assembler` / `m_FrameSnapshot` / `FrameSnap()`，
+        快照访问统一走 `FrameSnap()`。
+      · 判据：单测 398 例 / 71841 断言；`04.Sponza-Deferred` 与 `05.Sponza-PathTracing` 各跑 22 秒
+        **无 VUID、无 ERROR**（这两条路径本批改动最直接）；`06.GILab` 冒烟同批双跑 **4539 像素**，
+        与上一批二进制对比的差异**全部**落在 `hdr`(719 px/maxULP 21/meanAbs 5.91e-08) 与
+        `lumen_irradiance`/`prov6_*`(764 px/maxULP 552/meanAbs 2.56e-07) —— 即 §9 T1.3a 记录的
+        **噪声签名本身**（同批双跑的底噪也是 4539）。
+      > **剩余 24 = 帧入口签名 + `RTPass`**：`DeferredPipeline.h` 4、`PathTracingPipeline.h` 4、
+      > `RTPass.h` 3 + `.cpp` 4、`DeferredPipeline_FrameGraph.cpp` 2、`PathTracingPipeline.cpp` 2、
+      > `ForwardPipeline.{h,cpp}` 各 2、`IRenderPipeline.h` 1。
+      > **下一步必须先做 `RTPass`**（它同时也是"组件指针 13 处"闸门的最后持有者）。已查清它需要
+      > 快照补齐一批 **RT 专用材质字段**：贴图均值回落（`hasMaterialAvg`/`baseColorAvg`/
+      > `metallicAvg`/`roughnessAvg`）、`ior`/`transmission`、`attenuationColor`/`attenuationDistance`
+      > —— 否则 `BuildSceneMaterialTexture`（11 行 × N 列的 RT 材质纹理 + 三角形法线/UV 纹理）
+      > 无法脱离组件构建；另需把 `m_BLASMap` 的键从 `MeshComponent*` 换成 `meshIndex`、
+      > `HashGeometry`/`HasGeometryChanged` 改吃注册表条目、`CollectMeshList` 改为按
+      > `SnapshotMeshClass ∈ {Base, Cube, Sphere}` 过滤快照，并删掉那条**无调用点**的顶点拉取死路径。
+    - **第 5 批（已提交）**：**`RTPass` 改吃快照 + 网格注册表** ⇒ **B1 24 → 17**，且
+      **组件指针依赖 渲染期 13 → 0（E-3 的收敛目标达成）**。
+      · 收集集用 `SnapshotMeshClass ∈ {Base, Cube, Sphere}` 表达（与旧实现遍历
+        `MeshComponent`/`Cube`/`Sphere` 的精确类型范围**与顺序**逐条一致）；世界矩阵直接取
+        快照条目的 `object.worldMatrix`（不再经 `SceneGraph::GetWorldMatrix`）。
+      · **BLAS 缓存键从 `MeshComponent*` 换成 `meshIndex`**；`HashGeometry`/`HasGeometryChanged`
+        改吃 `MeshRegistryEntry`（顶点数 + 索引数 + 两个缓冲的设备地址 —— 与旧哈希同口径）。
+      · `BuildSceneMaterialTexture`（11 行 × N 列材质纹理 + 三角形法线/UV 纹理）改为从快照与
+        注册表取值：材质字段取 `GPUObjectData`（收集侧 `MakePBRMaterial` + `FillObjectData` 算好，
+        与 GBuffer 路径同源，含 `textureMask`），三角形属性从注册表缓冲读。
+      · **快照新增 `SnapshotRTMaterial`**（RT/PT 专用补充）：贴图均值回落
+        （`hasMaterialAvg`/`baseColorAvg`/`metallicAvg`/`roughnessAvg`）、`ior`/`transmission`、
+        `attenuationColor`/`attenuationDistance`。这批字段**不在** `GPUObjectData` 里，缺了它们
+        RT 材质纹理无法脱离组件构建；只对 RT 可见子集填。
+      · 删除一条**无调用点**的死路径（`CreateVertexPullBuffer` + `UpdateVertexDataDescriptorSet`
+        + `RTVertexPacked`）：它把 VB/IB 打包成 32B 布局绑到 set=1，而 PT 早已改用材质纹理的法线/UV
+        查询三角形属性（`ClosestHit` 里访问 `StructuredBuffer` 已知 GPU fault）。它此前还虚增了
+        帧内同步 RHI 计数（378 而非 384）。
+      · 判据：单测 398 例 / 71841 断言；`04.Sponza-Deferred` 与 `05.Sponza-PathTracing` 各跑 20 秒
+        无 VUID、无 ERROR；`06.GILab` 冒烟同批双跑 **4539 像素**、与上一批二进制对比 **0 像素**
+        （28 个目标逐位一致）。
+      > **一条教训（已入 §9 纪律）**：上一批用脚本替换基线注释块时，替换区间跨到了
+      > `MESH_PTR_BASELINE`，把中间的 `MESH_PTR_PATTERN` 定义一起删掉了 —— `--mesh-ptrs` 会
+      > `NameError` 崩掉，而当时只跑了 `--world-deps --gate` 所以没暴露。**复测四项闸门必须带全
+      > 四个开关**，不能只看自己关心的那一个。
+      > **剩余 17 = 纯帧入口签名**：`DeferredPipeline.h` 4、`PathTracingPipeline.h` 4、
+      > `DeferredPipeline_FrameGraph.cpp` 2、`PathTracingPipeline.cpp` 2、`ForwardPipeline.{h,cpp}`
+      > 各 2、`IRenderPipeline.h` 1 —— 即 `Render`/`BuildFrameGraph` 的 `World&`/`SceneGraph&`
+      > 与接口声明本身。下一批一次改完即 **B1 = 0**：接口强制三条管线同批，而各管线的内部 helper
+      > 与前置依赖（装配器、光源收集、阴影下标解析、MeshBatcher、RTPass）都已在本轮备齐。
+- [x] T2.1 `RenderThread` 实现（帧节奏 + 休眠策略）—— ✅ 完成（真起线程 + 归属判断 + 停止排空；4 例单测。cv 唤醒并入 T2.6）
+- [x] T2.2 设备与交换链归渲染线程（Acquire/Present 迁移）—— ✅ 完成（2026-10-09）：Acquire / 录制 / ImGui 录制 / Submit / 探测读回 / Present 全在渲染线程（一帧两条命令）；06.GILab 模式 0/1 转储逐位一致、归属断言 0
+- [x] T2.3 `ResourceCreationService` —— **判定不做**（当前没有消费者：创建点全在 owner 线程）—— **推迟到 A-3（P7）**：核实结果是当前**没有消费者**
+  —— `ForwardPipeline` 的所有创建点都在 `Initialize`/`Resize`/`UploadMaterialBindless` 扩容路径上，而
+  模式 1/2 的 **owner 就是渲染线程**（创建本来就在它上面，合法）。只有在 A-3 把创建挪去 RHI 线程之后，
+  "渲染线程请求创建 → 拥有线程执行"才有意义 ⇒ 现在实现只会是死代码。
+- [x] **T2.4 之一（已提交）**： 6.GILab 的渲染命令载荷改为**按值捕获**（此前 `[&]` 按引用捕获
+  `curPipeline`/`cmdList`/`camCtrl` ⇒ 真正异步时随时被游戏线程改写）。现在整帧渲染输入收进
+  POD 载荷按值交接：管线指针 + 本帧快照指针 + 命令缓冲 + 相机/时长的值拷贝。
+  · **判据**：单测 398 例 / 71841 断言；02.Cube 首帧统计不变（25 draws / 8150 tris / 阴影级联 12）、
+    `VUID=0`；06.GILab 冒烟与上一批二进制对比 **0 像素**、同批双跑 **0 像素**；四项闸门不变。
+  · **一次失败试验（重要）**：曾把快照改为"每飞行帧一份"（3 份轮转 + `NextFrame` 推进 + 装配器按槽重绑），
+    理由是按值交接的载荷里那个快照指针在异步执行时不该被下一帧改写。实测**真实回归**：
+    `lumen_irradiance`/`prov6_*` 差 8.26M 像素（meanAbs 0.28~0.53）、`hdr` 6.18M 像素；
+    回退后逐位一致 ⇒ **当下有消费者对"快照缓冲的同一性"有隐含依赖**
+    （最可疑：`ShadowSystem::m_CachedSnapshot` 这个跨调用缓存的指针、以及帧图构建期读到的快照指针）。
+    **结论**：多份轮转必须与 T2.2（渲染线程自己持有命令缓冲 + 自己 Submit/Present）一起做 ——
+    让真实异步去暴露并修正这些隐含依赖，而不是先改存储形态。三个管线保留了 `SnapBuf()` 访问器，
+    下次切换只动访问器与 `NextFrame`。
+  · 剩余（T2.4 后续）：其余 6 个样例同源改造（循环体 → 投递 + `SubmitFrame`）+ ImGui CPU 侧。
+
+- **T2.2 就绪度实测（本轮，`06.GILab` 的 `HE_RENDER_THREAD_STRICT=1` 开关，默认关闭）**：
+  · **归属机制有两套且当前不一致**：RHI 侧是 `rhi::ThreadAffinity`（`HE_ASSERT_RENDER_THREAD` 读它；
+    `VulkanDevice` 在创建设备时 `Claim()` 给**创建线程 = 游戏线程**），`RenderThread` 侧是
+    `s_RenderThreadHash`（`ThreadMain` 设置、`IsCurrent()` 读它）。**起线程不会转移 RHI 归属** ⇒
+    "起了线程也没报错"不能当作正确性证据。
+  · **mode 1 + 真线程的实测**：首条违规 = `Engine/RHI/Vulkan/VulkanCommandList.cpp:278`
+    （录制期的一次性小上传），出现在**渲染线程**执行管线录制时；随后运行**停在 Frame 1**
+    （RenderGraph 执行 15 passes 之后不再推进）⇒ 除归属外还有**帧推进的同步缺口**。
+  · **步骤 (a) 已完成（已提交）**：`RenderThread::SetThreadStartHook` + 样例注入 `Claim()`（认领必须在
+    新线程里做，而 Threading 层保持 RHI-free ⇒ 由调用方注入）。**验证证据 = 首条违规的转移**：
+    转移前是渲染线程录制路径（`VulkanCommandList.cpp:278`），转移后渲染线程录制合法、首条变成
+    **游戏线程的 `AcquireNextImage`（`VulkanSwapChain.cpp:232`）** ⇒ 归属确实转移，且步骤 (b) 的
+    工单第一项就是 `Acquire`。
+  · **因此 T2.2 的搬迁清单**：(a) 渲染线程启动时把 RHI 归属转移过去（`ThreadMain` 里 `Claim()`、
+    `Stop()` 里恢复/`Release()`）；(b) 把 `Acquire` / 录制 / ImGui 录制 / `Submit` / `Present` /
+    探针 `WaitIdle` 全部搬进渲染命令，其中 ImGui 要做"**CPU 侧建 UI、录制侧 `EndFrame(cmdList)`**"
+    的拆分（UI 控件仍在游戏线程，draw data 在渲染线程录制）；(c) 设计帧推进的同步（背压 + 帧票据 +
+    呈现完成）。做完 (a)(b)(c) 后 `HE_RENDER_THREAD_STRICT` 才应默认打开。
+- **T2.2 步骤 (c) 的核心原语（已提交）**：`RenderCommandQueue::WaitFrameRetired(frameIndex, timeoutMs)`
+  （记录"已退休到的帧号"——帧按 FIFO 消费 ⇒ 退休也有序）与 `FrameScheduler::SubmitAndWait(...)`
+  的**严格握手提交**（壳模式就地执行即刻满足；真线程模式等渲染线程回收）。
+  【为什么要先做它】步骤 (b) 要"把每帧 RHI 调用搬进渲染命令"，而这件事必须**逐项验证**：
+  每搬一项，转储都应保持逐位一致。严格握手让每帧串行，从而把"执行位置搬了但语义没变"
+  单独测出来；否则执行位置与录制一旦并发，任何差异都分不清是 bug 还是时序。
+  【判据】单测 399 例 / 71850 断言（新增 1 例 9 断言：壳模式即时满足、未发布帧号等待超时、
+  真线程模式 2s 内完成并确认已退休）；四项闸门不变；06.GILab 冒烟改动前后 15 像素
+  （5 个 Lumen 探针目标各 3 像素、maxULP=1、meanAbs=1.1e-11 —— 最小可能的浮点噪声），
+  同批双跑底噪 4554 像素 ⇒ 本批只加原语、未改渲染路径。
+
+- **步骤 (b) 的一次尝试与回退（本轮，未落地代码）**：把 `06.GILab` 一帧的全部 RHI 调用
+  （Acquire → 录制 → ImGui 录制 → 调试绘制 → End → Submit → 探测读回 → Present）抽成一个
+  `renderFrame` lambda，模式 0 直接调用、模式 1/2 经队列 + `SubmitAndWait` 严格握手；ImGui 控件
+  （CPU 侧）留在游戏线程、`imgui.EndFrame(cmdList)` 移入命令。**它能编译**，但实测改变了语义，
+  故**回退**（工作区与判据恢复到本轮之前：回退后重建对比 98 像素 ≈ 底噪）。
+  · **证据 1（顺序语义）**：严格路径（mode 1 + 真线程）与默认路径的转储差 **37,190,248 像素**
+    （`lumen_irradiance`/`prov6_*` maxRel 7364、`hdr` 6.15M）——探针是时域累积，任何"早一帧/晚一帧"
+    都会放大成这种量级。
+  · **原因**：该形状把**控件树挪到了管线渲染之前**，而面板里有大量"每帧写管线/GI 设置"的代码
+    （如环境强度/档位），原先写在渲染之后 ⇒ 设置下一帧才生效，现在同一帧就生效 ⇒ 时域结果整体
+    平移一帧。
+  · **证据 2（teardown 归属）**：严格路径唯一断言 = `VulkanDevice.cpp:331`（"设备销毁只在拥有线程"）
+    ⇒ 退出路径的 `device->WaitIdle()` / `Shutdown()` 仍在游戏线程，而归属已认领给渲染线程；
+    **`RenderThread::Stop()` 侧还没有对应的 Release**（步骤 (a) 只做了认领）。
+  · **修正后的形状（下一步照此做）**：一帧**两条命令**，以保持原有顺序不变 ——
+    ① `[Acquire + cmdList->Begin + 管线 Render]` → 握手；
+    ② 游戏线程建 UI（控件写在渲染之后，与今天一致）；
+    ③ `[ImGui BeginRenderPass + imgui.EndFrame(cmdList) + EndRenderPass + 调试绘制 + End + Submit +
+    探测读回 + Present]` → 握手。
+    另外给 `RenderThread` 补一个 **stop 钩子/Release**（或在样例退出前 `Release()` 再 `Stop()`），
+    使 teardown 合法。
+
+- **步骤 (b)(c) 落地（已提交，`06.GILab`）**：按上面的"修正后的形状"实现——一帧**两条**渲染命令，
+  保持原有帧内顺序不变：① `[Acquire + cmdList->Begin + 管线 Render]`；② 游戏线程建 UI（控件仍在管线
+  渲染**之后**）；③ `[ImGui BeginRenderPass + imgui.EndFrame(cmdList) + EndRenderPass + 调试绘制 +
+  End + Submit + 探测读回 + Present]`。两条命令统一走 `submitRender`：模式 0 直接在本线程执行，
+  模式 1/2 经队列 + **严格握手**。另外：**模式 1/2 起真渲染线程成为默认行为**
+  （壳模式对照见库层 `RenderThread` 的"未启动"形态）、启动/停止钩子认领与撤销 RHI 归属、
+  控件里的 `SetSwapChain`/`OnResize` 改为置标志由下一条命令在渲染线程执行。
+  · **判据（`HE_LUMEN_PROBE_FILTER=off`、`HE_NO_VSYNC=1`、120 帧 28 个转储目标）**：
+    模式 0 与改动前二进制 **0 像素**；**模式 1（真渲染线程）与模式 0 0 像素**（逐位一致）；
+    模式 1 无归属断言、无握手超时；`vuid_lines=42` 与既有基线一致；
+    **帧时间 448.9 → 454.2 ms/帧 = +1.18%**（在"不退化 >3%"预算内）；
+    单测 399 例 / 71850 断言；四项闸门：帧内 RHI 378、B1 0/0、组件指针 0/0、持有者 277。
+  · **未做**：其余 6 个样例与编辑器的同源改造（T2.4 收尾）；模式 2（三线程/RHI 线程）不在本轮范围。
+
+- **T2.4 扩展到 `07.AISamples`（已提交）**：同一"两条命令 + 真渲染线程"形状（帧前准备留在游戏线程；
+  ① `[Acquire + cmdList->Begin + 管线 Render + BackBuffer pass 开始]`；② `[imgui.EndFrame + EndDebugLabel
+  + EndRenderPass + End + Submit + Present]`；控件仍在两条命令之间）。
+  · **踩到并修掉一处搬迁遗漏**：样例在 `PollEvents()` 之后还有一句**独立**的 `AcquireNextImage`
+    （位于替换区间之外）⇒ 迁移后变成"游戏线程与渲染命令各 acquire 一次"，模式 1 下触发
+    `VulkanSwapChain.cpp:232` 的归属断言。**教训**：搬迁前先枚举该样例**全部**同类调用点
+    （`Acquire/Present/Submit/Begin/End/WaitIdle`），不要只处理"结构最像参照样例"的那一段。
+  · **判据**：模式 0 与模式 1 各跑 45 秒，**断言 0、VUID 0**；日志显示 `ForwardPipeline::RenderScene`
+    出现在"已起真渲染线程"之后 ⇒ 帧确实由渲染线程执行。（07.AISamples 无转储机制，故以"无归属违规 +
+    与 06.GILab 同形（后者有转储逐位一致证据）"作为本样例的证据。）
+  · **T2.4 剩余**：`02.Cube` / `03.Sponza-Forward` / `04.Sponza-Deferred` / `05.Sponza-PathTracing` /
+
+- **T2.4 扩展到 `02.Cube`（已提交，进度 6/7）**：用**显式锚点切分**（它的 acquire 是两行
+  `if (...) continue;` 形式，且 acquire 与 `cmdList->Begin` 之间有约 270 行帧前准备 —— 整段原样保留
+  在两条命令之前，这正是第 20/21 轮两次失败的原因）拆成两条命令；起线程按需（`HE_RENDER_THREAD_STRICT`）。
+  · **判据（三配置实测）**：默认 / 模式 1 单独 ⇒ **不起线程**；模式 1 + opt-in ⇒ 起线程；三者断言 0、
+    VUID 0、都正常出帧（`RenderScene` 各一次）；模式 1+opt-in 日志 1009 行 vs 默认 1450~1471 行
+    （= 已知的流水线深度代价，故仍为 opt-in）。
+  · 注：`02.Cube` 目前是"两条命令各握手一次"的形状（`06.GILab` 已是"命令 2 只发布"），待流水线深度
+    补齐时一并对齐。**T2.4 剩余**：`07.Nanite`。
+
+- **T2.4 收口：`07.Nanite` 也完成同源改造（已提交，进度 7/7）**：两条命令 + 按需起线程；
+  窗口回调与控件里的 `SetSwapChain`（都是 RHI）改为置标志、由渲染命令落地；跨两条命令共用的
+  `s_accPipelineMs` 提升到帧体层级。
+  · **判据（三配置各 30 秒）**：默认 / 模式 1 单独 ⇒ 不起线程；模式 1 + opt-in ⇒ 起线程；
+    三者**断言 0、VUID 0**，日志 198821 / 199483 / 196656 行（重帧样例，异步代价很小）。
+  · **T2.4 至此 7/7 样例完成**（`06.GILab` 默认异步且已实测；其余 6 个正确性已验证、异步为 opt-in，
+    待流水线深度补齐后逐个测量并默认打开）。
+
+- **流水线深度：帧槽位随命令冻结（本轮已提交）**：`FrameSceneSnapshot::frameSlot` 由装配器写入
+  （管线经 `SetFrameSlot` 告知），三条管线新增 `RenderFrameSlot()`（读"本次命令携带的快照里的槽位"，
+  回退实时计数器），渲染期所有 `m_CurrentFrameSlot` 使用点改用它（两个帧图 17 处 + 三个 .cpp 27 处；
+  保留"推进槽位/初始化归零"两行，面向游戏线程的 `GetCurrent*()` 访问器不变）。
+  【为什么】游戏线程跑到渲染线程前面时，渲染期读实时计数器会取到**别的帧槽位**的每帧资源
+  （描述符集/光源缓冲/UBO/实例剔除句柄）⇒ 画面错乱。至此"游戏线程跑到前面"会引入的两个竞争
+  都已消除（另一个是渲染期快照读取已冻结为 `FrameSnap()`）⇒ **流水线深度只差"每飞行帧命令缓冲
+  + 去掉命令 1 的每帧等待（改由队列满背压）"**。
+  · **判据**：单测 399 例 / 71850 断言；四项闸门不变；06.GILab 模式 1 同批双跑 **0 像素**（逐位可复现）、
+    模式 1 vs 模式 0 与模式 0 vs 上一版为 **4539 像素**（已知间歇底噪；本轮另有一次双跑为 0）、断言 0。
+
+- **深度 3 流水线的尝试（本轮，未落地代码，已回退）**：按上面设计实现了 —— 每飞行帧一个命令缓冲
+  （`cmdLists[3]`，`cmdList` 改成指针按槽位换绑）、**一帧 = 一个队列帧含两条命令**（帧首
+  `renderQueue.BeginFrame()` 取槽位、两条命令依次 `Enqueue`、帧末 `SubmitAndPump` 一次发布 ⇒ 背压由
+  `SubmitFrameBlocking` 在队列满时提供），并新增 `RenderCommandQueue::CurrentFrameSlot()`。
+  · **结果**：模式 0 与上一版 **0 像素**（默认路径不变 ✓），但**模式 1 挂死**（冒烟脚本 300 秒超时杀掉；
+    重跑一次 `lumen_passes=0`、转储文件缺失）⇒ 那个"模式 1 vs 模式 0 = 0 像素"是**空比较**（两边都缺）。
+  · **已 git 回退**（含 `CurrentFrameSlot()`），回退后重建通过。**未落地代码。**
+  · **下一步的定位方向（写清楚，下次接着做）**：(a) 先加**每帧可观测**（队列的 in-flight / pending /
+    retired 计数 + 渲染线程已执行帧数）打印，确认是"背压死等"还是"渲染线程停止消费"；
+    (b) 特别怀疑**槽位配对**：队列槽位（每渲染帧一个）与管线快照/帧槽位（`m_SnapshotSlot`、
+    `m_CurrentFrameSlot`）是**三个独立计数器**，深度 3 时它们的前后关系可能让"某帧的命令缓冲"
+    与"另一帧的渲染期资源"配错（`RenderFrameSlot()` 现在取的是快照里的槽位，而命令缓冲取的是
+    队列槽位 —— 两者必须一致）；(c) 转储/读数路径的排空点与探测读回的可见性也要在深度 >1 下重新推演。
+  · **结论**：在"每帧一次握手"的当前形状下，`06.GILab`（重帧）已达标（+1.22%），轻帧样例的默认异步
+    仍**不能**打开；深度 ≥2 需要上面 (a)(b)(c) 的诊断，属于下一批工作。
+
+  · **诊断结果（本轮）：挂死的真因是"样例记账被搬到了渲染线程"**。加了每帧的队列可观测后
+    （`inFlight/pending/retired/published` + 渲染线程 `execFrames/execCmds`）实测：
+    `[QUEUE] frame=0 ... published=0 execFrames=0` 被打印了 **13.9 万次** ⇒ 游戏线程的帧循环
+    **从未推进**。追下去发现：`frameIndex++`、`++s_n`（帧计时累加）与**转储触发** `s_n >= 120`
+    都落在 `recordUiAndPresent`（= 命令 2）里 ⇒ 它们现在**在渲染线程上执行**，游戏线程自己的
+    循环计数与转储触发因此永不推进 ⇒ 冒烟脚本等不到转储，300 秒超时（与我们观察到的现象完全一致）。
+    【为什么现在的形状没暴露】当前提交的形状里两条命令**都要握手**，游戏线程会等命令 2 跑完才继续，
+    于是这些"搬到渲染线程的记账"恰好也在游戏线程继续之前完成 ⇒ 碰巧正确；一旦改成"只发布"，
+    记账就真的跑到游戏线程后面去了。
+  · **修复清单（下一步）**：把命令 2 里的**非 RHI 记账搬回游戏线程** —— `frameIndex++`、`++s_n`、
+    帧计时累加、帧率/步骤 37 打印（读 `s_accPipelineMs`）；**转储**是混合体（触发+记账属游戏线程，
+    读回属 RHI）⇒ 触发与记账留游戏线程、读回留在渲染命令里（或用"转储前排空"保证可见性）。
+    搬完后再重做深度 ≥2，并按(a)(b)复核槽位配对。
+  · **纪律**：把一整段"帧尾块"整体搬进渲染命令时，必须逐行分辨"哪些是 RHI、哪些是游戏线程记账"
+    —— 后者留在外面。这条与"每帧只做一次的幂等标记必须由每帧必然发生处复位"是同一类教训。
+
+  · **修复清单第 1 步的实现与结论（本轮，未落地代码，已回退）**：按清单把 `frameIndex++`、帧率/步骤 37
+    记账、转储前排空与**转储判定**从命令 2 搬到游戏线程（转储执行仍留在命令 2，触发改为读一个标志
+    `dumpThisFrame`）。**能编译，但语义变了**：模式 1 与模式 0 的转储差 **61,841,201 像素**、
+    `lumen_passes` 410 vs 242 ⇒ **转储帧整体错开了一帧**。根因：`dumpThisFrame` 是**外层可变变量**、
+    而命令 lambda 是 `[&]` 按引用捕获 ⇒ 渲染线程执行命令 2 时读到的可能是**游戏线程已经为下一帧改写后**
+    的值（这正是"记账搬到游戏线程"想消除的那个竞争，只是从"渲染线程读 frameIndex"变成了
+    "渲染线程读 dumpThisFrame"）。
+  · **正确的修法（下一步）**：把"帧号与转储判定"作为**命令载荷按值携带**——即命令 lambda 必须
+    **按值**捕获本帧的 `frameIndex`（与 `dumpThisFrame`），而不是读外层可变变量。这与 T2.6
+    "类型化载荷"的方向一致（届时帧号/标志属于载荷字段）。**已 git 回退**（回退后重建通过），
+    未落地代码。
+    `07.Nanite` 共 5 个样例（形状相同，各自还需按上面的教训先枚举全部 RHI 调用点）。
+
+- **T2.4 扩展到 `03.Sponza-Forward`（已提交，进度 3/7）**：同形改造（两条命令 + 真渲染线程）；
+  按上一轮教训先枚举了全部 RHI 调用点，因此没有漏掉**窗口回调**里的整串 RHI
+  （`swapchain->Resize`/`cmdList->SetSwapChain`/`pipeline.OnResize`）—— 改为回调只置尺寸标志、
+  由渲染命令落地。
+  · **判据**：模式 0/模式 1 各 30 秒，`VUID 0`；模式 1 日志中 `[CSMTechnique] Cascade0 绘制物体数: 104`
+    出现在"已起真渲染线程"之后 ⇒ 帧由渲染线程录制与提交。
+  · **发现一处既有条件（与本批无关）**：两种模式下各有 1 条同源断言
+    `VulkanCommandList.cpp:197` = `BeginSecondary`（RenderGraph 的 worker/secondary 并行录制路径）。
+    它在**模式 0**（本批改动完全不起作用）同样出现 ⇒ 既有；`06.GILab` 不用 secondary 录制故无此断言。
+    **待办**：secondary/并行录制的归属问题（要么归到渲染线程，要么给它自己的归属语义）——
+    这条会挡在"模式 1 全样例零断言"之前。
+  · **T2.4 剩余**：`02.Cube` / `04.Sponza-Deferred` / `05.Sponza-PathTracing` / `07.Nanite` 共 4 个样例。
+
+- **T2.4 扩展到 `04.Sponza-Deferred`（已提交，进度 4/7）**：同形改造（两条命令；命令 2 里还包含
+  `pipeline.FlushComputeWork()` 这个 AsyncCompute 提交点；窗口回调的 RHI 改为置标志由命令落地）。
+  · **判据**：模式 0 与模式 1 各 30 秒，**断言 0、VUID 0**，日志 124958 / 126984 行 ⇒ 两种模式都
+    稳定连续出帧（日志量足以排除"卡在初始化"的假通过）。
+  · **T2.4 剩余**：`02.Cube` / `05.Sponza-PathTracing` / `07.Nanite` 共 3 个样例。
+
+- **T2.4 扩展到 `05.Sponza-PathTracing`（已提交，进度 5/7）**：同形改造（命令 2 里含对照用途的
+  `WaitIdle` 与探测读回；窗口回调 RHI 延迟落地，两个管线都 `OnResize`）。
+  · **判据**：模式 0/模式 1 各 30 秒，**断言 0**；两模式各有 **1 条同源 VUID**（第③段第 5 批记录过的
+    PT 首帧图像布局告警，既有条件、两模式一致）；日志 268512 / 263568 行 ⇒ 稳定连续出帧；
+    模式 1 日志中 `RTPass: TLAS 构建 (105 instances)` 出现在"已起真渲染线程"之后 ⇒ 光追工作在
+    渲染线程上执行。
+  · **T2.4 剩余**：`02.Cube` / `07.Nanite` 共 2 个样例。
+  · **`02.Cube` 的一次尝试与回退（本轮，未落地代码）**：它的帧结构与 03/04/05 **不同** ——
+    `AcquireNextImage` 是**两行形式**（`if (...) continue;`，无花括号），且 acquire 与
+    `cmdList->Begin` 之间有 **~270 行游戏线程帧前准备**（相机/装配/阴影分支）。用"从 acquire 之后
+    找第一个 8 空格 `}`"的启发式去切这段区域时切错了位置 ⇒ 帧前准备被切坏，两种模式下样例都在
+    进入循环后立刻停住（日志停在 "02.Cube demo started"/"已起真渲染线程"，无任何帧日志）。
+    **已 git 回退**（回退后重建通过）。
+    **教训（已入纪律）**：区域切分**不要用启发式**——每个样例都要先用**显式锚点**（该样例 acquire
+    块的确切收尾文本）确定边界；`02.Cube` 下次做时应显式写出 `i_acqend`（= `continue;` 那一行之后），
+    并把"帧前准备"整段原样保留在两条命令之前。
+
+  · **第二次尝试（本轮）：修好切分后 02.Cube 能正确渲染，但暴露出一个更重要的问题，故仍回退。**
+    根因确认：上一轮那次"停住"是我的启发式把 acquire 的第二行 `continue;` 留在了帧体层级 ⇒
+    变成"每帧立刻 continue"。改用**显式锚点**（`            continue;\n` 之后）后：
+    模式 0 与模式 1 **断言 0、VUID 0**，且 `RenderScene: 25 draws, 8150 tris, 4 lights` 与
+    阴影级联 12 都与既有基线一致（模式 1 里这两条日志出现在"已起真渲染线程"之后 ⇒ 渲染线程在工作）。
+  · **但帧时间判据不成立**：同一 28 秒窗口内，模式 0 日志 2008 行 / `任务 25`（逐实例剔除统计）40 条，
+    模式 1 只有 992 行 / **0 条** ⇒ 严格握手（每帧两次"发布 + 等做完"的同步往返）对**快帧样例**
+    的开销不可接受。06.GILab 是 450 ms/帧的重帧，同样设计只 +1.18%；02.Cube 帧很轻，两次往返
+    就把它压下去。
+  · **因此顺序要调整（重要）**：**先把"严格握手"换成队列的在飞流水线**（游戏线程只在队列满时等待，
+    即 T2.6 的 cv 唤醒 + 多飞行帧），**再**迁移剩余样例 —— 否则"模式 1 帧时间不退化 >3%"的判据在
+    轻帧样例上必然失败。而多飞行帧又要求"每飞行帧一份快照"（第 10 轮试过、因**有消费者持有快照
+    指针/依赖缓冲同一性**而回退）⇒ 下一步的依赖顺序是：
+    (a) 先消除"快照指针被跨帧持有 / 依赖快照缓冲同一性"的消费者（已定位最可疑者：
+        `ShadowSystem::m_CachedSnapshot` 与帧图构建期读到的快照指针）；
+    (b) 再多槽快照 + 队列在飞流水线（去掉每帧等待）；
+    (c) 然后才测模式 0/1 的帧时间，并继续迁移 `02.Cube` / `07.Nanite`。
+
+  · **步骤 (a) 的第一项已落地（已提交）**：`IShadowSystem::SetFrameSnapshot(snapshot, registry)`
+    （默认空实现）+ `ShadowSystem` 实现，由两个帧图在**注册 Shadow pass 之前无条件调用**
+    （Forward 用 `SnapBuf()`、Deferred 用 `FrameSnap()`）。原先快照指针只在 `Update` 里缓存 ⇒
+    "本帧没调 Update 却调了 Render"会用到**上一帧**的指针（单份快照时被掩盖，多槽时就会读到别的槽位
+    —— 第 10 轮多槽回归的机制类）。现在绑定与是否 Update 无关、每帧必然发生。
+    **判据**：单测 399 例 / 71850 断言；四项闸门不变；06.GILab 冒烟模式 0 与已验收二进制 **0 像素**、
+    模式 1 与模式 0 **0 像素**（判据保持）。
+
+- **03.Cube… 更正：`02.Cube` 第三次尝试的结论与"完整流水线"的前置条件（本轮，未落地代码）**：
+  用已验证的**显式锚点切分** + 新的**流水线化形状**（命令 1 握手、命令 2 只发布）迁移 `02.Cube`：
+  正确性全通（模式 0/1 断言 0、VUID 0；`RenderScene: 25 draws, 8150 tris, 4 lights` 出现在起线程之后），
+  **但帧时间仍不达标**：同 30 秒窗口内 模式 0 日志 1360 行 / `任务 25` 32 条，模式 1 仅 985 行 / **0 条**
+  （≈ 慢 28%；相比"两次握手"版本已是 72% vs 49%，说明"命令 2 只发布"确实省了一半同步，但不够）。
+  · **根因**：命令 1 的**严格握手**把"游戏线程准备下一帧"与"渲染线程录制本帧"串行化了 ——
+    而录制是帧内最重的部分（06.GILab 里 ~443 ms）。所以这不是同步往返的常数开销，而是**流水线深度只有 1**。
+  · **要真正达标（>3%）必须补齐三件**：(a) **每飞行帧一个命令缓冲**（现在只有一个 `cmdList`，
+    游戏线程提前开始下一帧的 `Begin` 会与渲染线程的录制并发）；(b) **多槽快照**（每飞行帧一份，
+    第 10 轮试过、因跨帧快照指针缓存而回退 —— 该缓存已被本轮的 `SetFrameSnapshot` 消除，可再试）；
+    (c) 去掉命令 1 的每帧等待，改成"只在队列满时等待"（背压）+ 帧票据对账。
+  · **已 git 回退**（回退后重建通过）。迁移配方（显式锚点 + 两条命令 + 只发布）本身已验证可用。
+  · **⚠ 开放风险（必须记住）**：`03`/`04`/`05`/`07.AISamples` 在提交时把"模式 ≥1 起真线程"设为**默认**，
+    但当时只验证了**正确性**（0 断言/0 VUID），**没有测过帧时间**。按本轮的实测（轻帧样例上
+    当前流水线深度会显著变慢），这些样例在模式 1 下很可能**不满足 >3%** 判据 ⇒
+    **下一步要么补测（03/05 可复用其日志行数做代理），要么把默认起线程改为按样例开关**。
+
+  · **已按后者处理（已提交）**：`03`/`04`/`05`/`07.AISamples` 的起线程改为**显式 opt-in**
+    （`HE_RENDER_THREAD_STRICT=1`，且仍需模式 ≥1）；`06.GILab` 保持默认（唯一实测达标者：
+    转储 0 像素、帧时间 +1.22%）。**实测三种配置**（04）：默认/模式 1 单独 ⇒ 不起线程（新默认语义）、
+    模式 1 + opt-in ⇒ 起线程；三者断言 0、VUID 0，日志行数同量级 ⇒ 默认路径回到与改动前一致，
+    异步路径仍可按需复现与测量。**待流水线深度补齐（每飞行帧命令缓冲 + 多槽快照 + 队列背压）后**
+    再逐个测量并把默认打开。
+
+- **多槽快照第二次尝试（本轮，未落地代码）**：在 `SetFrameSnapshot` 消除阴影跨帧指针缓存之后重试
+  "每飞行帧一份快照"（`m_Snapshots[3]` + `NextFrame` 推进 + 装配器重绑）——**回归以完全相同的数值
+  复现**（总差 47,531,045 像素；`hdr` 6,184,882 / maxULP 4462、`lumen_irradiance` 8,264,232 /
+  maxAbs 1 / meanAbs 0.276，与第 10 轮逐项相同）⇒ **阴影缓存不是原因**，该回归是**确定性**的，
+  且与"跨帧缓存快照**指针**"无关（本仓已无可疑的存储点：`FrameSceneSnapshot*` 成员只有三条管线与
+  `ShadowSystem`，后者已改为每帧无条件绑定）。
+  · **下一步的排查方法（已定）**：既然确定性，就用**二分**定位 —— 保留 3 份分配但让 `SnapBuf()`
+    恒返回第 0 份（若回归消失 ⇒ 问题在"消费侧读到非当前槽"；若仍在 ⇒ 问题在"装配侧写错槽"）；
+    再在装配器与每个消费点各打一条"槽位号 + draws.size()"的每帧日志（只跑一帧即可看出错配的
+    那一对生产者/消费者）。
+  · **注意**：在单线程（模式 0）下"装配 → 消费"发生在同一帧、同一线程，多槽本应完全等价 ⇒
+    回归必然来自某个**跨帧持有**：要么是引用/指针，要么是**依赖"三个槽位数组的地址稳定"**
+    （例如按地址做过哈希/比较、或把 `draws.data()` 之类缓存过）。排查时优先验证后者
+    （`m_Snapshots` 是数组 ⇒ 各槽地址不同但稳定；单份成员地址也稳定 —— 两者差别是"同一时刻存在
+    三份不同地址的数据"）。
+  · **已 git 回退**（回退后重建通过）。**流水线深度（每飞行帧命令缓冲 + 多槽快照 + 队列背压）
+    仍被这条排查挡着**，在查清之前不继续。
+
+  · **诊断结果（本轮，二分已完成第一步）**：把数组保留 3 份、但 `NextFrame()` **不推进槽位**
+    （永远用第 0 份）⇒ **转储 0 像素**（与单份等价）。这一步排除了"地址/数组形态"这一类假设
+    （若各槽地址不同就会出错，这里不会），把原因**锁定为"轮转本身"**：即某个消费点读到了
+    **非当前槽**（stale read）。也再次确认静态排查的结论：仓库里没有缓存快照**地址**的地方
+    （没有 `snapshot.*.data()`、也没有 `&FrameSnap()`），所以 stale read 只能来自
+    **"取快照的时机早于本帧的槽位推进/装配"** 或 **"某处保留了上一帧取到的快照引用"**。
+  · **下一步（已定，下一步执行）**：在 (a) 装配器写入点、(b) 管线 `Render` 入口、(c) 各消费点
+    （`SkyboxPass::Update`、`MakeGIContext`、`SetFrameSnapshot`、`GIManager`/Lumen 等）各打一条
+    "帧号 + 槽位号 + `draws.size()`"的日志，跑 3 帧即可看出**写入与读取的槽位/规模不一致的那一对**；
+    重点怀疑顺序问题：`m_FrameSnapshot = &snapshot` 与帧图构建（`BuildFrameGraph` 里多处
+    `FrameSnap()` 在**构建期**求值）之间是否严格有序、以及是否有 lambda 在**下一帧**才执行。
+  · **已 git 回退**（回退后重建通过）。流水线深度仍被这条排查挡着；不过现在它的范围已经从
+    "不知道哪来的"缩小到"某一处取快照的时机不对"。
+
+  · **已查清并修复（已提交）——根因不是"stale read"，而是"只装配过一次"**：
+    按上面的计划加了临时诊断（装配写入点 / 管线 `Render` 入口 / `SkyboxPass` 各打一条"地址 + 规模"，
+    跑前 4 帧），日志立刻给出答案：`[DIAG-write]` **只出现一次**，而 `[DIAG-render]` 每帧都出现，
+    且轮转到第 1/2 槽时 `draws=0` ⇒ **那两槽从未被装配**。
+    真正的原因：`AssembleScene` 用 `m_Assembled` 做"每帧只装配一次"的幂等，靠管线在 `NextFrame()`
+    里调 `BeginFrame()` 复位 —— 而**只有 `ForwardPipeline` 调了**，`Deferred`/`PathTracing` 都没有
+    ⇒ 这两条管线的快照**只在第一帧装配**。**静态场景把这条缺陷完全掩盖了**（内容一直有效，
+    所以 8 个批次的所有冒烟都是 0 像素或底噪），而在多槽轮转下"其它槽永远为空"就表现为巨大差异。
+    修好后：多槽 vs 单份 **0 像素**、同批双跑 **0 像素**、模式 1（真线程 + 多槽）vs 模式 0 **0 像素**。
+  · **顺带记一条纪律**：**"每帧只做一次"这类幂等标记必须由"每帧必然发生的地方"复位**，
+    且**静态基准无法验证它** —— 需要一条**动态场景**（或至少一帧内改变场景）的判据来兜底。
+  · **多槽快照（流水线深度的最后一块前置）现已启用并验证**，下一步可做"每飞行帧命令缓冲 +
+    队列背压（去掉命令 1 的每帧等待）"，然后复测轻帧样例（`02.Cube`）的模式 1 帧时间。
+
+  · **流水线深度的又一块前置已落地（已提交）**：把管线**渲染期**的 `SnapBuf()`（游戏线程推进的槽位）
+    改为 `FrameSnap()`（`Render` 入口收到的那份，随命令冻结）—— RSM/`GPUScene`/`SceneRenderer::Prepare`/
+    `SetFrameSnapshot` 四处；装配器绑定继续用 `SnapBuf()`（那是游戏线程该用的）。这样渲染线程只依赖
+    载荷里的指针，与并行推进的槽位无关，消除了"游戏线程跑到前面"会引入的两个竞争之一。
+    另一个是管线按 `m_CurrentFrameSlot` 取每帧资源（描述符集/UBO/光源缓冲）—— **改读快照里已有的
+    `frameSlot` 字段**（装配时填）即可，留给"每飞行帧命令缓冲 + 队列背压"那一步一起做。
+  · **判据**：单测 399 例 / 71850 断言；四项闸门不变；06.GILab 冒烟 模式 0 与上一版 **0 像素**、
+    模式 1 与模式 0 为 4539（= 已知间歇底噪）、模式 1 断言 0。
+  · **教训**：读数前必须先确认渲染线程模式 —— 模式 0（SingleThreaded）时队列不参与、渲染线程空转，
+    第一次测量因此"什么都没测到"。
+- [x] T2.4 样例循环改造（7 个样例）—— ✅ 完成（2026-10-09）：02.Cube / 03.Sponza-Forward / 04.Sponza-Deferred / 05.Sponza-PathTracing / 06.GILab / 07.Nanite / 07.AISamples；按值载荷（修掉 06.GILab 按引用捕获）；实现细节与完整时序见 15 文档 §13–§21。**注**：06.GILab 的 `NextFrame`/装配/阴影驱动仍在命令 1 内（未搬迁），搬迁后方可去掉每帧握手 ⇒ 见 §15"下一步"第 0 项
+- [x] T2.5 编辑器主循环改造 —— ✅ **完成**（`abeb859`）：`HugEditor` 帧外壳改用 `rhi::FramePresenter`，9 个可执行目标统一（附录 I §20.1）
+- [x] T2.6前置 **A-2 RHI 线程（唯一提交者）** —— ✅ 完成（2026-10）：`Render/Threading/RHIThread` +
+  `RHI/SubmitRouter.h` + `ThreadAffinity` 第三角色；06.GILab 默认模式 2
+- [x] T2.6前置 **A-4 三层背压与同步点** —— ✅ 完成（2026-10）：有界队列（2 项）、呈现参数在渲染线程捕获、
+  `AcquireNextImage`/`WaitIdle` 先排空路由
+- [x] T2.6 `RenderThreadContext`：出口层 ✅ + **718 处帧内解析已全部迁移** ✅ + 7 个样例登记设备 ✅ + 帧上下文线程局部发布 ✅；**最终形态定为「上下文优先 + 创建期设备」**（附录 H §19.6 有崩溃栈证明硬删回退不可行）
+- [x] A-1 `RHI` 命令流 —— L1 契约+翻译 ✅、L2 提交管道 ✅；L3 单 pass 命令化**撤销**（§12.11）；L4-3 整帧命令化为独立项目（§12.12）
+- [x] A-3 资源句柄化 —— **64 批全部完成**（§16.2/§16.4），仅两处记录在案的例外
+- [x] A-5（**读回部分**）—— ✅ 完成：06 的 dump 读回改为 timeline fence（`SetTimelineSignal` +
+  `FlushAndWait` + `WaitForFence`），去掉设备级 `WaitIdle`；判据 = 20/20 逐字节一致、无新增 VUID
+- [x] A-5 —— PSO 句柄版队列已落地（`6d944ae`）；接生产者需先做 desc 生命周期改造（§16.7.4，暂缓）。ImGui 的 PSO/纹理由第三方后端直接创建，判为**范围外**（§16.7.2）
+- [x] T3.1 `ParallelRecordHelper` 抽取 —— ✅ 完成（`5ba4705`）：池 + 分块 + 归属声明 + 按块序合并抽成
+  `Pipeline/ParallelRecordHelper`，Forward 改用它；判据 = 冻结配置 A/B 逐字节一致
+- [x] T3.2 Deferred 接入并行录制 —— ✅ 完成（`ac496e2`）：GBuffer CPU 路径改并行录制；踩出两处必要修正
+  （次级列表不继承绑定 ⇒ 每块自己绑描述符集；GBuffer 的 pass 必须 `allowSecondary=true`，否则命中
+  `vkCmdExecuteCommands-contents-09680`）；判据 = 20/20 逐字节一致 + 无新增 VUID
+- [x] T3.3 评估完成 —— 结论**不做**（PT/Nanite 都只有 1 条 draw，无并行收益；附录 F §17.2）
+- [x] T3.4 完成 —— 新增 `kMinDrawsForParallel = 64` 阈值并接入两个调用方（`a70aa36`；附录 F §17.3）
+- [x] T4.1 ImGui 后端录制归属 —— **样例侧已实现**（`imgui.EndFrame(cmdList)` 已在命令 2 内、由渲染线程执行）；**编辑器侧待 T2.5**
+- [x] T4.2 消除 ImGui 专用 RHI 后门 —— **判为范围外**：PSO/纹理/描述符池由第三方 `imgui_impl_vulkan` 用原生 Vulkan 创建（附录 I §20.3，与 A-5 结论一致）
+- [x] T4.3 面板改读快照 —— **判为不做**：快照的前提是「面板与渲染分处两个线程」，而编辑器是单线程结构（附录 I §20.4）
+- [x] T4.4 热重载 PSO 替换改渲染线程执行 —— **现状已满足**：`EditorApp` 不使用渲染线程，`ShaderHotReload::Poll()` 与渲染同线程（附录 I §20.2）
+- [x] T5.1 —— **判定不做**（现有 `CpuSections` 是渲染线程内子阶段；三段计时的价值集中在背压观测，已由帧率/CPU 占用间接验证；埋点位置记录在附录 G §18.1）
+- [x] T5.2 —— **无需调优**（`kMaxFramesInFlight=3` 在模式 2 下稳定，附录 G §18.2）
+- [x] T5.3 —— **判定不做**（稳态帧内无创建；A-3 已解决所有权；触发条件记录在附录 G §18.3）
+- [x] T5.4 文档更新（2026-10-09：原文档 24 合并入 15 的 §13–§21，本文头部与 T5.4 行同步）
+
+---
+
+## 10. 附录 B：自动化迁移检查
+
+以下断言建议做成脚本（如 `Tools/check_threading.py`）在阶段退出时跑一遍：
+
+| 检查 | 期望 |
+|---|---|
+| **B1** `Engine/Render/` 渲染期函数签名是否出现 `he::World&` / `SceneGraph&` | 阶段 1 后为 **0**（加载期例外需逐个白名单） |
+| **B2** `Samples/` 是否出现 `AcquireNextImage` / `Present` / `CreateCommandList` / `Submit` | 阶段 2 后为 **0** |
+| **B3** `Engine/Render/` 帧循环路径内是否出现 `CreateBuffer` / `CreateTexture` / `CreateGraphicsPipeline` | 阶段 2 后为 **0**（Initialize/OnResize 白名单） |
+| **B4** 是否出现无超时的 `WaitForFence(...UINT64_MAX)` 在帧循环内 | 为 **0**（铁律 3） |
+| **B5** `IRHIDevice` 的创建/销毁入口是否都有 `HE_ASSERT_RENDER_THREAD()` | 覆盖 100% |
+| **B6** 渲染输出一致性（`cmp_dumps.py` 前后对比） | 每阶段退出时**逐像素一致** |
+
+---
+
+## 11. 参考
+
+- [Parallel Rendering Overview for Unreal Engine（Epic 官方）](https://dev.epicgames.com/documentation/unreal-engine/parallel-rendering-overview-for-unreal-engine?application_version=5.4&lang=zh-CN)——Render Thread / RHI Thread / 并行命令录制的职责划分
+- 本仓库：[15.多线程架构与渲染实现分析.md](../HugEngine引擎介绍/15.多线程架构与渲染实现分析.md)、[02.架构UML与可扩展性分析.md](../HugEngine引擎介绍/02.架构UML与可扩展性分析.md)（§17 代码级债务）、[04.功能缺口与对标分析.md](../HugEngine引擎介绍/04.功能缺口与对标分析.md)（§16 债务清单）、[22.开发与验证手册.md](../HugEngine引擎介绍/22.开发与验证手册.md)（验证工具与流程）
+
+---
+
+## 12. 附录 C：升级到 UE 三线程模型的增量路径
+
+> 本附录回答："本方案（方案 B）将来若要转成 UE 的 **Game → Render → RHI** 三线程模型，需要改什么、哪些决定必须提前做。"
+> 阅读顺序：§12.5（必须提前定的决定）→ §12.6（逐任务改动）→ §12.8（落地策略）。
+
+### 12.1 一句话：分水岭在 T2.6
+
+| 如果 T2.6 的 `RenderThreadContext` 被设计成… | 那么升级到 A 是… |
+|---|---|
+| **吐命令流**（渲染线程只 push `RHICommand`，不碰 Vulkan API） | **加一层线程 + 换执行位置**（增量 +6~12 人日，见 §12.9） |
+| 直接调 Vulkan（`IRHIDevice::Create*`、`vkCmd*`） | **重写渲染层**（命令流与句柄化都要事后补，面极大） |
+
+因此 §5 阶段 0 额外预埋了 **T0.6（命令流契约）** 与 **T0.7（资源句柄化）** 两个任务。
+
+### 12.2 本质差异
+
+```
+B（本方案）:   渲染线程 ──► IRHICommandList（直接产 vkCmd*）──► vkQueueSubmit ──► Acquire/Present
+A（UE 三线程）: 渲染线程 ──► RHI 命令流（纯数据，零 API 调用）
+                              RHI 线程 ──► 翻译成 vkCmd* ──► vkQueueSubmit ──► Acquire/Present
+```
+
+职责对照（对应 UE 的 `FRHICommandListExecutor` / `FDynamicRHI` / `FRHIThread`）：
+
+| 环节 | B（渲染线程一人全包） | A（拆成两段） |
+|---|---|---|
+| 剔除 / 收集 / 建帧图 | 渲染线程 | 渲染线程（不变） |
+| 记录"要做什么" | 直接生成 `vkCmd*` | **只 append `RHICommand`**（渲染线程） |
+| 翻译成 API 调用 | 记录时立即发生 | **RHI 线程** |
+| `vkQueueSubmit` / `Acquire` / `Present` | 渲染线程 | **RHI 线程（唯一提交者）** |
+| fence 与背压 | 两层（游戏↔渲染） | **三层**（游戏↔渲染↔RHI） |
+
+### 12.3 必须新增的 5 件东西
+
+| # | 新增件 | 说明 | 难度 |
+|---|---|---|---|
+| **A-1** | **抽象 RHI 命令流**（记录/执行分离） | 渲染线程 push 类型擦除的命令载荷，RHI 线程 pop 并翻译。**不要用 `std::function`**：每帧数千条命令会造成堆分配与虚调用开销，UE 用"类型擦除 + 内联参数存储"（`FRHICommand`） | **最高** |
+| **A-2** | **RHI 线程** | 命令流唯一消费者、唯一提交者；`Submit` / `SubmitAll` / `AcquireNextImage` / `Present` / fence 全归它 | 中 |
+| **A-3** | **资源创建命令化 + 句柄化** | `std::unique_ptr<IRHIBuffer>` 的"同步立即给所有权"语义必须换成句柄（创建在 RHI 线程执行） | **面最广** |
+| **A-4** | **三层背压与同步点** | 游戏→渲染、渲染→RHI 各自有在飞上限；语义对齐 UE 的 `FRHIThread::Sync()` | 中 |
+| **A-5** | **ImGui / PSO / 读回的命令化** | UI 产 `ImDrawData` → 命令流；PSO 走已有异步队列；`Map()` 改轮询或延迟取值 | 中 |
+
+### 12.4 现状接口的改造面（含两个有利条件）
+
+| 现状 | 位置 | 对 A 的含义 |
+|---|---|---|
+| `CreateSwapChain` / `CreateCommandList` / `CreateBuffer` / `CreateTexture` / `CreateSampler` / `CreatePipelineState` 均返回 **`std::unique_ptr<T>`** | `Engine/RHI/RHI/RHI.h:52-58` | ⚠️ **最大改造面**：同步所有权语义 ⇒ 必须句柄化（A-3） |
+| `CreateTextureMipStorageView` / `CreateTextureMipSampledView` 返回 **`void*`**；`CreateImGuiDescriptorPool` / `CreateImGuiRenderPass` 返回 **`void*`** | `RHI.h:127-135`、`RHI.h:163-167` | ⚠️ A 方案中"立即返回原生句柄"全部作废，须改为命令流内的抽象引用 |
+| `Submit()` 在命令列表上、`Submit(IRHICommandList*)` / `SubmitAll(Span<...>)` 在 device 上 | `Engine/RHI/RHI/CommandList.h:283`、`RHI.h:172`、`RHI.h:208` | A 方案中只允许 RHI 线程调用 |
+| ✅ `CreateDescriptorSetLayout` 返回 **`DescriptorSetLayoutHandle`**、`CreateFence` 返回 **`RHIFenceHandle`** | `RHI.h:99`、`RHI.h:188` | **句柄式 API 已有先例**，可照此推广到 buffer/texture/PSO |
+| ✅ 已有 `EnqueuePSOCreate` / `ProcessPSOCreateQueue` / `GetPendingPSOCreateCount` | `RHI.h:82-86` | **PSO 异步创建的雏形已存在**，A-5 只需扩展它，不必从零设计 |
+
+### 12.5 B 方案里"必须提前定"的 5 个决定
+
+| B 阶段的决定 | A 阶段的要求 | 建议提前到 |
+|---|---|---|
+| 资源创建同步返回 `unique_ptr`，各 Pass 用 `unique_ptr` 成员持有 | 改为**句柄 + 延迟解析**（并由 `FrameRetireQueue` 承担生命周期） | **阶段 0（T0.7）**——否则要二次动全工程 200+ 处持有者 |
+| `BufferDesc::initialData` 同步上传（`VulkanResources.cpp:486,651`） | 拷贝入队，RHI 线程执行 | 阶段 0 |
+| device 由渲染线程持有并直接调 `Create*` | device 归 RHI 线程；渲染线程只拿"命令接口" | 阶段 2（T2.6，分水岭） |
+| 交换链归渲染线程 | 归 **RHI 线程** | 阶段 2 起就抽象成 `ISwapChainController`，不让管线直接持有 |
+| ImGui 后端直接写命令缓冲（`EditorApp.cpp:536-542`） | UI 只产 `ImDrawData` → 命令流 | 阶段 4，但接口**不得暴露** `VkCommandBuffer` |
+
+### 12.6 逐任务改动表
+
+| 原任务 | A 方案的改法 | 增量 |
+|---|---|---|
+| T0.1 线程断言 | 断言分**双角色**：记录期 = 渲染线程、执行期 = RHI 线程 | 小 |
+| **T0.6（新增）** | `RHICommandList` 记录端契约 + `RHICommand` 载荷（§12.7） | **大** |
+| **T0.7（新增）** | 资源句柄化（`RHIBufferHandle` / `RHITextureHandle` + generation） | **大** |
+| T0.3 / T0.4 命令队列与帧票据 | 基本不变，额外加一层 RHI 背压计数 | 小 |
+| **T1.x 场景快照（阶段 1）** | ✅ **完全复用，零改动** | **0** |
+| T2.2 交换链迁移 | 目标线程从"渲染线程"改为 **RHI 线程** | 小 |
+| T2.3 资源创建服务 | 从"转发到渲染线程执行"改为"**命令化，RHI 线程执行**" | 中 |
+| **T2.6 `RenderThreadContext`** | 从"RHI 唯一出口"升级为"**只能吐命令流**"，不再暴露 device | **大** |
+| **阶段 2.5（新增）** | RHI 线程落地：消费命令流 + 唯一提交 + fence 管理 | **大** |
+| T3.1~T3.4 并行录制 | worker 产出的命令流片段由 **RHI 线程合并翻译**（UE 的 `TranslateCommandList` 模式） | 中 |
+| T4.1~T4.4 编辑器 / ImGui | UI 命令化；后门接口改为命令流内的描述符池引用（`RHI.h:163-169` 移除） | 中 |
+| T5.x 验收调优 | 增加三层背压调优、提交批优化、`enableRHIThread` 运行期开关 | 中 |
+
+### 12.7 命令流接口草案
+
+```cpp
+// Engine/RHI/RHI/RHICommandList.h —— 记录端（渲染线程唯一可调，对应 UE 的 FRHICommandList）
+namespace he::rhi {
+
+/// 一条命令的载荷：类型擦除 + **内联存储**。
+/// 为什么内联：每帧可能有数千条命令，逐条堆分配会成为新的瓶颈（UE 同做法）。
+struct RHICommand {
+    u32 type;                            // 命令类型（SetPipeline / DrawIndexed / PipelineBarrier / …）
+    u32 payloadSize;                     // 实际参数字节数
+    alignas(16) u8 inlinePayload[64];    // 小参数直接内联；超出 64B 的走列表私有 arena
+};
+
+/// 命令列表 = 命令流 + 参数 arena。渲染线程写，RHI 线程读；交接后只读（铁律 2）。
+class RHICommandList {
+public:
+    /// 记录一条命令：参数按值内联，禁止捕获会被游戏线程继续修改的引用
+    template <typename TPayload>
+    void Enqueue(u32 type, const TPayload& payload) {
+        static_assert(sizeof(TPayload) <= 64, "参数超过 64B，请走 AllocArena 通道");
+        // … 追加到 m_Commands
+    }
+
+    /// 大块数据（常量缓冲、上传源、SBT 记录）写入本列表私有 arena，RHI 线程执行期读取
+    [[nodiscard]] void* AllocArena(u64 size, u64 alignment = 16);
+
+    /// 标记本列表为此帧的提交边界（RHI 线程翻译完成后执行一次 submit）
+    void MarkSubmitBoundary() { m_HasSubmit = true; }
+
+private:
+    std::vector<RHICommand> m_Commands;
+    // … arena / 提交标记 / 目标队列类型
+};
+
+/// 资源句柄：取代 unique_ptr 的同步所有权语义；generation 用于检测悬挂引用
+struct RHIBufferHandle  { u32 index = 0; u32 generation = 0; };
+struct RHITextureHandle { u32 index = 0; u32 generation = 0; };
+
+} // namespace he::rhi
+```
+
+```cpp
+// Engine/RHI/Threading/RHIThread.h —— 执行端（对应 UE 的 FRHICommandListExecutor + FRHIThread）
+namespace he::rhi {
+
+/// RHI 线程：命令流的唯一消费者与唯一提交者。
+/// 职责：翻译 RHICommand → 平台 API；执行 queue submit；Acquire/Present；fence 管理。
+/// 对应关系：等价于 UE 的 r.RHIThread.Enable=1 模式。
+class RHIThread {
+public:
+    bool Start(IRHIDevice* device);          // 设备由本线程创建与持有
+    void Stop();
+
+    /// 渲染线程：提交一帧命令流（有界队列，满则渲染线程阻塞 —— 第二层背压）
+    void EnqueueCommandList(RHICommandList&& list);
+
+    /// 渲染线程：同步点（仅当确实需要"GPU 已完成某事"时使用，禁止进入帧循环）
+    void Sync();
+
+    static bool IsCurrent();
+
+private:
+    void ThreadMain();                        // 消费命令流 → 翻译 → 提交 → 呈现
+    std::thread     m_Thread;
+    RHICommandQueue m_Queue;                  // 有界
+    // … fence / 提交批 / 背压计数
+};
+
+} // namespace he::rhi
+```
+
+### 12.8 落地策略：把 A 做成"加开关"，而不是重写
+
+| 步骤 | 内容 | 验收 |
+|---|---|---|
+| **A1** | 命令流落地，**执行位置 = 渲染线程就地执行**（翻译与执行都在渲染线程） | 行为与 B **逐像素一致**、帧时间不退化 ⇒ 证明命令流层本身不引入开销 |
+| **A2** | 新增 `RHIThread`，执行位置切到它（`enableRHIThread` 开关）；**两个位置共用同一套命令流代码** | 主线程与渲染线程零 API 调用；提交在 RHI 线程；validation（含 sync）零告警 |
+| **A3** | 三层背压调优 + **提交批优化**（合并 barrier、批量描述符更新、批量提交） | `vkQueueSubmit` 调用次数下降；渲染线程可跑前于 RHI 线程 |
+
+> 运行期开关直接对齐 UE 的 `r.RHIThread.Enable`：**关 = 渲染线程就地执行；开 = RHI 线程执行**。
+> 这也解释了为何 UE 能把它做成可选——它的结构从第一天起就是"记录/执行分离"。
+
+### 12.9 代价与收益
+
+| 项 | 评估 |
+|---|---|
+| 额外工作量（不预埋） | 命令流层 + RHI 线程 + 句柄化改造：在 B 的 33~62 人日之上 **+15~30 人日** |
+| 额外工作量（阶段 0 预埋 T0.6/T0.7） | 增量降到 **+6~12 人日**（预埋成本约 +5~8 人日） |
+| 收益兑现条件 | ① 落地 **D3D12 后端**（描述符堆/PSO 开销大，RHI 线程收益显著）；② 实测"提交 + 驱动时间"占比 > 10~15%；③ 需要渲染线程在提交期间继续跑下一帧 |
+| 新增风险 | 三层时序难以调试；**命令流翻译本身可能成为新瓶颈**——这正是必须先做 A1（就地执行版）验证的原因 |
+| 与 §7 风险表的关系 | §7 的 R1~R7 全部适用；额外增加 R8「命令流翻译开销」与 R9「三层背压抖动」 |
+
+### 12.10 不建议的做法
+
+| 做法 | 为什么不好 |
+|---|---|
+| 先把 B 做完，再回头把 `vkCmd*` 调用"包装"成命令流 | 等于把渲染层重写一遍；且 `unique_ptr` 资源持有者已扩散到 200+ 处 |
+| 用 `std::function` 作为命令载荷 | 每帧数千次堆分配 + 间接调用；应为类型擦除 + 内联存储 |
+| 一开始就上三线程 | 录制耗时（16.4 ms，见 §1.5）才是当前瓶颈，三线程治不了它；且前置改造面最大 |
+| 让渲染线程与 RHI 线程都能调 `IRHIDevice::Create*` | 资源创建就必须线程安全化，等于把 RHI 改成两套锁；应保持"创建只在 RHI 线程" |
+
+---
+
+## 13. 附录 D：阶段 0 T0.2 帧内同步 RHI 调用清单
+
+> **性质**：阶段 0 T0.2 的产出（**只读盘点，不改代码**）。这张清单是阶段 2（T2.2/T2.3/T2.6）的派工单，
+> 也是附录 B 各阶段退出闸门的可执行版本。
+
+### 13.1 怎么复现
+
+```powershell
+python Tools\check_threading.py                  # 汇总（Engine/Render）
+python Tools\check_threading.py --detail         # 附每条 file:line + 所属函数
+python Tools\check_threading.py --root Samples   # 样例侧（附录 B 的 B2 口径）
+python Tools\check_threading.py --gate           # 闸门：帧内命中 > 0 时退出码 1（各阶段退出用）
+```
+
+### 13.2 判定口径（刻意保守）
+
+- **类别**：`SWAPCHAIN`（拿图/呈现）、`WAIT`（等待型提交 / 空闲等待）、`CREATE`（设备调用形态
+  `x->Create*()`，含 `CreateTransient*`）、`MAP`（映射缓冲访问：直写上传或 GPU→CPU 读回）、
+  `UPLOAD_DESC`（`desc.initialData` 创建期上传）。
+- **帧内 vs 加载期**：取该行**所属函数名**，含 `Initialize / Init / Shutdown / Resize / Load / Upload /
+  Setup / Construct / OnCreate` 之一 ⇒ 加载期，其余一律帧内。白名单**故意不含 `Build` / `Create`**：
+  `BuildFrameGraph` 这类名字里有 Build 的函数**每帧都跑**，含进去会把真正的帧内创建藏起来。
+- **已知两类噪声**（清单用于排序与派工，不当作证明）：
+  1. **辅助函数误判为帧内**：如 `AA_TAA::CreateHistoryTextures` 只在 `Initialize` 里被调用，但函数名
+     不含白名单词 ⇒ 记成帧内（保守方向：多报，不会漏报）；
+  2. **头文件声明/文件作用域**：如 `RenderGraph.h` 内的声明行记为 `<文件作用域>` ⇒ 记成帧内。
+  反向的漏报风险同样存在（多行函数签名会让"所属函数"退化成上一个可识别的函数名）。
+
+### 13.3 清点结果（2026-09-24，multi_thread 分支）
+
+`Engine/Render`（196 个文件）：
+
+| 类别 | 帧内 | 加载期 | 处置（方案对应任务） |
+|---|---|---|---|
+| `SWAPCHAIN` | **0** | 0 | 交换链调用全在样例侧 ⇒ 见下表 + C2 |
+| `WAIT` | **2** | 2 | 阶段 2：只允许渲染线程，帧内禁止（铁律 3）；加载期保留 |
+| `CREATE` | **211** | 209 | 阶段 2 T2.3：帧内改走 `ResourceCreationService`（步 1 同步转发，仅限加载/重建） |
+| `MAP` | **142** | 22 | 阶段 2 T2.6：读回改"登记 + N 帧后取值"（`FrameRetireQueue`）；直写改入队拷贝（铁律 2） |
+| `UPLOAD_DESC` | **21** | 14 | 阶段 2 T2.3：创建期上传经创建服务在渲染线程执行 |
+| **合计** | **376** | 247 | 阶段 2 退出时帧内必须为 0（加载期用例保留但需经创建服务） |
+
+`Samples`（7 个样例 + 编辑器）：
+
+| 类别 | 帧内 | 加载期 | 说明 |
+|---|---|---|---|
+| `SWAPCHAIN` | **18** | 0 | 与 C2 一致：`AcquireNextImage` / `Present` 全在样例主循环，T2.2 整体迁入渲染线程 |
+| `WAIT` | **15** | 1 | 样例里的等待型提交，随 T2.4 的循环改造一起收口 |
+| `CREATE` | **66** | 2 | 样例侧资源创建（多为加载期语义，但因函数名未命中白名单而记帧内） |
+| `MAP` | **6** | 0 | — |
+| `UPLOAD_DESC` | **22** | 0 | — |
+| **合计** | **127** | 3 | 附录 B 的 **B2**：阶段 2 后样例侧这些调用应为 0 |
+
+### 13.4 代表点与优先级（帧内命中按文件聚合）
+
+| 类别 | 最集中的文件（帧内命中数） | 已核对的具体点 |
+|---|---|---|
+| `CREATE` | `Lumen/LumenScene_SurfaceCache.cpp×32`、`Nanite/NaniteRaster.cpp×26`、`Lumen/LumenSDF.cpp×18`、`Pipeline/ParticleRenderer.cpp×17`、`Pipeline/RTPass.cpp×12`、`Pipeline/LightingPass.cpp×11` | `RenderGraph.cpp:441/447` —— 帧图 `Execute` 内瞬态分配失败时**直接调用 `device->CreateTexture/CreateBuffer`**；`AA_FXAA.cpp:114`、`AA_SMAA.cpp:285` 等 PSO 辅助函数 |
+| `MAP` | `Pipeline/ParticleRenderer.cpp×20`、`Lumen/LumenScene_SurfaceCache.cpp×18`、`Nanite/NaniteRenderer.cpp×15`、`Nanite/NaniteRaster.cpp×13`、`Nanite/NaniteCull.cpp×12`、`Lumen/LumenSDF.cpp×9` | `SceneRenderer.cpp:102`（对象数据直写）、`AA_TAA.cpp:198`（TAA 常量直写）、`DDGITracePass.cpp:152`/`GI_RSM.cpp:201`（GI 常量直写）、`NaniteRenderer.cpp:736` 起（GPU 计数读回） |
+| `UPLOAD_DESC` | `Pipeline/RTPass.cpp×6`、`Lumen/LumenScene_SurfaceCache.cpp×3`、`Nanite/NaniteStream.cpp×3`、`Pipeline/LightingPass.cpp×3` | `LumenSDF.cpp:2249`、`NaniteRaster.cpp:145`（dummy VB 零填充） |
+| `WAIT` | `Lumen/LumenScene_Irradiance.cpp:166`、`Nanite/NaniteStream.cpp:388` | 两处都在帧内路径上 ⇒ 阶段 2 起必须改造（铁律 3） |
+
+**结论**：阶段 2 的主要工作量集中在 **Lumen 表面缓存 / Nanite（光栅、剔除、流式）/ 粒子 / RT**，以及
+**帧图 `Execute` 的兜底创建路径**；这三块正好也是《Lumen设计与实现》里 CPU 录制耗时的大头，
+因此 T2.3 与 T3.2 应当合起来排期，避免"先搬到渲染线程、再为并行录制改一遍"。
+
+### 13.5 作为闸门
+
+阶段退出时用 `--gate`：帧内命中非 0 即失败。各阶段期望：
+
+| 阶段 | 期望 |
+|---|---|
+| 阶段 0（本阶段） | 只登记、不设闸门（本附录即产出） |
+| 阶段 1 | `Engine/Render` 渲染期不再出现 `he::World&` / `SceneGraph&`（附录 B 的 B1，另行纳入脚本） |
+| 阶段 2 | `--root Engine/Render --gate` 与 `--root Samples --gate` 均通过（帧内为 0） |
+| 阶段 3/4 | 保持为 0，且 `WAIT` 帧内不得回升（铁律 3） |
+
+---
+
+---
+
+## 14. 附录 E：mesh 注册表设计草案（T1.2c / T1.4 骨骼消费侧的前置）
+
+> **为什么单独一节**：T1.2c（材质参数快照化）与骨骼消费侧都卡在同一件事上 —— 渲染侧目前通过
+> **`MeshComponent*` 指针**拿到顶点/索引缓冲与材质数据（`SceneRenderer::Prepare` 的 `DrawItem`、
+> `ForwardPipeline` 的骨骼上传），而**快照不允许带指针**（§4.2 的硬约束）。本节把这块的设计一次定清，
+> 后续按它实施即可；实施前**不需要**再改口径。
+
+### 14.1 目标与边界
+
+- **目标**：让"快照里的 `meshIndex`"成为渲染侧取网格资源的唯一入口 ⇒ 删除渲染期对
+  `MeshComponent*` 的依赖（这正是附录 B1 里 82 处的**主要来源**）。
+- **不做**：不改顶点布局、不改绘制路径的绑定顺序、不改实例化/蒙皮的数据来源（它们已经索引化或另有入口）。
+
+### 14.2 API 草案
+
+```cpp
+// Engine/Render/Threading/MeshRegistry.h —— 渲染侧网格注册表（阶段 1）
+namespace he::render {
+
+/// 一条网格记录（只存**渲染侧可达**的值；不持有组件所有权）
+struct MeshRegistryEntry {
+    rhi::IRHIBuffer* vertexBuffer = nullptr;   // 顶点缓冲（所有权仍在组件/资产，注册表只借指针）
+    rhi::IRHIBuffer* indexBuffer  = nullptr;
+    u32  indexCount = 0;                       // 索引数（间接绘制参数的兜底来源）
+    u32  materialID = 0;                       // bindless 纹理基索引（与组件同源）
+    bool instanced  = false;                   // 实例化网格：顶点由实例路径提供
+};
+
+class MeshRegistry {
+public:
+    /// 注册或**更新**（同一 key 重复注册 = 更新，用于组件重建缓冲的场景）；返回从 1 起的 meshIndex
+    u32  Register(const void* key, const MeshRegistryEntry& entry);
+    /// 注销：索引回到空闲表，且**旧 meshIndex 从此解析为 nullptr**（悬挂引用立刻可见，而不是指错资源）
+    void Unregister(const void* key);
+    [[nodiscard]] const MeshRegistryEntry* Find(u32 meshIndex) const;   // 越界/已注销 ⇒ nullptr
+    [[nodiscard]] u32 Count() const;
+    void Clear();
+};
+
+} // namespace he::render
+```
+
+### 14.3 生命周期规则（必须遵守，否则又是一类悬挂）
+
+1. **谁注册**：持有组件/资产的一侧（加载期或组件创建时）；`key` 用组件地址，注册表**只借不拥有**缓冲。
+2. **禁止帧内注销**：注销要在"确认渲染侧不再引用该索引"之后（沿用 `FrameRetireQueue` 的 N 帧延迟思路）；
+   帧内注销会让当帧已录制的绘制指到空记录 ⇒ 与"快照按帧轮换"同一类问题。
+3. **索引从 1 起**，0 保留为"未注册"哨兵（与 `RHIBufferHandle` 的约定一致）。
+4. 与 **T0.7 句柄化**的关系：注册表内部将来换成 `RHIBufferHandle`（而不是裸 `IRHIBuffer*`），
+   这样缓冲释放后的悬挂引用由**代次**检出；本阶段的裸指针版本是过渡（已在注释里标明）。
+
+### 14.4 两个首个消费者（实施顺序）
+
+| 步骤 | 内容 | 判据 |
+|---|---|---|
+| **E-1** | **骨骼上传**（`ForwardPipeline` 里把 `sm.boneMatrices` 写进 `sm.boneBuffer` 的那段）改为：遍历快照的骨骼条目（`skinMatrixOffset/Count`），用 `meshIndex` 从注册表取骨骼缓冲 | 与旧实现**逐位一致**（旧实现逐行转写为参考实现 + `memcmp`） |
+| **E-2** | **`SceneRenderer::Prepare`** 的材质填充：材质输入改为"收集侧跑 `FillObjectData` 并把结果放进 `SnapshotDrawItem::object`"（§9 T1.2c 已定），`DrawItem` 不再携带 `MeshComponent*`；**视锥剔除仍在渲染线程**（它只需要快照里的世界 AABB） | 同上；并核对 `06.GILab` 的 28 个转储目标 |
+| **E-3** | **第 5 处口径漂移的裁决**：`SceneRenderer` 收集 `SplineMeshComponent` 而 `GPUScene`/`BuildObjects` 不收集 —— 二者必须取其一（建议**统一为收集**，并在提交里给出前后对比） | 提交里写明"修正"还是"改版"及其依据 |
+
+**E-3 配方（已查清，照做即可；2026-09-24）**：
+
+- 可复用的现成件（都在 `Engine/Render/Pipeline/Material.h`，全部 `inline`）：
+  `PBRMaterial`（:77）、`GetDefaultMaterial()`（:109）、`FillObjectData(GPUObjectData&, const PBRMaterial&)`（:129）。
+- 现在要抽出来的映射在 `Engine/Render/SceneRenderer.cpp:110-125`（组件字段 → `PBRMaterial` 的
+  10 项：`baseColorFactor / emissiveFactor / metallicFactor / roughnessFactor / aoFactor /
+  alphaCutoff / alphaMode / doubleSided / unlit / 5 条纹理路径`）。
+- **落点**：把该映射做成 `SceneSnapshotBuilder::MakePBRMaterial(const he::MeshComponent&)`
+  （`static`，实现在 builder 的 .cpp 里；`SceneRenderer` 改为调用它 ⇒ 只有一份口径）。
+  `CollectObjectItem` 在填完 `materialID` 后调用它并 `FillObjectData(item.object, mat)` ——
+  **在收集侧把材质算完**（纯计算），快照因此不必携带纹理路径字符串。
+- `SceneRenderer::Prepare` 改为消费快照（`entry` 不再需要 `MeshComponent*`）：
+  剔除仍用快照的世界 AABB 在渲染线程做；`DrawItem` 里的网格引用换成 `meshIndex`
+  （顶点/索引缓冲从 `MeshRegistry::Find` 取，E-1/E-2 已就绪）。
+- 判据：① `FillObjectData` 的输出与旧路径**逐位**比较（把 `SceneRenderer.cpp:110-125` 的映射
+  逐行转写为参考实现 + `memcmp`）；② `06.GILab` 的 28 个转储目标粗筛（噪声底噪 ≈4.5k 像素）。
+
+**注册所有权（E-2 开工前必须先定 —— 已定，避免下一轮再决策）**：注册表由**创建/替换网格缓冲的那一侧**
+填充，即 `MeshComponent::SetMeshData` 的调用点（资产加载器 / 样例的加载期），**不在渲染帧内**注册；
+组件销毁时在同一处注销（且必须帧外，见 §14.3 第 2 条）。渲染侧只做 `Find`。
+这样"谁创建谁注册"与缓冲所有权一致，也保证注册表在帧内**只读**（与快照同一条纪律）。
+
+**E-2 的具体步骤（建议按此顺序，每步单独提交 + 逐位判据）**：1. 给 `ForwardPipeline` 加 `MeshRegistry m_MeshRegistry;`（成员）与最小注册点：**加载期**遍历一次
+   `SkeletalMeshComponent`，用组件地址作 key 注册其顶点/索引缓冲与 `indexCount`；
+2. 骨骼上传改为：遍历快照里 `skinMatrixCount > 0` 的条目 → `Find(item.meshIndex)` 取缓冲 →
+   写入 `skinMatrices[offset, offset+count)`；旧实现（遍历组件 + `sm.boneBuffer`）逐行转写为参考实现
+   做 `memcmp` 逐位比较；
+3. 完成 E-2 后复测 `--world-deps`（预期 `ForwardPipeline.cpp` 的 7 处与 `.h` 的 12 处各降若干），
+   并把 `WORLD_DEP_BASELINE` 手动下调到新值。
+
+**E-2 代码骨架（真实字段名/调用，可直接照抄；`meshIndex` 字段已于 2026-09-24 落在 `MeshComponent` 上）**：
+
+```cpp
+// ① 注册（加载期；只做一次 —— 用 bool m_MeshRegistryReady 守；必须在首次构建快照之前）
+//    ForwardPipeline.cpp / DeferredPipeline.cpp 同款
+if (!m_MeshRegistryReady) {
+    world.ForEach<he::SkeletalMeshComponent>([&](he::Entity, he::SkeletalMeshComponent& sm) {
+        if (sm.GetIndexCount() == 0u) return;                 // 与收集口径一致：无索引不登记
+        MeshRegistryEntry e;
+        e.vertexBuffer = sm.GetVertexBuffer().get();          // 只借指针，所有权仍在组件
+        e.indexBuffer  = sm.GetIndexBuffer().get();
+        e.indexCount   = sm.GetIndexCount();
+        e.materialID   = sm.materialID;
+        e.instanced    = true;                                // 骨骼网格：顶点由蒙皮路径提供
+        sm.meshIndex   = m_MeshRegistry.Register(&sm, e);      // 回填：快照靠它索引
+    });
+    m_MeshRegistryReady = true;
+}
+
+// ② 消费（骨骼上传：遍历快照条目而不是组件）
+SceneSnapshotBuilder::BuildObjects(world, sg, camera, {}, nullptr, m_Snapshot);   // 若尚未构建
+for (const SnapshotDrawItem& item : m_Snapshot.draws) {
+    if (item.skinMatrixCount == 0u) continue;
+    const MeshRegistryEntry* entry = m_MeshRegistry.Find(item.meshIndex);
+    if (!entry) continue;                                     // 未注册/已注销 ⇒ 跳过（可见化，而不是指错资源）
+    // …把 m_Snapshot.skinMatrices[item.skinMatrixOffset, +skinMatrixCount) 写进 entry 对应的骨骼缓冲
+}
+```
+
+> 判据：把"遍历组件 + `sm.boneBuffer`"的旧实现**逐行转写**成参考实现，与上面①②的结果做 `memcmp`
+> 逐位比较（全帧转储只作粗筛，原因见 §9 T1.3a 的噪声底噪记录）。
+
+### 14.6 会话交接点（2026-09-24 更新，`multi_thread` 分支，81 条提交未推送）
+
+**当前绿灯状态（最近一次复测）**：单测 **390 例 / 71750 断言全通过**；四项闸门**都在基线**
+（帧内同步 RHI 调用 376 / B1 世界依赖渲染期 **82** / 组件指针渲染期 **20** / 资源持有者 277）；
+`acceptance_sweep.ps1 -OnlyNanite` **PASS** 且两类指纹（`1C15AB72E688B530` / `750CC247BF8B9C3D`）
+未变；`06.GILab` 冒烟在 Forward/Deferred 双管线完整快照之后 = **0 像素差异**。
+
+**已完成的阶段 1 工作**（详见 §9）：快照契约、光源/物体/环境/骨骼/粒子收集、三管线消费、
+E-1 注册表本体、E-2① 注册点（**三条管线对称**）、E-2② 骨骼矩阵走快照、E-3① 材质映射唯一化、
+E-3② 前半（收集侧算材质）、E-4 样条网格口径统一、快照稳态零分配（两处补漏）、
+Forward/Deferred 完整快照 + 自校准容量预留。
+
+**下一步（E-3② 后半，按 §14.5 的三类清单做）**：
+1. 删掉 `SceneRenderer::DrawItem::mesh`（组件指针闸门的核心），消费者改用 `meshIndex`：
+   顶点/索引缓冲从各管线自己的 `MeshRegistry::Find` 取（三条管线的注册已就绪）；
+   视锥剔除继续用快照的世界 AABB 在渲染线程做。
+2. Forward 的两处"地址反查对象条目"已有整数优先版（`meshIndex`），删字段后把兜底分支一并去掉。
+3. `RTPass` 的 BLAS 缓存键从 `MeshComponent*` 换成 `meshIndex`（13 处），并处理缓存重建。
+4. 每步完成后复测 `python Tools/check_threading.py --mesh-ptrs` 并把 `MESH_PTR_BASELINE` 下调
+   （当前 20 → 目标 0）。
+
+**再之后**：T1.5（三条管线的帧入口签名从 `(world, sg, camera)` 改为收 `const FrameSceneSnapshot&`，
+样例在游戏线程构建快照）⇒ B1 从 82 开始下降；然后进入阶段 2（真线程 + 设备/交换链迁移 + 样例循环）。
+
+**开工前的固定命令（顺序不可省）**：
+```powershell
+# 1) 确认没有并发构建（否则会出现"假挂死"）
+Get-Process cl,MSBuild -ErrorAction SilentlyContinue
+# 2) 后台构建（前台会被 600s 上限截断并留下孤儿 cl，让后续构建看起来卡死）
+cmd /c "cmake --build build --config Release --target HugEngineTests 06.GILab 03.Sponza-Forward > build\verify\b.log 2>&1"
+# 3) 看退出码与 error C/error LNK —— 确认全绿之后再单独执行提交（不要把构建与提交串成一条命令）
+python Tools\check_threading.py --world-deps --mesh-ptrs --handles --gate
+```
+
+### 14.5 判据与闸门
+- 注册表本体：单测覆盖"注册/更新/注销/复用/越界与已注销返回 nullptr"（与 `TestRHIHandles.cpp` 同款）。
+- 两个消费者：沿用本方案统一判据 —— **旧实现逐行转写为参考实现 + 逐位比较**（全帧转储只做粗筛）。
+- **B1 计数必须下降**：`Tools/check_threading.py --world-deps` 每完成一步就复测并把基线手动下调
+  （当前 82）。
+  > **口径修正（2026-09-24，E-2② 实测）**：E-1/E-2 消除的是**组件指针依赖**（`MeshComponent*`），
+  > 而 B1 统计的是**签名里的 `World&` / `SceneGraph&`** —— 两者不是同一个度量。实测 E-2② 完成后
+  > B1 仍为 82（骨骼循环本身仍在 `Render(world, …)` 之内）。**B1 真正开始下降是在 T1.5**
+  > （把管线帧入口从"收 `world/sg`"改成"收快照"）。本附录的 E-1/E-2 因此按"组件依赖是否消失"
+  > 衡量（代码检查 + 逐位判据），不按 B1 计数衡量。
+- **组件指针依赖有独立闸门（2026-09-24 新增）**：`python Tools/check_threading.py --mesh-ptrs`
+  统计 `Engine/Render/` 内 `*Component*` 的出现处，按所属函数名分**渲染期 / 加载期**
+  （与 B1 共用同一套分类口径与白名单），基线即上限并接入 `--gate`。
+  **实测基线：渲染期 20 处 / 加载期 4 处**，命中清单（= E-3 后半的收敛对象）：
+  `Pipeline/RTPass.cpp`(9)、`SceneRenderer.cpp`(4)、`Pipeline/RTPass.h`(4)、`SceneRenderer.h`(1)、
+  `Pipeline/ForwardPipeline.{h,cpp}`(各 1)。**E-3 每推进一步就复测并把 `MESH_PTR_BASELINE` 下调。**
+  > **首次下调（2026-09-24）**：`ForwardPipeline::DrawMesh` 是**私有且零调用的死代码**（全仓库核查，
+  > 其余 `DrawMesh*` 命中都是无关的 RHI `DrawMeshTasks`）⇒ 删除声明与定义，渲染期命中
+  > **20 → 18**，基线随之下调为 18。这类"重构遗留的死函数"也是组件指针依赖的来源之一，
+  > 值得在收敛过程中顺手清掉（判据：全仓库无调用点 + 构建通过）。
+  > **20 处的分类与替代方案（2026-09-24 逐条查清；没有"顺手能啃掉"的边角，都是结构性的）**：
+  > ① **RT 的 BLAS 缓存**（`RTPass.h:177/183` 等 4 处 + `.cpp` 9 处）：`unordered_map<MeshComponent*, BLASEntry>`
+  > —— 按组件地址做键 ⇒ 换成**按 `meshIndex`（或 `sourceEntity`）为键**，并在 E-4 的口径统一后重建缓存；
+  > ② **绘制辅助函数与查找**（`ForwardPipeline.h:137` `DrawMesh(cmd, MeshComponent*, …)`、
+  > `.cpp:1372` 定义、`.cpp:1112/1240` 用组件地址反查 `DrawItem`）—— 换成按 `meshIndex`/`sourceEntity`
+  > 查找，`DrawMesh` 的入参改成 `meshIndex` + 从注册表取缓冲；
+  > ③ **`SceneRenderer` 的 `Entry`/`DrawItem`**（`.cpp` 4 处 + `.h` 1 处）—— 见 E-3 配方：
+  > `Entry` 不再需要组件指针，`DrawItem` 用 `meshIndex`。
+  > 建议顺序：③（E-3 配方已就绪）→ ②（顺带把 `sourceEntity` 用起来）→ ①（涉及 RT 缓存重建，
+  > 与 E-4 口径统一一起做）。
+
+---
+
+> **文档版本**：v1.3（2026-09-24）
+
+---
+
+## 15. 第二轮交接快照（2026-09-24 晚；新会话请从这里开始）
+
+> **2026-10-09 更新（§15.1 第①②段完成）**：本节的"分支与状态 / 四项闸门 / 验收 / 已完成 / 下一步"
+> 五段已按第①②段落地后的实测刷新；**§15.1 的第③段亦已完成**（帧入口收快照 ⇒ 附录 B1 世界依赖
+> 渲染期 0 / 加载期 0；该节收尾说明写在该节里）。
+>
+> **2026-10-09 更新（文档合并，T5.4）**：原《24.渲染线程化实现情况》已并入
+> [15.多线程架构与渲染实现分析.md](../HugEngine引擎介绍/15.多线程架构与渲染实现分析.md) 的 §13–§21；
+> 一并修正了 15 的过期结论（原"没有持久化的 Render 线程"）与 `FrameSnapshotAssembler` 幂等标记缺陷的补正；
+> 本文头部性质对应改为"计划 + 实施记录"。
+>
+> **2026-10-09 更新（收尾：并入 main 并推送）**：本节五段已按当前状态刷新。**工作已全部合并进 `main`
+> 并推送**（`origin/main` = `b2aace6`），`multi_thread` 分支**已删除**（本地 + 远端），`main` 成为唯一分支。
+> 新增落地项：§15.1 **第③段（B1 → 0）**、**T2.2**、**T2.4（7/7 样例）**、相机控制回归修复（06/03/04/05）、
+> `06.GILab` "渲染线程模式"下拉 + **默认模式 1**、文档合并（24 → 15 的 §13–§21）、**T5.4 勾选**。
+
+**分支与状态**：**`main`（唯一分支）**，与 `origin/main` **完全同步**（`b2aace6`；本轮 187 条提交已推送）。
+原 `multi_thread` 分支已删除（本地 + 远端；内容全部在 `main` 上，删除前核对 `main` 缺失提交数 = 0）。
+工作区干净（仅未跟踪占位文件 `docs/计划实现功能/占位.md`，不要动它）。
+
+**四项闸门（都在基线，只允许下降）**：帧内同步 RHI 调用 **378**（= 376 + 归属漂移；见 §9 T1.5 的
+口径说明）｜附录 B1 世界依赖 渲染期 **0** / 加载期 0 —— **阶段 1 退出目标达成**
+（80 → 76 → 69 → 51 → 47 → 43 → 27 → 24 → 17 → 0，逐批见 §9 第②段与第③段各批；自此只允许保持 0）｜
+组件指针依赖 渲染期 **0** / 加载期 0（**18 → 13 → 0**，E-3 收敛目标达成）｜T0.7 资源持有者 **277** / 75 文件。
+复测：`python Tools/check_threading.py --world-deps --mesh-ptrs --handles --gate`
+（**务必带全四个开关** —— 只看其中一项会漏掉别的闸门回归，§9 已记录一次由此漏掉工具损坏的事故；
+注意 `--gate` 的退出码目前恒为 1：`帧内同步 RHI = 378 > 0` 是**阶段 2** 的退出条件，
+四项**基线**本身都已满足。）
+
+**验收**：单测 **399 例 / 71850 断言全通过**；`acceptance_sweep.ps1 -OnlyNanite` **PASS** 且两类
+pass 指纹（`1C15AB72E688B530` / `750CC247BF8B9C3D`）未变；`06.GILab` 冒烟必须带
+`HE_LUMEN_PROBE_FILTER=off`（默认滤波下同一二进制两趟差 **≈ 2.25M 像素**，判据会被淹没）。
+**底噪是间歇的**：关掉滤波后同一二进制两趟本会话实测 **0 像素**（inst5/6、7/8、9/10）
+与 **4630 像素**（inst11/12）都出现过 —— 因此判据必须**成对**给出
+（同批二进制双跑 + 改动前后对比），单次 0 像素不构成证据；至今各步的"改动前后"对比分别为
+第①段 0、第②段 0、第③段第 1 批 15 像素（maxULP=1，均在 Lumen 探针类目标上）⇒ 均落于同批底噪内。
+`02.Cube`（唯一含实例化网格的样例）双管线实跑：GPU 剔除读回与 CPU 复算逐帧相等、实例 SSBO
+只建一次后原地复用、Deferred 比 Forward 少 1 条（贴花卡片被正确排除）。
+**模式 0 / 模式 1 判据（2026-10-09 收尾实测）**：`06.GILab` 模式 1 vs 模式 0 转储**逐位一致**
+（同批双跑 0 像素；误差落于已知间歇底噪 4539/4615 像素内）、两模式转储各 28 个齐全、**归属断言 0**；
+帧时间：**重帧配置（Lumen 开，约 450 ms/帧）+0.72% ~ +1.29%**（噪声 ±2%，可信）；轻帧配置
+（Lumen 关，6~9 ms/帧）差异落在噪声内（同模式自身波动可达 ±31%），**需多次取中位数才能判定**。
+
+**已完成**：阶段 0 全部（T0.1–T0.7 + 两条退出判据）；阶段 1 的快照契约、光源/物体/环境/骨骼/粒子/
+天空盒/材质/贴花收集、三管线消费（光源 + `GPUScene`）、E-1 注册表、E-2① 注册点（三管线对称）、E-2② 骨骼
+矩阵走快照、E-3① 材质映射唯一化、E-3② 前半（收集侧算材质）、E-4 样条口径统一、稳态零分配（`Reserve`
+补漏 + 自校准预留）、Forward/Deferred 完整快照；**阶段 2 的 T2.1 渲染线程真起线程**（含 4 例单测）；
+**§15.1 第①段**（实例缓冲状态搬迁 + 实例数据进快照，含顺带修掉的 `CollectLights` 误清快照缺陷）；
+**§15.1 第②段**（`Prepare` 收快照 + `DrawItem` 去组件指针，含顺带修掉的 Deferred 贴花口径缺口）；
+**§15.1 第③段第 1 批**（GBuffer 家族去 `World&`、`GPUScene` 过渡重载删除、`SkyboxPass` 改读快照）；
+**第③段第 2 批**（阴影系统全链路改吃快照 + 样例先建快照，含顺带修掉的 Deferred 阴影静默消失回归）；
+**第③段其余各批（B1 → 0）**——帧入口收快照（三管线 + 帧图）、`RTPass`/`MeshBatcher`/`ResolveFrameCamera`
+去世界、`SubsystemContext`/`GIProviderContext` 收口 ⇒ **附录 B1 渲染期 0 / 加载期 0**；
+**T2.2**（一帧两条渲染命令：Acquire/录制/ImGui 录制/Submit/探测读回/Present 全在渲染线程；
+窗口回调与 GUI 里的 RHI 改为置标志、由命令落地）；**T2.4**（**7/7 样例**：`02.Cube`、`03`、`04`、`05`、
+`06.GILab`、`07.Nanite`、`07.AISamples`；按值载荷 + 帧号/转储判定按值携带，修掉 `06.GILab` 按引用捕获）；
+**多槽快照 + 装配器复位缺陷修复**（Deferred/PT 曾只在第一帧装配）；**帧槽位随命令冻结**（`RenderFrameSlot()`）；
+**命令 2 只发布**（去掉每帧第二次握手）；**相机控制回归修复**（06/03/04/05 四处，帧体拆分时被误删）；
+**`06.GILab` 渲染线程模式下拉**（运行时切换，帧首生效）+ **默认模式 1**；**文档合并与 T5.4**。
+
+**下一步（2026-10-09 刷新）**：
+0. **把 06.GILab 的帧推进/装配/阴影收集搬回游戏线程**（`NextFrame()`/`AssembleScene(...)`/Forward 阴影驱动
+   目前仍在命令 1 内 ⇒ 模式 1 下跑在渲染线程；`06.GILab.cpp:1053/1057/1068-1079`）。这是**流水线深度 ≥2**
+   与 **T2.6** 的前置：搬迁 + 每飞行帧命令缓冲 + 命令 1 类型化按值载荷 + 队列满背压，四件一起做才能去掉
+   命令 1 的每帧握手（详见 15 文档 §15.6 的目标形态与 §15.7 的接入清单）。
+1. **轻帧配置的性能判定**：每模式各跑 5 次取**中位数**（当前单次波动 ±31%，不足以判定是否退化 >3%）；达标后
+   才把其余样例的"默认异步"打开。
+2. **流水线深度 ≥2**（去掉命令 1 的每帧握手，让轻帧样例受益）：每飞行帧命令缓冲 + 命令 1 的类型化按值载荷
+   + 队列满背压；前置已全部就位（多槽快照、渲染期读数冻结、帧槽位随命令冻结、帧号按值、`CurrentFrameSlot()`）。
+3. **模式 2（游戏线程 + 渲染线程 + RHI 线程）已实现**（A-2 + A-4）：三级线程、二级命令队列、`Submit`/`Present` 提交者唯一化（`HE_ASSERT_SUBMIT_THREAD`）、`ThreadAffinity` 扩展为「录制者 ≠ 提交者」；渲染线程仍产 `vkCmd*`（交接单位是已录制的命令列表），「渲染线程零 Vulkan」是 L4-3 的目标。
+   `WaitIdle` 的提交者唯一化、`ThreadAffinity` 扩展为"录制者 ≠ 提交者"、命令缓冲两级所有权（见 §12 附录 C）。
+4. **`03.Sponza-Forward` 的既有断言**（`VulkanCommandList.cpp:197 HE_ASSERT_RENDER_THREAD`，加载期 697 行后退出）：
+   已用"撤回改动再跑"对照证明与渲染线程化无关；修掉后该样例才能做视觉确认。
+5. **secondary/并行录制（`BeginSecondary`）的线程归属**；**T2.6**（类型化载荷 + cv 唤醒）。
+6. **T2.5 / T3.x / T4.x / T5.1–T5.3**（MTCR 扩展、ImGui 归属与后门、面板只读快照、热重载替换、Profiler 三段计时、
+   背压参数调优、资源创建异步化）仍属后续范围。
+
+**（以下为 2026-09-24 版历史计划；其第③段各批与 T2.4/T2.2 均已完成，见上）**
+1. **§15.1 第③段第 4 批（下一步，最大的一块）**：**三条管线的帧入口改收 `const FrameSceneSnapshot&`**
+   ⇒ **B1 → 0**。当前 47 的分布：`ForwardPipeline.{h,cpp}` 11+7、`DeferredPipeline.h` 6 +
+   `.cpp` 2 + `_FrameGraph.cpp` 2、`PathTracingPipeline.h` 5（+ .cpp，在 top-12 之外）、
+   `ForwardPipeline_FrameGraph.cpp` 2、`IRenderPipeline.h` 1、`Camera.{h,cpp}` 1+1、
+   `RTPass.{h,cpp}` 3+4、`MeshBatcher` 2（在 top-12 之外）。
+   **落地要点（第 2/3 批已经铺好的路）**：
+   · **快照构建必须移出 `Engine/Render`** —— `ForwardPipeline::BuildFrameSnapshot(world, sg, camera)`
+     本身带 `World&`/`SceneGraph&`，**它就是 B1 命中**（第 2 批引入，当时未计入预期）。正确形态是
+     **样例直接调 `SceneSnapshotBuilder`**（它在 `Engine/Render/Threading/` 白名单内）：
+     样例持久持有一个 `FrameSceneSnapshot`（首帧 `Reserve`），每帧按
+     `RegisterMeshes → BuildObjects → BuildInstances → BuildShadowLights → BuildSkybox →
+     BuildEnvironment → BuildMaterials → BuildDecals/BuildParticles（按管线需要）` 填充，
+     然后交给 `pipeline.Render(cmd, snapshot, camera, dt)`。
+   · 管线侧：删 `BuildFrameSnapshot`/`m_SnapshotBuiltThisFrame`，把 `m_Snapshot` 换成
+     `const FrameSceneSnapshot* m_FrameSnapshot`（Render 入口赋值，帧图 lambda 在 Render 内执行 ⇒
+     引用安全），并逐个收掉 helper 的 `World&`/`SceneGraph&`：`CollectLights`（光源收集也要移出
+     Render —— 它需要 `sg` 与阴影下标解析器）、`RenderScene`、`RunGPUCulling`、`RenderSkybox`、
+     `RefreshRSMFrustum`、`BuildFrameGraph`。
+   · **光源收集的顺序约束**：`SnapshotLight::shadowIndex` 由 `m_ShadowSystem->GetShadowIndex(e)` 解析，
+     而该映射在 `ShadowSystem::Update` 里建立 ⇒ 快照的"光源部分"必须在阴影收集**之后**填；
+     建议快照增设 `lightSourceEntities` 平行数组 + 一个**无 world 参数**的
+     `SceneSnapshotBuilder::ResolveLightShadowIndices(snapshot, resolver)`，由样例在阴影收集之后调用
+     （`BuildLights` 先留 `shadowIndex = -1`）。这样既保持"阴影下标是本帧的"，又不让管线收世界。
+   · `RunGPUCulling` 里的 `MeshBatcher::Build(world)` 是**一次性**构建（`m_BatchBuilt` 门控）⇒
+     移到样例首帧调用（或第 5 批把 `MeshBatcher::Build` 改成吃快照 + 注册表）。
+2. **§15.1 第③段第 5 批**：`RTPass`（`RTPass.{h,cpp}` 的 3+4 处 B1 + 13 处组件指针：BLAS 缓存键、
+   `CollectMeshList` 指针载荷、`HasGeometryChanged`/`HashGeometry`、以及一条无调用点的顶点拉取死路径；
+   RT 可见子集 = `Base`/`Cube`/`Sphere`，现在可以用 `SnapshotMeshClass` 表达）、
+   `MeshBatcher::Build`(2，注意它的收集集含 `Instanced`、**不含** `Spline`/`Skeletal`，与快照全集不同)、
+   `ResolveFrameCamera`(2，`Camera.{h,cpp}` —— 它是**场景查询**，应挪出 `Engine/Render`
+   或改吃已解析的值)、以及 `IRenderPipeline.h` 的 1 处。
+3. **§15.1 第③段第 6 批（B1 盲区收尾）**：`SubsystemContext::world/sceneGraph` 与
+   `GIProviderContext::world/sceneGraph`（后者已查明全 GI 源无一处使用，可直接删）、
+   `he::SyncPhysicalSkyToSun(world)`（每帧写世界）、`SceneGraph::UpdateTransforms()`
+   （只在渲染期调用）—— 它们不被 B1 统计，但换线程后就是数据竞争。
+   **这批才是"渲染期真的不读世界"的判据。**
+4. **T2.4** 样例循环改造（06.GILab 试点 → 7 个样例）：**按值**交接（修掉 06.GILab 的按引用捕获）、
+   渲染线程执行；第 4 批已把"游戏线程建快照"这一步做掉。
+5. **T2.2** 设备与交换链归渲染线程（`CreateDevice` 的归属 claim 迁移、`Acquire/Present` 迁移）；
+6. **按需 T2.3**（资源创建同步转发）、**T2.6**（`RenderThreadContext` 为 RHI 唯一出口 + 队列 cv 唤醒）；
+7. **判据**：模式 0 / 模式 1 同场景转储**逐位一致** + 帧时间**不退化 >3%**（06.GILab 121 帧自测）。
+   **模式 2 本轮不做**（你已明确）；T2.5/T3.x/T4.x/T5.x 属后续范围。
+
+**开工前固定命令（顺序不可省）**：先查并发构建（`Get-Process cl,MSBuild`）→ **后台**构建
+（前台会被 600s 截断并留孤儿 `cl`，表现为"假挂死"）→ 看退出码与 `error C`/`error LNK` →**确认全绿后
+再单独提交**（不要把构建与提交串成一条命令）。
+
+### 15.1 走向 B1 → 0 的**剩余三段**（2026-09-24 已查清，零决策；① 已于 2026-10-09 完成）
+
+**第 ① 段：实例数据进快照 —— ✅ 完成（2026-10-09）**
+- 落地内容与实测数字见 §9 T1.5 的"第①段"条目与 §6 的"第三次复核"表。要点：
+  快照新增 `SnapshotInstance` + `instanceTransforms` 扁平数组 + `BuildInstances`；
+  `InstancedMeshComponent` 只留 CPU 数据源与 `instanceTransformVersion`；
+  逐网格 GPU 缓冲状态搬到 `InstanceCuller::InstanceState`（按 `meshIndex`，含 `BeginInstancesFrame`
+  的回收与 `ownerEntity` 的索引复用识别）；三个消费侧全部改读快照。
+- **落地时修正了两处原方案**：① 原方案说"原重载内部转发、保持两条路径共用"——实际三个消费侧全部
+  切到快照后就没有第二条路径了，旧重载直接删除（避免留一份"吃组件"的死代码）；
+  ② 原方案没预见到 `CollectLights` 里的 `m_Snapshot.Clear()` 会把实例数组一起抹掉（见 §6 第三次复核）。
+- 组件侧只保留 `instanceTransforms`（CPU 数据源）+ 版本号；`enableFrustumCull` 与局部 AABB 由快照携带。
+
+**第 ② 段：`SceneRenderer::Prepare` 收快照，`DrawItem` 去指针 —— ✅ 完成（2026-10-09）**（前半）
+- 落地内容与实测数字见 §9 T1.5 的"第②段"条目与 §6 的"第四次复核"表。要点：
+  `Prepare(const FrameSceneSnapshot&, const CameraData&, rhi::IRHIBuffer*)`（签名去掉 `World&`/`SceneGraph&`）、
+  `DrawItem::mesh` 删除（四处绘制循环改按 `meshIndex` 查 `MeshRegistry`）、快照新增 `bInstanced`、
+  `GBufferContext::excludeDecals` 删除 ⇒ 组件指针闸门 **18 → 13**、B1 **78 → 76**。
+- **落地时修正**：`DeferredPipeline::BuildObjects` 必须显式传 `excludeDecals = true`（原方案没提，
+  因为原先这个口径藏在 `Prepare` 的实参里）；否则贴花卡片会被画两遍且与 `GPUScene` 集合错位。
+- **仍未做的 13 处组件指针全在 `Pipeline/RTPass.{h,cpp}`**（BLAS 缓存键、`CollectMeshList` 的指针载荷、
+  `HasGeometryChanged`/`HashGeometry`、以及一条无调用点的顶点拉取死路径）。它与第③段同源
+  （`RTPass::BuildAS(world, sg)` 本身是 B1 的收敛对象），故并入第③段：RTPass 需要一个
+  "RT 可见子集"的快照视图（当前它自己按 `MeshComponent`/`Cube`/`Sphere` 遍历世界，
+  子集与 `BuildObjects` 的全集**不同**，转换时要显式保住这个子集与顺序）。
+
+**第 ③ 段：帧入口收快照 ⇒ B1 归零**（未开工）
+- `GBufferRenderer::Render`（第①段已加 `const FrameSceneSnapshot&` 入参）、
+  `IRenderPipeline::Render` 与三条管线实现改收快照；样例在游戏线程构建完整快照
+  （`RegisterMeshes`/`BuildObjects`/`BuildInstances`/`BuildLights`/`BuildMaterials`/`BuildSkybox`/
+  `BuildEnvironment`/`BuildParticles`/`BuildDecals` 均已就绪）。
+- **B1 归零还要处理"非管线入口"的世界依赖**（它们同样计入 80）：`MeshBatcher::Build(World&)`、
+  `GPUScene::Collect(World&, SceneGraph&)`、`ResolveFrameCamera(World&, …)`（在 `Engine/Render/` 内，
+  样例在游戏线程调用 ⇒ 需要挪出 `Engine/Render` 或改吃已解析的值）、四类阴影技术
+  （`IShadowTechnique` 及 CSM/Spot/Point/Rect 的 `CollectLights`/`Render`）、`GI_RSM::RenderRSMPass`、
+  `RTPass` 的四处。这一步是**机械但面广**的改动，建议按子系统分批提交。
+- 判据：`--world-deps` 渲染期 **80 → 0**（附录 B 断言通过）+ 每次改动都跑
+  `06.GILab` 冒烟（**同二进制双跑做噪声对照**，且必须带 `HE_LUMEN_PROBE_FILTER=off`：
+  默认滤波下噪声底噪约 2.25M 像素，判据会被淹没）。
+
+**之后**：T2.4 样例按值交接与渲染线程执行（修掉 06.GILab 的按引用捕获）→ T2.2 设备与交换链归渲染 线程 → 模式 0/1 判据（转储逐位一致 + 帧时间不退化 >3%）。—— **✅ 均已完成（2026-10-09）**，实测见本节"验收"与 §9。
+
+<details><summary>过程中记录（T2.4 按值载荷的三次尝试）</summary>
+
+  · **第 2 步的实现（本轮，未落地代码，已回退）**：把命令 2 改成带参数的 lambda（recordUiAndPresent(renderFrameIndex, dumpThisFrame)），调用点按值捕获这两个值，帧计数与帧率记账留在游戏线程。能编译能跑、28 个转储齐全、0 断言，但**转储仍早一帧**（模式 0 vs 已验收基线 = 60,781,523 像素；lumen_passes 240 vs 242）。
+  · **根因（已锁定到一行）**：冻结语句写成了先 frameIndex++ 再取 renderFrameIndex ⇒ 冻结的是自增后的值；而原判定发生在命令里、自增之前 ⇒ 判定早一帧。正确写法是 const u64 renderFrameIndex = frameIndex; 必须在 frameIndex++ 之前（本轮因脚本替换未命中未落地；为不留破坏转储语义的状态已 git 干净回退）。
+  · **已修复并提交（本轮）**：命令 2 改为 recordUiAndPresent(u64 renderFrameIndex, bool dumpThisFrame)，帧计数与帧率记账留游戏线程、帧号与转储判定**按值捕获**交给命令；**冻结语句放在 frameIndex++ 之前**。复测：模式 0 vs 已验收基线 4615（= 已知底噪）、模式 1 vs 模式 0 4615、模式 1 同批双跑 **0 像素**、两模式转储各 28 个齐全、断言 0；帧时间 443.6 → 449.3 ms = **+1.29%**（3% 内）；单测 399 例 / 71850 断言；四项闸门不变。
+  · **至此游戏线程跑到前面的全部已知竞争都已消除**（多槽快照、渲染期快照读取冻结、帧槽位随命令冻结、帧号与转储判定按值携带）⇒ **下一步可做深度 >= 2**（每飞行帧命令缓冲 + 一帧一个队列帧 + 背压；RenderCommandQueue::CurrentFrameSlot() 已就位），随后复测轻帧样例（02.Cube）的模式 1 帧时间并决定是否默认打开异步。
+  · **复测回退后的已提交状态（每帧一次握手形状）**：模式 0 vs 基线 0 像素；模式 1 vs 模式 0 = 4539（已知底噪）；28 个转储齐全；断言 0 ⇒ 判据仍成立。
+  · **下一步**：把上述两行互换 → 重跑两次冒烟（应回到 0/底噪）→ 再做深度 ≥2。
+
+</details>
+
+> **性质**：**计划 + 实施记录**。§15.1 ①②③ 与 T2.2/T2.4 已落地并过判据（**模式 0/1/2 均已实现**，`06.GILab` 默认模式 2；A-2 + A-4 见 §P 系列）；
+> T3/T4/T5 其余项仍为计划。开工后每完成一个任务，回到 §9 勾选并在 §6 记录实测数字。
+> **v1.1 变更**：新增 §12 附录 C「升级到 UE 三线程模型的增量路径」；阶段 0 增加预埋任务 **T0.6（RHI 命令流契约）** 与 **T0.7（资源句柄化）**，二者是 §12 所列升级路径的前置条件。
+> **v1.2 变更**：T0.5 的开关改为**三态** `RenderThreadingMode`（单线程 / 游戏+渲染 / 游戏+渲染+RHI，见 §5 与 §7 的口径说明）；新增 §13 附录 D「阶段 0 T0.2 帧内同步 RHI 调用清单」与配套脚本 `Tools/check_threading.py`（含 `--gate` 闸门模式）。
+> **v1.3 变更**：新增 §14 附录 E「mesh 注册表设计草案」（T1.2c 与 T1.4 骨骼消费侧的前置：API、生命周期规则、两个首个消费者、第 5 处口径漂移的裁决与判据）；§6 增补"阶段 0/1 累计实测"与端到端绿灯复核记录。
+> **v1.4 变更（2026-10-09）**：§15.1 **第①段完成**（实例缓冲状态搬迁 + 实例数据进快照，含顺带修掉的
+> `CollectLights` 误清快照缺陷）；§6 增补"第三次复核"；§9 T1.5 增补第①段条目与两条**口径说明**
+> （帧内 RHI 376 → 380 是启发式归属漂移、B1 80 → 78 是行合并少计，两者都不下调基线）；
+> §15 交接快照按实测刷新（单测 397 例 / 71829 断言、`06.GILab` 冒烟须带 `HE_LUMEN_PROBE_FILTER=off`，
+> 否则默认滤波下同二进制双跑差约 2.25M 像素）。
+> **v1.6 变更（2026-10-09）**：§15.1 **第③段完成（B1 → 0）**、**T2.2**、**T2.4（7/7）**、相机控制回归修复、
+> `06.GILab` 渲染线程模式下拉 + 默认模式 1、多槽快照与装配器复位缺陷修复、帧槽位随命令冻结、命令 2 只发布、
+> 文档合并（24 → 15 的 §13–§21）与 T5.4 勾选；**工作已合并入 `main` 并推送，`multi_thread` 分支已删除**。
+> **v1.5 变更（2026-10-09）**：§15.1 **第②段完成**（`Prepare` 收快照 + `DrawItem` 去组件指针，
+> 含顺带修掉的 Deferred 贴花口径缺口）；§6 增补"第四次复核"；§9 T1.5 增补第②段条目并把剩余
+> 13 处组件指针（全在 `RTPass`）的处置写清楚（并入第③段）；两项基线随实测下调
+> （组件指针 18 → 13、B1 80 → 76）。
+
+---
+
+## 16. 第三轮交接快照（2026-10-22；新会话建议从本节开始）
+
+### 16.1 结论摘要
+
+| 项 | 状态 | 关键提交 |
+|---|---|---|
+| **P1**（A-5 读回命令化） | ✅ 完成：dump 读回改 timeline fence（`SetTimelineSignal` + `router->FlushAndWait()` + `WaitForFence`），去掉设备级 `vkDeviceWaitIdle` | `27d5033` |
+| **P3**（并行录制） | ✅ 完成：T3.1 抽 `ParallelRecordHelper`、T3.2 Deferred GBuffer 接入；T2.3 推迟到 A-3（创建点全在 owner 线程，现在做是死代码） | `5ba4705`、`ac496e2` |
+| **L4-1**（acquire/present 收口） | ✅ 完成：新增 `rhi::FramePresenter`，8 个样例改用 `BeginFrame/EndFrame` | `cfaabe8`、`b9e8c3d` |
+| **L4-2**（录制生命周期收口） | ✅ 完成：`BeginRecording/EndRecording`，除 `Editor` 外全部样例 | `f1419bd`、`a0aa1bd` |
+| **P2 / A-1**（命令流） | 🟡 L1 契约+翻译 ✅（`9a294e7`）、L2 提交管道 ✅（`9afe25c`）、L3 前置命令 ✅（`0b8afe3`）；**L3 撤销**（§12.11）；**L4-3 = all-or-nothing 独立项目**（§12.12） | 见左 |
 | **A-3**（资源句柄化） | 基本完成：共 64 批（见 16.2）。只剩两处记录在案的例外（`LumenSDF::Entry.field` 的 per-mesh 动态条目、`LumenScene` 三个只有声明无使用点的数组）；`FrameRetireQueue` 已具备 `SetReleaser` 能力，当前三个使用点仍是自管理 `unique_ptr` 故无需接线 | 见 16.2 |
-
-### 16.2 A-3 已完成的 19 批
-
-| # | 内容 | 提交 |
-|---|---|---|
-| 1 | 设备侧句柄资源表 + 句柄式创建/解析/销毁（`Create*Handle`/`Resolve*`/`Destroy*Handle`） | `e5e18c1` |
-| 2 | Forward `m_ObjectBuffers` | `ed42c4a` |
-| 3 | Forward 光源/阴影/阴影对象缓冲 | `89f2e3d` |
-| 4 | Forward 材质 SSBO（帧内重建） | `3211774` |
-| 5 | Forward HDR 颜色/深度 + bindless 占位纹理（含 resize 重建） | `f793eb7` |
-| 6 | Deferred 对象缓冲 + **VMA 销毁顺序修复**（句柄资源必须在 `vmaDestroyAllocator` 之前释放） | `5b3d010` |
-| 7 | Deferred 光源/阴影/阴影对象/LightGrid/IndexList 五组缓冲 | `c26b8e8` |
-| 8 | `GPUScene` 对象 SSBO（需新增 `m_Device`） | `28a9a9d` |
-| 9 | `GPUCulling` 5 个 PSO | `7794371` |
-| 10 | `GPUCulling` Hi-Z 纹理 + 采样器（resize + mip 视图） | `badaa04` |
-| 11 | `GPUCulling` PTG 参数缓冲（单缓冲试点） | `92769e5` |
-| 12 | `GPUCulling` 其余 4 个缓冲（**`m_Device` 在 `Initialize` 末尾才赋值 ⇒ 提到开头** 才修好崩溃） | `9b944df` |
-| 13 | `SpotShadowTechnique` | `d39efe8` |
-| 14 | `RectLightShadowTechnique` | `a302b5a` |
-| 15 | `PointShadowTechnique`（cubemap 数组 + 半状态回收） | `a41020b` |
-| 16 | `CSMTechnique`（二维数组 + `.cpp` 里的 getter + `GetPSO` 跨技术复用） | `dd32f45` |
-| 17 | `GBufferRenderer`（9 纹理经 lambda 创建 + PSO，用 `m_Ctx.device` 解析） | `93db8ca` |
-| 18 | `LightingPass`（10 持有者 / 62 处引用；补 `Core/Assert.h`） | `fe435a0` |
-| 19 | `DecalPass`（4 持有者；该路径在样例中未启用 ⇒ 判据为"构建 + 无回归"级） | `842c802` |
-
-### 16.3 验收判据（**四条**，缺一不可）
-
-1. 冻结配置 A/B 转储 **20/20 逐字节一致**（`HE_GILAB_CONFIG` 指向 pristine 副本 + `HE_DUMP_GI`）；
-2. **0 新增 VUID**（与基线日志做差集）；
-3. **0 断言**（`Assertion failed` / `IsEmpty()` / `not freed`）；
-4. **干净退出**：日志不含 `[crash phase`。
-   ⚠️ 工程当前存在**既有**的退出期崩溃（见 16.5），因此第 4 条要"与基线对照"，而不是无条件要求 clean。
-
-抓屏类判据（03.Sponza-Forward）另需**先校验图像尺寸**（976×579），再看 3D 区域均值 **149.76 / spread 0.00**。
-
+
+### 16.2 A-3 已完成的 19 批
+
+| # | 内容 | 提交 |
+|---|---|---|
+| 1 | 设备侧句柄资源表 + 句柄式创建/解析/销毁（`Create*Handle`/`Resolve*`/`Destroy*Handle`） | `e5e18c1` |
+| 2 | Forward `m_ObjectBuffers` | `ed42c4a` |
+| 3 | Forward 光源/阴影/阴影对象缓冲 | `89f2e3d` |
+| 4 | Forward 材质 SSBO（帧内重建） | `3211774` |
+| 5 | Forward HDR 颜色/深度 + bindless 占位纹理（含 resize 重建） | `f793eb7` |
+| 6 | Deferred 对象缓冲 + **VMA 销毁顺序修复**（句柄资源必须在 `vmaDestroyAllocator` 之前释放） | `5b3d010` |
+| 7 | Deferred 光源/阴影/阴影对象/LightGrid/IndexList 五组缓冲 | `c26b8e8` |
+| 8 | `GPUScene` 对象 SSBO（需新增 `m_Device`） | `28a9a9d` |
+| 9 | `GPUCulling` 5 个 PSO | `7794371` |
+| 10 | `GPUCulling` Hi-Z 纹理 + 采样器（resize + mip 视图） | `badaa04` |
+| 11 | `GPUCulling` PTG 参数缓冲（单缓冲试点） | `92769e5` |
+| 12 | `GPUCulling` 其余 4 个缓冲（**`m_Device` 在 `Initialize` 末尾才赋值 ⇒ 提到开头** 才修好崩溃） | `9b944df` |
+| 13 | `SpotShadowTechnique` | `d39efe8` |
+| 14 | `RectLightShadowTechnique` | `a302b5a` |
+| 15 | `PointShadowTechnique`（cubemap 数组 + 半状态回收） | `a41020b` |
+| 16 | `CSMTechnique`（二维数组 + `.cpp` 里的 getter + `GetPSO` 跨技术复用） | `dd32f45` |
+| 17 | `GBufferRenderer`（9 纹理经 lambda 创建 + PSO，用 `m_Ctx.device` 解析） | `93db8ca` |
+| 18 | `LightingPass`（10 持有者 / 62 处引用；补 `Core/Assert.h`） | `fe435a0` |
+| 19 | `DecalPass`（4 持有者；该路径在样例中未启用 ⇒ 判据为"构建 + 无回归"级） | `842c802` |
+
+### 16.3 验收判据（**四条**，缺一不可）
+
+1. 冻结配置 A/B 转储 **20/20 逐字节一致**（`HE_GILAB_CONFIG` 指向 pristine 副本 + `HE_DUMP_GI`）；
+2. **0 新增 VUID**（与基线日志做差集）；
+3. **0 断言**（`Assertion failed` / `IsEmpty()` / `not freed`）；
+4. **干净退出**：日志不含 `[crash phase`。
+   ⚠️ 工程当前存在**既有**的退出期崩溃（见 16.5），因此第 4 条要"与基线对照"，而不是无条件要求 clean。
+
+抓屏类判据（03.Sponza-Forward）另需**先校验图像尺寸**（976×579），再看 3D 区域均值 **149.76 / spread 0.00**。
+
 ### 16.4 剩余工作
 
 **原表（AA/GI/RTPass/Lumen/Nanite 等模块的句柄化）已全部完成**，2026-10-22 第三轮收尾时逐项核对：
@@ -2441,33 +2441,33 @@ pass 指纹（`1C15AB72E688B530` / `750CC247BF8B9C3D`）未变；`06.GILab` 冒�
 `SkinnedMeshBuffers`、`TextRenderComponent`）的元素都是自管理 `unique_ptr`，无需接线；
 将来把退役队列改成句柄时直接 `SetReleaser([dev](Handle& h){ dev->Destroy*(h); })` 即可。
 
-**文档层面仍待办的项（与 A-3 无关）**：`Editor` 帧外壳收口（T2.5/T4.1/T4.3/T4.4）、
+**文档层面仍待办的项（与 A-3 无关）**：`P0`（每飞行帧命令缓冲 + 去掉命令 1 的每帧握手）、`T1.2c` 快照化的剩余消费侧（骨骼 / 材质 / Decal / 粒子）、`RTPass` 的 13 处组件指针；L4-3 另见《Vulkan命令流双模式L4-3实施方案.md》。
 A-5（ImGui/PSO 命令化）、T2.6、T3.3/T3.4、T5.1~T5.3、L4-3。
 
-### 16.5 已知既有缺陷（**与 A-3 无关，已 bisect 证明**）
-
-- **症状**：进程退出时崩溃，栈顶 `vulkan-1!vkResetEvent` ← `VulkanCommandList::~VulkanCommandList`，
-  说明**命令列表在设备销毁之后析构**；伴随 `vkDeviceWaitIdle: Invalid device` 的 loader 报错。
-- **时隐时现**：同一 HEAD 连跑 2 次必现，但不同构建/不同批次里有的 clean。
-- **bisect 结论**：回退 `c26b8e8` + `badaa04` 后**仍崩** ⇒ 与 A-3 的句柄化批次无关。
-- **建议**：单独立项修（`VulkanDevice::Shutdown` 与各管线 `Shutdown` 的销毁顺序 +
-  `ParallelRecordHelper` 的列表生命周期）。
-
-### 16.6 第五轮踩坑记录（避免重复）
-
-1. **判据漏项**：只查"转储/VUID/断言"不查"干净退出" ⇒ 把既有崩溃误判成自己的回归，浪费一轮 bisect。
-2. **抓屏不校验尺寸**：窗口从 976×579 变成 480×977 时，按固定 `x≥440` 裁剪读出"变暗"，
-   误退回了一次正确的迁移。
-3. **头文件内联 getter 漏改（出现 5 次）**：对策 = 松散 `.get()` 规则**同时作用于 `.h` 与 `.cpp`**，
-   且锚点**不带前导空格**（同一句在文件里常有多处不同缩进）。
-4. **PowerShell 内联脚本破坏源码/提交信息（3 次）**：编码、BOM、引号被吃。
-   对策 = 所有补丁脚本与提交信息**一律文件化**（`write` 工具写 `.py`/`.txt`，再 `python file.py`、
-   `git commit -F file`）。
-5. **凭 grep 片段猜写法**（`for(auto& m:...)m.reset()`、lambda 创建、`GetShadowMap` 定义在 `.cpp`）
-   ⇒ 对策 = **先整段 `read` 目标函数**，再写规则；每条规则带**期望命中次数**断言。
-6. **未核对设备指针**：`GPUScene`/`GBufferRenderer` 没有 `m_Device`；`GPUCulling` 的 `m_Device` 在
-   `Initialize` 末尾才赋值 ⇒ 早点赋值或用参数里的 device。这类问题占失败批次的一半。
-
+### 16.5 已知既有缺陷（**与 A-3 无关，已 bisect 证明**）
+
+- **症状**：进程退出时崩溃，栈顶 `vulkan-1!vkResetEvent` ← `VulkanCommandList::~VulkanCommandList`，
+  说明**命令列表在设备销毁之后析构**；伴随 `vkDeviceWaitIdle: Invalid device` 的 loader 报错。
+- **时隐时现**：同一 HEAD 连跑 2 次必现，但不同构建/不同批次里有的 clean。
+- **bisect 结论**：回退 `c26b8e8` + `badaa04` 后**仍崩** ⇒ 与 A-3 的句柄化批次无关。
+- **建议**：单独立项修（`VulkanDevice::Shutdown` 与各管线 `Shutdown` 的销毁顺序 +
+  `ParallelRecordHelper` 的列表生命周期）。
+
+### 16.6 第五轮踩坑记录（避免重复）
+
+1. **判据漏项**：只查"转储/VUID/断言"不查"干净退出" ⇒ 把既有崩溃误判成自己的回归，浪费一轮 bisect。
+2. **抓屏不校验尺寸**：窗口从 976×579 变成 480×977 时，按固定 `x≥440` 裁剪读出"变暗"，
+   误退回了一次正确的迁移。
+3. **头文件内联 getter 漏改（出现 5 次）**：对策 = 松散 `.get()` 规则**同时作用于 `.h` 与 `.cpp`**，
+   且锚点**不带前导空格**（同一句在文件里常有多处不同缩进）。
+4. **PowerShell 内联脚本破坏源码/提交信息（3 次）**：编码、BOM、引号被吃。
+   对策 = 所有补丁脚本与提交信息**一律文件化**（`write` 工具写 `.py`/`.txt`，再 `python file.py`、
+   `git commit -F file`）。
+5. **凭 grep 片段猜写法**（`for(auto& m:...)m.reset()`、lambda 创建、`GetShadowMap` 定义在 `.cpp`）
+   ⇒ 对策 = **先整段 `read` 目标函数**，再写规则；每条规则带**期望命中次数**断言。
+6. **未核对设备指针**：`GPUScene`/`GBufferRenderer` 没有 `m_Device`；`GPUCulling` 的 `m_Device` 在
+   `Initialize` 末尾才赋值 ⇒ 早点赋值或用参数里的 device。这类问题占失败批次的一半。
+
 
 ### 16.7 A-5（ImGui / PSO 命令化）现状调查与实施方案
 
