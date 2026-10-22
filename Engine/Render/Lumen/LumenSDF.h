@@ -102,7 +102,7 @@ public:
     }
     [[nodiscard]] u32    GetGlobalLayerCount() const { return m_GlobalLayerCount; }
     /// 步骤 15 的捕获 pass 需要线性采样器（与全局注入同源）与全局分辨率
-    [[nodiscard]] rhi::IRHISampler* GetLinearSampler() const { return m_LinearSampler.get(); }
+    [[nodiscard]] rhi::IRHISampler* GetLinearSampler() const { return m_Device->ResolveSampler(m_LinearSampler); }
     /// 诊断用：点到全部几何的精确距离（= 场应当逼近的真值）
     [[nodiscard]] float QueryTrueDistance(const float3& p) const { return MinDistToGeometry(p); }
     [[nodiscard]] u32 GetGlobalResolution() const { return m_Config.globalResolution; }
@@ -293,9 +293,9 @@ private:
     rhi::DescriptorSetHandle                  m_SeedFloodSet;
     rhi::RHIPipelineStateHandle   m_SeedFloodPSO{};   // A-3
     bool                                      m_SeedSetBound = false;
-    std::unique_ptr<rhi::IRHIBuffer>          m_Positions;   // float4（w 未用）
-    std::unique_ptr<rhi::IRHIBuffer>          m_Indices;
-    std::unique_ptr<rhi::IRHIBuffer>          m_ProbeDist;   // CPU 可读（自检）
+    rhi::RHIBufferHandle m_Positions{};   // A-3   // float4（w 未用）
+    rhi::RHIBufferHandle m_Indices{};   // A-3
+    rhi::RHIBufferHandle m_ProbeDist{};   // A-3   // CPU 可读（自检）
     u32 m_ProbeCount = 0;
     /// 自检探针针对哪个 mesh：取 **AABB 最大**的那个 —— 大网格是当前"注入值偏小"的头号怀疑对象，
     /// 只查 mesh 0（小网格）会把问题漏掉（实测：全局层在探针处为 0，而该点真实距离 894）
@@ -343,7 +343,7 @@ private:
     rhi::RHIPipelineStateHandle m_GlobalPSO{};   // A-3
     rhi::RHIPipelineStateHandle m_GlobalFloodPSO{};   // A-3   // 全局网格上的跳步洪泛
     rhi::RHIPipelineStateHandle m_LayerProbePSO{};   // A-3    // 独立取样（把层场写进探针缓冲）
-    std::unique_ptr<rhi::IRHISampler>       m_NearestSampler;
+    rhi::RHISamplerHandle m_NearestSampler{};   // A-3
     GlobalLayer m_GlobalLayers[kMaxGlobalLayers];
     u32 m_GlobalLayerCount = 0;
     float3 m_CameraPos = float3(0.0f);   // clipmap 近层的中心（跟随相机）
@@ -354,19 +354,19 @@ private:
     rhi::DescriptorSetLayoutHandle m_MarchLayout;
     rhi::DescriptorSetHandle       m_MarchSet;
     rhi::RHIPipelineStateHandle m_MarchPSO{};   // A-3
-    std::unique_ptr<rhi::IRHIBuffer> m_RayOrigin;
-    std::unique_ptr<rhi::IRHIBuffer> m_RayDir;
-    std::unique_ptr<rhi::IRHIBuffer> m_RayHit;      // CPU 可读
-    std::unique_ptr<rhi::IRHIBuffer> m_RayNormal;   // CPU 可读
+    rhi::RHIBufferHandle m_RayOrigin{};   // A-3
+    rhi::RHIBufferHandle m_RayDir{};   // A-3
+    rhi::RHIBufferHandle m_RayHit{};   // A-3      // CPU 可读
+    rhi::RHIBufferHandle m_RayNormal{};   // A-3   // CPU 可读
     // 细节追踪（逐 mesh）：min 归约的命中距离缓冲（u32 位模式，+inf = 未命中）
     rhi::DescriptorSetLayoutHandle m_DetailLayout;
     rhi::DescriptorSetHandle       m_DetailSet;
     // 每 mesh 一套细节追踪描述符集：**同一套集在一次提交里反复改写会变成别名**（所有 dispatch 都读最后一张场）
     std::vector<rhi::DescriptorSetHandle> m_DetailSets;
     rhi::RHIPipelineStateHandle m_DetailPSO{};   // A-3
-    std::unique_ptr<rhi::IRHIBuffer> m_RayT;
+    rhi::RHIBufferHandle m_RayT{};   // A-3
     void* m_RayTMapped = nullptr;
-    std::unique_ptr<rhi::IRHISampler> m_LinearSampler;
+    rhi::RHISamplerHandle m_LinearSampler{};   // A-3
     std::vector<float3> m_RayOriginCPU;
     std::vector<float3> m_RayDirCPU;
     u32 m_WaitMarchFrames = 0;
@@ -377,8 +377,8 @@ private:
     rhi::DescriptorSetHandle       m_DebugSet;
     rhi::RHIPipelineStateHandle m_DebugPSO{};   // A-3
     rhi::RHITextureHandle m_DebugTex{};   // A-3      // RGBA16F，屏幕尺寸
-    std::unique_ptr<rhi::IRHIBuffer>        m_DebugStats;    // CPU 可读（原子计数）
-    std::unique_ptr<rhi::IRHIBuffer>        m_DebugProbe;    // CPU 可读（沿中心射线的场剖面）
+    rhi::RHIBufferHandle m_DebugStats{};   // A-3    // CPU 可读（原子计数）
+    rhi::RHIBufferHandle m_DebugProbe{};   // A-3    // CPU 可读（沿中心射线的场剖面）
     void* m_DebugStatsMapped = nullptr;
     u32   m_ViewportW = 0, m_ViewportH = 0;
     float3 m_DebugCamPos = float3(0.0f);   // 最近一次调试视图的相机位置（诊断用）

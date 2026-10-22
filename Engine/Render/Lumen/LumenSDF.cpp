@@ -77,9 +77,9 @@ bool LumenSDF::Initialize(rhi::IRHIDevice* device, const LumenSDFConfig& config)
 
 void LumenSDF::Shutdown() {
     m_Entries.clear();
-    m_ProbeDist.reset();
-    m_Indices.reset();
-    m_Positions.reset();
+    m_Device->DestroyBufferHandle(m_ProbeDist); m_ProbeDist = {};
+    m_Device->DestroyBufferHandle(m_Indices); m_Indices = {};
+    m_Device->DestroyBufferHandle(m_Positions); m_Positions = {};
     m_Device->DestroyPipelineStateHandle(m_PSO); m_PSO = {};
     m_Device = nullptr;
     m_Phase = Phase::Idle;
@@ -297,13 +297,13 @@ void LumenSDF::UploadGeometry(const MeshBatcher& batcher) {
     vb.size        = positions.size() * sizeof(float4);
     vb.usage       = rhi::BufferUsage::Storage;
     vb.initialData = positions.data();
-    m_Positions = m_Device->CreateBuffer(vb);
+    m_Positions = m_Device->CreateBufferHandle(vb);
 
     rhi::BufferDesc ib;
     ib.size        = indices.size() * sizeof(u32);
     ib.usage       = rhi::BufferUsage::Storage;
     ib.initialData = indices.data();
-    m_Indices = m_Device->CreateBuffer(ib);
+    m_Indices = m_Device->CreateBufferHandle(ib);
 
     // 自检探针缓冲（CPU 可读）：只统计第 0 个 mesh。步长默认 resolution/4 ⇒ 4³ = 64 个探针，
     // 因为 CPU 参考要对"全部三角形"遍历，探针一多就慢（128³ 的场不能按体素逐个比对）。
@@ -315,7 +315,7 @@ void LumenSDF::UploadGeometry(const MeshBatcher& batcher) {
     pb.size      = (usize)m_ProbeCount * std::max(1u, m_Config.maxMeshes) * sizeof(float);
     pb.usage     = rhi::BufferUsage::Storage;
     pb.cpuAccess = true;                      // 自检要 Map 读回
-    m_ProbeDist  = m_Device->CreateBuffer(pb);
+    m_ProbeDist  = m_Device->CreateBufferHandle(pb);
 
     // 共享的 u32 距离场（原子最小目标）：逐 mesh 串行复用，不必每个 mesh 一张
     {
@@ -332,13 +332,13 @@ void LumenSDF::UploadGeometry(const MeshBatcher& batcher) {
 
     }
 
-    m_Device->UpdateDescriptorSet(m_Set, kBindPosition, rhi::DescriptorType::StorageBuffer, m_Positions.get());
-    m_Device->UpdateDescriptorSet(m_Set, kBindIndex,    rhi::DescriptorType::StorageBuffer, m_Indices.get());
+    m_Device->UpdateDescriptorSet(m_Set, kBindPosition, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_Positions));
+    m_Device->UpdateDescriptorSet(m_Set, kBindIndex,    rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_Indices));
     m_Device->UpdateDescriptorSetWithImageView(m_Set, kBindField, rhi::DescriptorType::StorageImage,
                                                m_Device->ResolveTexture(m_MeshScratch)->GetNativeHandle());
     m_Device->UpdateDescriptorSetWithImageView(m_ConvertSet, 0, rhi::DescriptorType::StorageImage,
                                                m_Device->ResolveTexture(m_MeshScratch)->GetNativeHandle());
-    m_Device->UpdateDescriptorSet(m_ConvertSet, 2, rhi::DescriptorType::StorageBuffer, m_ProbeDist.get());
+    m_Device->UpdateDescriptorSet(m_ConvertSet, 2, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_ProbeDist));
 
     m_GeometryUploaded = true;
     HE_CORE_INFO("LumenSDF: 几何已上传（{} 顶点 float4 + {} 索引，探针 {} 点（针对 mesh {}，AABB 最大者），u32 临时场 {:.2f} MB）",
@@ -458,7 +458,7 @@ void LumenSDF::BakeOne(rhi::IRHICommandList* cmd, u32 entryIndex) {
                                                m_Device->ResolveTexture(m_MeshScratch)->GetNativeHandle());
     m_Device->UpdateDescriptorSetWithImageView(convSet, 1, rhi::DescriptorType::StorageImage,
                                                e.field->GetNativeHandle());
-    m_Device->UpdateDescriptorSet(convSet, 2, rhi::DescriptorType::StorageBuffer, m_ProbeDist.get());
+    m_Device->UpdateDescriptorSet(convSet, 2, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_ProbeDist));
     cmd->SetPipeline(m_Device->ResolvePipelineState(m_ConvertPSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, convSet);
     pc.meshIndex = 0u;                              // convert 的 dims.w = 0 ⇒ 写自检探针
@@ -530,7 +530,7 @@ void LumenSDF::CreateGlobalGPUObjects() {
     rhi::SamplerDesc sd;
     sd.minFilter = sd.magFilter = rhi::FilterMode::Nearest;   // 逐体素取值，不能线性插值
     sd.addressU  = sd.addressV  = sd.addressW = rhi::AddressMode::ClampToEdge;
-    m_NearestSampler = m_Device->CreateSampler(sd);
+    m_NearestSampler = m_Device->CreateSamplerHandle(sd);
 
     // 线性采样器：全局注入（把 mesh 场采到全局网格）与 sphere tracing 都要用，
     // **必须在注入之前就存在**。此前它只在 CreateMarchGPUObjects 里创建，而那个函数在
@@ -539,11 +539,11 @@ void LumenSDF::CreateGlobalGPUObjects() {
     // 于是 16 个 mesh 的场一个都没被真正采样，注入的尽是 0（`abs(0)=0` 被 InterlockedMin
     // 写进每个 AABB 内的体素）⇒ 全局场在空旷处塌缩到 ≈0、任意视点追踪立刻假命中。
     // 这正是步骤 12 的可视化抓到的那条（§附三）。
-    if (!m_LinearSampler) {
+    if (!m_LinearSampler.IsValid()) {
         rhi::SamplerDesc ls;
         ls.minFilter = ls.magFilter = rhi::FilterMode::Linear;
         ls.addressU  = ls.addressV  = ls.addressW = rhi::AddressMode::ClampToEdge;
-        m_LinearSampler = m_Device->CreateSampler(ls);
+        m_LinearSampler = m_Device->CreateSamplerHandle(ls);
     }
 
     // 独立取样 pass：绑定集与全局布局相同（binding 2 = 该层场，binding 4 = 探针缓冲）
@@ -657,7 +657,7 @@ void LumenSDF::BuildGlobalField(rhi::IRHICommandList* cmd) {
     // 注入必须能真正采到 mesh 场：缺采样器时引擎会跳过整条描述符更新，而注入仍然照跑，
     // 于是 InterlockedMin 会把 0 写满每个 mesh 的 AABB（全局场在空旷处塌缩到 ≈0）。
     // 这类"跑得很正常、结果全错"的失败必须在入口拦下来。
-    if (!m_LinearSampler) {
+    if (!m_LinearSampler.IsValid()) {
         HE_CORE_ERROR("LumenSDF: 注入缺少线性采样器（CreateGlobalGPUObjects 未跑？）——"
                       "全局场会退化成 0，拒绝构建");
         return;
@@ -705,7 +705,7 @@ void LumenSDF::BuildGlobalField(rhi::IRHICommandList* cmd) {
             // binding 2：该层自己的场（供"独立取样"pass 用最近邻采样）
             m_Device->UpdateDescriptorSet(ls, kGBindMeshField,
                 rhi::DescriptorType::CombinedImageSampler, layer.field.get(),
-                m_NearestSampler.get());
+                m_Device->ResolveSampler(m_NearestSampler));
             for (u32 m = 0; m < injectStride && m < (u32)m_Entries.size(); ++m) {
                 auto& is = m_GlobalInjectSets[(usize)L * injectStride + m];
                 m_Device->UpdateDescriptorSetWithImageView(is, kGBindGlobal,
@@ -717,7 +717,7 @@ void LumenSDF::BuildGlobalField(rhi::IRHICommandList* cmd) {
                 if (m_Entries[m].field) {
                     m_Device->UpdateDescriptorSet(is, kGBindMeshField,
                         rhi::DescriptorType::CombinedImageSampler, m_Entries[m].field.get(),
-                        m_LinearSampler.get());
+                        m_Device->ResolveSampler(m_LinearSampler));
                 }
             }
         }
@@ -970,9 +970,9 @@ float3 LumenSDF::ClosestPointOnTriangle(const float3& p, const float3& a,
 }
 
 void LumenSDF::RunSelfCheck() {
-    if (!m_ProbeDist || m_Entries.empty() || m_ProbeCount == 0) return;
+    if (!m_ProbeDist.IsValid() || m_Entries.empty() || m_ProbeCount == 0) return;
 
-    void* mapped = m_ProbeDist->Map();
+    void* mapped = m_Device->ResolveBuffer(m_ProbeDist)->Map();
     if (!mapped) {
         HE_CORE_WARN("LumenSDF: 自检探针缓冲不可映射，跳过自检");
         return;
@@ -1038,7 +1038,7 @@ void LumenSDF::RunSelfCheck() {
         }
         totalProbes += st.counted;
     }
-    m_ProbeDist->Unmap();
+    if (auto* ub = m_Device->ResolveBuffer(m_ProbeDist)) ub->Unmap();
 
     // 点名：按"零值数"降序、再按最大误差降序
     std::sort(stats.begin(), stats.end(), [](const MeshStat& a, const MeshStat& b) {
@@ -1251,11 +1251,11 @@ void LumenSDF::CreateMarchGPUObjects() {
     // 线性 clamp 采样器：三线性插值由采样器完成（步进需要连续场，不能最近邻）。
     // 【注意】正常路径下它已在 CreateGlobalGPUObjects 里建好（注入必须先有它）；
     // 这里只是兜底，避免"依赖调用顺序"再次变成静默的场损坏。
-    if (!m_LinearSampler) {
+    if (!m_LinearSampler.IsValid()) {
         rhi::SamplerDesc sd;
         sd.minFilter = sd.magFilter = rhi::FilterMode::Linear;
         sd.addressU  = sd.addressV  = sd.addressW = rhi::AddressMode::ClampToEdge;
-        m_LinearSampler = m_Device->CreateSampler(sd);
+        m_LinearSampler = m_Device->CreateSamplerHandle(sd);
     }
 
     // ── 细节追踪（逐 mesh 的 min 归约）──
@@ -1333,28 +1333,28 @@ void LumenSDF::SetupMarchRays() {
     rhi::BufferDesc bd;
     bd.usage = rhi::BufferUsage::Storage;
     bd.size = origins.size() * sizeof(float4); bd.initialData = origins.data();
-    m_RayOrigin = m_Device->CreateBuffer(bd);
+    m_RayOrigin = m_Device->CreateBufferHandle(bd);
     bd.size = dirs.size() * sizeof(float4); bd.initialData = dirs.data();
-    m_RayDir = m_Device->CreateBuffer(bd);
+    m_RayDir = m_Device->CreateBufferHandle(bd);
 
     bd.initialData = nullptr;
     bd.cpuAccess = true;                     // 自检要读回
     bd.size = (usize)n * sizeof(float4);
-    m_RayHit    = m_Device->CreateBuffer(bd);
-    m_RayNormal = m_Device->CreateBuffer(bd);
+    m_RayHit    = m_Device->CreateBufferHandle(bd);
+    m_RayNormal = m_Device->CreateBufferHandle(bd);
     bd.size = (usize)n * sizeof(u32);
-    m_RayT  = m_Device->CreateBuffer(bd);
-    m_RayTMapped = m_RayT ? m_RayT->Map() : nullptr;
+    m_RayT  = m_Device->CreateBufferHandle(bd);
+    m_RayTMapped = m_RayT.IsValid() ? m_Device->ResolveBuffer(m_RayT)->Map() : nullptr;
 
-    m_Device->UpdateDescriptorSet(m_MarchSet, kMBindOrigin, rhi::DescriptorType::StorageBuffer, m_RayOrigin.get());
-    m_Device->UpdateDescriptorSet(m_MarchSet, kMBindDir,    rhi::DescriptorType::StorageBuffer, m_RayDir.get());
-    m_Device->UpdateDescriptorSet(m_MarchSet, kMBindHit,    rhi::DescriptorType::StorageBuffer, m_RayHit.get());
-    m_Device->UpdateDescriptorSet(m_MarchSet, kMBindNormal, rhi::DescriptorType::StorageBuffer, m_RayNormal.get());
+    m_Device->UpdateDescriptorSet(m_MarchSet, kMBindOrigin, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_RayOrigin));
+    m_Device->UpdateDescriptorSet(m_MarchSet, kMBindDir,    rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_RayDir));
+    m_Device->UpdateDescriptorSet(m_MarchSet, kMBindHit,    rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_RayHit));
+    m_Device->UpdateDescriptorSet(m_MarchSet, kMBindNormal, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_RayNormal));
     // 细节追踪用同一个绑定号布局：field/sampler/origin/dir/minTarget
-    m_Device->UpdateDescriptorSet(m_DetailSet, kMBindOrigin, rhi::DescriptorType::StorageBuffer, m_RayOrigin.get());
-    m_Device->UpdateDescriptorSet(m_DetailSet, kMBindDir,    rhi::DescriptorType::StorageBuffer, m_RayDir.get());
-    m_Device->UpdateDescriptorSet(m_DetailSet, kMBindHit,    rhi::DescriptorType::StorageBuffer, m_RayT.get());
-    m_Device->UpdateDescriptorSet(m_DetailSet, kMBindNormal, rhi::DescriptorType::StorageBuffer, m_RayT.get());
+    m_Device->UpdateDescriptorSet(m_DetailSet, kMBindOrigin, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_RayOrigin));
+    m_Device->UpdateDescriptorSet(m_DetailSet, kMBindDir,    rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_RayDir));
+    m_Device->UpdateDescriptorSet(m_DetailSet, kMBindHit,    rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_RayT));
+    m_Device->UpdateDescriptorSet(m_DetailSet, kMBindNormal, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_RayT));
     HE_CORE_INFO("LumenSDF: sphere tracing 验证射线已生成（{} 条，最大步数 {}，收敛阈值 {:.4f}，最大距离 {:.1f}）",
                  n, m_Config.marchMaxSteps, (double)(0.25f * GetGlobalVoxelSize(0)), (double)m_Config.marchMaxDist);
 }
@@ -1363,9 +1363,9 @@ void LumenSDF::RunMarch(rhi::IRHICommandList* cmd) {
     if (!m_MarchPSO.IsValid() || !GetGlobalField(0) || m_RayOriginCPU.empty()) return;
 
     m_Device->UpdateDescriptorSet(m_MarchSet, kMBindField,
-        rhi::DescriptorType::CombinedImageSampler, GetGlobalField(0), m_LinearSampler.get());
+        rhi::DescriptorType::CombinedImageSampler, GetGlobalField(0), m_Device->ResolveSampler(m_LinearSampler));
     m_Device->UpdateDescriptorSet(m_MarchSet, kMBindField1,
-        rhi::DescriptorType::CombinedImageSampler, GetGlobalField(1), m_LinearSampler.get());
+        rhi::DescriptorType::CombinedImageSampler, GetGlobalField(1), m_Device->ResolveSampler(m_LinearSampler));
 
     MarchPC pc{};
     pc.originX = GetGlobalOrigin(0).x; pc.originY = GetGlobalOrigin(0).y; pc.originZ = GetGlobalOrigin(0).z;
@@ -1406,13 +1406,13 @@ void LumenSDF::RunMarchDetail(rhi::IRHICommandList* cmd) {
     if (m_DetailSets.empty()) {
         for (size_t m = 0; m < m_Entries.size(); ++m) {
             auto ds = m_Device->AllocateDescriptorSet(m_DetailLayout);
-            m_Device->UpdateDescriptorSet(ds, kMBindOrigin, rhi::DescriptorType::StorageBuffer, m_RayOrigin.get());
-            m_Device->UpdateDescriptorSet(ds, kMBindDir,    rhi::DescriptorType::StorageBuffer, m_RayDir.get());
-            m_Device->UpdateDescriptorSet(ds, kMBindHit,    rhi::DescriptorType::StorageBuffer, m_RayT.get());
-            m_Device->UpdateDescriptorSet(ds, kMBindNormal, rhi::DescriptorType::StorageBuffer, m_RayT.get());
+            m_Device->UpdateDescriptorSet(ds, kMBindOrigin, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_RayOrigin));
+            m_Device->UpdateDescriptorSet(ds, kMBindDir,    rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_RayDir));
+            m_Device->UpdateDescriptorSet(ds, kMBindHit,    rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_RayT));
+            m_Device->UpdateDescriptorSet(ds, kMBindNormal, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_RayT));
             if (m_Entries[m].field) {
                 m_Device->UpdateDescriptorSet(ds, kMBindField, rhi::DescriptorType::CombinedImageSampler,
-                                              m_Entries[m].field.get(), m_LinearSampler.get());
+                                              m_Entries[m].field.get(), m_Device->ResolveSampler(m_LinearSampler));
             }
             m_DetailSets.push_back(ds);
         }
@@ -1465,9 +1465,9 @@ float LumenSDF::MinDistToGeometry(const float3& p) const {
 }
 
 void LumenSDF::RunMarchCheck() {
-    if (!m_RayHit || !m_RayNormal || !GetGlobalField(0)) return;
-    void* hitMapped = m_RayHit->Map();
-    void* nrmMapped = m_RayNormal->Map();
+    if (!m_RayHit.IsValid() || !m_RayNormal.IsValid() || !GetGlobalField(0)) return;
+    void* hitMapped = m_Device->ResolveBuffer(m_RayHit)->Map();
+    void* nrmMapped = m_Device->ResolveBuffer(m_RayNormal)->Map();
     if (!hitMapped || !nrmMapped) {
         HE_CORE_WARN("LumenSDF: sphere tracing 结果缓冲不可映射，跳过自检");
         return;
@@ -1637,8 +1637,8 @@ void LumenSDF::RunMarchCheck() {
             }
         }
     }
-    m_RayHit->Unmap();
-    m_RayNormal->Unmap();
+    if (auto* ub = m_Device->ResolveBuffer(m_RayHit)) ub->Unmap();
+    if (auto* ub = m_Device->ResolveBuffer(m_RayNormal)) ub->Unmap();
 
     m_MarchCheck.valid      = true;
     m_MarchCheck.rays       = n;
@@ -1795,32 +1795,32 @@ void LumenSDF::CreateDebugGPUObjects() {
     }
 
     // 统计缓冲（CPU 可读）：创建时清零一次，之后只靠 shader 的原子加
-    if (!m_DebugStats) {
+    if (!m_DebugStats.IsValid()) {
         rhi::BufferDesc bd;
         bd.size      = 4 * sizeof(u32);
         bd.usage     = rhi::BufferUsage::Storage;
         bd.cpuAccess = true;
-        m_DebugStats = m_Device->CreateBuffer(bd);
-        if (void* p = m_DebugStats->Map()) {
+        m_DebugStats = m_Device->CreateBufferHandle(bd);
+        if (void* p = m_Device->ResolveBuffer(m_DebugStats)->Map()) {
             u32 zero[4] = {0, 0, 0, 0};
             std::memcpy(p, zero, sizeof(zero));
-            m_DebugStats->Unmap();
+            if (auto* ub = m_Device->ResolveBuffer(m_DebugStats)) ub->Unmap();
         }
         m_Device->UpdateDescriptorSet(m_DebugSet, kDBindStats, rhi::DescriptorType::StorageBuffer,
-                                      m_DebugStats.get());
+                                      m_Device->ResolveBuffer(m_DebugStats));
         HE_CORE_INFO("LumenSDF: SDF 调试视图就绪（{}x{}，RGBA16F，逐像素 sphere tracing）",
                      m_ViewportW, m_ViewportH);
     }
 
     // 剖面探针缓冲（CPU 可读，随调试视图一起建）
-    if (!m_DebugProbe) {
+    if (!m_DebugProbe.IsValid()) {
         rhi::BufferDesc pd;
         pd.size      = (usize)kProbeSamples * sizeof(float4);
         pd.usage     = rhi::BufferUsage::Storage;
         pd.cpuAccess = true;
-        m_DebugProbe = m_Device->CreateBuffer(pd);
+        m_DebugProbe = m_Device->CreateBufferHandle(pd);
         m_Device->UpdateDescriptorSet(m_DebugSet, kDBindProbe, rhi::DescriptorType::StorageBuffer,
-                                      m_DebugProbe.get());
+                                      m_Device->ResolveBuffer(m_DebugProbe));
     }
 }
 
@@ -1829,8 +1829,8 @@ void LumenSDF::RunDebugView(rhi::IRHICommandList* cmd, const float3& camPos, con
     // 只在 SDF 构建完成后跑；没建完时视图没有意义（场还没注入）
     if (m_Phase != Phase::Done || !GetGlobalField(0)) return;
     CreateDebugGPUObjects();
-    if (!m_DebugPSO.IsValid() || !m_DebugTex.IsValid() || !m_DebugStats) return;
-    if (!m_LinearSampler) return;
+    if (!m_DebugPSO.IsValid() || !m_DebugTex.IsValid() || !m_DebugStats.IsValid()) return;
+    if (!m_LinearSampler.IsValid()) return;
 
     const bool countFrame = (++m_DebugFrames == kDebugCountFrame);
     m_DebugCamPos = camPos;
@@ -1857,11 +1857,11 @@ void LumenSDF::RunDebugView(rhi::IRHICommandList* cmd, const float3& camPos, con
 
     m_Device->UpdateDescriptorSet(m_DebugSet, kDBindField,
         rhi::DescriptorType::CombinedImageSampler, m_GlobalLayers[0].field.get(),
-        m_LinearSampler.get());
+        m_Device->ResolveSampler(m_LinearSampler));
     m_Device->UpdateDescriptorSet(m_DebugSet, kDBindField1,
         rhi::DescriptorType::CombinedImageSampler,
         hasLayer1 ? m_GlobalLayers[1].field.get() : m_GlobalLayers[0].field.get(),
-        m_LinearSampler.get());
+        m_Device->ResolveSampler(m_LinearSampler));
 
     cmd->SetPipeline(m_Device->ResolvePipelineState(m_DebugPSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DebugSet);
@@ -1880,15 +1880,15 @@ void LumenSDF::RunDebugView(rhi::IRHICommandList* cmd, const float3& camPos, con
 }
 
 void LumenSDF::LogDebugStats() {
-    if (!m_DebugStats) return;
-    void* mapped = m_DebugStats->Map();
+    if (!m_DebugStats.IsValid()) return;
+    void* mapped = m_Device->ResolveBuffer(m_DebugStats)->Map();
     if (!mapped) {
         HE_CORE_WARN("LumenSDF: 调试视图统计缓冲不可映射（步骤 12 的可视化数字缺失）");
         return;
     }
     u32 c[4];
     std::memcpy(c, mapped, sizeof(c));
-    m_DebugStats->Unmap();
+    if (auto* ub = m_Device->ResolveBuffer(m_DebugStats)) ub->Unmap();
     m_DebugStatsLast[0] = c[0]; m_DebugStatsLast[1] = c[1];
     m_DebugStatsLast[2] = c[2]; m_DebugStatsLast[3] = c[3];
 
@@ -1913,8 +1913,8 @@ void LumenSDF::LogDebugStats() {
                  (double)camTruth, (double)(camTruth / std::max(1e-6f, eps)));
 
     // 剖面：沿图像中心那条射线，把"场值 vs 真实距离"并排打出来（-1 = 该层不在域内）
-    if (m_DebugProbe) {
-        if (void* pm = m_DebugProbe->Map()) {
+    if (m_DebugProbe.IsValid()) {
+        if (void* pm = m_Device->ResolveBuffer(m_DebugProbe)->Map()) {
             const float4* pr = static_cast<const float4*>(pm);
             HE_CORE_INFO("LumenSDF 场剖面（沿中心射线，t / 层0 值 / 层1 值 / 该点真实距几何）:");
             for (u32 i = 0; i < kProbeSamples; i += 8) {
@@ -1924,7 +1924,7 @@ void LumenSDF::LogDebugStats() {
                 HE_CORE_INFO("   t={:7.2f}  层0={:9.2f}  层1={:9.2f}  真值={:9.2f}", (double)pr[i].x,
                              (double)pr[i].y, (double)pr[i].z, (double)truth);
             }
-            m_DebugProbe->Unmap();
+            if (auto* ub = m_Device->ResolveBuffer(m_DebugProbe)) ub->Unmap();
         }
     }
 }
@@ -1935,7 +1935,7 @@ void LumenSDF::RunMeshFieldProbe(rhi::IRHICommandList* cmd, const float3& camPos
     // 本探测用 1 条合成射线（相机 → 前向）单独跑**某一个** mesh 的细节追踪：
     // 命中距离 ≈ 该 mesh 场在起点处的值（第一步就命中 ⇒ 该 mesh 场在此处 ≈ 0 ⇒ 就是它毒化了全局场）。
     // 读回要等 3 帧（飞行帧），故每帧只查一个 mesh。
-    if (m_Entries.empty() || !m_DetailPSO.IsValid() || !m_RayOrigin || !m_RayDir || !m_RayT || !m_RayTMapped) return;
+    if (m_Entries.empty() || !m_DetailPSO.IsValid() || !m_RayOrigin.IsValid() || !m_RayDir.IsValid() || !m_RayT.IsValid() || !m_RayTMapped) return;
 
     if (m_MeshProbeIndex >= m_Entries.size()) {
         if (!m_MeshProbeReported) {
@@ -1961,15 +1961,15 @@ void LumenSDF::RunMeshFieldProbe(rhi::IRHICommandList* cmd, const float3& camPos
         const auto& e = m_Entries[m_MeshProbeIndex];
         if (!e.field) { m_MeshProbeValue[m_MeshProbeIndex] = -2.0f; ++m_MeshProbeIndex; return; }
 
-        if (void* mo = m_RayOrigin->Map()) { std::memcpy(mo, &camPos, sizeof(float3)); m_RayOrigin->Unmap(); }
-        if (void* md = m_RayDir->Map())    { std::memcpy(md, &fwd,    sizeof(float3)); m_RayDir->Unmap(); }
+        if (void* mo = m_Device->ResolveBuffer(m_RayOrigin)->Map()) { std::memcpy(mo, &camPos, sizeof(float3)); if (auto* ub = m_Device->ResolveBuffer(m_RayOrigin)) ub->Unmap(); }
+        if (void* md = m_Device->ResolveBuffer(m_RayDir)->Map())    { std::memcpy(md, &fwd,    sizeof(float3)); if (auto* ub = m_Device->ResolveBuffer(m_RayDir)) ub->Unmap(); }
         {
             u32 inf = 0x7F800000u;   // +inf：细节追踪是 min 归约，起点必须比任何命中都大
             std::memcpy(m_RayTMapped, &inf, sizeof(u32));
         }
 
         m_Device->UpdateDescriptorSet(m_DetailSet, kMBindField,
-            rhi::DescriptorType::CombinedImageSampler, e.field.get(), m_LinearSampler.get());
+            rhi::DescriptorType::CombinedImageSampler, e.field.get(), m_Device->ResolveSampler(m_LinearSampler));
 
         MarchPC pc{};
         pc.originX = e.origin.x; pc.originY = e.origin.y; pc.originZ = e.origin.z;
