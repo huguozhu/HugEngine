@@ -191,11 +191,11 @@ private:
     const NanitePackedAsset* m_Asset = nullptr;
 
     // ── GPU 资源 ──
-    std::unique_ptr<rhi::IRHIBuffer> m_PoolClusters;   ///< clusterStride × slots 条簇记录
-    std::unique_ptr<rhi::IRHIBuffer> m_PoolVertices;   ///< vertexStride  × slots 条量化顶点
-    std::unique_ptr<rhi::IRHIBuffer> m_PoolTriangles;  ///< triangleStride× slots 条打包三角形
-    std::unique_ptr<rhi::IRHIBuffer> m_ClusterPage;    ///< 簇 → 页（只读；上传后不再变）
-    std::unique_ptr<rhi::IRHIBuffer> m_PageTable;      ///< 页表（**只由 CPU 写**，每帧重写）
+    rhi::RHIBufferHandle m_PoolClusters{};   // A-3   ///< clusterStride × slots 条簇记录
+    rhi::RHIBufferHandle m_PoolVertices{};   // A-3   ///< vertexStride  × slots 条量化顶点
+    rhi::RHIBufferHandle m_PoolTriangles{};   // A-3  ///< triangleStride× slots 条打包三角形
+    rhi::RHIBufferHandle m_ClusterPage{};   // A-3    ///< 簇 → 页（只读；上传后不再变）
+    rhi::RHIBufferHandle m_PageTable{};   // A-3      ///< 页表（**只由 CPU 写**，每帧重写）
     /// 反馈环：`feedbackLatency` 个缓冲。帧 N 用 `N % L` 槽，同时读的也是它
     /// （它上一次被写是帧 N-L —— 这正是"延迟恰好等于常量"的实现方式）。
     std::vector<std::unique_ptr<rhi::IRHIBuffer>> m_FeedbackRing;
