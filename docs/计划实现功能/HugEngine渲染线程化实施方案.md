@@ -2385,7 +2385,7 @@ pass 指纹（`1C15AB72E688B530` / `750CC247BF8B9C3D`）未变；`06.GILab` 冒�
 | **L4-1**（acquire/present 收口） | ✅ 完成：新增 `rhi::FramePresenter`，8 个样例改用 `BeginFrame/EndFrame` | `cfaabe8`、`b9e8c3d` |
 | **L4-2**（录制生命周期收口） | ✅ 完成：`BeginRecording/EndRecording`，除 `Editor` 外全部样例 | `f1419bd`、`a0aa1bd` |
 | **P2 / A-1**（命令流） | 🟡 L1 契约+翻译 ✅（`9a294e7`）、L2 提交管道 ✅（`9afe25c`）、L3 前置命令 ✅（`0b8afe3`）；**L3 撤销**（§12.11）；**L4-3 = all-or-nothing 独立项目**（§12.12） | 见左 |
-| **A-3**（资源句柄化） | 🟡 **19 批已提交**（见 16.2），剩余约 75 处 | 见 16.2 |
+| **A-3**（资源句柄化） | 基本完成：共 64 批（见 16.2）。只剩两处记录在案的例外（`LumenSDF::Entry.field` 的 per-mesh 动态条目、`LumenScene` 三个只有声明无使用点的数组）；`FrameRetireQueue` 已具备 `SetReleaser` 能力，当前三个使用点仍是自管理 `unique_ptr` 故无需接线 | 见 16.2 |
 
 ### 16.2 A-3 已完成的 19 批
 
