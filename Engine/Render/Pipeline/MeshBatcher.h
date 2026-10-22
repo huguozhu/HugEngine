@@ -83,8 +83,8 @@ public:
                bool excludeDecals = false);
 
     // 合并后的 GPU 缓冲
-    rhi::IRHIBuffer* GetVertexBuffer() const { return m_MergedVB.get(); }
-    rhi::IRHIBuffer* GetIndexBuffer()  const { return m_MergedIB.get(); }
+    rhi::IRHIBuffer* GetVertexBuffer() const { return rhi::GetDevice()->ResolveBuffer(m_MergedVB); }
+    rhi::IRHIBuffer* GetIndexBuffer()  const { return rhi::GetDevice()->ResolveBuffer(m_MergedIB); }
     u32 GetTotalVertexCount() const { return m_TotalVertices; }
     u32 GetTotalIndexCount()  const { return m_TotalIndices; }
 
@@ -125,8 +125,8 @@ private:
     // DGC 模式的 draw token 列表（与 m_Commands 并行）
     std::vector<DGCDrawToken> m_DGCTokens;
 
-    std::unique_ptr<rhi::IRHIBuffer> m_MergedVB;
-    std::unique_ptr<rhi::IRHIBuffer> m_MergedIB;
+    rhi::RHIBufferHandle m_MergedVB{};   // A-3
+    rhi::RHIBufferHandle m_MergedIB{};   // A-3
     u32 m_TotalVertices = 0;
     u32 m_TotalIndices  = 0;
 };

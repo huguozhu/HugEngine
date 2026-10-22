@@ -36,12 +36,12 @@ bool AA_SMAA::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         rhi::SamplerDesc pointDesc;
         pointDesc.minFilter = pointDesc.magFilter = rhi::FilterMode::Nearest;
         pointDesc.addressU = pointDesc.addressV = rhi::AddressMode::ClampToEdge;
-        m_PointSampler = device->CreateSampler(pointDesc);
+        m_PointSampler = device->CreateSamplerHandle(pointDesc);
 
         rhi::SamplerDesc linearDesc;
         linearDesc.minFilter = linearDesc.magFilter = rhi::FilterMode::Linear;
         linearDesc.addressU = linearDesc.addressV = rhi::AddressMode::ClampToEdge;
-        m_LinearSampler = device->CreateSampler(linearDesc);
+        m_LinearSampler = device->CreateSamplerHandle(linearDesc);
     }
 
     // ── 中间纹理（分辨率相关）──
@@ -52,7 +52,7 @@ bool AA_SMAA::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         edgeDesc.width    = width;
         edgeDesc.height   = height;
         edgeDesc.usage    = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
-        m_EdgeTex = device->CreateTexture(edgeDesc);
+        m_EdgeTex = device->CreateTextureHandle(edgeDesc);
 
         // 混合权重纹理 RGBA8_UNORM
         rhi::TextureDesc blendDesc;
@@ -60,7 +60,7 @@ bool AA_SMAA::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         blendDesc.width  = width;
         blendDesc.height = height;
         blendDesc.usage  = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
-        m_BlendTex = device->CreateTexture(blendDesc);
+        m_BlendTex = device->CreateTextureHandle(blendDesc);
     }
 
     // ── 3 个 PSO ──
@@ -85,10 +85,10 @@ void AA_SMAA::Shutdown() {
         if (m_NeighborLayout != rhi::kInvalidLayout) m_Device->DestroyDescriptorSetLayout(m_NeighborLayout);
     }
 
-    m_EdgeTex.reset();
-    m_BlendTex.reset();
-    m_PointSampler.reset();
-    m_LinearSampler.reset();
+    m_Device->DestroyTextureHandle(m_EdgeTex); m_EdgeTex = {};
+    m_Device->DestroyTextureHandle(m_BlendTex); m_BlendTex = {};
+    m_Device->DestroySamplerHandle(m_PointSampler); m_PointSampler = {};
+    m_Device->DestroySamplerHandle(m_LinearSampler); m_LinearSampler = {};
 
     m_EdgeLayout    = rhi::kInvalidLayout;
     m_EdgeSet       = rhi::kInvalidSet;
@@ -117,7 +117,7 @@ void AA_SMAA::OnResize(u32 width, u32 height) {
     edgeDesc.width  = width;
     edgeDesc.height = height;
     edgeDesc.usage  = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
-    m_EdgeTex = m_Device->CreateTexture(edgeDesc);
+    m_EdgeTex = m_Device->CreateTextureHandle(edgeDesc);
 
     // 重建混合权重纹理
     rhi::TextureDesc blendDesc;
@@ -125,7 +125,7 @@ void AA_SMAA::OnResize(u32 width, u32 height) {
     blendDesc.width  = width;
     blendDesc.height = height;
     blendDesc.usage  = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
-    m_BlendTex = m_Device->CreateTexture(blendDesc);
+    m_BlendTex = m_Device->CreateTextureHandle(blendDesc);
 }
 
 // ============================================================
@@ -150,7 +150,7 @@ void AA_SMAA::Render(rhi::IRHICommandList* cmd) {
 
     // ── Pass 1: Edge Detection → m_EdgeTex ──
     {
-        cmd->SetPipeline(m_EdgePSO.get());
+        cmd->SetPipeline(m_Device->ResolvePipelineState(m_EdgePSO));
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_EdgeSet);
         cmd->SetViewport({0, (float)m_Height, (float)m_Width, -(float)m_Height, 0, 1});
         cmd->SetScissor({0, 0, m_Width, m_Height});
@@ -165,7 +165,7 @@ void AA_SMAA::Render(rhi::IRHICommandList* cmd) {
         edgeClr.color[1] = 0.0f;
         edgeClr.color[2] = 0.0f;
         edgeClr.color[3] = 0.0f;
-        cmd->BeginOffscreenPass(m_EdgeTex->GetNativeHandle(), nullptr,
+        cmd->BeginOffscreenPass(m_Device->ResolveTexture(m_EdgeTex)->GetNativeHandle(), nullptr,
             m_Width, m_Height, &edgeClr, false);
         cmd->Draw(3);  // 全屏三角形
         cmd->EndOffscreenPass();
@@ -177,16 +177,16 @@ void AA_SMAA::Render(rhi::IRHICommandList* cmd) {
         rhi::PipelineStage::FragmentShader,
         rhi::ResourceState::RenderTarget,
         rhi::ResourceState::ShaderResource,
-        m_EdgeTex.get());
+        m_Device->ResolveTexture(m_EdgeTex));
 
     // ── Pass 2: Blending Weight Calculation → m_BlendTex ──
     {
         // 更新描述符：binding 0 = 边缘纹理（Point 采样）
         m_Device->UpdateDescriptorSet(m_BlendSet, kSMAABlendBindInput,
             rhi::DescriptorType::CombinedImageSampler,
-            m_EdgeTex.get(), m_PointSampler.get());
+            m_Device->ResolveTexture(m_EdgeTex), m_Device->ResolveSampler(m_PointSampler));
 
-        cmd->SetPipeline(m_BlendPSO.get());
+        cmd->SetPipeline(m_Device->ResolvePipelineState(m_BlendPSO));
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_BlendSet);
         cmd->SetViewport({0, (float)m_Height, (float)m_Width, -(float)m_Height, 0, 1});
         cmd->SetScissor({0, 0, m_Width, m_Height});
@@ -201,7 +201,7 @@ void AA_SMAA::Render(rhi::IRHICommandList* cmd) {
         blendClr.color[1] = 0.0f;
         blendClr.color[2] = 0.0f;
         blendClr.color[3] = 0.0f;
-        cmd->BeginOffscreenPass(m_BlendTex->GetNativeHandle(), nullptr,
+        cmd->BeginOffscreenPass(m_Device->ResolveTexture(m_BlendTex)->GetNativeHandle(), nullptr,
             m_Width, m_Height, &blendClr, false);
         cmd->Draw(3);
         cmd->EndOffscreenPass();
@@ -213,7 +213,7 @@ void AA_SMAA::Render(rhi::IRHICommandList* cmd) {
         rhi::PipelineStage::FragmentShader,
         rhi::ResourceState::RenderTarget,
         rhi::ResourceState::ShaderResource,
-        m_BlendTex.get());
+        m_Device->ResolveTexture(m_BlendTex));
 }
 
 // ============================================================
@@ -231,9 +231,9 @@ void AA_SMAA::RenderFinalPass(rhi::IRHICommandList* cmd) {
     // binding 1 = 混合权重纹理（Point 采样）
     m_Device->UpdateDescriptorSet(m_NeighborSet, kSMAANeighborBindBlend,
         rhi::DescriptorType::CombinedImageSampler,
-        m_BlendTex.get(), m_PointSampler.get());
+        m_Device->ResolveTexture(m_BlendTex), m_Device->ResolveSampler(m_PointSampler));
 
-    cmd->SetPipeline(m_NeighborPSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_NeighborPSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_NeighborSet);
     cmd->SetViewport({0, (float)m_Height, (float)m_Width, -(float)m_Height, 0, 1});
     cmd->SetScissor({0, 0, m_Width, m_Height});
@@ -282,8 +282,8 @@ void AA_SMAA::CreateEdgePSO() {
     d.pushConstantRanges   = {pcr};
     d.descriptorSetLayouts = {m_EdgeLayout};
     d.debugName            = "SMAA_EdgeDetect";
-    m_EdgePSO = m_Device->CreatePipelineState(d);
-    HE_ASSERT(m_EdgePSO, "AA_SMAA: EdgeDetection PSO creation failed");
+    m_EdgePSO = m_Device->CreatePipelineStateHandle(d);
+    HE_ASSERT(m_EdgePSO.IsValid(), "AA_SMAA: EdgeDetection PSO 句柄创建失败");
 }
 
 // ============================================================
@@ -322,8 +322,8 @@ void AA_SMAA::CreateBlendPSO() {
     d.pushConstantRanges   = {pcr};
     d.descriptorSetLayouts = {m_BlendLayout};
     d.debugName            = "SMAA_BlendWeight";
-    m_BlendPSO = m_Device->CreatePipelineState(d);
-    HE_ASSERT(m_BlendPSO, "AA_SMAA: BlendWeight PSO creation failed");
+    m_BlendPSO = m_Device->CreatePipelineStateHandle(d);
+    HE_ASSERT(m_BlendPSO.IsValid(), "AA_SMAA: BlendWeight PSO 句柄创建失败");
 }
 
 // ============================================================
@@ -369,17 +369,17 @@ void AA_SMAA::CreateNeighborPSO() {
     d.pushConstantRanges   = {pcr};
     d.descriptorSetLayouts = {m_NeighborLayout};
     d.debugName            = "SMAA_Neighborhood";
-    m_NeighborPSO = m_Device->CreatePipelineState(d);
-    HE_ASSERT(m_NeighborPSO, "AA_SMAA: Neighborhood PSO creation failed");
+    m_NeighborPSO = m_Device->CreatePipelineStateHandle(d);
+    HE_ASSERT(m_NeighborPSO.IsValid(), "AA_SMAA: Neighborhood PSO 句柄创建失败");
 }
 
 // ============================================================
 // DestroyAllPSOs — 销毁 3 个 PSO
 // ============================================================
 void AA_SMAA::DestroyAllPSOs() {
-    m_EdgePSO.reset();
-    m_BlendPSO.reset();
-    m_NeighborPSO.reset();
+    m_Device->DestroyPipelineStateHandle(m_EdgePSO); m_EdgePSO = {};
+    m_Device->DestroyPipelineStateHandle(m_BlendPSO); m_BlendPSO = {};
+    m_Device->DestroyPipelineStateHandle(m_NeighborPSO); m_NeighborPSO = {};
 }
 
 } // namespace he::render

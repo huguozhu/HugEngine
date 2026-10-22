@@ -112,14 +112,14 @@ bool MeshBatcher::Build(const FrameSceneSnapshot& snapshot, const MeshRegistry& 
     vbDesc.usage = rhi::BufferUsage::Vertex;
     vbDesc.initialData = m_MergedVertices.data();
     vbDesc.stride = sizeof(StaticVertex);
-    m_MergedVB = rhi::GetDevice()->CreateBuffer(vbDesc);
+    m_MergedVB = rhi::GetDevice()->CreateBufferHandle(vbDesc);   // A-3
 
     rhi::BufferDesc ibDesc;
     ibDesc.size = m_MergedIndices.size() * sizeof(u32);
     ibDesc.usage = rhi::BufferUsage::Index;
     ibDesc.initialData = m_MergedIndices.data();
     ibDesc.stride = sizeof(u32);
-    m_MergedIB = rhi::GetDevice()->CreateBuffer(ibDesc);
+    m_MergedIB = rhi::GetDevice()->CreateBufferHandle(ibDesc);   // A-3
 
     HE_CORE_INFO("MeshBatcher: {} meshes → {} verts, {} indices ({} KB VB + {} KB IB)",
         m_Commands.size(), m_TotalVertices, m_TotalIndices,

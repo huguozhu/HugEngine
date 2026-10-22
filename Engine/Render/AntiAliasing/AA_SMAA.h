@@ -63,25 +63,25 @@ private:
     bool m_Enabled = true;
 
     // 中间纹理（Pass 1/2 输出，分辨率相关，OnResize 重建）
-    std::unique_ptr<rhi::IRHITexture> m_EdgeTex;   // R8_UNORM — 边缘类型编码
-    std::unique_ptr<rhi::IRHITexture> m_BlendTex;  // RGBA8_UNORM — 四方向混合权重
+    rhi::RHITextureHandle m_EdgeTex{};   // A-3：R8_UNORM — 边缘类型编码
+    rhi::RHITextureHandle m_BlendTex{};  // A-3：RGBA8_UNORM — 四方向混合权重
 
     // 采样器
-    std::unique_ptr<rhi::IRHISampler> m_PointSampler;   // Nearest-neighbor（边缘/权重纹理）
-    std::unique_ptr<rhi::IRHISampler> m_LinearSampler;  // Linear（输入颜色）
+    rhi::RHISamplerHandle m_PointSampler{};   // A-3：Nearest-neighbor（边缘/权重纹理）
+    rhi::RHISamplerHandle m_LinearSampler{};  // A-3：Linear（输入颜色）
 
     // Pass 1: Edge Detection
-    std::unique_ptr<rhi::IRHIPipelineState> m_EdgePSO;
+    rhi::RHIPipelineStateHandle m_EdgePSO{};   // A-3
     rhi::DescriptorSetLayoutHandle m_EdgeLayout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_EdgeSet    = rhi::kInvalidSet;
 
     // Pass 2: Blending Weight Calculation
-    std::unique_ptr<rhi::IRHIPipelineState> m_BlendPSO;
+    rhi::RHIPipelineStateHandle m_BlendPSO{};   // A-3
     rhi::DescriptorSetLayoutHandle m_BlendLayout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_BlendSet    = rhi::kInvalidSet;
 
     // Pass 3: Neighborhood Blending
-    std::unique_ptr<rhi::IRHIPipelineState> m_NeighborPSO;
+    rhi::RHIPipelineStateHandle m_NeighborPSO{};   // A-3
     rhi::DescriptorSetLayoutHandle m_NeighborLayout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_NeighborSet    = rhi::kInvalidSet;
 

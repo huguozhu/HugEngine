@@ -48,14 +48,14 @@ private:
     u32 m_Width = 0, m_Height = 0;
     bool m_Ready = false, m_Enabled = true;
 
-    std::unique_ptr<rhi::IRHIPipelineState> m_PSO;
+    rhi::RHIPipelineStateHandle m_PSO{};   // A-3
     rhi::DescriptorSetLayoutHandle m_DescLayout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_DescSet    = rhi::kInvalidSet;
 
     rhi::IRHITexture* m_Input        = nullptr;
     rhi::IRHISampler* m_InputSampler = nullptr;
-    std::unique_ptr<rhi::IRHITexture> m_Placeholder;
-    std::unique_ptr<rhi::IRHISampler> m_PlaceholderSamp;
+    rhi::RHITextureHandle m_Placeholder{};   // A-3
+    rhi::RHISamplerHandle m_PlaceholderSamp{};   // A-3
 };
 
 } // namespace he::render
