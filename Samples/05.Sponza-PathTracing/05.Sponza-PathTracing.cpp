@@ -22,7 +22,8 @@
 #include "Threading/RenderThread.h"  // T2.4：命令队列 + 渲染线程（严格握手）
 #include "Pipeline/PathTracingPipeline.h"
 #include "Pipeline/PTQualityCVars.h"
-#include "Pipeline/DeferredPipeline.h"   // 对照模式：PT 当标准答案 vs GI 层栈（HE_DUMP_MODE=deferred）
+#include "Pipeline/DeferredPipeline.h"
+#include "Debug/FrameDumpRecorder.h"   // PT 参考图落盘（机制）   // 对照模式：PT 当标准答案 vs GI 层栈（HE_DUMP_MODE=deferred）
 #include "Pipeline/CameraController.h"
 #include "Pipeline/PhysicalCamera.h"
 #include "Scene/World.h"
@@ -680,25 +681,9 @@ int main() {
     // 为什么需要它：PT 是"标准答案"，对照结论必须建立在**可复现的读数**上。
     // 落盘的是未 ToneMap 的线性 HDR（降噪 + A-Trous 之后的最终辐射度），
     // 离线脚本据此算均值/分位数/两版差值，避免用截图或目测下结论。
-    const char* dumpTagEnv   = std::getenv("HE_DUMP_PT");
-    const char* dumpFrameEnv = std::getenv("HE_DUMP_PT_FRAME");
-    const String g_DumpTag   = dumpTagEnv ? dumpTagEnv : "";
-    bool         g_DumpPT    = !g_DumpTag.empty();   // 非 const：失败时关闭以免每帧重试
-    const u64    g_DumpFrame = dumpFrameEnv ? (u64)std::max(1, std::atoi(dumpFrameEnv)) : 60ull;
-    bool g_DumpDone    = false;   // 已录制拷贝（防止重复录制）
-    bool g_DumpWritten = false;   // 已落盘（防止每帧重复写文件）
-    struct DumpTarget {
-        String                           name;
-        rhi::IRHITexture*                tex = nullptr;
-        std::unique_ptr<rhi::IRHIBuffer> buf;
-        u32                              w = 0, h = 0;
-        u32                              bytesPerPixel = 8;   // RGBA16F=8，R32F/BGRA8=4
-        const char*                      fmt = "RGBA16F";    // 落盘元数据里的格式名
-    };
-    std::vector<DumpTarget> g_DumpTargets;
-    if (g_DumpPT)
-        HE_CORE_INFO("[PT采样] 已启用：标签={} 目标帧={} 输出 build/verify/pt_{}_*.f16",
-                     g_DumpTag, g_DumpFrame, g_DumpTag);
+    // PT 参考图落盘：**机制**在 Engine/Render/Debug/FrameDumpRecorder（读回缓冲 / 录制拷贝 /
+    // timeline 等待 / _meta.txt 与 _camera.txt 写法）；这里只给"哪些目标值得看"与格式字样。
+    auto ptDump = render::FrameDumpRecorder::FromEnv("pt_", "HE_DUMP_PT", "HE_DUMP_PT_FRAME");
 
     // ============================================================
     // 11. 主渲染循环
@@ -832,29 +817,11 @@ int main() {
 
             // ── PT 参考图落盘：整幅 CopyTextureToBuffer 到 host 可见缓冲（仅对照路径）──
             // 必须在 render pass 之外录制；缓冲在采样帧才创建，尺寸取自纹理本身。
-            if (g_DumpPT && !g_DumpDone && frameIndex >= g_DumpFrame) {
+            if (ptDump.WantsFrame(frameIndex)) {
+                // 登记纹理目标：机制在 FrameDumpRecorder（显式 bpp/格式字样 ⇒ _meta.txt 与旧版一致）
                 auto addTarget = [&](const String& name, rhi::IRHITexture* tex, u32 bytesPerPixel,
                                      const char* fmt) {
-                    if (!tex) return;
-                    DumpTarget t;
-                    t.name = name;
-                    t.tex  = tex;
-                    t.w    = tex->GetWidth();
-                    t.h    = tex->GetHeight();
-                    t.bytesPerPixel = bytesPerPixel;
-                    t.fmt  = fmt;
-                    rhi::BufferDesc dd;
-                    dd.size      = (usize)t.w * t.h * bytesPerPixel;
-                    dd.usage     = rhi::BufferUsage::Storage;   // 该路径恒定带 TRANSFER_DST，可作拷贝目标
-                    dd.cpuAccess = true;                        // 需要 Map 读回
-                    t.buf = device->CreateBuffer(dd);
-                    if (!t.buf) {
-                        HE_CORE_ERROR("[PT采样] 读回缓冲创建失败: {}（{}x{}）", name, t.w, t.h);
-                        return;
-                    }
-                    // x=y=0 且取满宽高 ⇒ bufferRowLength=0 的紧密排布正好等于线性落盘布局
-                    cmdList->CopyTextureToBuffer(tex, t.buf.get(), 0, 0, t.w, t.h, 0);
-                    g_DumpTargets.push_back(std::move(t));
+                    ptDump.AddTexture(device.get(), cmdList.get(), name.c_str(), tex, bytesPerPixel, fmt);
                 };
                 if (g_UseDeferred) {
                     // 对照模式：落盘延迟管线的 HDR（ToneMap 前的线性光照结果）+ GBuffer 的关键输入
@@ -873,12 +840,7 @@ int main() {
                     if (auto* pp = pathTracingPipeline.GetPostProcess())
                         addTarget("ldr", pp->GetLDRTarget(), 4, "BGRA8");
                 }
-                if (!g_DumpTargets.empty()) {
-                    g_DumpDone = true;   // 已录制；实际读取放在 Submit 之后
-                } else {
-                    HE_CORE_WARN("[PT采样] 无可用目标，关闭落盘");
-                    g_DumpPT = false;
-                }
+                ptDump.FinishRecording(device.get(), cmdList.get());   // 挂本帧 timeline
             }
 
             // --- ImGui（LOAD 保留 ToneMap 输出）---
@@ -1054,47 +1016,23 @@ int main() {
             framePresenter.EndRecording();   // L4-2：End + Submit 收口
 
             // ── PT 参考图落盘：等 GPU 完成后原样写文件（原始像素、无文件头）──
-            if (g_DumpDone && !g_DumpWritten) {
-                device->WaitIdle();   // 对照用途，允许停顿
-                const String dir  = "build/verify/";
-                const String base = dir + "pt_" + g_DumpTag;
-                std::filesystem::create_directories(dir);
-                std::ofstream meta(base + "_meta.txt");
-                for (auto& t : g_DumpTargets) {
-                    const usize bytes = (usize)t.w * t.h * t.bytesPerPixel;
-                    const void* p = t.buf ? t.buf->Map() : nullptr;
-                    if (p) {
-                        std::ofstream f(base + "_" + t.name + ".f16", std::ios::binary);
-                        f.write(static_cast<const char*>(p), (std::streamsize)bytes);
-                        t.buf->Unmap();
-                        meta << t.name << " " << t.w << " " << t.h << " " << t.fmt << "\n";
-                        HE_CORE_INFO("[PT采样] {}_{}.f16  {}x{}  {} B", base, t.name, t.w, t.h, bytes);
-                    } else {
-                        HE_CORE_ERROR("[PT采样] 映射失败: {}_{}", base, t.name);
-                    }
-                }
-                // 相机参数一并落盘：离线对照需要**渲染这一帧时**的相机参数，
-                // 否则判据只能靠硬编码，而硬编码一旦被 cfg 改动就失效
-                {
-                    const render::CameraData& cam = camCtrl.GetCamera();
-                    std::ofstream cm(base + "_camera.txt");
-                    cm << "pos "     << cam.position.x << " " << cam.position.y << " " << cam.position.z << "\n";
-                    cm << "forward " << cam.forward.x  << " " << cam.forward.y  << " " << cam.forward.z  << "\n";
-                    cm << "up "      << cam.up.x       << " " << cam.up.y       << " " << cam.up.z       << "\n";
-                    cm << "fov "     << cam.fov        << "\n";
-                    cm << "near "    << cam.nearPlane  << "\n";
-                    cm << "far "     << cam.farPlane   << "\n";
-                    cm << "aspect "  << cam.aspectRatio << "\n";
-                    cm << "frame "   << frameIndex << "\n";
-                }
-                HE_CORE_INFO("[PT采样] 共落盘 {} 个目标，请求退出", g_DumpTargets.size());
-                g_DumpWritten = true;
-                // 采样完成即请求关窗：脚本无需超时等待，也保证退出前正常走完清理与保存流程
-                glfwSetWindowShouldClose(glfwWin, GLFW_TRUE);
+            // ── PT 参考图落盘：等本帧 timeline 后写盘（机制在 FrameDumpRecorder）──
+        if (ptDump.PendingWriteBack()) {
+            const render::CameraData& cam = camCtrl.GetCamera();
+            render::FrameDumpRecorder::CameraSnapshot camSnap;
+            camSnap.pos[0] = cam.position.x; camSnap.pos[1] = cam.position.y; camSnap.pos[2] = cam.position.z;
+            camSnap.forward[0] = cam.forward.x; camSnap.forward[1] = cam.forward.y; camSnap.forward[2] = cam.forward.z;
+            camSnap.up[0] = cam.up.x; camSnap.up[1] = cam.up.y; camSnap.up[2] = cam.up.z;
+            camSnap.fov = cam.fov; camSnap.nearPlane = cam.nearPlane;
+            camSnap.farPlane = cam.farPlane; camSnap.aspect = cam.aspectRatio;
+            if (ptDump.TryWriteBack(device.get(), camSnap)) {
+                glfwSetWindowShouldClose(glfwWin, GLFW_TRUE);   // 落盘完成即请求退出（脚本友好）
             }
+        }
 
             framePresenter.EndFrame(true);
-            frameIndex++;        };
+            frameIndex++;
+        };
         submitRender(recordUiAndPresent);
 
     }
