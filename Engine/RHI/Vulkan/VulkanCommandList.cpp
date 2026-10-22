@@ -320,6 +320,14 @@ void VulkanCommandList::SetViewport(const Viewport& vp) {
     vkCmdSetViewport(m_CmdBuffers[m_FrameIndex], 0, 1, &vkViewport);
 }
 
+// 【方案 A】Vulkan 的 NDC 的 y 向下 ⇒ 用负视口高度翻转 Y；D3D12 后端则用正高度、不翻。
+void VulkanCommandList::SetFullscreenViewport(u32 width, u32 height) {
+    const float w = static_cast<float>(width);
+    const float h = static_cast<float>(height);
+    SetViewport(Viewport{0.0f, h, w, -h, 0.0f, 1.0f});   // 负高度 = 翻转 Y
+    SetScissor(ScissorRect{0, 0, width, height});
+}
+
 void VulkanCommandList::SetScissor(const ScissorRect& sc) {
     VkRect2D vkScissor{};
     vkScissor.offset = {sc.x, sc.y};

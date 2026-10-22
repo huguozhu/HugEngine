@@ -1258,8 +1258,7 @@ void ForwardPipeline::RenderScene(rhi::IRHICommandList* cmd, const CameraData& c
         m_ParallelRecorder.Record(cmd, totalDraws, m_PBR_PSO.get(),
             [&](rhi::IRHICommandList& secCmdRef, u32 start, u32 end) {
         auto* secCmd = &secCmdRef;
-        secCmd->SetViewport({0, (float)m_HDRHeight, (float)m_HDRWidth, -(float)m_HDRHeight, 0, 1});
-        secCmd->SetScissor({0, 0, m_HDRWidth, m_HDRHeight});
+        secCmd->SetFullscreenViewport(static_cast<u32>(m_HDRWidth), static_cast<u32>(m_HDRHeight));
 
                 for (u32 i = start; i < end; ++i) {
                     auto& di = filteredItems[i];

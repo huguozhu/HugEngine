@@ -84,8 +84,7 @@ void ToneMapPass::SetInput(rhi::IRHITexture* hdr,rhi::IRHISampler* sampler){
 void ToneMapPass::Render(rhi::IRHICommandList* cmd){
     if(!m_Ready||!m_Enabled)return;
     cmd->SetPipeline(ResP(m_PSO));
-    cmd->SetViewport({0,(float)m_Height,(float)m_Width,-(float)m_Height,0,1});
-    cmd->SetScissor({0,0,m_Width,m_Height});
+    cmd->SetFullscreenViewport(static_cast<u32>(m_Width), static_cast<u32>(m_Height));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame,m_DescSet[m_SlotAware?m_Slot:0u]);
     struct { float exposure; float hdrEnabled; float whitePointNits; float _pad; } pc;
     pc.exposure = m_Exposure;

@@ -1584,8 +1584,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
                     m_Lighting.GetHDRTarget()->GetNativeHandle(),
                     m_Lighting.GetHDRDepth()->GetNativeHandle(),
                     w, h, nullptr, false);  // LoadOp::Load 保留 Light 结果
-                c->SetViewport({0, (float)h, (float)w, -(float)h, 0, 1});
-                c->SetScissor({0, 0, w, h});
+                c->SetFullscreenViewport(static_cast<u32>(w), static_cast<u32>(h));
                 m_ParticleRenderer.Render(c, pid, camera.GetViewProjMatrix(), camera);
                 c->EndOffscreenPass();
             });

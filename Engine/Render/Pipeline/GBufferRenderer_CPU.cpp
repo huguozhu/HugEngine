@@ -64,8 +64,7 @@ void GBufferRenderer_CPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
                     ctx.gbDisneyB->GetNativeHandle(), ctx.gbLightmapKey->GetNativeHandle() };
     // T3.2：本 pass 内会 ExecuteSecondary（并行录制）⇒ 必须允许 INLINE_AND_SECONDARY
     cmd->BeginOffscreenPassMRT(cv, 8, ctx.gbDepth->GetNativeHandle(), w, h, clears, /*allowSecondary=*/true);
-    cmd->SetViewport({0, (float)h, (float)w, -(float)h, 0, 1});
-    cmd->SetScissor({0, 0, w, h});
+    cmd->SetFullscreenViewport(static_cast<u32>(w), static_cast<u32>(h));
 
     // SceneRenderer 准备所有绘制项（阶段 1 §15.1 第②段：改吃快照，不再遍历世界；
     // 贴花是否排除已在收集侧由 `SceneSnapshotObjectOptions` 决定 ⇒ 这里不再传 excludeDecals）
@@ -149,8 +148,7 @@ void GBufferRenderer_CPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
             [&](rhi::IRHICommandList& secRef, u32 start, u32 end) {
                 auto& s = secRef;
                 s.BindDescriptorSet(rhi::kDescSetPerFrame, ctx.descSet);
-                s.SetViewport({0, (float)h, (float)w, -(float)h, 0, 1});
-                s.SetScissor({0, 0, w, h});
+                s.SetFullscreenViewport(static_cast<u32>(w), static_cast<u32>(h));
                 for (u32 i = start; i < end; ++i) {
                     const DrawItem& di = filteredItems[i];
                     // 任务 25：实例化网格由下面专门的实例化绘制段处理（SV_InstanceID 取实例变换）

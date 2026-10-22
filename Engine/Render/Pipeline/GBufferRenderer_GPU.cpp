@@ -61,8 +61,7 @@ void GBufferRenderer_GPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
                     ctx.gbWorldPos->GetNativeHandle(), ctx.gbDisneyA->GetNativeHandle(),
                     ctx.gbDisneyB->GetNativeHandle(), ctx.gbLightmapKey->GetNativeHandle() };
     cmd->BeginOffscreenPassMRT(cv, 8, ctx.gbDepth->GetNativeHandle(), w, h, clears, false);
-    cmd->SetViewport({0, (float)h, (float)w, -(float)h, 0, 1});
-    cmd->SetScissor({0, 0, w, h});
+    cmd->SetFullscreenViewport(static_cast<u32>(w), static_cast<u32>(h));
 
     // GPU Driven 绘制
     u32 visCount = ctx.gpuCulling->GetLastVisibleCount();

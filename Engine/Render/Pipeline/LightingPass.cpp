@@ -164,8 +164,7 @@ void LightingPass::Render(rhi::IRHICommandList* cmd, const LightingInputs& in) {
     cmd->BeginOffscreenPass(ResT(m_HDRTarget)->GetNativeHandle(),
                             ResT(m_HDRDepth)->GetNativeHandle(),
                             in.width, in.height, &clr, false);
-    cmd->SetViewport({0, (float)in.height, (float)in.width, -(float)in.height, 0, 1});
-    cmd->SetScissor({0, 0, in.width, in.height});
+    cmd->SetFullscreenViewport(static_cast<u32>(in.width), static_cast<u32>(in.height));
 
     // Push constants
     DeferredLightingPushConstant lpc{};

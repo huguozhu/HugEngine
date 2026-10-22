@@ -95,6 +95,14 @@ public:
     virtual void SetViewport(const Viewport& vp) = 0;
     virtual void SetScissor(const ScissorRect& sc) = 0;
 
+    /// 【统一入口】把视口与剪切矩形都设为"覆盖整张目标"（width × height）。
+    ///
+    /// 为什么放在接口上而不是做成公共内联函数：**Y 是否翻转是后端约定**——
+    ///   · Vulkan：NDC 的 y 向下 ⇒ 用**负高度**翻 Y（`SetViewport({0,h,w,-h,0,1})`）；
+    ///   · D3D12：`D3D12_VIEWPORT.Height` 必须非负、且 NDC 的 y 向上 ⇒ 用正高度、不翻。
+    /// 调用方只表达"覆盖整张目标"的语义，翻不翻由各后端决定，避免把 Vulkan 约定固化到调用点。
+    virtual void SetFullscreenViewport(u32 width, u32 height) = 0;
+
     // Draw
     virtual void Draw(u32 vertexCount, u32 instanceCount = 1,
                       u32 firstVertex = 0, u32 firstInstance = 0) = 0;

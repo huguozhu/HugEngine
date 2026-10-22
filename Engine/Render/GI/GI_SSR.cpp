@@ -164,8 +164,7 @@ void GI_SSR::Render(rhi::IRHICommandList* cmd) {
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSet);
     u32 ow = ResT(m_Output)->GetWidth();
     u32 oh = ResT(m_Output)->GetHeight();
-    cmd->SetViewport({0, (float)oh, (float)ow, -(float)oh, 0, 1});
-    cmd->SetScissor({0, 0, ow, oh});
+    cmd->SetFullscreenViewport(static_cast<u32>(ow), static_cast<u32>(oh));
     // ── 矩阵上传（UBO binding 3）：**正/逆投影分开传** ──
     // 此前只传了 inverse(proj)，而 shader 还拿它做 view→clip 投影 —— 于是
     // Hi-Z 层次 march 与线性 march **两条路径都在错误的屏幕位置采样深度**（§9.2-B）。

@@ -98,8 +98,7 @@ void DenoiseUpscale::Render(rhi::IRHICommandList* cmd) {
     if (!m_Ready || !m_Input || !m_Depth || !m_Normal) return;
     cmd->SetPipeline(ResP(m_PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
-    cmd->SetViewport({ 0, (float)m_Height, (float)m_Width, -(float)m_Height, 0, 1 });
-    cmd->SetScissor({ 0, 0, m_Width, m_Height });
+    cmd->SetFullscreenViewport(static_cast<u32>(m_Width), static_cast<u32>(m_Height));
     // 源尺寸从纹理自身读：半分辨率/全分辨率是运行时开关，缓存一份副本会与纹理漂移
     const u32 srcW = m_Input->GetWidth()  ? m_Input->GetWidth()  : 1u;
     const u32 srcH = m_Input->GetHeight() ? m_Input->GetHeight() : 1u;

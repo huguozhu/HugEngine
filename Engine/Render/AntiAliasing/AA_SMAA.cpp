@@ -152,8 +152,7 @@ void AA_SMAA::Render(rhi::IRHICommandList* cmd) {
     {
         cmd->SetPipeline(ResP(m_EdgePSO));
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_EdgeSet);
-        cmd->SetViewport({0, (float)m_Height, (float)m_Width, -(float)m_Height, 0, 1});
-        cmd->SetScissor({0, 0, m_Width, m_Height});
+        cmd->SetFullscreenViewport(static_cast<u32>(m_Width), static_cast<u32>(m_Height));
 
         struct { float2 invSize; float2 _pad; } pc;
         pc.invSize = float2(1.0f / m_Width, 1.0f / m_Height);
@@ -188,8 +187,7 @@ void AA_SMAA::Render(rhi::IRHICommandList* cmd) {
 
         cmd->SetPipeline(ResP(m_BlendPSO));
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_BlendSet);
-        cmd->SetViewport({0, (float)m_Height, (float)m_Width, -(float)m_Height, 0, 1});
-        cmd->SetScissor({0, 0, m_Width, m_Height});
+        cmd->SetFullscreenViewport(static_cast<u32>(m_Width), static_cast<u32>(m_Height));
 
         struct { float2 invSize; float2 _pad; } pc;
         pc.invSize = float2(1.0f / m_Width, 1.0f / m_Height);
@@ -235,8 +233,7 @@ void AA_SMAA::RenderFinalPass(rhi::IRHICommandList* cmd) {
 
     cmd->SetPipeline(ResP(m_NeighborPSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_NeighborSet);
-    cmd->SetViewport({0, (float)m_Height, (float)m_Width, -(float)m_Height, 0, 1});
-    cmd->SetScissor({0, 0, m_Width, m_Height});
+    cmd->SetFullscreenViewport(static_cast<u32>(m_Width), static_cast<u32>(m_Height));
 
     struct { float2 invSize; float2 _pad; } pc;
     pc.invSize = float2(1.0f / m_Width, 1.0f / m_Height);

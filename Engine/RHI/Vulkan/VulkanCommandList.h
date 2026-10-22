@@ -51,6 +51,7 @@ public:
     void SetVertexBuffer(IRHIBuffer* buffer, u32 binding) override;
     void SetIndexBuffer(IRHIBuffer* buffer, u32 offset) override;
     void SetViewport(const Viewport& vp) override;
+    void SetFullscreenViewport(u32 width, u32 height) override;
     void SetScissor(const ScissorRect& sc) override;
     void BindDescriptorSet(u32 setIndex, DescriptorSetHandle set) override;
     void Draw(u32 vertexCount, u32 instanceCount, u32 firstVertex, u32 firstInstance) override;

@@ -1,7 +1,9 @@
 #pragma once
 
 #include "Core/Types.h"
-#include "RHI/SwapChain.h"
+#include "RHI/SwapChain.h"
+#include "RHI/CommandList.h"
+#include "RHI/RHI.h"   // EndRecording 内联调用 IRHIDevice::Submit（需要完整类型）   // BeginRecording/EndRecording 内联用到 IRHICommandList 的成员
 
 // ============================================================
 // FramePresenter —— 帧外壳的 acquire/present 收口（L4-1）
@@ -23,6 +25,9 @@
 
 namespace he::rhi {
 
+class IRHIDevice;
+class IRHICommandList;   // 同上：只用指针   // 前置声明：本文件只用它的指针（避免把 RHI.h 拉进来）
+
 class FramePresenter {
 public:
     FramePresenter() = default;

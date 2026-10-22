@@ -117,8 +117,7 @@ void ColorGradingPass::Render(rhi::IRHICommandList* cmd) {
 
     cmd->SetPipeline(ResP(m_PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
-    cmd->SetViewport({0, (float)m_Height, (float)m_Width, -(float)m_Height, 0, 1});
-    cmd->SetScissor({0, 0, m_Width, m_Height});
+    cmd->SetFullscreenViewport(static_cast<u32>(m_Width), static_cast<u32>(m_Height));
     cmd->SetPushConstants(0, sizeof(pc), &pc);
     cmd->Draw(3);
 }

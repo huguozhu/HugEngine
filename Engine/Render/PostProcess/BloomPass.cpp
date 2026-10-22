@@ -195,8 +195,7 @@ void BloomPass::Render(rhi::IRHICommandList* cmd) {
 
     cmd->SetPipeline(m_BrightPSO.get());
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_BrightSet);
-    cmd->SetViewport({0, (float)hh, (float)hw, -(float)hh, 0, 1});
-    cmd->SetScissor({0, 0, hw, hh});
+    cmd->SetFullscreenViewport(static_cast<u32>(hw), static_cast<u32>(hh));
 
     struct { float threshold; float _pad[3]; } bpc;
     bpc.threshold = m_Threshold;
@@ -222,8 +221,7 @@ void BloomPass::Render(rhi::IRHICommandList* cmd) {
 
     cmd->SetPipeline(m_CompositePSO.get());
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_CompositeSet);
-    cmd->SetViewport({0, (float)m_Height, (float)m_Width, -(float)m_Height, 0, 1});
-    cmd->SetScissor({0, 0, m_Width, m_Height});
+    cmd->SetFullscreenViewport(static_cast<u32>(m_Width), static_cast<u32>(m_Height));
 
     struct { float intensity; float _pad[3]; } cpc;
     cpc.intensity = m_Intensity;

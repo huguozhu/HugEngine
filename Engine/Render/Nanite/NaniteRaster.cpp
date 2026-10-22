@@ -307,9 +307,7 @@ void NaniteRaster::RecordRasterPass(rhi::IRHICommandList* cmd,
                             kNaniteRasterTargetSize, kNaniteRasterTargetSize, &clear, false);
     // 1×1 视口 + 剪裁：全屏三角形 ⇒ 每条间接命令的第一个三角形恰好产生 1 个片元，
     // 片元里用 `SV_PrimitiveID == 0` 判定"本条命令的第一个三角形" ⇒ 每个绘制恰好计一次。
-    cmd->SetViewport({ 0.0f, (float)kNaniteRasterTargetSize,
-                       (float)kNaniteRasterTargetSize, -(float)kNaniteRasterTargetSize, 0.0f, 1.0f });
-    cmd->SetScissor({ 0, 0, kNaniteRasterTargetSize, kNaniteRasterTargetSize });
+    cmd->SetFullscreenViewport(static_cast<u32>(kNaniteRasterTargetSize), static_cast<u32>(kNaniteRasterTargetSize));
 
     // 绘制端点：`DrawIndexedIndirectCount`。maxDrawCount 只是命令缓冲容量上限，
     // 真正画几条由 countBuffer 的值决定 —— 这正是"可见簇数驱动绘制条数"的实现。
@@ -603,9 +601,7 @@ void NaniteRaster::RecordMeshTestPass(rhi::IRHICommandList* cmd) {
     cmd->BeginOffscreenPass(ResT(m_MeshTestTarget)->GetNativeHandle(), nullptr,
                             kNaniteMeshTestTargetSize, kNaniteMeshTestTargetSize, &clear, false);
     // 视口/剪裁与任务 3 的 1×1 pass 同款（y 方向翻转与 Vulkan 约定一致）
-    cmd->SetViewport({ 0.0f, (float)kNaniteMeshTestTargetSize,
-                       (float)kNaniteMeshTestTargetSize, -(float)kNaniteMeshTestTargetSize, 0.0f, 1.0f });
-    cmd->SetScissor({ 0, 0, kNaniteMeshTestTargetSize, kNaniteMeshTestTargetSize });
+    cmd->SetFullscreenViewport(static_cast<u32>(kNaniteMeshTestTargetSize), static_cast<u32>(kNaniteMeshTestTargetSize));
 
     // 绘制端点：1 个 mesh 工作组（`Nanite_MeshTest.mesh.slang` 输出 4 顶点 / 2 图元）。
     cmd->SetDrawDebugLabel("Nanite_MeshTest (1 meshlet group, 2 prims)");
@@ -1276,8 +1272,7 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
     NaniteDepthResolveParams resolveParams{ w, h };
     cmd->SetPushConstants(0, (u32)sizeof(resolveParams), &resolveParams);
     cmd->BeginOffscreenPass(nullptr, targets.depth->GetNativeHandle(), w, h, &depthClear, false);
-    cmd->SetViewport({ 0.0f, (float)h, (float)w, -(float)h, 0.0f, 1.0f });
-    cmd->SetScissor({ 0, 0, w, h });
+    cmd->SetFullscreenViewport(static_cast<u32>(w), static_cast<u32>(h));
     cmd->SetDrawDebugLabel("Nanite_DepthResolve (key -> SV_Depth)");
     cmd->Draw(3);
     cmd->EndOffscreenPass();
@@ -1589,8 +1584,7 @@ void NaniteRaster::RecordHardRasterPass(rhi::IRHICommandList* cmd,
     // 【视口必须与软光栅/深度解析同款（负高度）】本引擎的离屏通道统一用 `-h` 抵消"NDC y 向上、
     //   帧缓冲 y 向下"的差异；软光栅的 `softRasterNdcToPixel` 也是按这条约定把 NDC 映射到行列的
     //   ⇒ 只有用同一个负高度视口，两条光栅路径才会落在**同一批像素**上。
-    cmd->SetViewport({ 0.0f, (float)h, (float)w, -(float)h, 0.0f, 1.0f });
-    cmd->SetScissor({ 0, 0, w, h });
+    cmd->SetFullscreenViewport(static_cast<u32>(w), static_cast<u32>(h));
     // 任务数 = 可见簇容量（与软光栅同一条既有口径：可见计数是**同一帧 GPU 刚写出**的、CPU 读不到，
     // 读回会破坏无停顿）⇒ 由 shader 按 `slot >= visibleCount` 与分流判据早退收口。
     cmd->SetDrawDebugLabel("Nanite_HardRaster (mesh, triangleCount > maxTriangles)");

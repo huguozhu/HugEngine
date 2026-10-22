@@ -178,8 +178,7 @@ void GI_SSGI::Render(rhi::IRHICommandList* cmd) {
     // 视口用输出纹理实际尺寸（halfRes 时为半分辨率，与渲染目标一致）
     u32 ow = ResT(m_Output)->GetWidth();
     u32 oh = ResT(m_Output)->GetHeight();
-    cmd->SetViewport({0, (float)oh, (float)ow, -(float)oh, 0, 1});
-    cmd->SetScissor({0, 0, ow, oh});
+    cmd->SetFullscreenViewport(static_cast<u32>(ow), static_cast<u32>(oh));
 
     // 2. 绑定「前帧 HDR 辐射度」（入射辐射度来源；纹理代次变化时才重绑）
     BindRadianceHistory();

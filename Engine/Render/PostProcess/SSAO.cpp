@@ -292,8 +292,7 @@ void SSAO::Render(rhi::IRHICommandList* cmd) {
     // --- Pass 1: SSAO / GTAO → m_RawAOTexture（按模式选择 PSO）---
     cmd->SetPipeline(useGTAO ? m_GTAO_PSO.get() : m_SSAO_PSO.get());
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_SSAOSets[m_FrameSlot]);
-    cmd->SetViewport({0,(float)aoH,(float)aoW,-(float)aoH,0,1});
-    cmd->SetScissor({0,0,aoW,aoH});
+    cmd->SetFullscreenViewport(static_cast<u32>(aoW), static_cast<u32>(aoH));
 
     // 上传 SSAO 参数到 Uniform Buffer（kernel[64] + params + proj）
     // 对齐 shader 中 SSAOParams cbuffer 布局
@@ -344,8 +343,7 @@ void SSAO::Render(rhi::IRHICommandList* cmd) {
     // --- Pass 2: Blur（读 m_RawAOTexture → 写 m_AOTexture）---
     cmd->SetPipeline(m_Blur_PSO.get());
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_BlurSet);
-    cmd->SetViewport({0,(float)aoH,(float)aoW,-(float)aoH,0,1});
-    cmd->SetScissor({0,0,aoW,aoH});
+    cmd->SetFullscreenViewport(static_cast<u32>(aoW), static_cast<u32>(aoH));
 
     struct { float2 ts; float _pad[2]; } bpc;
     bpc.ts = float2(1.0f/float(aoW), 1.0f/float(aoH));   // 模糊半径按 AO 纹理实际尺寸

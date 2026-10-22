@@ -136,8 +136,7 @@ void RectLightShadowTechnique::Render(rhi::IRHICommandList* cmd,const FrameScene
         cmd->SetPipeline(ResP(m_ShadowPSO));
         cmd->BeginOffscreenPass(nullptr,depthView,m_MapSize,m_MapSize,&cv);
         cmd->SetPipeline(ResP(m_ShadowPSO));
-        cmd->SetViewport({0,(float)m_MapSize,(float)m_MapSize,-(float)m_MapSize,0,1});
-        cmd->SetScissor({0,0,m_MapSize,m_MapSize});
+        cmd->SetFullscreenViewport(static_cast<u32>(m_MapSize), static_cast<u32>(m_MapSize));
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame,m_ExternalDescSet);
         u32 oi=0;
         // 【第③段第 2 批】遍历快照里的阴影投射者（顺序 = 旧的 Mesh→Cube→Sphere 相对顺序），

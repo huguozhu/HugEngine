@@ -107,8 +107,7 @@ void GIRadianceHistory::Capture(rhi::IRHICommandList* cmd, rhi::IRHITexture* hdr
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
     rhi::ClearValue clr{};
     cmd->BeginOffscreenPass(ResT(m_Texture)->GetNativeHandle(), nullptr, tw, th, &clr, false);
-    cmd->SetViewport({0, (float)th, (float)tw, -(float)th, 0, 1});
-    cmd->SetScissor({0, 0, tw, th});
+    cmd->SetFullscreenViewport(static_cast<u32>(tw), static_cast<u32>(th));
     cmd->Draw(3);
     cmd->EndOffscreenPass();
 }

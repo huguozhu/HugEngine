@@ -154,8 +154,7 @@ void RSMIndirect::PreBind(rhi::IRHICommandList* cmd) {
     // 视口用输出纹理实际尺寸（半分辨率），与渲染目标一致
     const u32 ow = ResT(m_Output)->GetWidth();
     const u32 oh = ResT(m_Output)->GetHeight();
-    cmd->SetViewport({0, (float)oh, (float)ow, -(float)oh, 0, 1});
-    cmd->SetScissor({0, 0, ow, oh});
+    cmd->SetFullscreenViewport(static_cast<u32>(ow), static_cast<u32>(oh));
 }
 
 void RSMIndirect::Render(rhi::IRHICommandList* cmd) {

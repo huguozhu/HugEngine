@@ -183,8 +183,7 @@ void CSMTechnique::RenderCascade(rhi::IRHICommandList* cmd,u32 ci,const FrameSce
     cmd->SetPipeline(ResP(m_ShadowPSO));
     cmd->BeginOffscreenPass(nullptr,dv,m_ShadowMapSize,m_ShadowMapSize,&cv);
     cmd->SetPipeline(ResP(m_ShadowPSO));
-    cmd->SetViewport({0,(float)m_ShadowMapSize,(float)m_ShadowMapSize,-(float)m_ShadowMapSize,0,1});
-    cmd->SetScissor({0,0,m_ShadowMapSize,m_ShadowMapSize});
+    cmd->SetFullscreenViewport(static_cast<u32>(m_ShadowMapSize), static_cast<u32>(m_ShadowMapSize));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame,m_ExternalDescSet);
     auto*objData=static_cast<GPUObjectData*>(m_ExternalObjectBuffer->Map());
     u32 oi=0;

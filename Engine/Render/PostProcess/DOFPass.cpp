@@ -180,8 +180,7 @@ void DOFPass::Render(rhi::IRHICommandList* cmd) {
 
         cmd->SetPipeline(m_CoCPSO.get());
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_CoCSet);
-        cmd->SetViewport({0, (float)h, (float)w, -(float)h, 0, 1});
-        cmd->SetScissor({0, 0, w, h});
+        cmd->SetFullscreenViewport(static_cast<u32>(w), static_cast<u32>(h));
         cmd->SetPushConstants(0, sizeof(pc), &pc);
         cmd->BeginOffscreenPass(m_CoCTex->GetNativeHandle(), nullptr, w, h, &clr, false);
         cmd->Draw(3);
@@ -209,8 +208,7 @@ void DOFPass::Render(rhi::IRHICommandList* cmd) {
 
         cmd->SetPipeline(m_CompositePSO.get());
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_CompositeSet);
-        cmd->SetViewport({0, (float)h, (float)w, -(float)h, 0, 1});
-        cmd->SetScissor({0, 0, w, h});
+        cmd->SetFullscreenViewport(static_cast<u32>(w), static_cast<u32>(h));
         cmd->SetPushConstants(0, sizeof(pc), &pc);
         cmd->BeginOffscreenPass(m_Output->GetNativeHandle(), nullptr, w, h, &clr, false);
         cmd->Draw(3);
