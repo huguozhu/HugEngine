@@ -254,7 +254,7 @@ void NaniteRaster::Shutdown() {
 
     m_Device->DestroyTextureHandle(m_Target); m_Target = {};
     m_Device->DestroyBufferHandle(m_DummyVB); m_DummyVB = {};
-    m_PlaceholderIB.reset();
+    m_Device->DestroyBufferHandle(m_PlaceholderIB); m_PlaceholderIB = {};
     m_PlaceholderIndexCount = 0u;
     m_RasterCountRef = nullptr;
 
@@ -314,7 +314,7 @@ void NaniteRaster::RecordRasterPass(rhi::IRHICommandList* cmd,
     // 绘制端点：`DrawIndexedIndirectCount`。maxDrawCount 只是命令缓冲容量上限，
     // 真正画几条由 countBuffer 的值决定 —— 这正是"可见簇数驱动绘制条数"的实现。
     cmd->SetVertexBuffer(m_Device->ResolveBuffer(m_DummyVB), 0);
-    cmd->SetIndexBuffer(m_PlaceholderIB.get(), 0);
+    cmd->SetIndexBuffer(m_Device->ResolveBuffer(m_PlaceholderIB), 0);
     cmd->SetDrawDebugLabel("Nanite_Raster (indirect count)");
     cmd->DrawIndexedIndirectCount(indirectCmdBuffer, 0, countBuffer, 0,
                                   maxDrawCount, (u32)sizeof(NaniteIndirectCommand));
@@ -336,7 +336,7 @@ void NaniteRaster::SetPlaceholderIndexCapacity(u32 indexCount) {
                      want, kNanitePlaceholderIndexCountMax);
         want = kNanitePlaceholderIndexCountMax;
     }
-    if (m_PlaceholderIB && want <= m_PlaceholderIndexCount) return;   // 现有缓冲已经够大
+    if (m_PlaceholderIB.IsValid() && want <= m_PlaceholderIndexCount) return;   // 现有缓冲已经够大
 
     // 【替换的安全性】本函数只在 `EnsureAssetUploaded` 的一次性路径上被调用，而那条路径里的
     //   `NaniteScene::UploadPackedAsset` 已经 `WaitIdle()` ⇒ 没有任何在飞的命令缓冲还引用旧缓冲。
@@ -352,7 +352,7 @@ void NaniteRaster::SetPlaceholderIndexCapacity(u32 indexCount) {
 }
 
 bool NaniteRaster::EnsurePlaceholderIndexBuffer() {
-    if (m_PlaceholderIB) return true;
+    if (m_PlaceholderIB.IsValid()) return true;
     // 还没被告知资产规模（例如资产为空/上传失败）⇒ 建一条命令的最小容量，够假簇链用。
     return CreatePlaceholderIndexBuffer(kNaniteFakeClusterIndexCount);
 }
@@ -365,23 +365,24 @@ bool NaniteRaster::CreatePlaceholderIndexBuffer(u32 indexCount) {
     // Index：`SetIndexBuffer` 会按这个 usage 建索引缓冲视图（缓冲 ≥ 4B ⇒ 索引类型为 UINT32）。
     d.usage     = rhi::BufferUsage::Index;
     d.cpuAccess = true;   // 创建时写入周期模式（内容每帧不变 ⇒ 之后只被 GPU 读）
-    auto buffer = m_Device->CreateBuffer(d);
-    if (!buffer) return false;
+    auto buffer = m_Device->CreateBufferHandle(d);   // A-3：句柄，随成员一起持有
+    if (!buffer.IsValid()) return false;
 
     // 内容 = 0,1,2,0,1,2,…：让任意 `[firstIndex, firstIndex+indexCount)`（firstIndex 是 3 的倍数、
     // indexCount 是 3 的倍数）都读出 `{0,1,2}` 的周期序列 ⇒ 每个三角形的三个 `SV_VertexID`
     // 取模 3 后是 `{0,1,2}` 的一个排列 ⇒ 顶点着色器画出的全屏三角形**非退化** ⇒ 每个三角形
     // 都产生片元（否则退化三角形会被光栅器整块丢弃，"绘制条数"读数就不可信）。
-    if (void* p = buffer->Map()) {
+    if (void* p = m_Device->ResolveBuffer(buffer)->Map()) {
         auto* words = static_cast<u32*>(p);
         for (u32 i = 0; i < indexCount; ++i) words[i] = i % kNaniteIndicesPerTriangle;
-        buffer->Unmap();
+        if (auto* bb = m_Device->ResolveBuffer(buffer)) bb->Unmap();
     } else {
         HE_CORE_ERROR("NaniteRaster: 占位索引缓冲映射失败（{} 个索引位置）", indexCount);
         return false;
     }
 
-    m_PlaceholderIB = std::move(buffer);
+    m_Device->DestroyBufferHandle(m_PlaceholderIB);   // 替换旧缓冲（调用方已 WaitIdle）
+    m_PlaceholderIB = buffer;
     m_PlaceholderIndexCount = indexCount;
     return true;
 }

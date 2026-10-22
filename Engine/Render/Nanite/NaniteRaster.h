@@ -438,7 +438,7 @@ private:
     /// 【任务 16】占位**索引**缓冲：覆盖资产的整个索引位置空间，内容 = `0,1,2` 周期模式。
     /// 懒建（首次录制时按 `m_PlaceholderIndexCount` 建，资产上传后由
     /// `SetPlaceholderIndexCapacity` 放大一次）。
-    std::unique_ptr<rhi::IRHIBuffer>  m_PlaceholderIB;
+    rhi::RHIBufferHandle  m_PlaceholderIB{};   // A-3
     /// 占位索引缓冲覆盖的索引位置个数（u32 元素数）
     u32 m_PlaceholderIndexCount = 0u;
     /// 【任务 16】"绘制计数"缓冲的**非持有**引用（由 `NaniteCull` 创建并持有；`Initialize` 传入）。
