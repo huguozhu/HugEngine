@@ -2609,3 +2609,48 @@ A-5（ImGui/PSO 命令化）、T2.6、T3.3/T3.4、T5.1~T5.3、L4-3。
 **触发条件**（将来什么时候该做）：出现"每帧都需要新建资源"的用例（例如动态字体的每秒重栅格化、
 程序化生成的体积纹理），那时再做异步化才有意义。
 
+## 19. 附录 H：T2.6 现状与搬迁配方（2026-10-22）
+
+### 19.1 已完成：出口层（`4852be9`）
+
+`RenderThreadContext` 从"只有帧号/槽位/`hasWork` 的壳"升级为渲染层调用 RHI 的唯一出口：
+
+| 段 | API |
+|---|---|
+| 执行 | `Submit(cmd, stream = nullptr)`（呈现仍由 `rhi::FramePresenter`（L4-1）收口） |
+| 创建 | `CreateBufferHandle` / `CreateTextureHandle` / `CreatePipelineStateHandle` / `CreateSamplerHandle` |
+| 解析 | `ResolveBuffer` / `ResolveTexture` / `ResolvePipelineState` |
+| 身份 | `device`（`RenderThread::SetDevice` 在泵帧时填入）+ `IsValid()` |
+
+`Engine/Render/Threading/RenderThreadContext.h` 自此**不再是 RHI-free** —— 这是文档里
+"保持 RHI-free **直到 T2.6**"那一步的兑现。
+
+### 19.2 未完成：长尾搬迁（几十个 pass）
+
+判据要求"`RenderThreadContext` 是**唯一** RHI 出口"，而现状是各 pass 都自己存
+`rhi::IRHIDevice* m_Device`（`ForwardPipeline`、`DeferredPipeline`、`GBufferRenderer`、
+`LightingPass` …）。把它们全部改走上下文是**逐 pass 的机械工作**，总量大、每步都必须单独验证。
+
+**为什么不一次做完**：`Render` 类入口的签名一旦加 `RenderThreadContext*` 就会波及所有调用方
+（`DeferredPipeline`、8 个样例），一次改完无法用"20/20 逐字节一致"定位是哪一处引入的回归。
+
+### 19.3 搬迁配方（每个 pass 按此顺序，单批单验证）
+
+1. **入口加参数**：给该 pass 的帧入口加 `const RenderThreadContext& ctx`（或 `RenderThreadContext*`），
+   由上一级传入；`Initialize` 里的 `m_Device` 暂时保留（创建期仍直接用它）。
+2. **解析改走上下文**：把该 pass 里 `m_Device->ResolveBuffer/ResolveTexture/ResolvePipelineState(...)`
+   换成 `ctx.ResolveBuffer/...`（纯机械替换，语义不变）。
+3. **提交改走上下文**：凡是该 pass 内部调 `m_Device->Submit(...)` 的地方换成 `ctx.Submit(...)`。
+4. **创建改走上下文**：`Create*Handle` 换成 `ctx.Create*Handle`（这样将来把创建挪去 RHI 线程时，
+   只需改上下文一层）。
+5. **逐批验证**：构建 + 四条判据 + 单独提交。搬迁是"语义等价"改造 ⇒ 转储必须 20/20 一致。
+6. **最后一步**：该 pass 的 `m_Device` 成员可以删掉（此时它已完全不碰设备指针）。
+
+**建议顺序**：先 `ForwardPipeline`（主通道、结构最典型）→ `DeferredPipeline` → `GBufferRenderer`
+→ `LightingPass` → 其余 GI/RT/Lumen/Nanite pass。每个 pass 一批。
+
+### 19.4 当前判定
+
+T2.6 判为**部分完成**：出口已就位（19.1），搬迁按 19.3 的配方持续推进；在没有完成全部搬迁前，
+不应声称"`RenderThreadContext` 是唯一 RHI 出口"。
+
