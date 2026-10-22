@@ -165,17 +165,19 @@ public:
     u64 GetCullCount()           const { return m_CullCount; }
     u32 GetLastInstanceCount()   const { return m_LastInstanceCount; }
 
-    rhi::IRHIPipelineState* GetPSO() const { return m_PSO.get(); }
+    rhi::IRHIPipelineState* GetPSO() const {   // A-3：句柄按需解析
+        return m_Device ? m_Device->ResolvePipelineState(m_PSO) : nullptr;
+    }
 
 private:
     rhi::IRHIDevice* m_Device = nullptr;
 
     // 共享可见实例索引列表（u32[]）——**每飞行帧一份**：
     // 单份会让"帧 N 的 cull 写"与"帧 N-1 仍在执行的 draw 读"互相覆盖
-    std::unique_ptr<rhi::IRHIBuffer> m_VisibleBuf[rhi::kMaxFramesInFlight];
+    rhi::RHIBufferHandle m_VisibleBuf[rhi::kMaxFramesInFlight]{};   // A-3：句柄持有
     u32 m_VisibleSSBOHandle[rhi::kMaxFramesInFlight] = { 0, 0, 0 };
 
-    std::unique_ptr<rhi::IRHIPipelineState> m_PSO;
+    rhi::RHIPipelineStateHandle m_PSO{};   // A-3：句柄持有
     rhi::ShaderBytecode m_CS;
     rhi::DescriptorSetLayoutHandle m_Layout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_Set    = rhi::kInvalidSet;

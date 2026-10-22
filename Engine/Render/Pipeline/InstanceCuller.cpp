@@ -24,13 +24,13 @@ bool InstanceCuller::Initialize(rhi::IRHIDevice* device) {
         rhi::BufferDesc vb;
         vb.size  = sizeof(u32) * kMaxInstances;
         vb.usage = rhi::BufferUsage::Storage;
-        m_VisibleBuf[slot] = m_Device->CreateBuffer(vb);
-        if (!m_VisibleBuf[slot]) {
+        m_VisibleBuf[slot] = m_Device->CreateBufferHandle(vb);   // A-3
+        if (!m_VisibleBuf[slot].IsValid()) {
             HE_CORE_ERROR("InstanceCuller: 可见实例列表创建失败（槽位 {}）", slot);
             return false;
         }
         m_VisibleSSBOHandle[slot] =
-            m_Device->GetBindlessHeap()->RegisterBuffer(m_VisibleBuf[slot].get());
+            m_Device->GetBindlessHeap()->RegisterBuffer(m_Device->ResolveBuffer(m_VisibleBuf[slot]));
     }
 
     // 2. 描述符集布局：与引擎其它 pass 一致地登记 bindless 三件套
@@ -65,8 +65,8 @@ bool InstanceCuller::Initialize(rhi::IRHIDevice* device) {
     desc.pushConstantRanges   = { pc };
     desc.descriptorSetLayouts = { m_Layout };
     desc.debugName            = "InstancedCull";
-    m_PSO = m_Device->CreatePipelineState(desc);
-    if (!m_PSO) {
+    m_PSO = m_Device->CreatePipelineStateHandle(desc);   // A-3
+    if (!m_PSO.IsValid()) {
         HE_CORE_ERROR("InstanceCuller: compute PSO 创建失败");
         return false;
     }
@@ -76,14 +76,15 @@ bool InstanceCuller::Initialize(rhi::IRHIDevice* device) {
 }
 
 void InstanceCuller::Shutdown() {
-    m_PSO.reset();
+    m_Device->DestroyPipelineStateHandle(m_PSO); m_PSO = {};
     if (m_Device) {
         for (u32 slot = 0; slot < rhi::kMaxFramesInFlight; ++slot) {
             if (m_VisibleSSBOHandle[slot] != 0) {
                 m_Device->GetBindlessHeap()->ReleaseBuffer(m_VisibleSSBOHandle[slot]);  // 任务 23：槽位回收
                 m_VisibleSSBOHandle[slot] = 0;
             }
-            m_VisibleBuf[slot].reset();
+            m_Device->DestroyBufferHandle(m_VisibleBuf[slot]);
+            m_VisibleBuf[slot] = {};
         }
         // 实例缓冲状态表：连同实例 SSBO / 命令缓冲的 bindless 槽位一并释放
         // （设备仍然有效时才能回收槽位，因此这一步必须在 m_Device 置空之前）
@@ -258,7 +259,7 @@ u32 InstanceCuller::Cull(rhi::IRHICommandList* cmd,
                           u32 instanceCount, u32 frameSlot,
                           const float3& localBoundsMin, const float3& localBoundsMax,
                           const float4x4& viewProj) {
-    if (!cmd || !m_PSO || !commandBuffer) return 0;
+    if (!cmd || !m_PSO.IsValid() || !commandBuffer) return 0;
     frameSlot %= rhi::kMaxFramesInFlight;
 
     // 命令头复位 + **先读回**上一帧的可见数（GPU 已经写完；本帧清零之后读到的必然是 0，
@@ -286,7 +287,7 @@ u32 InstanceCuller::Cull(rhi::IRHICommandList* cmd,
     pcs.visibleBufferHandle  = m_VisibleSSBOHandle[frameSlot];
     pcs.commandHandle        = commandSSBOHandle;
 
-    cmd->SetPipeline(m_PSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
     cmd->SetPushConstants(0, sizeof(pcs), &pcs);
 
