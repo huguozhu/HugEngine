@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Threading/RenderThreadContext.h"   // T2.6：帧上下文（唯一 RHI 出口）
+
 #include "Pipeline/IRenderPipeline.h"
 #include "Pipeline/Material.h"
 #include "Pipeline/ClusteredShading.h"
@@ -61,6 +63,10 @@ public:
     void Render(rhi::IRHICommandList* cmd, const FrameSceneSnapshot& snapshot,
                 const CameraData& camera,
                 float deltaTime = 0.016f) override;
+
+    /// 【T2.6】设置本帧的渲染线程上下文：设置后 `Render` 内的解析走上下文（唯一 RHI 出口），
+    /// 未设置时回退到 `m_Device`（搬迁过渡期用，逐 pass 推进完成后可删掉回退）。
+    void SetFrameContext(const RenderThreadContext* ctx) { m_FrameCtx = ctx; }
 
     // 子系统访问
     IShadowSystem*       GetShadowSystem() override { return m_ShadowSystem.get(); }
@@ -181,6 +187,8 @@ private:
     /// 每帧在 Render 开头（填 UBO 之前）调用一次，结果同时喂 frame graph 与 UBO。
     void RefreshRSMFrustum(const CameraData& camera);
     rhi::IRHIDevice* m_Device = nullptr;
+    /// 【T2.6】本帧的渲染线程上下文（可空；空时各调用点回退 `m_Device`）
+    const RenderThreadContext* m_FrameCtx = nullptr;
     std::unique_ptr<rhi::IRHIPipelineState> m_PBR_PSO;
     // 蒙皮网格 PSO（C1b）：扩展顶点布局（location 3/4 = JOINTS/WEIGHTS），同着色器
     std::unique_ptr<rhi::IRHIPipelineState> m_PBR_Skinned_PSO;

@@ -1,4 +1,6 @@
 #include "Pipeline/ForwardPipeline.h"
+
+#include "Threading/RenderThreadContext.h"   // T2.6：帧上下文（唯一 RHI 出口）
 #include "Pipeline/PhysicalLight.h"  // render::KelvinToRGB
 // 阶段 1 T1.3b：光源收集集中到快照构造器（本文件不再自己遍历 ECS 光源组件）
 #include "Threading/SceneSnapshotBuilder.h"
@@ -965,7 +967,10 @@ void ForwardPipeline::Render(rhi::IRHICommandList* cmd, const FrameSceneSnapshot
 
     // AA Pass（FXAA 等在 HDR→ToneMap 之间或 ToneMap 之后）
     if (m_AntiAliasing && m_AntiAliasing->IsEnabled() && m_AntiAliasing->GetMode() != AAMode::None) {
-        m_AntiAliasing->SetInput(m_Device->ResolveTexture(m_HDRTarget[RenderFrameSlot()]), m_HDRSampler.get());
+        // 【T2.6】有上下文时走上下文解析（唯一 RHI 出口），否则回退 m_Device
+        rhi::IRHITexture* hdrTex = m_FrameCtx ? m_FrameCtx->ResolveTexture(m_HDRTarget[RenderFrameSlot()])
+                                              : m_Device->ResolveTexture(m_HDRTarget[RenderFrameSlot()]);
+        m_AntiAliasing->SetInput(hdrTex, m_HDRSampler.get());
         m_AntiAliasing->Render(cmd);
     }
 }
