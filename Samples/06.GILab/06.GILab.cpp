@@ -45,7 +45,7 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>   // std::getenv（HE_CRASH_TEST 自检开关）
+#include <cstdlib>   // std::getenv / std::atoi（环境变量开关）
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -62,9 +62,7 @@
 
 using namespace he;
 
-// ============================================================
-// 配置读写（简易 key=value 格式）
-// ============================================================
+// ---- 配置读写（简易 key=value 格式） ----
 // 默认读写内容目录下的正式配置；自动化实验可用 HE_GILAB_CONFIG=<路径> 指向临时文件
 // （读写同一路径，因此指向临时文件即完全不触碰仓库内的正式配置）
 static String g_ConfigPath = []{
@@ -112,25 +110,7 @@ static int GetInt(const std::unordered_map<String, String>& m,
     return (it != m.end()) ? std::stoi(it->second) : def;
 }
 
-// ============================================================
-// 创建形状实体（立方体/球）——Cornell Box 场景构件
-// ============================================================
-// 平面镜测试台的几何（任务 32）：判据要在 CPU 侧做解析计算，所以参数必须**从同一处**导出，
-// 不能一边写在场景搭建里、一边抄进检查脚本（那种"两份真值"迟早漂移）。
-struct MirrorRigSpec {
-    bool   valid = false;
-    float3 planeNormal   = float3(0.0f, 1.0f, 0.0f);   // 镜面平面法线（朝向相机）
-    float  planeOffset   = -1700.0f;                    // 平面方程 n·P + d = 0 的 d
-    float3 slabCenter    = float3(0.0f, 1699.5f, 0.0f); // 镜面板中心
-    float3 slabHalf      = float3(400.0f, 0.5f, 400.0f);// 镜面板半尺寸
-    // 两个标记物（**立方体**，half* 是半边长；默认值与实际创建保持一致，避免两份真值漂移）
-    float3 boxRed        = float3(-150.0f, 1750.0f, 100.0f);
-    float  halfRed       = 50.0f;
-    float3 boxGreen      = float3(170.0f, 1770.0f, -120.0f);
-    float  halfGreen     = 45.0f;
-};
-static MirrorRigSpec g_MirrorRig;
-
+// ---- 创建形状实体（立方体/球）——Cornell Box 场景构件 ----
 Entity CreateShapeEntity(World& world, SceneGraph& sg,
                          const float3& position, const float3& scale,
                          const float4& baseColor, float metallic, float roughness,
@@ -159,19 +139,15 @@ Entity CreateShapeEntity(World& world, SceneGraph& sg,
 }
 
 int main() {
-    // ============================================================
-    // 0. 安装崩溃处理器（Wave 0.8 诊断基建）
+    // ---- 0. 安装崩溃处理器（Wave 0.8 诊断基建） ----
     //    崩溃时打印"函数名 + 源文件:行号"的完整调用栈，并写出 minidump。
     //    之所以放在最前面：初始化阶段（设备/交换链/资源创建）同样是崩溃高发区。
-    // ============================================================
     {
         const std::string crashLog = std::string(HUGE_CONTENT_DIR) + "Config/06_GILab_crash.log";
         he::InstallCrashHandler(crashLog.c_str(), nullptr);
     }
 
-    // ============================================================
-    // 1. 引擎启动
-    // ============================================================
+    // ---- 1. 引擎启动 ----
     EngineConfig config;
     config.appName      = "HugEngine — 06.GILab (Cornell Box GI 对比)";
     config.windowWidth  = 1920;   // 窗口宽（960×2）
@@ -196,9 +172,7 @@ int main() {
     Engine engine(config);
     engine.Initialize();
 
-    // ============================================================
-    // 2. 创建 Vulkan RHI 设备
-    // ============================================================
+    // ---- 2. 创建 Vulkan RHI 设备 ----
     rhi::DeviceInitDesc rhiDesc;
     rhiDesc.backend          = rhi::Backend::Vulkan;
     rhiDesc.enableValidation = true;
@@ -208,9 +182,7 @@ int main() {
     device->Initialize(rhiDesc);
     rhi::SetDevice(device.get());
 
-    // ============================================================
-    // 3. 创建 SwapChain
-    // ============================================================
+    // ---- 3. 创建 SwapChain ----
     auto swapchain = device->CreateSwapChain({
         .windowHandle = engine.GetWindow()->GetNativeHandleRaw(),
         .width  = engine.GetWindow()->GetWidth(),
@@ -218,9 +190,7 @@ int main() {
         .vsync  = !noVsync,   // 与 EngineConfig 同源（HE_NO_VSYNC=1 时同时关掉，否则帧率仍被锁 60）
     });
 
-    // ============================================================
-    // 4. 初始化场景（Sponza glTF——检验各种 GI 的间接光照/反射）
-    // ============================================================
+    // ---- 4. 初始化场景（Sponza glTF——检验各种 GI 的间接光照/反射） ----
     World world;
     SceneGraph sceneGraph(world);
 
@@ -278,45 +248,6 @@ int main() {
             sceneGraph.SetParent(e, Entity{kInvalidEntity});
             pointLightEntities[i] = e;
         }
-    }
-
-    // --- 平面镜测试台（任务 32 / §9.2-W 的解析对照用；HE_SSR_MIRROR=1 时创建）---
-    // 为什么要有它：任务 25 只证明了"射线有效性恢复、两条 march 同量级、Hi-Z 更快"，
-    // **没有**证明反射的位置/方向正确。平面镜恰好有一个闭式解析真值：物体中心 C 关于平面
-    // (n, d) 的镜像点 C' = C − 2(n·C + d)n，相机 E 与 C' 的连线与镜面的交点 Q 就是"镜面上
-    // 出现该物体反射"的那一点 —— 于是反射是否落在正确的像素上可以逐像素判定，而不靠肉眼。
-    // 台子架在 Sponza 建筑上方（y≈500）的开阔处，背景是天空，避免建筑几何干扰判据。
-    if (std::getenv("HE_SSR_MIRROR")) {
-        // 【为什么是**地面镜**而不是竖镜】SSR 的命中判据只能命中**深度缓冲里存着的那一面**
-        // （相机看到的那一面）。物体若夹在相机与竖镜之间，反射线打到的是物体的**背面**，
-        // 深度图上却是它的正面 ⇒ 永远判不出命中（实测：竖镜下 99.96% 的镜面像素"有效"但
-        // 一个物体颜色都没有）。地面镜不存在这个问题：反射线从镜面向上，命中的正是物体
-        // 朝相机的那一面。
-        // 【为什么架在 y=1700】Sponza 建筑高约 1556（y∈[-57,1499]），放进楼里会被墙挡住
-        // （实测：相机在楼内时整屏只剩一面 25 单位外的墙）。架在楼顶之上，背景是天空，
-        // 判据里"出现物体颜色"才唯一对应**反射**。
-        // 镜面 = y=1700 平面、法线 +Y。用一块薄板实现：+Y 面即镜面。
-        CreateShapeEntity(world, sceneGraph, float3(0.0f, 1699.5f, 0.0f), float3(800.0f, 1.0f, 800.0f),
-                          float4(0.95f, 0.95f, 0.95f, 1.0f), /*metallic=*/1.0f, /*roughness=*/0.0f);
-        // 两个已知物体（红/绿）。**必须用立方体而不是球**：地面镜里球体只有朝下的那一面
-        // 会被反射到，而相机看不到那一面（深度图里存的是朝上的面）⇒ SSR 永远判不出命中
-        // （实测：球体时预测像素附近 0.1% 有效）。立方体的**正面**朝相机，反射线从正面一侧
-        // 打到它，深度图里存的就是那一面 ✓。
-        CreateShapeEntity(world, sceneGraph, float3(-150.0f, 1750.0f, 100.0f), float3(100.0f, 100.0f, 100.0f),
-                          float4(1.0f, 0.05f, 0.05f, 1.0f), 0.0f, 0.7f, /*sphere=*/false);
-        CreateShapeEntity(world, sceneGraph, float3(170.0f, 1770.0f, -120.0f), float3(90.0f, 90.0f, 90.0f),
-                          float4(0.05f, 1.0f, 0.05f, 1.0f), 0.0f, 0.7f, /*sphere=*/false);
-        HE_CORE_INFO("[平面镜测试台] 已创建：地面镜 y=1700（法线 +Y）、红立方 (-150,1750,100) 半长 50、"
-                     "绿立方 (170,1770,-120) 半长 45");
-        g_MirrorRig.valid = true;   // 参数落盘给检查脚本用（见上方的 MirrorRigSpec 注释）
-        g_MirrorRig.planeNormal = float3(0.0f, 1.0f, 0.0f);
-        g_MirrorRig.planeOffset = -1700.0f;
-        g_MirrorRig.slabCenter  = float3(0.0f, 1699.5f, 0.0f);
-        g_MirrorRig.slabHalf    = float3(400.0f, 0.5f, 400.0f);
-        g_MirrorRig.boxRed     = float3(-150.0f, 1750.0f, 100.0f);
-        g_MirrorRig.halfRed    = 50.0f;
-        g_MirrorRig.boxGreen   = float3(170.0f, 1770.0f, -120.0f);
-        g_MirrorRig.halfGreen  = 45.0f;
     }
 
     // --- 天空盒 ---
@@ -399,9 +330,7 @@ int main() {
         }
     }
 
-    // ============================================================
-    // 5. 加载 glTF 纹理 → RHI Texture → MeshComponent
-    // ============================================================
+    // ---- 5. 加载 glTF 纹理 → RHI Texture → MeshComponent ----
     std::unordered_map<String,
         std::pair<std::unique_ptr<rhi::IRHITexture>,
                   std::unique_ptr<rhi::IRHISampler>>> g_TexCache;
@@ -482,9 +411,7 @@ int main() {
         HE_CORE_INFO("纹理加载 + bindless 注册完成: {} primitive, {} 张独立纹理", texCount, g_TexCache.size());
     }
 
-    // ============================================================
-    // 6. 初始化渲染管线（Forward / Deferred；光追经 GI 层栈的 RT 源启用）
-    // ============================================================
+    // ---- 6. 初始化渲染管线（Forward / Deferred；光追经 GI 层栈的 RT 源启用） ----
     render::DeferredPipeline   deferredPipeline;   // 延迟管线（默认，GI 对比主用）
     render::ForwardPipeline    forwardPipeline;    // 前向管线
 
@@ -509,8 +436,7 @@ int main() {
     int  g_GIPreset = 1;                           // GI 质量档位（默认 Medium=1）
     render::IRenderPipeline* curPipeline = &deferredPipeline;
 
-    // ============================================================
-    // 白炉探针（Wave 0.2）—— 能量守恒判据的读数设施
+    // ---- 白炉探针（Wave 0.2）—— 能量守恒判据的读数设施 ----
     //
     // 目的：白炉测试要求"全白环境 + albedo=1 + 关闭直接光"时物体应消失，即
     //       任意两点亮度应相等。这里读回 HDR 目标（**色调映射之前**，线性值）
@@ -518,7 +444,6 @@ int main() {
     // 实现：RHI 的 CopyTextureToBuffer 把 1×1 像素拷进 host 可见缓冲，等 GPU 完成后
     //       映射读取（RGBA16_FLOAT → half 解码）。仅在启用探针时每 N 帧执行一次，
     //       且会 WaitIdle（测试用途，不追求性能）。
-    // ============================================================
     bool  g_ProbeEnabled   = (std::getenv("HE_FURNACE_PROBE") != nullptr);   // 也可用 HE_FURNACE_PROBE=1 直接开启（便于自动化验证）
     int   g_ProbeInterval  = 30;      // 每 N 帧采一次
     float g_ProbeCenter[3] = {0, 0, 0};   // 中心像素 RGB（线性）
@@ -536,8 +461,7 @@ int main() {
         probeBuffer  = device->CreateBuffer(pd);
     }
 
-    // ============================================================
-    // GI 频谱采样（P5 步骤 0）—— 判定 DDGI 与 SSGI 是否需要"频率分离"
+    // ---- GI 频谱采样（P5 步骤 0）—— 判定 DDGI 与 SSGI 是否需要"频率分离" ----
     //
     // 目的：把"单个漫反射源独开"时的 HDR 结果与 GBuffer albedo 原样落盘，供离线做
     //       频谱分析，回答那个决定性问题——"低通(SSGI) 是否 ≈ DDGI"。
@@ -554,7 +478,6 @@ int main() {
     // 采样三组配置以便做差：漫反射栈=空（基线：天空+自发光+空气透视+镜面）、=[DDGI]、=[SSGI]；
     //       后两者减去基线即得各源自身的贡献（且两者带同一 albedo，比值即频谱之比）。
     // 实现：整幅 CopyTextureToBuffer 到 host 可见缓冲。仅测试路径使用，会 WaitIdle，不追求性能。
-    // ============================================================
     const char*  dumpTagEnv   = std::getenv("HE_DUMP_GI");
     const char*  dumpFrameEnv = std::getenv("HE_DUMP_GI_FRAME");
     const String g_DumpTag    = dumpTagEnv ? dumpTagEnv : "";
@@ -783,17 +706,13 @@ int main() {
 
     HE_CORE_INFO("DeferredPipeline 初始化完成");
 
-    // ============================================================
-    // 7. 创建命令列表
-    // ============================================================
+    // ---- 7. 创建命令列表 ----
     auto cmdList = device->CreateCommandList();
     cmdList->SetSwapChain(swapchain.get());
     // 预设 ToneMap PSO → 匹配 BGRA8_UNORM RP（ImGui LoadOp 兼容）
     cmdList->SetPipeline(deferredPipeline.GetToneMap()->GetPSO());
 
-    // ============================================================
-    // 8. ImGui 初始化
-    // ============================================================
+    // ---- 8. ImGui 初始化 ----
     GLFWwindow* glfwWin = engine.GetWindow()->GetNativeHandle();
     editor::ImGuiIntegration imgui;
     imgui.Initialize(glfwWin, device.get(), swapchain.get());
@@ -802,9 +721,7 @@ int main() {
     static String g_ImGuiIniPath = String(HUGE_CONTENT_DIR) + "Config/06_GILab_imgui.ini";
     ImGui::GetIO().IniFilename = g_ImGuiIniPath.c_str();
 
-    // ============================================================
-    // 9. 相机 — 从配置文件加载，否则使用默认位置
-    // ============================================================
+    // ---- 9. 相机 — 从配置文件加载，否则使用默认位置 ----
     render::CameraController camCtrl;
     camCtrl.SetAspectRatio(
         static_cast<float>(swapchain->GetWidth()),
@@ -830,9 +747,7 @@ int main() {
         camCtrl.SetOrientation(-1.57f, -0.1f);
     }
 
-    // ============================================================
-    // 8.5 相机平移动画（AnimationComponent 演示）
-    // ============================================================
+    // ---- 8.5 相机平移动画（AnimationComponent 演示） ----
     Entity camAnimEntity = world.CreateEntity("CameraAnimation");
     world.AddComponent<TransformComponent>(camAnimEntity);
     auto* camAnim = world.AddComponent<AnimationComponent>(camAnimEntity);
@@ -855,13 +770,6 @@ int main() {
         }
         camAnim->FinalizeClip();
         camAnim->playing = false;  // 默认关闭启动动画
-        // 【为什么留一个环境变量开关】步骤 31（L5 Radiance Cache）的验收有一条是"相机移动时
-        // 无拖影累积"—— 静态相机测不出来。`HE_CAMERA_ORBIT=1` 让这条圆形路径直接跑起来。
-        // 注意它按**墙钟** deltaTime 推进 ⇒ 该模式下的画面不保证逐位可复现（静态模式不受影响）。
-        if (std::getenv("HE_CAMERA_ORBIT")) {
-            camAnim->playing = true;
-            HE_CORE_INFO("相机动画已启用（HE_CAMERA_ORBIT=1）：用于验证时间混合无拖影累积");
-        }
     }
     sceneGraph.SetParent(camAnimEntity, Entity{kInvalidEntity});
     HE_CORE_INFO("相机动画已创建: {} 秒圆形路径", 6.0f);
@@ -870,9 +778,7 @@ int main() {
     bool   animCameraMode = true;
     double lastMouseX = 0.0, lastMouseY = 0.0;
 
-    // ============================================================
-    // 10. 窗口调整回调
-    // ============================================================
+    // ---- 10. 窗口调整回调 ----
     engine.GetWindow()->SetResizeCallback([&](u32 w, u32 h) {
         if (w == 0 || h == 0) return;
         swapchain->Resize(w, h);
@@ -882,9 +788,7 @@ int main() {
         camCtrl.SetAspectRatio(static_cast<float>(w), static_cast<float>(h));
     });
 
-    // ============================================================
-    // 11. 主渲染循环
-    // ============================================================
+    // ---- 11. 主渲染循环 ----
     HE_CORE_INFO("06.GILab (Cornell Box) 启动 — WASD=移动, 右键拖拽=旋转, Shift=加速, E/Q=升降");
     u64 frameIndex = 0;
     f64 lastTime   = glfwGetTime();
@@ -978,19 +882,6 @@ int main() {
         engine.GetWindow()->PollEvents();
 
         // 【帧首落地】下拉选择与当前生效模式不一致时，在这里统一切换（下一帧命令即按新模式走）
-        // 【自动化验证钩子】`HE_THREADING_MODE_CYCLE=<N>`：每 N 帧按 0→1→2→0 轮换一次模式，
-        // 用来在无人值守下验证"三种模式任意切换"（默认关 ⇒ 不影响正常使用）。
-        if (const char* cycleEnv = std::getenv("HE_THREADING_MODE_CYCLE")) {
-            const int period = std::max(1, std::atoi(cycleEnv));
-            if (frameIndex % (u64)period == 0ull && frameIndex > 0ull) {
-                static u64 s_LastCycleFrame = ~0ull;
-                if (s_LastCycleFrame != frameIndex) {
-                    s_LastCycleFrame = frameIndex;
-                    g_UiThreadingMode = (g_UiThreadingMode + 1) % 3;
-                    HE_CORE_INFO("06.GILab：[自动轮换] 第 {} 帧切到模式 {}", frameIndex, g_UiThreadingMode);
-                }
-            }
-        }
         if (g_UiThreadingMode != static_cast<int>(he::GetRenderThreadingMode())) {
             applyThreadingMode(static_cast<he::RenderThreadingMode>(g_UiThreadingMode));
         }
@@ -1164,18 +1055,6 @@ int main() {
                     std::chrono::steady_clock::now() - t0).count();
             }
 
-            // --- 崩溃处理器自检（Wave 0.8）---
-            // 设置环境变量 HE_CRASH_TEST=1 启动，会在第 3 帧主动解引用空指针，
-            // 用于验证崩溃处理器能否打出完整调用栈（默认关闭，不影响正常使用）。
-            // 放在 Render 之后是为了让调用栈具备真实深度。
-            if (std::getenv("HE_CRASH_TEST")) {
-                static int s_CrashTestFrame = 0;
-                if (++s_CrashTestFrame == 3) {
-                    HE_CORE_ERROR("HE_CRASH_TEST=1：主动触发崩溃，用于验证崩溃处理器");
-                    volatile int* nullPtr = nullptr;   // volatile 保证编译器不优化掉这次写入
-                    *nullPtr = 1;
-                }
-            }
 
         };
         submitRender(recordScene);
@@ -1336,10 +1215,8 @@ int main() {
         }
         ImGui::End();
 
-        // ============================================================
-        // 独立 GI 控制面板：渲染管线 → GI 质量档位 → GI 四通道（可用性 + 参数）
+        // ---- 独立 GI 控制面板：渲染管线 → GI 质量档位 → GI 四通道（可用性 + 参数） ----
         // 与主面板分离，便于独立摆放/查看
-        // ============================================================
         // 首次使用时默认摆放在主面板右侧（之后由 imgui.ini 恢复用户位置/大小）
         ImGui::SetNextWindowPos(ImVec2(560.0f, 10.0f), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowSize(ImVec2(430.0f, 700.0f), ImGuiCond_FirstUseEver);
@@ -1719,9 +1596,7 @@ int main() {
         }
         ImGui::End();
 
-        // ============================================================
-        // 独立 GPU Profiler 面板：各 pass 的 GPU 耗时统计
-        // ============================================================
+        // ---- 独立 GPU Profiler 面板：各 pass 的 GPU 耗时统计 ----
         // 首次使用时默认摆放在 GI 面板下方（之后由 imgui.ini 恢复）
         ImGui::SetNextWindowPos(ImVec2(560.0f, 720.0f), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowSize(ImVec2(430.0f, 260.0f), ImGuiCond_FirstUseEver);
@@ -2008,19 +1883,6 @@ int main() {
                     cm << "far "     << cam.farPlane   << "\n";
                     cm << "aspect "  << cam.aspectRatio << "\n";
                 }
-                // 平面镜测试台的几何（任务 32）：与场景搭建同源，判据据此做解析镜像计算
-                if (g_MirrorRig.valid) {
-                    std::ofstream mr(base + "_mirror.txt");
-                    mr << "plane "  << g_MirrorRig.planeNormal.x << " " << g_MirrorRig.planeNormal.y << " "
-                                    << g_MirrorRig.planeNormal.z << " " << g_MirrorRig.planeOffset << "\n";
-                    mr << "slab "   << g_MirrorRig.slabCenter.x << " " << g_MirrorRig.slabCenter.y << " "
-                                    << g_MirrorRig.slabCenter.z << " " << g_MirrorRig.slabHalf.x << " "
-                                    << g_MirrorRig.slabHalf.y << " " << g_MirrorRig.slabHalf.z << "\n";
-                    mr << "red "    << g_MirrorRig.boxRed.x << " " << g_MirrorRig.boxRed.y << " "
-                                    << g_MirrorRig.boxRed.z << " " << g_MirrorRig.halfRed << "\n";
-                    mr << "green "  << g_MirrorRig.boxGreen.x << " " << g_MirrorRig.boxGreen.y << " "
-                                    << g_MirrorRig.boxGreen.z << " " << g_MirrorRig.halfGreen << "\n";
-                }
                 g_DumpWritten = true;
                 // 采样完成即请求关窗：让脚本无需超时等待，也保证退出前正常走完清理与保存流程
                 glfwSetWindowShouldClose(engine.GetWindow()->GetNativeHandle(), GLFW_TRUE);
@@ -2107,9 +1969,7 @@ int main() {
     device->WaitIdle();
     deferredPipeline.Shutdown();
 
-    // ============================================================
-    // 保存配置（所有 ImGui 可控参数）
-    // ============================================================
+    // ---- 保存配置（所有 ImGui 可控参数） ----
     {
         std::unordered_map<String, String> out;
 
