@@ -11,7 +11,8 @@
 #include "Platform/Window.h"
 #include "RHI/RHI.h"
 #include "RHI/FramePresenter.h"
-#include "Debug/FrameDumpRecorder.h"   // L4-1：帧外壳（acquire/present）收口
+#include "Debug/FrameDumpRecorder.h"
+#include "Debug/PixelProbe.h"   // L4-1：帧外壳（acquire/present）收口
 #include "RHI/ThreadAffinity.h"   // T2.2：渲染线程启动钩子里认领 RHI 归属（GetThreadAffinity）
 #include "Pipeline/DeferredPipeline.h"
 #include "Pipeline/ForwardPipeline.h"
@@ -445,20 +446,11 @@ int main() {
     //       且会 WaitIdle（测试用途，不追求性能）。
     bool  g_ProbeEnabled   = (std::getenv("HE_FURNACE_PROBE") != nullptr);   // 也可用 HE_FURNACE_PROBE=1 直接开启（便于自动化验证）
     int   g_ProbeInterval  = 30;      // 每 N 帧采一次
-    float g_ProbeCenter[3] = {0, 0, 0};   // 中心像素 RGB（线性）
-    float g_ProbeBg[3]     = {0, 0, 0};   // 背景像素 RGB（线性）
-    float g_ProbeRatio     = 0.0f;        // 中心亮度 / 背景亮度（白炉正确时应 ≈ 1）
-    float g_ProbeLumCenter = 0.0f;        // 中心亮度绝对值（白炉正确时应 = 1.0）
-    // 白炉数值测试（Wave 0.2）：源真值取白炉条件（全白环境 + albedo=1 + 关直接光）
-    bool  g_FurnaceMode    = (std::getenv("HE_FURNACE") != nullptr);   // HE_FURNACE=1 直接开启
-    std::unique_ptr<rhi::IRHIBuffer> probeBuffer;   // 2 个 RGBA16F 像素 = 32 B
-    {
-        rhi::BufferDesc pd;
-        pd.size      = 32;
-        pd.usage     = rhi::BufferUsage::Storage;   // 该路径恒定带 TRANSFER_DST，可作拷贝目标
-        pd.cpuAccess = true;                        // 需要 Map 读回
-        probeBuffer  = device->CreateBuffer(pd);
-    }
+    // 白炉模式（HE_FURNACE=1 直接开启；面板开关在 GI 控制台里）
+    bool  g_FurnaceMode    = (std::getenv("HE_FURNACE") != nullptr);
+    // 像素数值探针（机制在 Engine/Render/Debug/PixelProbe；这里只保留开关/间隔与判据阈值）
+    render::PixelProbe probe;
+    probe.Initialize(device.get(), 2);   // 两个采样点：中心 / 背景
 
     // ---- GI 频谱采样（P5 步骤 0）—— 判定 DDGI 与 SSGI 是否需要"频率分离" ----
     //
@@ -1233,13 +1225,15 @@ int main() {
             ImGui::TextWrapped("白炉条件：全白环境 + albedo=1 + 关闭直接光 → 各源真值均为 1，\n"
                                "正确的分层合成应恰好读回 1.0；>1 即存在归一化之外的双重计数。");
             if (g_ProbeEnabled) {
-                ImGui::Text("中心像素 (线性 RGB): %.4f %.4f %.4f", g_ProbeCenter[0], g_ProbeCenter[1], g_ProbeCenter[2]);
-                ImGui::Text("背景像素 (线性 RGB): %.4f %.4f %.4f", g_ProbeBg[0], g_ProbeBg[1], g_ProbeBg[2]);
+                const auto& pv = probe.Values();
+                ImGui::Text("中心像素 (线性 RGB): %.4f %.4f %.4f", pv[0].rgb[0], pv[0].rgb[1], pv[0].rgb[2]);
+                ImGui::Text("背景像素 (线性 RGB): %.4f %.4f %.4f", pv[1].rgb[0], pv[1].rgb[1], pv[1].rgb[2]);
                 // 白炉正确时：物体消失 → 中心与背景都应等于环境真值 1.0
-                const bool ok = (g_ProbeRatio > 0.98f && g_ProbeRatio < 1.02f);
+                const float ratio = probe.LuminanceRatio(0, 1);
+                const bool ok = (ratio > 0.98f && ratio < 1.02f);
                 const ImVec4 col = ok ? ImVec4(0.3f, 0.9f, 0.3f, 1.0f) : ImVec4(1.0f, 0.6f, 0.2f, 1.0f);
-                ImGui::TextColored(col, "亮度比 中心/背景 = %.4f   (白炉判据 0.98 ~ 1.02)", g_ProbeRatio);
-                ImGui::TextColored(col, "中心亮度 = %.4f   (白炉真值 1.0)", g_ProbeLumCenter);
+                ImGui::TextColored(col, "亮度比 中心/背景 = %.4f   (白炉判据 0.98 ~ 1.02)", ratio);
+                ImGui::TextColored(col, "中心亮度 = %.4f   (白炉真值 1.0)", pv[0].luminance);
             }
 
             // ── GI 质量档位（紧随管线选择）──
@@ -1504,20 +1498,21 @@ int main() {
 
             // ── 白炉探针：把 HDR 目标上的两个像素拷进 host 可见缓冲 ──
             // 必须在 render pass 之外录制（拷贝不能在 pass 内），因此放在 EndRenderPass 之后、End 之前
-            const bool probeThisFrame = g_ProbeEnabled && (frameIndex % (u64)std::max(1, g_ProbeInterval) == 0);
-            if (probeThisFrame && probeBuffer) {
-                // 白炉探针也要按**当前管线**取 HDR：Forward 有自己的一张（任务 26 起层栈归一化
-                // 也在 Forward 生效，白炉判据必须能覆盖它）
-                rhi::IRHITexture* hdr = (g_PipelineMode == 0)
-                    ? forwardPipeline.GetHDRTarget()
-                    : deferredPipeline.GetLighting().GetHDRTarget();
+            // 白炉探针：把 HDR 上的中心/背景两个像素读回（机制在 PixelProbe）
+            const bool probeThisFrame = g_ProbeEnabled &&
+                probe.WantsFrame(frameIndex, (u32)std::max(1, g_ProbeInterval));
+            if (probeThisFrame) {
+                // HDR 要按**当前管线**取：Forward 有自己的那张（层栈归一化在 Forward 也生效）
+                rhi::IRHITexture* hdr = (g_PipelineMode == 0) ? forwardPipeline.GetHDRTarget()
+                                                              : deferredPipeline.GetLighting().GetHDRTarget();
                 if (hdr) {
                     const u32 pw = swapchain->GetWidth(), ph = swapchain->GetHeight();
-                    const u32 cx = pw / 2,           cy = ph / 2;            // 中心（物体所在）
-                    const u32 bx = pw / 10,          by = ph / 10;           // 背景取样点
-                    // RGBA16_FLOAT：每像素 8 字节 → 第二个像素偏移 16 字节
-                    cmdList->CopyTextureToBuffer(hdr, probeBuffer.get(), cx, cy, 1, 1, 0);
-                    cmdList->CopyTextureToBuffer(hdr, probeBuffer.get(), bx, by, 1, 1, 16);
+                    const render::PixelProbe::Sample pts[2] = {
+                        {pw / 2,  ph / 2},    // 中心（物体所在）
+                        {pw / 10, ph / 10},   // 背景取样点
+                    };
+                    probe.RecordReadback(cmdList.get(), hdr, pts, 2);
+                    probe.FinishRecording(device.get(), cmdList.get());   // 挂本帧 timeline
                 }
             }
 
@@ -1574,27 +1569,15 @@ int main() {
             framePresenter.EndRecording();   // L4-2：End + Submit 收口
             deferredPipeline.FlushComputeWork();  // AsyncCompute: Graphics Submit 之后提交 Compute 工作
 
-            // ── 白炉探针：等 GPU 完成后读回（half → float），算亮度比并打日志 ──
-            if (probeThisFrame && probeBuffer) {
-                device->WaitIdle();   // 测试用途，允许停顿
-                const auto* texels = static_cast<const uint16_t*>(probeBuffer->Map());
-                if (texels) {
-                    for (int i = 0; i < 3; ++i) {
-                        g_ProbeCenter[i] = glm::unpackHalf1x16(texels[i]);          // 像素 0：中心
-                        g_ProbeBg[i]     = glm::unpackHalf1x16(texels[8 + i]);      // 像素 1：背景（16B 偏移 = 8 个 half）
-                    }
-                    const float lumCenter = 0.2126f * g_ProbeCenter[0] + 0.7152f * g_ProbeCenter[1] + 0.0722f * g_ProbeCenter[2];
-                    const float lumBg     = 0.2126f * g_ProbeBg[0]     + 0.7152f * g_ProbeBg[1]     + 0.0722f * g_ProbeBg[2];
-                    g_ProbeLumCenter = lumCenter;
-                    g_ProbeRatio = (lumBg > 1e-6f) ? (lumCenter / lumBg) : 0.0f;
-                    HE_CORE_INFO("[白炉探针] 中心 RGB=({:.4f},{:.4f},{:.4f}) 背景 RGB=({:.4f},{:.4f},{:.4f}) "
-                                 "亮度 中心={:.4f} 背景={:.4f} 比值={:.4f} 白炉={}",
-                                 g_ProbeCenter[0], g_ProbeCenter[1], g_ProbeCenter[2],
-                                 g_ProbeBg[0], g_ProbeBg[1], g_ProbeBg[2],
-                                 lumCenter, lumBg, g_ProbeRatio,
-                                 g_FurnaceMode ? "ON" : "off");
-                    probeBuffer->Unmap();
-                }
+            // ── 白炉探针：等本帧 timeline 后读回数值（机制在 PixelProbe）──
+            if (probeThisFrame && probe.TryReadBack(device.get())) {
+                const auto& v = probe.Values();
+                HE_CORE_INFO("[白炉探针] 中心 RGB=({:.4f},{:.4f},{:.4f}) 背景 RGB=({:.4f},{:.4f},{:.4f}) "
+                             "亮度 中心={:.4f} 背景={:.4f} 比值={:.4f} 白炉={}",
+                             v[0].rgb[0], v[0].rgb[1], v[0].rgb[2],
+                             v[1].rgb[0], v[1].rgb[1], v[1].rgb[2],
+                             v[0].luminance, v[1].luminance, probe.LuminanceRatio(0, 1),
+                             g_FurnaceMode ? "ON" : "off");
             }
 
             // ── GI 频谱采样：等本帧 timeline 后原样落盘（机制在 FrameDumpRecorder）──
