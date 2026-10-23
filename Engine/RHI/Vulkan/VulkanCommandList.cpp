@@ -390,12 +390,22 @@ void VulkanCommandList::SetPipeline(IRHIPipelineState* pso) {
 }
 
 void VulkanCommandList::SetVertexBuffer(IRHIBuffer* buffer, u32 binding) {
+    if (m_StreamMode) {
+        // L4-3 stream mode: record the binding; the replay list does not know about it otherwise.
+        m_Stream.Enqueue(RHICommandType::SetVertexBuffer, RHICommandSetVertexBuffer{ buffer, binding, 0u });
+        return;
+    }
     auto* vkBuf = static_cast<VulkanBuffer*>(buffer);
     m_CurrentVB = vkBuf->GetHandle();
     m_VBBinding = binding;
 }
 
 void VulkanCommandList::SetIndexBuffer(IRHIBuffer* buffer, u32 offset) {
+    if (m_StreamMode) {
+        // L4-3 stream mode: index type (U16/U32) is inferred at replay time from the buffer size.
+        m_Stream.Enqueue(RHICommandType::SetIndexBuffer, RHICommandSetIndexBuffer{ buffer, offset });
+        return;
+    }
     auto* vkBuf = static_cast<VulkanBuffer*>(buffer);
     m_CurrentIB = vkBuf->GetHandle();
     m_IBOffset  = offset;
