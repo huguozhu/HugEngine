@@ -78,6 +78,25 @@ u32 ReplayCommandStream(const RHICommandList& stream, IRHICommandList& cmd) {
             ++replayed;
             break;
         }
+        case RHICommandType::SetViewport: {
+            const auto* d = stream.PayloadAt<RHICommandSetViewport>(i);
+            if (!d) break;
+            Viewport vp{};
+            vp.x = d->x; vp.y = d->y; vp.width = d->w; vp.height = d->h;
+            vp.minDepth = d->minZ; vp.maxDepth = d->maxZ;
+            cmd.SetViewport(vp);
+            ++replayed;
+            break;
+        }
+        case RHICommandType::SetScissor: {
+            const auto* d = stream.PayloadAt<RHICommandSetScissor>(i);
+            if (!d) break;
+            ScissorRect sc{};
+            sc.x = d->x; sc.y = d->y; sc.width = d->w; sc.height = d->h;
+            cmd.SetScissor(sc);
+            ++replayed;
+            break;
+        }
         case RHICommandType::MarkSubmitBoundary:
             // 提交边界由执行端（RHI 线程）自己按帧处理，这里不是一条 RHI 调用
             ++replayed;

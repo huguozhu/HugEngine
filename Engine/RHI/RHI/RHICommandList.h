@@ -55,12 +55,18 @@ enum class RHICommandType : u32 {
     SetIndexBuffer     = 10,
     SetDrawDebugLabel  = 11,
     ExecuteSecondary   = 12,   // 主列表执行一条已录好的次级列表（MTCR 合并点）
-    ExecuteIndirect    = 13,   // 间接绘制（GBuffer/Forward 的 indirect 分支）
+    ExecuteIndirect    = 13,
+    SetViewport        = 14,   // L4-3 batch2
+    SetScissor         = 15,   // L4-3 batch2   // 间接绘制（GBuffer/Forward 的 indirect 分支）
 };
 
 /// 一条命令的载荷：类型擦除 + **内联存储**。
 /// 约定：`payloadSize <= kInlinePayloadBytes` 时参数在 `inlinePayload` 内；超过时 `payloadSize`
 /// 记 0 并把实际数据放在 arena，偏移写在 `arenaOffset`（由 `EnqueueArena` 生成）。
+/// L4-3 batch2: POD only (this header is RHI-free, so no Viewport/ScissorRect types)
+struct RHICommandSetViewport { float x = 0, y = 0, w = 0, h = 0, minZ = 0, maxZ = 1; };
+struct RHICommandSetScissor  { i32 x = 0, y = 0; u32 w = 0, h = 0; };
+
 struct RHICommand {
     RHICommandType type         = RHICommandType::Invalid;
     u32            payloadSize  = 0;    // 内联参数的实际字节数（0 表示走 arena）

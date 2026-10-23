@@ -329,6 +329,7 @@ void VulkanCommandList::End() {
 // ============================================================
 
 void VulkanCommandList::SetViewport(const Viewport& vp) {
+    if (m_StreamMode) { m_Stream.Enqueue(RHICommandType::SetViewport, RHICommandSetViewport{ vp.x, vp.y, vp.width, vp.height, vp.minDepth, vp.maxDepth }); return; }
     VkViewport vkViewport{};
     vkViewport.x = vp.x;
     vkViewport.y = vp.y;
@@ -348,6 +349,7 @@ void VulkanCommandList::SetFullscreenViewport(u32 width, u32 height) {
 }
 
 void VulkanCommandList::SetScissor(const ScissorRect& sc) {
+    if (m_StreamMode) { m_Stream.Enqueue(RHICommandType::SetScissor, RHICommandSetScissor{ sc.x, sc.y, sc.width, sc.height }); return; }
     VkRect2D vkScissor{};
     vkScissor.offset = {sc.x, sc.y};
     vkScissor.extent = {sc.width, sc.height};
