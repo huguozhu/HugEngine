@@ -680,7 +680,10 @@ private:
 结论：**P2 的"零 Vulkan 调用"目标在 L3+L4 都完成前不应声称达成**；本阶段的合法成果是 L1+L2（已落地并
 按"行为中立"验收），以及 L3/L4 的设计与判据。
 
-### 12.12 L4 盘点（2026-10）与分步计划
+### 12.12 L4 盘点（2026-10）与分步计划
+
+> **【任务已迁移】** 本节保留为**历史论证**（为什么 L4-3 必须 all-or-nothing、为什么 L3 被撤销）。
+> **L4-3 的实施方案、命令类型清单、分批计划与判据**已移到 《Vulkan命令流双模式L4-3实施方案.md》；本文档不再跟踪该任务。
 
 **盘点一：剩余 `unique_ptr<IRHI*>` 持有者约 180 处**（`grep -c 'std::unique_ptr<rhi::IRHI'` 于
 `Engine/**/*.h`）。分布（按数量级）：Lumen 最多（`LumenScene.h` 单文件 40+），其次 Nanite
@@ -700,7 +703,7 @@ private:
 |---|---|---|
 | **L4-1** | **把 acquire/present 收口到引擎侧**（样例不再直接持有 swapchain 的帧序操作）：新增一个 `IFramePresenter`（或 `RHI` 层的 `BeginFrame/EndFrame`），内部封装 `AcquireNextImage` + `Present` + 失败分支；7 个样例机械替换 | 20/20 转储一致、0 新 VUID、断言 0 |
 | **L4-2** | **命令缓冲生命周期收口**：`Begin/End` 从样例移到引擎（与 L4-1 同一入口），样例只调 `BeginFrame/Record/EndFrame` | 同上 |
-| **L4-3** | **整帧命令流**：L4-1/L4-2 之后，帧外壳的每个 API 都变成命令流里的一条（L1/L2 已就绪），RHI 线程自己 `Begin → 翻译 → End → Submit → Present` ⇒ **渲染线程真正零 Vulkan 调用** | 同上 + grep 断言"渲染线程路径不再出现 `vkCmd*`/`vkAcquire*`/`vkQueuePresent`" |
+| ~~**L4-3**~~ | **整帧命令流**：L4-1/L4-2 之后，帧外壳的每个 API 都变成命令流里的一条（L1/L2 已就绪），RHI 线程自己 `Begin → 翻译 → End → Submit → Present` ⇒ **渲染线程真正零 Vulkan 调用** | 同上 + grep 断言"渲染线程路径不再出现 `vkCmd*`/`vkAcquire*`/`vkQueuePresent`" |
 
 **为什么先 L4-1 而不是继续 A-3**：L4-1 只动 14 个调用点、形状一致、判据现成；而 A-3 的 180 处
 持有者需要按模块分批（每批都要 A/B），更适合作为并行长期路线。两者在 L4-3 汇合（那时帧外壳的
@@ -1676,7 +1679,7 @@ Submit → Present`，渲染线程只 append。由此推出一个硬约束：
 - [x] T2.6前置 **A-4 三层背压与同步点** —— ✅ 完成（2026-10）：有界队列（2 项）、呈现参数在渲染线程捕获、
   `AcquireNextImage`/`WaitIdle` 先排空路由
 - [x] T2.6 `RenderThreadContext`：出口层 ✅ + **718 处帧内解析已全部迁移** ✅ + 7 个样例登记设备 ✅ + 帧上下文线程局部发布 ✅；**最终形态定为「上下文优先 + 创建期设备」**（附录 H §19.6 有崩溃栈证明硬删回退不可行）
-- [x] A-1 `RHI` 命令流 —— L1 契约+翻译 ✅、L2 提交管道 ✅；L3 单 pass 命令化**撤销**（§12.11）；L4-3 整帧命令化为独立项目（§12.12）
+- [x] A-1 `RHI` 命令流 —— L1 契约+翻译 ✅、L2 提交管道 ✅；L3 单 pass 命令化**撤销**（§12.11）；L4-3 整帧命令化**已拆分为独立任务**，方案与分批计划见 《Vulkan命令流双模式L4-3实施方案.md》
 - [x] A-3 资源句柄化 —— **64 批全部完成**（§16.2/§16.4），仅两处记录在案的例外
 - [x] A-5（**读回部分**）—— ✅ 完成：06 的 dump 读回改为 timeline fence（`SetTimelineSignal` +
   `FlushAndWait` + `WaitForFence`），去掉设备级 `WaitIdle`；判据 = 20/20 逐字节一致、无新增 VUID
@@ -2430,7 +2433,7 @@ pass 指纹（`1C15AB72E688B530` / `750CC247BF8B9C3D`）未变；`06.GILab` 冒�
 | 小：`AA_TAA`/`AA_SMAA`/`AA_FXAA`/`MeshBatcher`/`InstanceCuller`/`STBNTexture`/`RTEffectPass`/`RTShadowPass` | 完成 |
 | 中：`GI_IBL`/`GI_RSM`/`GI_SSGI`/`GI_SSR`/`GI_DDGI`/`GIRadianceHistory` | 完成 |
 | 大：`RTPass`/`PTPass`/`ReSTIRPass`、`LumenScene`+`LumenSDF`、`NaniteCull`+`NaniteRaster`+`NaniteStream` | 完成 |
-| 其他：`L4-3` 整帧命令化 | 未开始（all-or-nothing 独立项目，§12.12） |
+| 其他：`L4-3` 整帧命令化 | **已移出本文档**：方案/分批计划/判据见 《Vulkan命令流双模式L4-3实施方案.md》 |
 
 **A-3 仍未做的两处（记录在案，非阻塞）**：
 
@@ -2441,8 +2444,8 @@ pass 指纹（`1C15AB72E688B530` / `750CC247BF8B9C3D`）未变；`06.GILab` 冒�
 `SkinnedMeshBuffers`、`TextRenderComponent`）的元素都是自管理 `unique_ptr`，无需接线；
 将来把退役队列改成句柄时直接 `SetReleaser([dev](Handle& h){ dev->Destroy*(h); })` 即可。
 
-**文档层面仍待办的项（与 A-3 无关）**：`P0`（每飞行帧命令缓冲 + 去掉命令 1 的每帧握手）、`T1.2c` 快照化的剩余消费侧（骨骼 / 材质 / Decal / 粒子）、`RTPass` 的组件指针（**已完成**）与 `MeshRegistry` 并发读（观察项，§21.7）；L4-3 另见《Vulkan命令流双模式L4-3实施方案.md》。
-A-5（ImGui/PSO 命令化）、T2.6、T3.3/T3.4、T5.1~T5.3、L4-3。
+**文档层面仍待办的项（与 A-3 无关）**：`P0`（每飞行帧命令缓冲 + 去掉命令 1 的每帧握手）、`T1.2c` 快照化的剩余消费侧（骨骼 / 材质 / Decal / 粒子）、`RTPass` 的组件指针（**已完成**）与 `MeshRegistry` 并发读（观察项，§21.7）；**L4-3 已移出本文档**，见《Vulkan命令流双模式L4-3实施方案.md》。
+A-5（ImGui/PSO 命令化）、T2.6、T3.3/T3.4、T5.1~T5.3。**L4-3 见 《Vulkan命令流双模式L4-3实施方案.md》**。
 
 ### 16.5 已知既有缺陷（**与 A-3 无关，已 bisect 证明**）
 
