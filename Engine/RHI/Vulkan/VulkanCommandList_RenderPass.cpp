@@ -478,6 +478,8 @@ void VulkanCommandList::BeginOffscreenPassMRT(
 {
     if (m_StreamMode) {
         // L4-3 skip: BeginOffscreenPassMRT is not yet representable in the command stream.
+        // 记深度，让配对的 EndOffscreenPass 也跳过（否则回放侧出现"没有 Begin 的 End"）。
+        ++m_StreamSkippedPassDepth;
         return;
     }
     if (colorCount == 0 && !depthImageView) {
@@ -574,6 +576,8 @@ void VulkanCommandList::BeginOffscreenPassMRT(
 void VulkanCommandList::EndOffscreenPass() {
     if (m_StreamMode) {
         // L4-3: record only; the replay list issues the real vkCmd*.
+        // L4-3: 若对应 Begin 被跳过（如 MRT 版本），这里也要跳过，保持配对。
+        if (m_StreamSkippedPassDepth > 0u) { --m_StreamSkippedPassDepth; return; }
         m_Stream.Enqueue(RHICommandType::CmdEndOffscreenPass, u32{0});
         return;
     }

@@ -177,6 +177,8 @@ private:
     // 【L4-3】命令流模式开关与流（默认关闭：零行为变化）
     bool                 m_StreamMode = false;
     bool                 m_IsReplayList = false;
+    // L4-3: 记录"被跳过、因而没有进流的 pass"的嵌套深度，避免 End 单飞
+    u32                  m_StreamSkippedPassDepth = 0;
     rhi::RHICommandList  m_Stream;
 
     static constexpr u32 kMaxSecondaryCBs = 3;
