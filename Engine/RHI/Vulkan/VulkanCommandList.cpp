@@ -486,7 +486,9 @@ void VulkanCommandList::DrawIndexedIndirectCount(rhi::IRHIBuffer* buffer, u64 of
                                                   rhi::IRHIBuffer* countBuffer, u64 countOffset,
                                                   u32 maxDrawCount, u32 stride) {
     if (m_StreamMode) {
-        // L4-3 skip: DrawIndexedIndirectCount is not yet representable in the command stream.
+        // L4-3：GPU 计数间接绘制进流（缓冲句柄 + 偏移/上限/步长均为纯数据）。
+        m_Stream.Enqueue(RHICommandType::CmdDrawIndexedIndirectCount,
+                         RHICommandDrawIndexedIndirectCount{ buffer, countBuffer, offset, countOffset, maxDrawCount, stride });
         return;
     }
     EmitDrawLabel();  // 自动插入 DrawCall 级调试 marker（若已设置）
