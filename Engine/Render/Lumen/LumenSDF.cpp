@@ -76,6 +76,10 @@ bool LumenSDF::Initialize(rhi::IRHIDevice* device, const LumenSDFConfig& config)
 }
 
 void LumenSDF::Shutdown() {
+    // A-3：Entry 的场改句柄后不再随 vector 析构自动释放 ⇒ 清空前逐个销毁
+    if (m_Device) {
+        for (auto& e : m_Entries) m_Device->DestroyTextureHandle(e.field);
+    }
     m_Entries.clear();
     m_Device->DestroyBufferHandle(m_ProbeDist); m_ProbeDist = {};
     m_Device->DestroyBufferHandle(m_Indices); m_Indices = {};
@@ -375,8 +379,8 @@ void LumenSDF::BakeOne(rhi::IRHICommandList* cmd, u32 entryIndex) {
     td.height = e.resolution;
     td.depth  = e.resolution;
     td.usage  = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource;
-    e.field   = m_Device->CreateTexture(td);
-    if (!e.field) return;
+    e.field   = m_Device->CreateTextureHandle(td);
+    if (!e.field.IsValid()) return;
 
     // 【步骤 37：布局转换必须在**首次写入之前**】这张场纹理是自持存储图像，而 Lumen 的 pass 之间
     // 只用"全局内存屏障"（不做布局转换）⇒ 它停在 UNDEFINED 上，校验层会报
@@ -385,7 +389,7 @@ void LumenSDF::BakeOne(rhi::IRHICommandList* cmd, u32 entryIndex) {
     // 一起丢掉 —— 这正是"统一在首帧转一次"行不通的原因（mesh 场是逐帧建出来的）。
     cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
                          rhi::ResourceState::Undefined, rhi::ResourceState::UnorderedAccess,
-                         e.field.get());
+                         ResT(e.field));
 
     BuildPC pc{};
     pc.originX = e.origin.x; pc.originY = e.origin.y; pc.originZ = e.origin.z;
@@ -463,7 +467,7 @@ void LumenSDF::BakeOne(rhi::IRHICommandList* cmd, u32 entryIndex) {
     m_Device->UpdateDescriptorSetWithImageView(convSet, 0, rhi::DescriptorType::StorageImage,
                                                ResT(m_MeshScratch)->GetNativeHandle());
     m_Device->UpdateDescriptorSetWithImageView(convSet, 1, rhi::DescriptorType::StorageImage,
-                                               e.field->GetNativeHandle());
+                                               ResT(e.field)->GetNativeHandle());
     m_Device->UpdateDescriptorSet(convSet, 2, rhi::DescriptorType::StorageBuffer, ResB(m_ProbeDist));
     cmd->SetPipeline(ResP(m_ConvertPSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, convSet);
@@ -476,7 +480,7 @@ void LumenSDF::BakeOne(rhi::IRHICommandList* cmd, u32 entryIndex) {
     // 构建结束转入"可采样"状态：后续步骤（10 注入 / 11 sphere tracing）会读它
     cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
                          rhi::ResourceState::UnorderedAccess, rhi::ResourceState::ShaderResource,
-                         e.field.get());
+                         ResT(e.field));
 }
 
 void LumenSDF::CreateGlobalGPUObjects() {
@@ -720,9 +724,9 @@ void LumenSDF::BuildGlobalField(rhi::IRHICommandList* cmd) {
                     rhi::DescriptorType::StorageImage, ResT(layer.field)->GetNativeHandle());
                 m_Device->UpdateDescriptorSet(is, kGBindProbe,
                     rhi::DescriptorType::StorageBuffer, ResB(layer.probe));
-                if (m_Entries[m].field) {
+                if (m_Entries[m].field.IsValid()) {
                     m_Device->UpdateDescriptorSet(is, kGBindMeshField,
-                        rhi::DescriptorType::CombinedImageSampler, m_Entries[m].field.get(),
+                        rhi::DescriptorType::CombinedImageSampler, ResT(m_Entries[m].field),
                         ResS(m_LinearSampler));
                 }
             }
@@ -757,7 +761,7 @@ void LumenSDF::BuildGlobalField(rhi::IRHICommandList* cmd) {
         pc.mode = 1u;
         for (u32 m = 0; m < (u32)m_Entries.size(); ++m) {
             const auto& e = m_Entries[m];
-            if (!e.field) continue;
+            if (!e.field.IsValid()) continue;
             pc.meshOriginX = e.origin.x; pc.meshOriginY = e.origin.y; pc.meshOriginZ = e.origin.z;
             pc.meshVoxelSize = e.voxelSize;
             pc.meshDimX = pc.meshDimY = pc.meshDimZ = e.resolution;
@@ -1416,9 +1420,9 @@ void LumenSDF::RunMarchDetail(rhi::IRHICommandList* cmd) {
             m_Device->UpdateDescriptorSet(ds, kMBindDir,    rhi::DescriptorType::StorageBuffer, ResB(m_RayDir));
             m_Device->UpdateDescriptorSet(ds, kMBindHit,    rhi::DescriptorType::StorageBuffer, ResB(m_RayT));
             m_Device->UpdateDescriptorSet(ds, kMBindNormal, rhi::DescriptorType::StorageBuffer, ResB(m_RayT));
-            if (m_Entries[m].field) {
+            if (m_Entries[m].field.IsValid()) {
                 m_Device->UpdateDescriptorSet(ds, kMBindField, rhi::DescriptorType::CombinedImageSampler,
-                                              m_Entries[m].field.get(), ResS(m_LinearSampler));
+                                              ResT(m_Entries[m].field), ResS(m_LinearSampler));
             }
             m_DetailSets.push_back(ds);
         }
@@ -1434,7 +1438,7 @@ void LumenSDF::RunMarchDetail(rhi::IRHICommandList* cmd) {
 
     for (size_t mi = 0; mi < m_Entries.size(); ++mi) {
         const auto& e = m_Entries[mi];
-        if (!e.field || mi >= m_DetailSets.size()) continue;
+        if (!e.field.IsValid() || mi >= m_DetailSets.size()) continue;
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DetailSets[mi]);   // 该 mesh 专属的集，循环里不再改写
         pc.originX = e.origin.x; pc.originY = e.origin.y; pc.originZ = e.origin.z;
         pc.voxelSize = e.voxelSize;
@@ -1965,7 +1969,7 @@ void LumenSDF::RunMeshFieldProbe(rhi::IRHICommandList* cmd, const float3& camPos
     // ① 发射：写第 0 条射线 = 相机 → 前向，清 m_RayT[0]，只对该 mesh 跑一次 1 线程的细节追踪
     if (m_MeshProbeStage == 0) {
         const auto& e = m_Entries[m_MeshProbeIndex];
-        if (!e.field) { m_MeshProbeValue[m_MeshProbeIndex] = -2.0f; ++m_MeshProbeIndex; return; }
+        if (!e.field.IsValid()) { m_MeshProbeValue[m_MeshProbeIndex] = -2.0f; ++m_MeshProbeIndex; return; }
 
         if (void* mo = ResB(m_RayOrigin)->Map()) { std::memcpy(mo, &camPos, sizeof(float3)); if (auto* ub = ResB(m_RayOrigin)) ub->Unmap(); }
         if (void* md = ResB(m_RayDir)->Map())    { std::memcpy(md, &fwd,    sizeof(float3)); if (auto* ub = ResB(m_RayDir)) ub->Unmap(); }
@@ -1975,7 +1979,7 @@ void LumenSDF::RunMeshFieldProbe(rhi::IRHICommandList* cmd, const float3& camPos
         }
 
         m_Device->UpdateDescriptorSet(m_DetailSet, kMBindField,
-            rhi::DescriptorType::CombinedImageSampler, e.field.get(), ResS(m_LinearSampler));
+            rhi::DescriptorType::CombinedImageSampler, ResT(e.field), ResS(m_LinearSampler));
 
         MarchPC pc{};
         pc.originX = e.origin.x; pc.originY = e.origin.y; pc.originZ = e.origin.z;

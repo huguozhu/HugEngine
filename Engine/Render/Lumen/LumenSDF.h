@@ -68,7 +68,7 @@ struct MeshSDFEntry {
     float voxelSize    = 0.0f;
     u32   resolution   = 0;
     u32   probeCount   = 0;
-    std::unique_ptr<rhi::IRHITexture> field;   // R32F 3D 距离场
+    rhi::RHITextureHandle field{};   // A-3：Entry 的场改句柄（清空前逐个销毁）   // R32F 3D 距离场
 };
 
 class LumenSDF {
@@ -177,7 +177,7 @@ public:
     void CollectStorageImages(std::vector<rhi::IRHITexture*>& out) const {
         if (m_MeshScratch.IsValid()) out.push_back(m_Device->ResolveTexture(m_MeshScratch));
         if (m_MeshSeed.IsValid())    out.push_back(m_Device->ResolveTexture(m_MeshSeed));
-        for (const auto& e : m_Entries) if (e.field) out.push_back(e.field.get());
+        for (const auto& e : m_Entries) if (e.field.IsValid()) out.push_back(ResT(e.field));
         for (u32 i = 0; i < m_GlobalLayerCount; ++i) {
             const GlobalLayer& L = m_GlobalLayers[i];
             if (L.scratch.IsValid()) out.push_back(m_Device->ResolveTexture(L.scratch));
@@ -211,7 +211,7 @@ public:
     /// 步骤 29（显存清单）：已建好的 mesh 距离场个数与总字节数（每个 128³ R16F）
     [[nodiscard]] u32 GetMeshFieldCount() const {
         u32 n = 0;
-        for (const auto& e : m_Entries) if (e.field) ++n;   // 只数真正建出来的场
+        for (const auto& e : m_Entries) if (e.field.IsValid()) ++n;   // 只数真正建出来的场
         return n;
     }
     [[nodiscard]] double GetMeshFieldBytes() const {
@@ -226,8 +226,8 @@ public:
     [[nodiscard]] rhi::IRHITexture* GetMeshFieldTexture(u32 index) const {
         u32 built = 0;
         for (const auto& e : m_Entries) {
-            if (!e.field) continue;              // 尚未构建的条目不参与编号
-            if (built == index) return e.field.get();
+            if (!e.field.IsValid()) continue;              // 尚未构建的条目不参与编号
+            if (built == index) return ResT(e.field);
             ++built;
         }
         return nullptr;                          // 越界或尚未建够，一律返回 nullptr（调用方已有空指针判断）

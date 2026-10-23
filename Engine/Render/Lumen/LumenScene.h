@@ -353,7 +353,6 @@ public:
     /// 这是一个**数据竞争**：算法没错，但读数不确定、画面也就不可复现。
     static constexpr u32 kFeedbackSlots = 2;
     rhi::RHIBufferHandle  m_CardBuf{}, m_ReqCountBuf{};   // A-3
-    std::unique_ptr<rhi::IRHIBuffer>  m_ReqBuf[kFeedbackSlots];
     void* m_ReqCountMapped = nullptr;
     void* m_ReqMapped[kFeedbackSlots] = {nullptr, nullptr};
     rhi::DescriptorSetLayoutHandle m_FeedbackLayout = 0;
@@ -425,6 +424,7 @@ public:
     rhi::DescriptorSetHandle       m_ProbeFilterSet    = 0;
     rhi::RHIPipelineStateHandle m_ProbeFilterPSO{};   // A-3
     rhi::RHIBufferHandle m_ProbeFilteredBuf{};             // A-3：过滤结果（96 B/探针，下游读它）
+    std::unique_ptr<rhi::IRHIBuffer>  m_ReqBuf[kFeedbackSlots];
     std::unique_ptr<rhi::IRHIBuffer> m_ProbeFilterHistBuf[2];        // 历史探针镜像（80 B/探针，乒乓）
     std::unique_ptr<rhi::IRHIBuffer> m_CellProbeHistBuf[2];          // 历史单元映射（乒乓）
     /// 历史资源来自统一池时用这两个（池持有，本类只借；为空表示池没给，退回自建）
