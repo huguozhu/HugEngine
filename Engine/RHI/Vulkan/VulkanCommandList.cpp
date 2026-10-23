@@ -593,7 +593,8 @@ void VulkanCommandList::SetPushConstants(u32 offset, u32 size, const void* data)
 
 void VulkanCommandList::Dispatch(u32 groupCountX, u32 groupCountY, u32 groupCountZ) {
     if (m_StreamMode) {
-        // L4-3 skip: Dispatch is not yet representable in the command stream.
+        // L4-3：把计算分派记进流（回放侧执行真正的 vkCmdDispatch）。
+        m_Stream.Enqueue(RHICommandType::CmdDispatch, RHICommandDispatch{ groupCountX, groupCountY, groupCountZ });
         return;
     }
     EmitDrawLabel();  // 自动插入 DrawCall 级调试 marker（若已设置）

@@ -159,6 +159,21 @@ u32 ReplayCommandStream(const RHICommandList& stream, IRHICommandList& cmd) {
             ++replayed;
             break;
         }
+        case RHICommandType::CmdDispatch: {
+            const auto* d = stream.PayloadAt<RHICommandDispatch>(i);
+            if (!d) break;
+            cmd.Dispatch(d->x, d->y, d->z);
+            ++replayed;
+            break;
+        }
+        case RHICommandType::CmdCopyBuffer: {
+            const auto* d = stream.PayloadAt<RHICommandCopyBuffer>(i);
+            if (!d || !d->src || !d->dst) break;
+            cmd.CopyBuffer(static_cast<IRHIBuffer*>(d->src), static_cast<IRHIBuffer*>(d->dst),
+                           d->size, d->srcOffset, d->dstOffset);
+            ++replayed;
+            break;
+        }
         case RHICommandType::MarkSubmitBoundary:
             // 提交边界由执行端（RHI 线程）自己按帧处理，这里不是一条 RHI 调用
             ++replayed;

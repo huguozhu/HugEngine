@@ -65,6 +65,8 @@ enum class RHICommandType : u32 {
     CmdEndOffscreenPass   = 19,
     CmdDraw               = 20,
     CmdPipelineBarrier    = 21,
+    CmdDispatch            = 22,
+    CmdCopyBuffer          = 23,
 };
 
 /// 一条命令的载荷：类型擦除 + **内联存储**。
@@ -85,6 +87,8 @@ struct RHICommandBeginOffscreenPass {
 };
 struct RHICommandDraw { u32 vertexCount = 0, instanceCount = 1, firstVertex = 0, firstInstance = 0; };
 struct RHICommandPipelineBarrier { u32 srcStage = 0, dstStage = 0, srcState = 0, dstState = 0; };
+struct RHICommandDispatch { u32 x = 0, y = 1, z = 1; };
+struct RHICommandCopyBuffer { void* src = nullptr; void* dst = nullptr; u64 size = 0, srcOffset = 0, dstOffset = 0; };
 
 /// L4-3 batch2: POD only (this header is RHI-free, so no Viewport/ScissorRect types)
 struct RHICommandSetViewport { float x = 0, y = 0, w = 0, h = 0, minZ = 0, maxZ = 1; };
