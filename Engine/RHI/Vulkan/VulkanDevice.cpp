@@ -366,7 +366,12 @@ IRHIBindlessHeap* VulkanDevice::GetBindlessHeap() {
 // Shutdown — 销毁所有 Vulkan 资源
 // ============================================================
 void VulkanDevice::Shutdown() {
-    HE_ASSERT_RENDER_THREAD();   // T0.1：设备销毁只在拥有线程（渲染线程）上做
+    HE_ASSERT_RENDER_THREAD();
+
+    // L4-3：影子命令列表必须在设备销毁**之前**释放，否则其析构会在设备已失效后再碰
+    // vkDeviceWaitIdle/vkDestroy*（实测报 VUID-vkDeviceWaitIdle-device-parameter 并崩溃）。
+    for (auto& r : m_ReplayLists) r.reset();
+   // T0.1：设备销毁只在拥有线程（渲染线程）上做
 
     // 1. 等待 GPU 完成所有工作
     if (m_Device) vkDeviceWaitIdle(m_Device);
