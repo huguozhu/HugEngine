@@ -55,6 +55,11 @@ public:
     ) = 0;
     virtual void EndRenderPass() = 0;
 
+    /// 【L4-3】帧外壳显式开启"命令流模式"（默认空实现 = 不开启）。
+    /// 只有**帧主列表**会调用它；内部临时列表（异步计算等）永远走真实录制。
+    /// 是否真的开启由后端决定（当前实现读环境变量 HE_RHI_COMMAND_STREAM）。
+    virtual void EnableCommandStream() {}
+
     /// 【L4-3】回放侧提示：命令流自带 render pass 句柄时，先把它交给目标列表。
     /// 默认空实现（后端无关层不需要知道具体类型；Vulkan 后端会真正的把它记下来）。
     virtual void SetRenderPassHint(void* /*renderPass*/) {}

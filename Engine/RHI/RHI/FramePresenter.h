@@ -54,7 +54,7 @@ public:
     void BeginRecording(IRHIDevice* device, IRHICommandList* cmdList) {
         m_Device      = device;
         m_CommandList = cmdList;
-        if (m_CommandList) m_CommandList->Begin();
+        if (m_CommandList) { m_CommandList->EnableCommandStream(); m_CommandList->Begin(); }
     }
 
     /// L4-2：结束录制并提交。**present 不在这里**（EndFrame 负责），两者之间可能还夹着

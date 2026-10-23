@@ -885,8 +885,6 @@ std::unique_ptr<IRHICommandList> VulkanDevice::CreateCommandList(QueueType queue
 
     auto cmdList = std::make_unique<VulkanCommandList>(m_Device, vkQueue, family, this);
     cmdList->SetQueueType(queue);
-    // L4-3: env var HE_RHI_COMMAND_STREAM=1 turns on command-stream mode (off by default).
-    cmdList->SetStreamMode(StreamModeFromEnv());
     return cmdList;
 }
 

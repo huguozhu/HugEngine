@@ -162,6 +162,12 @@ public:
     void MarkAsReplayList() { m_IsReplayList = true; }
 
     // L4-3: 回放侧把命令流携带的 render pass 设置到影子列表（不依赖历史状态）。
+    // L4-3：帧主列表显式开启流模式（环境变量门控，默认关闭）
+    void EnableCommandStream() override {
+        const char* e = std::getenv("HE_RHI_COMMAND_STREAM");
+        m_StreamMode = (e && e[0] == '1');
+    }
+
     void SetRenderPassHint(void* rp) override { m_CurrentRenderPass = static_cast<VkRenderPass>(rp); }
 
     // L4-3：影子列表必须继承源列表的"渲染目标状态"，
