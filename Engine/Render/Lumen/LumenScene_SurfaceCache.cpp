@@ -1122,15 +1122,15 @@ void LumenScene::RunFeedback(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbWorl
         rb.size = (usize)kMaxFeedbackTiles * sizeof(u32) * 2u;
         rb.usage = rhi::BufferUsage::Storage; rb.cpuAccess = true;
         for (u32 s = 0; s < kFeedbackSlots; ++s) {
-            m_ReqBuf[s]    = m_Device->CreateBuffer(rb);
-            m_ReqMapped[s] = m_ReqBuf[s] ? m_ReqBuf[s]->Map() : nullptr;
+            m_ReqBuf[s]    = m_Device->CreateBufferHandle(rb);
+            m_ReqMapped[s] = m_ReqBuf[s].IsValid() ? ResB(m_ReqBuf[s])->Map() : nullptr;
         }
 
         m_Device->UpdateDescriptorSet(m_FeedbackSet, 0, rhi::DescriptorType::CombinedImageSampler,
                                       gbWorldPos, m_SDF.GetLinearSampler());
         m_Device->UpdateDescriptorSet(m_FeedbackSet, 1, rhi::DescriptorType::StorageBuffer, ResB(m_CardBuf));
         m_Device->UpdateDescriptorSet(m_FeedbackSet, 2, rhi::DescriptorType::StorageBuffer, ResB(m_ReqCountBuf));
-        m_Device->UpdateDescriptorSet(m_FeedbackSet, 3, rhi::DescriptorType::StorageBuffer, m_ReqBuf[0].get());
+        m_Device->UpdateDescriptorSet(m_FeedbackSet, 3, rhi::DescriptorType::StorageBuffer, ResB(m_ReqBuf[0]));
         m_FeedbackBound = true;
         return;   // 本帧只建资源；下一帧开始派发（"新建资源当帧使用"的教训见 §附二十）
     }
@@ -1147,7 +1147,7 @@ void LumenScene::RunFeedback(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbWorl
     const u32 writeSlot = s_singleFeedbackSlot ? 0u : (m_FeedbackFrame % kFeedbackSlots);
     const u32 readSlot  = s_singleFeedbackSlot ? 0u : ((m_FeedbackFrame + 1u) % kFeedbackSlots);
     m_Device->UpdateDescriptorSet(m_FeedbackSet, 3, rhi::DescriptorType::StorageBuffer,
-                                  m_ReqBuf[writeSlot].get());
+                                  ResB(m_ReqBuf[writeSlot]));
     // 【验收用】合成漫游：静态相机下把"需要的页"人为轮换，用来把 LRU 淘汰路径压出来。
     // 真实漫游时这一步由相机的移动自然完成（feedback 的 top-N 会跟着画面走）。
     if (m_SyntheticRoaming && m_FeedbackFrame > 20u) {

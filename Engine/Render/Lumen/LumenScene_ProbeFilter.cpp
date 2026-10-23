@@ -136,12 +136,12 @@ void LumenScene::RunScreenProbeFilter(rhi::IRHICommandList* cmd, const float4x4&
                 std::snprintf(name, sizeof(name), "Lumen_CellProbeHistory%u", k);
                 m_CellHistFromPool[k]  = m_HistoryPool->AcquireBuffer(name, cellBytes);
             }
-            if (!m_ProbeHistFromPool[k]) m_ProbeFilterHistBuf[k] = m_Device->CreateBuffer(hb);
+            if (!m_ProbeHistFromPool[k]) m_ProbeFilterHistBuf[k] = m_Device->CreateBufferHandle(hb);
             if (!m_CellHistFromPool[k]) {
                 rhi::BufferDesc cb;
                 cb.size  = (usize)cellBytes;
                 cb.usage = rhi::BufferUsage::Storage;
-                m_CellProbeHistBuf[k] = m_Device->CreateBuffer(cb);
+                m_CellProbeHistBuf[k] = m_Device->CreateBufferHandle(cb);
             }
         }
 
@@ -195,10 +195,10 @@ void LumenScene::RunScreenProbeFilter(rhi::IRHICommandList* cmd, const float4x4&
     // 乒乓：读 r、写 w；dispatch 结束后 r = w
     const u32 r = m_ProbeFilterHistIdx;
     const u32 w = 1u - r;
-    rhi::IRHIBuffer* histProbe = m_ProbeHistFromPool[r] ? m_ProbeHistFromPool[r] : m_ProbeFilterHistBuf[r].get();
-    rhi::IRHIBuffer* histCell  = m_CellHistFromPool[r]  ? m_CellHistFromPool[r]  : m_CellProbeHistBuf[r].get();
-    rhi::IRHIBuffer* outProbe  = m_ProbeHistFromPool[w] ? m_ProbeHistFromPool[w] : m_ProbeFilterHistBuf[w].get();
-    rhi::IRHIBuffer* outCell   = m_CellHistFromPool[w]  ? m_CellHistFromPool[w]  : m_CellProbeHistBuf[w].get();
+    rhi::IRHIBuffer* histProbe = m_ProbeHistFromPool[r] ? m_ProbeHistFromPool[r] : ResB(m_ProbeFilterHistBuf[r]);
+    rhi::IRHIBuffer* histCell  = m_CellHistFromPool[r]  ? m_CellHistFromPool[r]  : ResB(m_CellProbeHistBuf[r]);
+    rhi::IRHIBuffer* outProbe  = m_ProbeHistFromPool[w] ? m_ProbeHistFromPool[w] : ResB(m_ProbeFilterHistBuf[w]);
+    rhi::IRHIBuffer* outCell   = m_CellHistFromPool[w]  ? m_CellHistFromPool[w]  : ResB(m_CellProbeHistBuf[w]);
     if (!histProbe || !histCell || !outProbe || !outCell || !m_ProbeFilteredBuf.IsValid() || !m_ProbeFilterStatsBuf.IsValid()) return;
 
     // 描述符必须**每帧重绑**：乒乓使绑定 3/4/5/6 的目标每帧都换（步骤 27 的 fade 缓冲教训）

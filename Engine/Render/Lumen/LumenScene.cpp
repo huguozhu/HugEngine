@@ -98,8 +98,9 @@ void LumenScene::OnResize(u32 width, u32 height) {
     m_ProbeHistFromPool[0] = m_ProbeHistFromPool[1] = nullptr;
     m_CellHistFromPool[0]  = m_CellHistFromPool[1]  = nullptr;
     for (u32 k = 0; k < 2u; ++k) {
-        m_ProbeFilterHistBuf[k].reset();
-        m_CellProbeHistBuf[k].reset();
+        // A-3: handles are not freed by array destruction
+        m_Device->DestroyBufferHandle(m_ProbeFilterHistBuf[k]); m_ProbeFilterHistBuf[k] = {};
+        m_Device->DestroyBufferHandle(m_CellProbeHistBuf[k]);   m_CellProbeHistBuf[k]   = {};
     }
     m_Device->DestroyBufferHandle(m_ProbeFilteredBuf); m_ProbeFilteredBuf = {};
     m_Device->DestroyBufferHandle(m_ProbeFilterStatsBuf); m_ProbeFilterStatsBuf = {};
