@@ -479,9 +479,26 @@ void VulkanCommandList::BeginOffscreenPassMRT(
     const ClearValue* clears, bool allowSecondary)
 {
     if (m_StreamMode) {
-        // L4-3 skip: BeginOffscreenPassMRT is not yet representable in the command stream.
-        // 记深度，让配对的 EndOffscreenPass 也跳过（否则回放侧出现"没有 Begin 的 End"）。
-        ++m_StreamSkippedPassDepth;
+        // L4-3：MRT 离屏 pass 进流（附件视图数组与 clear 值都走 arena）。
+        RHICommandBeginOffscreenPassMRT p{};
+        p.renderPass     = static_cast<void*>(m_CurrentRenderPass);
+        p.depthImageView = depthImageView;
+        p.colorCount     = colorCount;
+        p.width = width; p.height = height;
+        p.allowSecondary = allowSecondary ? 1u : 0u;
+        if (colorCount && colorImageViews) {
+            void* dst = m_Stream.AllocArena(sizeof(void*) * colorCount, 16);
+            std::memcpy(dst, colorImageViews, sizeof(void*) * colorCount);
+            p.colorViewsOffset = m_Stream.ArenaOffsetOf(dst);
+        }
+        if (clears) {
+            const u32 n = colorCount + (depthImageView ? 1u : 0u);
+            void* dst = m_Stream.AllocArena(sizeof(ClearValue) * n, 16);
+            std::memcpy(dst, clears, sizeof(ClearValue) * n);
+            p.clearOffset = m_Stream.ArenaOffsetOf(dst);
+            p.clearCount  = n;
+        }
+        m_Stream.Enqueue(RHICommandType::CmdBeginOffscreenPassMRT, p);
         return;
     }
     if (colorCount == 0 && !depthImageView) {

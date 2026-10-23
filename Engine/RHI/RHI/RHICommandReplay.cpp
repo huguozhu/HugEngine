@@ -174,6 +174,20 @@ u32 ReplayCommandStream(const RHICommandList& stream, IRHICommandList& cmd) {
             ++replayed;
             break;
         }
+        case RHICommandType::CmdBeginOffscreenPassMRT: {
+            const auto* d = stream.PayloadAt<RHICommandBeginOffscreenPassMRT>(i);
+            if (!d) break;
+            cmd.SetRenderPassHint(d->renderPass);
+            const auto* views = reinterpret_cast<void* const*>(
+                stream.ArenaRawAt(d->colorViewsOffset, sizeof(void*) * d->colorCount));
+            const auto* clear = d->clearCount
+                ? reinterpret_cast<const ClearValue*>(stream.ArenaRawAt(d->clearOffset, sizeof(ClearValue) * d->clearCount))
+                : nullptr;
+            cmd.BeginOffscreenPassMRT(views, d->colorCount, d->depthImageView,
+                                      d->width, d->height, clear, d->allowSecondary != 0u);
+            ++replayed;
+            break;
+        }
         case RHICommandType::MarkSubmitBoundary:
             // 提交边界由执行端（RHI 线程）自己按帧处理，这里不是一条 RHI 调用
             ++replayed;
