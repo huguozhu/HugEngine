@@ -173,6 +173,12 @@ public:
     // L4-3：影子列表必须继承源列表的"渲染目标状态"，
     // 否则 BeginRenderPass 会在 "m_SwapchainViews.empty() || !m_CurrentRenderPass" 处静默返回，
     // 随后 EndRenderPass 就会对不存在的 pass 调用 vkCmdEndRenderPass（访问违例）。
+    // L4-3：影子列表还要继承 timeline 信号设置，否则源列表登记的转储等待永远不会被 signal。
+    void AdoptTimelineSignalFrom(const VulkanCommandList& src) {
+        m_TimelineSignalSem = src.m_TimelineSignalSem;
+        m_TimelineSignalVal = src.m_TimelineSignalVal;
+    }
+
     void AdoptRenderTargetStateFrom(const VulkanCommandList& src) {
         m_pSwapChain        = src.m_pSwapChain;
         m_SwapchainViews    = src.m_SwapchainViews;

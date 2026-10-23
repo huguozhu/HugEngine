@@ -1093,7 +1093,8 @@ void VulkanDevice::SubmitStreamReplay(VulkanCommandList* src) {
     replay->SetStreamMode(false);
     replay->SetFrameIndexForReplay(slot);
     replay->MarkAsReplayList();   // L4-3: shadow list is driven by the RHI thread
-    replay->AdoptRenderTargetStateFrom(*src);   // L4-3: 继承渲染目标状态
+    replay->AdoptRenderTargetStateFrom(*src);
+    replay->AdoptTimelineSignalFrom(*src);   // L4-3: 转储等待的 timeline 信号由影子列表 signal   // L4-3: 继承渲染目标状态
     replay->Begin();
     const u32 replayed = ReplayCommandStream(*streamData, *replay);
     replay->End();
