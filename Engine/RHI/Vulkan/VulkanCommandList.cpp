@@ -251,7 +251,8 @@ static bool StreamModeFromEnv() {
 }
 
 void VulkanCommandList::Begin() {
-    HE_ASSERT_RENDER_THREAD();   // T0.1：录制开始（本帧主命令列表）
+    // L4-3: replay lists run on the submit thread; normal lists on the render thread.
+    if (m_IsReplayList) { HE_ASSERT_SUBMIT_THREAD(); } else { HE_ASSERT_RENDER_THREAD(); }
     if (m_StreamMode) {
         // 【L4-3】流模式：不 vkWaitForFences / 不 vkResetCommandPool / 不 vkBeginCommandBuffer。
         // 帧槽位与栅栏由执行侧（RHI 线程在 ExecuteSubmit 里新建的那条真实命令列表）负责。
@@ -326,7 +327,8 @@ void VulkanCommandList::End() {
         vkEndCommandBuffer(m_SecCmdBuffers[m_SecActive]);
         ++m_SecSlot;
     } else {
-        HE_ASSERT_RENDER_THREAD();   // T0.1：录制结束（与 Begin 配对，同样受归属约束）
+        // L4-3: replay lists run on the submit thread.
+        if (m_IsReplayList) { HE_ASSERT_SUBMIT_THREAD(); } else { HE_ASSERT_RENDER_THREAD(); }
         vkEndCommandBuffer(m_CmdBuffers[m_FrameIndex]);
     }
     m_IsRecording = false;

@@ -157,6 +157,9 @@ public:
 
     // 【L4-3】影子回放列表需要与源列表落在**同一个帧槽位**（栅栏/命令池/延迟销毁都按槽位索引）。
     [[nodiscard]] u32 GetFrameIndex() const { return m_FrameIndex; }
+
+    // L4-3: replay list is driven by the RHI (submit) thread.
+    void MarkAsReplayList() { m_IsReplayList = true; }
     void SetFrameIndexForReplay(u32 idx) { m_FrameIndex = idx % kMaxFramesInFlight; }
 
 private:
@@ -173,6 +176,7 @@ private:
 
     // 【L4-3】命令流模式开关与流（默认关闭：零行为变化）
     bool                 m_StreamMode = false;
+    bool                 m_IsReplayList = false;
     rhi::RHICommandList  m_Stream;
 
     static constexpr u32 kMaxSecondaryCBs = 3;

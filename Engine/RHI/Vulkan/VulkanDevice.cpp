@@ -865,6 +865,12 @@ std::unique_ptr<IRHISwapChain> VulkanDevice::CreateSwapChain(const SwapChainDesc
                                             m_GraphicsQueue, desc);
 }
 
+// L4-3: read the command-stream switch (env var, off by default).
+static bool StreamModeFromEnv() {
+    const char* v = std::getenv("HE_RHI_COMMAND_STREAM");
+    return v && v[0] == '1';
+}
+
 std::unique_ptr<IRHICommandList> VulkanDevice::CreateCommandList(QueueType queue) {
     VkQueue vkQueue = m_GraphicsQueue;
     u32     family  = m_GraphicsFamily;
@@ -879,6 +885,8 @@ std::unique_ptr<IRHICommandList> VulkanDevice::CreateCommandList(QueueType queue
 
     auto cmdList = std::make_unique<VulkanCommandList>(m_Device, vkQueue, family, this);
     cmdList->SetQueueType(queue);
+    // L4-3: env var HE_RHI_COMMAND_STREAM=1 turns on command-stream mode (off by default).
+    cmdList->SetStreamMode(StreamModeFromEnv());
     return cmdList;
 }
 
@@ -1086,6 +1094,7 @@ void VulkanDevice::SubmitStreamReplay(VulkanCommandList* src) {
     // 影子列表是"真实录制者"：不走流模式，Begin/End 会真正操作 VkCommandBuffer
     replay->SetStreamMode(false);
     replay->SetFrameIndexForReplay(slot);
+    replay->MarkAsReplayList();   // L4-3: shadow list is driven by the RHI thread
     replay->Begin();
     const u32 replayed = ReplayCommandStream(*streamData, *replay);
     replay->End();
