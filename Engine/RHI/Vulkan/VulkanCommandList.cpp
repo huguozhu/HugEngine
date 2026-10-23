@@ -232,7 +232,9 @@ void VulkanCommandList::BeginSecondary(IRHIPipelineState* pso) {
 
 void VulkanCommandList::ExecuteSecondary(IRHICommandList* secondary) {
     if (m_StreamMode) {
-        // L4-3 skip: ExecuteSecondary is not yet representable in the command stream.
+        // L4-3：把"执行次级列表"记进流。次级列表本身由录制者线程真实录制（不进流模式），
+        // 所以回放侧只需再次执行它即可。
+        m_Stream.Enqueue(RHICommandType::ExecuteSecondary, RHICommandExecuteSecondary{ secondary });
         return;
     }
     auto* vkSec = static_cast<VulkanCommandList*>(secondary);
