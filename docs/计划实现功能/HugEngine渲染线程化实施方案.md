@@ -521,7 +521,7 @@ private:
 > 只能由收集侧决定，否则贴花卡片会既被投影又被当普通网格画进 GBuffer，并与 `GPUScene` /
 > `MeshBatcher` 的集合错位（三者 `objectIndex` 按顺序对齐）。
 >
-> **未做**：第③段（帧入口收快照 ⇒ B1 归零，含 `RTPass` 的 13 处组件指针）与 T2.4/T2.2。
+> **未做**：第③段（帧入口收快照 ⇒ B1 归零，含 `RTPass` 的组件指针——**已复核完成**）与 T2.4/T2.2。
 
 ---
 
@@ -1299,7 +1299,7 @@ Submit → Present`，渲染线程只 append。由此推出一个硬约束：
       > （帧入口签名本身）、`IRenderPipeline.h` 1。**`IRenderPipeline::Render` 的签名一变，
       > 三条管线与 `RTPass` 就必须同批改完**（接口强制）—— 这正是本批先把"装配器 + 各 helper 去世界"
       > 做完、把入口签名留到最后的原因：那一改要一次覆盖 Deferred/PathTracing 的
-      > `BuildFrameGraph`/`CollectLights` 与 `RTPass::BuildAS`（后者还要一并收掉它剩下的 13 处组件指针）。
+      > `BuildFrameGraph`/`CollectLights` 与 `RTPass::BuildAS`（后者的组件指针**已复核为全部收完**，帧入口只剩 `FrameSceneSnapshot` + `MeshRegistry`）。
     - **第 4 批之二（已提交）**：**Deferred 与 PathTracing 也统一走装配器** ⇒ 三条管线的光源收集与
       场景收集全部离开渲染期，**B1 27 → 24**。
       · Deferred：口径 = 排除贴花卡片（`DecalPass` 投影）、构建贴花与粒子数组；`CollectLights`
@@ -2279,7 +2279,7 @@ pass 指纹（`1C15AB72E688B530` / `750CC247BF8B9C3D`）未变；`06.GILab` 冒�
      （`BuildLights` 先留 `shadowIndex = -1`）。这样既保持"阴影下标是本帧的"，又不让管线收世界。
    · `RunGPUCulling` 里的 `MeshBatcher::Build(world)` 是**一次性**构建（`m_BatchBuilt` 门控）⇒
      移到样例首帧调用（或第 5 批把 `MeshBatcher::Build` 改成吃快照 + 注册表）。
-2. **§15.1 第③段第 5 批**：`RTPass`（`RTPass.{h,cpp}` 的 3+4 处 B1 + 13 处组件指针：BLAS 缓存键、
+2. **§15.1 第③段第 5 批**：`RTPass`（`RTPass.{h,cpp}` 的 3+4 处 B1（组件指针**已完成**，帧入口只收快照）：
    `CollectMeshList` 指针载荷、`HasGeometryChanged`/`HashGeometry`、以及一条无调用点的顶点拉取死路径；
    RT 可见子集 = `Base`/`Cube`/`Sphere`，现在可以用 `SnapshotMeshClass` 表达）、
    `MeshBatcher::Build`(2，注意它的收集集含 `Instanced`、**不含** `Spline`/`Skeletal`，与快照全集不同)、
@@ -2321,7 +2321,7 @@ pass 指纹（`1C15AB72E688B530` / `750CC247BF8B9C3D`）未变；`06.GILab` 冒�
   `GBufferContext::excludeDecals` 删除 ⇒ 组件指针闸门 **18 → 13**、B1 **78 → 76**。
 - **落地时修正**：`DeferredPipeline::BuildObjects` 必须显式传 `excludeDecals = true`（原方案没提，
   因为原先这个口径藏在 `Prepare` 的实参里）；否则贴花卡片会被画两遍且与 `GPUScene` 集合错位。
-- **仍未做的 13 处组件指针全在 `Pipeline/RTPass.{h,cpp}`**（BLAS 缓存键、`CollectMeshList` 的指针载荷、
+- **`RTPass` 的组件指针已完成**（2026-10-23 复核：`RTPass.{h,cpp}` 里 `World&`/`SceneGraph&`/`GetComponent`/`ForEach<` 均为 0 处，帧入口只收 `FrameSceneSnapshot`；`CollectMeshList` 读的是 `snapshot.draws`。**唯一剩余的外部输入是 `MeshRegistry`**（设备侧网格注册表，非 ECS）——见 §21.7）
   `HasGeometryChanged`/`HashGeometry`、以及一条无调用点的顶点拉取死路径）。它与第③段同源
   （`RTPass::BuildAS(world, sg)` 本身是 B1 的收敛对象），故并入第③段：RTPass 需要一个
   "RT 可见子集"的快照视图（当前它自己按 `MeshComponent`/`Cube`/`Sphere` 遍历世界，
@@ -2369,7 +2369,7 @@ pass 指纹（`1C15AB72E688B530` / `750CC247BF8B9C3D`）未变；`06.GILab` 冒�
 > 文档合并（24 → 15 的 §13–§21）与 T5.4 勾选；**工作已合并入 `main` 并推送，`multi_thread` 分支已删除**。
 > **v1.5 变更（2026-10-09）**：§15.1 **第②段完成**（`Prepare` 收快照 + `DrawItem` 去组件指针，
 > 含顺带修掉的 Deferred 贴花口径缺口）；§6 增补"第四次复核"；§9 T1.5 增补第②段条目并把剩余
-> 13 处组件指针（全在 `RTPass`）的处置写清楚（并入第③段）；两项基线随实测下调
+> `RTPass` 组件指针的处置已写入 §21.7（**已完成为主，`MeshRegistry` 为观察项**）；两项基线随实测下调
 > （组件指针 18 → 13、B1 80 → 76）。
 
 ---
@@ -2441,7 +2441,7 @@ pass 指纹（`1C15AB72E688B530` / `750CC247BF8B9C3D`）未变；`06.GILab` 冒�
 `SkinnedMeshBuffers`、`TextRenderComponent`）的元素都是自管理 `unique_ptr`，无需接线；
 将来把退役队列改成句柄时直接 `SetReleaser([dev](Handle& h){ dev->Destroy*(h); })` 即可。
 
-**文档层面仍待办的项（与 A-3 无关）**：`P0`（每飞行帧命令缓冲 + 去掉命令 1 的每帧握手）、`T1.2c` 快照化的剩余消费侧（骨骼 / 材质 / Decal / 粒子）、`RTPass` 的 13 处组件指针；L4-3 另见《Vulkan命令流双模式L4-3实施方案.md》。
+**文档层面仍待办的项（与 A-3 无关）**：`P0`（每飞行帧命令缓冲 + 去掉命令 1 的每帧握手）、`T1.2c` 快照化的剩余消费侧（骨骼 / 材质 / Decal / 粒子）、`RTPass` 的组件指针（**已完成**）与 `MeshRegistry` 并发读（观察项，§21.7）；L4-3 另见《Vulkan命令流双模式L4-3实施方案.md》。
 A-5（ImGui/PSO 命令化）、T2.6、T3.3/T3.4、T5.1~T5.3、L4-3。
 
 ### 16.5 已知既有缺陷（**与 A-3 无关，已 bisect 证明**）
@@ -2872,4 +2872,24 @@ void EndFrame(cmd) {                // 渲染线程（命令 2）
 | 每飞行帧命令缓冲 | ❌ 不做（当前"一份命令列表 + FIFO"的语义是正确的，且已被四条判据覆盖） |
 
 **将来若要做**：前提是"UI 搬到渲染线程"（方案 A）。在那之前，P0 视为**已结项（深度 1）**。
+
+### 21.7 复核：`RTPass` 的"13 处组件指针"已完成（2026-10-23）
+
+此前文档多处写着"`RTPass` 还有 13 处组件指针未处理"。逐项复核后**该结论已过时**：
+
+| 检查项 | 结果 |
+|---|---|
+| `RTPass.{h,cpp}` 中 `World&` / `SceneGraph&` / `GetComponent` / `ForEach<` | **0 处** |
+| 帧入口签名 | `BuildAS(cmd, const FrameSceneSnapshot&, const MeshRegistry&)`、`Render(cmd, const FrameSceneSnapshot&)`、`BuildSceneMaterialTexture(device, const FrameSceneSnapshot&, ...)` —— 全部只收快照 |
+| `CollectMeshList(snapshot, registry, out)` | 遍历 `snapshot.draws`，按 `meshIndex` 查 `registry.Find(...)` |
+
+**唯一剩余的外部输入是 `MeshRegistry`**（`meshIndex → 顶点/索引缓冲` 的设备侧注册表，**不是** ECS 组件）。
+它被渲染线程读取是合理的（网格上传后内容稳定），但它**本身可在运行时注册新网格** ⇒ 潜在并发写。
+
+**观察项（非阻塞）**：若将来出现"渲染中运行时注册网格"，需要二选一：
+
+1. 把本帧可见网格的缓冲句柄列表也放进快照（`FrameSceneSnapshot::visibleMeshes`），渲染侧不再碰 `MeshRegistry`；
+2. 给 `MeshRegistry` 加读写锁 / 只在帧边界（装配期）注册。
+
+目前样例都在启动阶段一次性注册网格 ⇒ 该风险未实际触发。
 
