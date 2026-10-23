@@ -128,6 +128,23 @@ void VulkanCommandList::EnsureDepthAttachmentLayout(void* depthImageView) {
 
 void VulkanCommandList::BeginRenderPass(u32 colorCount, Format, Format depthFormat,
                                         const ClearValue* clear, LoadOp loadOp) {
+    if (m_StreamMode) {
+        // L4-3: clear values travel through the stream arena (their size depends on attachment count).
+        RHICommandBeginRenderPass p{};
+        p.colorCount  = colorCount;
+        p.colorFormat = 0u;   // 该实现丢弃了颜色格式参数（签名里是匿名参数），与直连路径一致
+        p.depthFormat = static_cast<u32>(depthFormat);
+        p.loadOp      = static_cast<u32>(loadOp);
+        if (clear) {
+            const u32 n = colorCount + (depthFormat != Format::Unknown ? 1u : 0u);
+            void* dst = m_Stream.AllocArena(sizeof(ClearValue) * n, 16);
+            std::memcpy(dst, clear, sizeof(ClearValue) * n);
+            p.clearOffset = m_Stream.ArenaOffsetOf(dst);
+            p.clearCount  = n;
+        }
+        m_Stream.Enqueue(RHICommandType::CmdBeginRenderPass, p);
+        return;
+    }
     // 从 SwapChain 获取当前图像索引
     if (m_pSwapChain)
         m_CurrentImageIndex = m_pSwapChain->GetCurrentBackBufferIndex();
@@ -346,6 +363,23 @@ void VulkanCommandList::BeginOffscreenPass(
     void* colorImageView, void* depthImageView,
     u32 width, u32 height, const ClearValue* clear, bool allowSecondary)
 {
+    if (m_StreamMode) {
+        // L4-3: same arena-based clear transport as BeginRenderPass.
+        RHICommandBeginOffscreenPass p{};
+        p.colorImageView = colorImageView;
+        p.depthImageView = depthImageView;
+        p.width  = width;
+        p.height = height;
+        p.allowSecondary = allowSecondary ? 1u : 0u;
+        if (clear) {
+            void* dst = m_Stream.AllocArena(sizeof(ClearValue) * 2u, 16);
+            std::memcpy(dst, clear, sizeof(ClearValue) * 2u);
+            p.clearOffset = m_Stream.ArenaOffsetOf(dst);
+            p.clearCount  = 2u;
+        }
+        m_Stream.Enqueue(RHICommandType::CmdBeginOffscreenPass, p);
+        return;
+    }
     auto colorView = static_cast<VkImageView>(colorImageView);
     auto depthView = static_cast<VkImageView>(depthImageView);
     if (!colorView && !depthView) {
