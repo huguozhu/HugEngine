@@ -97,6 +97,60 @@ u32 ReplayCommandStream(const RHICommandList& stream, IRHICommandList& cmd) {
             ++replayed;
             break;
         }
+        case RHICommandType::CmdBeginRenderPass: {
+            const auto* d = stream.PayloadAt<RHICommandBeginRenderPass>(i);
+            if (!d) break;
+            const ClearValue* clear = nullptr;
+            if (d->clearCount != 0u) {
+                const auto* raw = stream.ArenaRawAt(d->clearOffset, sizeof(ClearValue) * d->clearCount);
+                clear = reinterpret_cast<const ClearValue*>(raw);
+            }
+            cmd.BeginRenderPass(d->colorCount, static_cast<Format>(d->colorFormat),
+                                static_cast<Format>(d->depthFormat), clear,
+                                static_cast<LoadOp>(d->loadOp));
+            ++replayed;
+            break;
+        }
+        case RHICommandType::CmdEndRenderPass: {
+            cmd.EndRenderPass();
+            ++replayed;
+            break;
+        }
+        case RHICommandType::CmdBeginOffscreenPass: {
+            const auto* d = stream.PayloadAt<RHICommandBeginOffscreenPass>(i);
+            if (!d) break;
+            const ClearValue* clear = nullptr;
+            if (d->clearCount != 0u) {
+                const auto* raw = stream.ArenaRawAt(d->clearOffset, sizeof(ClearValue) * d->clearCount);
+                clear = reinterpret_cast<const ClearValue*>(raw);
+            }
+            cmd.BeginOffscreenPass(d->colorImageView, d->depthImageView, d->width, d->height,
+                                   clear, d->allowSecondary != 0u);
+            ++replayed;
+            break;
+        }
+        case RHICommandType::CmdEndOffscreenPass: {
+            cmd.EndOffscreenPass();
+            ++replayed;
+            break;
+        }
+        case RHICommandType::CmdDraw: {
+            const auto* d = stream.PayloadAt<RHICommandDraw>(i);
+            if (!d) break;
+            cmd.Draw(d->vertexCount, d->instanceCount, d->firstVertex, d->firstInstance);
+            ++replayed;
+            break;
+        }
+        case RHICommandType::CmdPipelineBarrier: {
+            const auto* d = stream.PayloadAt<RHICommandPipelineBarrier>(i);
+            if (!d) break;
+            cmd.PipelineBarrier(static_cast<PipelineStage>(d->srcStage),
+                                static_cast<PipelineStage>(d->dstStage),
+                                static_cast<ResourceState>(d->srcState),
+                                static_cast<ResourceState>(d->dstState));
+            ++replayed;
+            break;
+        }
         case RHICommandType::MarkSubmitBoundary:
             // 提交边界由执行端（RHI 线程）自己按帧处理，这里不是一条 RHI 调用
             ++replayed;
