@@ -675,7 +675,7 @@ private:
 | L1 契约 + 翻译层 | `RHICommand`/`RHICommandList` + `ReplayCommandStream` | ✅ 已完成（`9a294e7`） |
 | L2 提交管道 | `Submit/RouteSubmit/ExecuteSubmit` 携带命令流，RHI 线程提交前翻译 | ✅ 已完成（`9afe25c`） |
 | L3 pass 级命令化 | `BeginPass`/`EndPass` + pass 内绘制序列进流 | ⬜ 未做（本文 §12.11 的 6 处改动） |
-| L4 帧级命令化 | 命令缓冲 Begin/End、Acquire、Present、重建也进流 ⇒ 渲染线程真正零 API | ⬜ 未做；这是"零 Vulkan 调用"的**必要条件**，也是 A-3 句柄化的直接消费者 |
+| L4 帧级命令化 | 命令缓冲 Begin/End、Acquire、Present、重建也进流 ⇒ 渲染线程真正零 API | ➡️ **已移出本文档**（方案见 《Vulkan命令流双模式L4-3实施方案.md》）；这是"零 Vulkan 调用"的**必要条件**，也是 A-3 句柄化的直接消费者 |
 
 结论：**P2 的"零 Vulkan 调用"目标在 L3+L4 都完成前不应声称达成**；本阶段的合法成果是 L1+L2（已落地并
 按"行为中立"验收），以及 L3/L4 的设计与判据。
@@ -1539,7 +1539,7 @@ Submit → Present`，渲染线程只 append。由此推出一个硬约束：
   · **发现一处既有条件（与本批无关）**：两种模式下各有 1 条同源断言
     `VulkanCommandList.cpp:197` = `BeginSecondary`（RenderGraph 的 worker/secondary 并行录制路径）。
     它在**模式 0**（本批改动完全不起作用）同样出现 ⇒ 既有；`06.GILab` 不用 secondary 录制故无此断言。
-    **待办**：secondary/并行录制的归属问题（要么归到渲染线程，要么给它自己的归属语义）——
+    **已完成**：secondary/并行录制的归属问题已由 `SecondaryRecordScope`（两级归属声明）解决 —— 原方案描述：
     这条会挡在"模式 1 全样例零断言"之前。
   · **T2.4 剩余**：`02.Cube` / `04.Sponza-Deferred` / `05.Sponza-PathTracing` / `07.Nanite` 共 4 个样例。
 
