@@ -418,6 +418,13 @@ void VulkanCommandList::Draw(u32 vertexCount, u32 instanceCount,
 
 void VulkanCommandList::DrawIndexed(u32 indexCount, u32 instanceCount,
                                      u32 firstIndex, i32 vertexOffset, u32 firstInstance) {
+    if (m_StreamMode) {
+        // L4-3: in stream mode record the draw only; bindings are replayed by the submit thread.
+        HE_ASSERT(firstInstance == 0u && "L4-3 stream mode does not support firstInstance != 0");
+        m_Stream.Enqueue(RHICommandType::DrawIndexed,
+                         RHICommandDrawIndexed{ indexCount, firstIndex, vertexOffset, instanceCount });
+        return;
+    }
     EmitDrawLabel();  // 自动插入 DrawCall 级调试 marker（若已设置）
     if (m_CurrentIB)
         vkCmdBindIndexBuffer(m_CmdBuffers[m_FrameIndex], m_CurrentIB, m_IBOffset, m_CurrentIndexType);
