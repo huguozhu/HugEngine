@@ -2889,7 +2889,7 @@ void EndFrame(cmd) {                // 渲染线程（命令 2）
 **唯一剩余的外部输入是 `MeshRegistry`**（`meshIndex → 顶点/索引缓冲` 的设备侧注册表，**不是** ECS 组件）。
 它被渲染线程读取是合理的（网格上传后内容稳定），但它**本身可在运行时注册新网格** ⇒ 潜在并发写。
 
-**观察项（非阻塞）**：若将来出现"渲染中运行时注册网格"，需要二选一：
+**已于 2026-10-23 修复**（`e11ab7e`）：`MeshRegistry` 加 `std::shared_mutex`（`Register`/`Unregister`/`Clear` 写锁，`Find`/`Count` 读锁），同时把 `m_Records` 从 `std::vector` 改为 `std::deque` —— `push_back` 不再搬移已有元素，因此 `Find` 返回的 `const MeshRegistryEntry*` 在后续注册后仍有效。两者缺一不可：只加锁会让指针在解锁后悬空，只换 deque 则并发读写仍是 UB。
 
 1. 把本帧可见网格的缓冲句柄列表也放进快照（`FrameSceneSnapshot::visibleMeshes`），渲染侧不再碰 `MeshRegistry`；
 2. 给 `MeshRegistry` 加读写锁 / 只在帧边界（装配期）注册。
