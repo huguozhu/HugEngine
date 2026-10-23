@@ -2435,7 +2435,7 @@ pass 指纹（`1C15AB72E688B530` / `750CC247BF8B9C3D`）未变；`06.GILab` 冒�
 | 大：`RTPass`/`PTPass`/`ReSTIRPass`、`LumenScene`+`LumenSDF`、`NaniteCull`+`NaniteRaster`+`NaniteStream` | 完成 |
 | 其他：`L4-3` 整帧命令化 | **已移出本文档**：方案/分批计划/判据见 《Vulkan命令流双模式L4-3实施方案.md》 |
 
-**A-3 仍未做的两处（记录在案，非阻塞）**：
+**A-3 的两处例外已于 2026-10-23 清零**（详见 §21.8）：
 
 1. `LumenSDF::Entry.field` —— per-mesh 动态条目，改句柄需连同"条目移除/清空时销毁"一起做；
 2. `LumenScene` 的 `m_ReqBuf[]`/`m_ProbeFilterHistBuf[]`/`m_CellProbeHistBuf[]` —— 源码中只有声明、无使用点。
@@ -2895,4 +2895,21 @@ void EndFrame(cmd) {                // 渲染线程（命令 2）
 2. 给 `MeshRegistry` 加读写锁 / 只在帧边界（装配期）注册。
 
 目前样例都在启动阶段一次性注册网格 ⇒ 该风险未实际触发。
+
+### 21.8 A-3 例外清零（2026-10-23）
+
+A-3（资源句柄化）此前记录了两处"暂不处理"的例外，现已全部完成：
+
+| 例外 | 处置 | 提交 |
+|---|---|---|
+| `LumenSDF::MeshSDFEntry::field`（per-mesh 动态条目） | 改 `RHITextureHandle`；`Shutdown` 里 `m_Entries.clear()` **之前**逐个 `DestroyTextureHandle` | `1eceacf` |
+| `LumenScene` 的 `m_ReqBuf[kFeedbackSlots]` / `m_ProbeFilterHistBuf[2]` / `m_CellProbeHistBuf[2]` | 三个数组改 `RHIBufferHandle[N]{}`；创建/映射/取值改 `CreateBufferHandle` + `ResB(...)`；`Shutdown` 里按元素销毁 | `6c1b73d` |
+
+**过程中的一处自我纠正**：此前文档称 `LumenScene` 那三个数组"只有声明、无使用点"是**错误的** ——
+编译立即暴露它们在 `LumenScene_ProbeFilter.cpp`（乒乓历史缓冲）与
+`LumenScene_SurfaceCache.cpp`（反馈请求缓冲）里都在使用。实际是**真正的迁移**而非删死代码。
+
+**结论**：A-3 **零例外**。所有 RHI 资源持有者均为句柄，创建/解析/销毁全部经设备侧表
+（销毁点上，容器类资源必须在清空容器**之前**逐个销毁 —— 这是 `NaniteStream` 反馈环那批
+趟出来的同一模式）。
 
