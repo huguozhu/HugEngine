@@ -194,6 +194,10 @@ VulkanCommandList::~VulkanCommandList() {
 // ============================================================
 
 void VulkanCommandList::BeginSecondary(IRHIPipelineState* pso) {
+    if (m_StreamMode) {
+        // L4-3 skip: BeginSecondary is not yet representable in the command stream.
+        return;
+    }
     // 【MTCR】这里是**唯一**允许非拥有线程发起的录制入口：次级列表按设计由 JobSystem worker
     // 独占（每条列表自带 VkCommandPool 与 3 个 sec CB，同一时刻只有一条线程录它），故改用两级
     // 归属里的"录制者"断言 —— worker 必须在任务体开头构造 `rhi::SecondaryRecordScope` 才放行。
@@ -227,6 +231,10 @@ void VulkanCommandList::BeginSecondary(IRHIPipelineState* pso) {
 }
 
 void VulkanCommandList::ExecuteSecondary(IRHICommandList* secondary) {
+    if (m_StreamMode) {
+        // L4-3 skip: ExecuteSecondary is not yet representable in the command stream.
+        return;
+    }
     auto* vkSec = static_cast<VulkanCommandList*>(secondary);
     vkCmdExecuteCommands(m_CmdBuffers[m_FrameIndex], 1,
                          &vkSec->m_SecCmdBuffers[vkSec->m_SecActive]);
@@ -469,6 +477,10 @@ void VulkanCommandList::DrawIndexedIndirect(rhi::IRHIBuffer* buffer, u64 offset,
 void VulkanCommandList::DrawIndexedIndirectCount(rhi::IRHIBuffer* buffer, u64 offset,
                                                   rhi::IRHIBuffer* countBuffer, u64 countOffset,
                                                   u32 maxDrawCount, u32 stride) {
+    if (m_StreamMode) {
+        // L4-3 skip: DrawIndexedIndirectCount is not yet representable in the command stream.
+        return;
+    }
     EmitDrawLabel();  // 自动插入 DrawCall 级调试 marker（若已设置）
 
     // 设备未启用 drawIndirectCount 时直接跳过：此时调用 vkCmdDrawIndexedIndirectCount
@@ -503,6 +515,10 @@ void VulkanCommandList::DrawIndexedIndirectCount(rhi::IRHIBuffer* buffer, u64 of
 // ExecuteGeneratedCommands — DGC 执行入口
 // ============================================================
 void VulkanCommandList::ExecuteGeneratedCommands(const DGCExecuteDesc& desc) {
+    if (m_StreamMode) {
+        // L4-3 skip: ExecuteGeneratedCommands is not yet representable in the command stream.
+        return;
+    }
     EmitDrawLabel();  // 自动插入 DrawCall 级调试 marker（若已设置）
     if (!m_VulkanDevice || !m_VulkanDevice->GetCaps().supportsDGC) {
         HE_CORE_WARN("ExecuteGeneratedCommands: 设备不支持 DGC");
@@ -574,11 +590,19 @@ void VulkanCommandList::SetPushConstants(u32 offset, u32 size, const void* data)
 }
 
 void VulkanCommandList::Dispatch(u32 groupCountX, u32 groupCountY, u32 groupCountZ) {
+    if (m_StreamMode) {
+        // L4-3 skip: Dispatch is not yet representable in the command stream.
+        return;
+    }
     EmitDrawLabel();  // 自动插入 DrawCall 级调试 marker（若已设置）
     vkCmdDispatch(m_CmdBuffers[m_FrameIndex], groupCountX, groupCountY, groupCountZ);
 }
 
 void VulkanCommandList::DispatchIndirect(IRHIBuffer* buffer, u64 offset) {
+    if (m_StreamMode) {
+        // L4-3 skip: DispatchIndirect is not yet representable in the command stream.
+        return;
+    }
     EmitDrawLabel();  // 自动插入 DrawCall 级调试 marker（若已设置）
     auto* vkBuf = static_cast<VulkanBuffer*>(buffer);
     vkCmdDispatchIndirect(m_CmdBuffers[m_FrameIndex], vkBuf->GetHandle(), offset);
@@ -594,12 +618,20 @@ void VulkanCommandList::BindDescriptorSet(u32 setIndex, DescriptorSetHandle setH
 
 // ── GPU Timestamp Query ──
 void VulkanCommandList::WriteTimestamp(IRHIQueryPool* pool, u32 queryIndex) {
+    if (m_StreamMode) {
+        // L4-3 skip: WriteTimestamp is not yet representable in the command stream.
+        return;
+    }
     auto* vkPool = static_cast<VulkanQueryPool*>(pool);
     vkCmdWriteTimestamp(m_CmdBuffers[m_FrameIndex],
         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, vkPool->GetHandle(), queryIndex);
 }
 
 void VulkanCommandList::ResetQueryPool(IRHIQueryPool* pool) {
+    if (m_StreamMode) {
+        // L4-3 skip: ResetQueryPool is not yet representable in the command stream.
+        return;
+    }
     auto* vkPool = static_cast<VulkanQueryPool*>(pool);
     vkCmdResetQueryPool(m_CmdBuffers[m_FrameIndex], vkPool->GetHandle(), 0, vkPool->GetQueryCount());
 }
@@ -629,11 +661,19 @@ bool VulkanCommandList::TryGetQueryResults(IRHIQueryPool* pool, u32 first, u32 c
 
 // ── GPU 通用查询（BeginQuery / EndQuery）──
 void VulkanCommandList::BeginQuery(IRHIQueryPool* pool, u32 queryIndex) {
+    if (m_StreamMode) {
+        // L4-3 skip: BeginQuery is not yet representable in the command stream.
+        return;
+    }
     auto* vkPool = static_cast<VulkanQueryPool*>(pool);
     vkCmdBeginQuery(m_CmdBuffers[m_FrameIndex], vkPool->GetHandle(), queryIndex, 0);
 }
 
 void VulkanCommandList::EndQuery(IRHIQueryPool* pool, u32 queryIndex) {
+    if (m_StreamMode) {
+        // L4-3 skip: EndQuery is not yet representable in the command stream.
+        return;
+    }
     auto* vkPool = static_cast<VulkanQueryPool*>(pool);
     vkCmdEndQuery(m_CmdBuffers[m_FrameIndex], vkPool->GetHandle(), queryIndex);
 }
@@ -724,6 +764,10 @@ void VulkanCommandList::EmitDrawLabel() {
 
 void VulkanCommandList::CopyBuffer(IRHIBuffer* src, IRHIBuffer* dst,
                                     u64 size, u64 srcOffset, u64 dstOffset) {
+    if (m_StreamMode) {
+        // L4-3 skip: CopyBuffer is not yet representable in the command stream.
+        return;
+    }
     auto* vkSrc = static_cast<VulkanBuffer*>(src);
     auto* vkDst = static_cast<VulkanBuffer*>(dst);
 
@@ -736,6 +780,10 @@ void VulkanCommandList::CopyBuffer(IRHIBuffer* src, IRHIBuffer* dst,
 }
 
 void VulkanCommandList::CopyTextureToTexture(IRHITexture* src, IRHITexture* dst) {
+    if (m_StreamMode) {
+        // L4-3 skip: CopyTextureToTexture is not yet representable in the command stream.
+        return;
+    }
     auto* vkSrc = static_cast<VulkanTexture*>(src);
     auto* vkDst = static_cast<VulkanTexture*>(dst);
     // 拷贝目标被写入确定内容：登记为"已写入"（供「采样了从未写入的纹理」检测使用，§9.2-S）
@@ -802,6 +850,10 @@ void VulkanCommandList::CopyTextureToTexture(IRHITexture* src, IRHITexture* dst)
 void VulkanCommandList::CopyTextureToBuffer(IRHITexture* src, IRHIBuffer* dst,
                                             u32 x, u32 y, u32 width, u32 height,
                                             u64 bufferOffset) {
+    if (m_StreamMode) {
+        // L4-3 skip: CopyTextureToBuffer is not yet representable in the command stream.
+        return;
+    }
     if (!src || !dst) return;
     auto* vkTex = static_cast<VulkanTexture*>(src);
     auto* vkBuf = static_cast<VulkanBuffer*>(dst);
@@ -865,6 +917,10 @@ void VulkanCommandList::CopyTextureToBuffer(IRHITexture* src, IRHIBuffer* dst,
 // 供粒子 Pass 等需要每帧重置深度附件内容的场景使用
 // ============================================================
 void VulkanCommandList::ClearDepthStencil(IRHITexture* texture, float depth) {
+    if (m_StreamMode) {
+        // L4-3 skip: ClearDepthStencil is not yet representable in the command stream.
+        return;
+    }
     if (!texture) return;
     auto* vkTex = static_cast<VulkanTexture*>(texture);
     VkImage image = vkTex->GetImage();
@@ -1139,6 +1195,10 @@ void VulkanCommandList::BuildBLAS(IRHIAccelerationStructure* blas, IRHIBuffer* s
 
 void VulkanCommandList::BuildTLAS(IRHIAccelerationStructure* tlas, IRHIBuffer* scratchBuffer,
                                    IRHIBuffer* instanceBuffer, u32 instanceCount, bool update) {
+    if (m_StreamMode) {
+        // L4-3 skip: BuildTLAS is not yet representable in the command stream.
+        return;
+    }
     auto* vkTLAS    = static_cast<VulkanAccelerationStructure*>(tlas);
     auto* vkScratch = static_cast<VulkanBuffer*>(scratchBuffer);
     auto* vkInstBuf = static_cast<VulkanBuffer*>(instanceBuffer);
@@ -1185,6 +1245,10 @@ void VulkanCommandList::BuildTLAS(IRHIAccelerationStructure* tlas, IRHIBuffer* s
 }
 
 void VulkanCommandList::BindRTPipeline(IRHIRayTracingPipelineState* rtPSO) {
+    if (m_StreamMode) {
+        // L4-3 skip: BindRTPipeline is not yet representable in the command stream.
+        return;
+    }
     auto* vkPSO = static_cast<VulkanRTPipelineState*>(rtPSO);
     VkCommandBuffer cb = m_CmdBuffers[m_FrameIndex];
 

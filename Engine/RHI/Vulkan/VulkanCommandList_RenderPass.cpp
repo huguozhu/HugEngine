@@ -87,6 +87,10 @@ static void TrackColorAttachmentsAfterPass(void* const* colorViews, u32 count) {
 }
 
 void VulkanCommandList::EnsureDepthAttachmentLayout(void* depthImageView) {
+    if (m_StreamMode) {
+        // L4-3 skip: EnsureDepthAttachmentLayout is not yet representable in the command stream.
+        return;
+    }
     if (!depthImageView) return;
 
     // 需要由视图反查底层图像（image barrier 只能作用于 VkImage）
@@ -472,6 +476,10 @@ void VulkanCommandList::BeginOffscreenPassMRT(
     void* depthImageView, u32 width, u32 height,
     const ClearValue* clears, bool allowSecondary)
 {
+    if (m_StreamMode) {
+        // L4-3 skip: BeginOffscreenPassMRT is not yet representable in the command stream.
+        return;
+    }
     if (colorCount == 0 && !depthImageView) {
         HE_CORE_ERROR("BeginOffscreenPassMRT: 至少需要一个附件");
         return;

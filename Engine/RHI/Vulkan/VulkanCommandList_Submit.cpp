@@ -23,6 +23,10 @@ void VulkanCommandList::QueueOwnershipTransfer(
     QueueType srcQueue, QueueType dstQueue,
     ResourceState currentState, ResourceState newState)
 {
+    if (m_StreamMode) {
+        // L4-3 skip: QueueOwnershipTransfer is not yet representable in the command stream.
+        return;
+    }
     if (!texture || !m_VulkanDevice) return;
     auto* vkTex = static_cast<VulkanTexture*>(texture);
 
