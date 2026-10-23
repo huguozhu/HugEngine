@@ -975,9 +975,9 @@ int main() {
     render::RenderCommandQueue renderQueue(rhi::kMaxFramesInFlight);
     render::RenderThread       renderThread(renderQueue);
     render::FrameScheduler     frameScheduler(renderQueue, renderThread);
-    const bool                 useRenderQueue = he::UsesRenderThread();
+    const bool                 useRenderThread = he::UsesRenderThread();
     const bool                 startRenderThread = std::getenv("HE_RENDER_THREAD_STRICT") != nullptr;
-    if (useRenderQueue && startRenderThread) {
+    if (useRenderThread && startRenderThread) {
         renderThread.SetSpinWaitUs(50);
         renderThread.SetThreadStartHook([] { he::rhi::GetThreadAffinity().Claim(); });
         renderThread.SetThreadStopHook([] { he::rhi::GetThreadAffinity().Release(); });
@@ -985,7 +985,7 @@ int main() {
         renderThread.Start();
     }
     auto submitRender = [&](auto&& fn) {
-        if (useRenderQueue) {
+        if (useRenderThread) {
             renderQueue.BeginFrame();
             renderQueue.Enqueue([&](render::RenderThreadContext&) { fn(); });
             bool timedOut = false;

@@ -1579,9 +1579,9 @@ int main() {
     render::RenderCommandQueue renderQueue(rhi::kMaxFramesInFlight);
     render::RenderThread       renderThread(renderQueue);
     render::FrameScheduler     frameScheduler(renderQueue, renderThread);
-    // 【运行时可切换】不再是启动时锁存的常量：下拉选择模式后，在**帧首**统一生效
-    // （切到 0 要排空并停线程、切到 ≥1 要起线程并认领 RHI 归属）。
-    bool useRenderQueue = he::UsesRenderThread();
+    
+    // 命令是否走队列交给渲染线程执行（true = 模式 1/2；false = 模式 0，当场执行）
+    bool useRenderThread = he::UsesRenderThread();
     // 下拉菜单绑定的目标模式（初值 = 实际生效的模式，取自配置/环境变量）
     int  g_UiThreadingMode = static_cast<int>(he::GetRenderThreadingMode());
     // 【T2.2 读数开关，默认关闭】`HE_RENDER_THREAD_STRICT=1` 时**真的起渲染线程**。
@@ -1605,7 +1605,7 @@ int main() {
 
         // ① 先改模式（线程启停期间日志/`UsesRenderThread()` 与目标一致）
         he::SetRenderThreadingMode(mode);
-        useRenderQueue = he::UsesRenderThread();
+        useRenderThread = he::UsesRenderThread();
 
         // ② 【切模式前必须等渲染队列排空】命令 2 是"只发布不等待"（`submitRender(..., false)`）⇒
         // 上一帧可能还在渲染线程上执行（正在 Acquire/Present）。此时停线程或换路由会让呈现落到
@@ -1670,7 +1670,7 @@ int main() {
         // 帧内资源仍安全：命令 2 不读快照，而同一份 `cmdList` 由 FIFO 保证了先来后到。
         u64 lastAsyncFrame = UINT64_MAX;
         auto submitRender = [&](auto&& fn, bool waitForCompletion = true) {
-            if (useRenderQueue) {
+            if (useRenderThread) {
                 renderQueue.BeginFrame();
                 renderQueue.Enqueue([&](render::RenderThreadContext&) { fn(); });
                 if (waitForCompletion) {
@@ -1762,7 +1762,7 @@ int main() {
 
         // 【测量确定性】转储/读数之前先把在飞的"命令 2"等掉：流水线化后它可能还没做完，
         // 否则读回的是"少一帧"的状态（表现为转储差异与 pass/VUID 计数偏移）。
-        if (useRenderQueue && lastAsyncFrame != UINT64_MAX) {
+        if (useRenderThread && lastAsyncFrame != UINT64_MAX) {
             // 【必须有超时】这是诊断/转储路径，不是背压点：无界等待会在"该帧因故未被回收"时
             // 永久挂住（实测出现过一次 300 秒未退出）。超时只告警、继续转储。
             if (!renderQueue.WaitFrameRetired(lastAsyncFrame, 5000u))

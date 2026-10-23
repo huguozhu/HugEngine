@@ -969,11 +969,11 @@ int main() {
     render::RenderCommandQueue renderQueue(rhi::kMaxFramesInFlight);
     render::RenderThread       renderThread(renderQueue);
     render::FrameScheduler     frameScheduler(renderQueue, renderThread);
-    const bool                 useRenderQueue = he::UsesRenderThread();
+    const bool                 useRenderThread = he::UsesRenderThread();
         // 【纪律】当前流水线深度只有 1（命令 1 需握手）⇒ 轻帧样例在模式 1 下会明显变慢；
         // 故与其余未实测样例一致：**按需**起线程（待流水线深度补齐后再测并默认打开）。
         const bool startRenderThread = std::getenv("HE_RENDER_THREAD_STRICT") != nullptr;
-        if (useRenderQueue && startRenderThread) {
+        if (useRenderThread && startRenderThread) {
         renderThread.SetSpinWaitUs(50);
         renderThread.SetThreadStartHook([] { he::rhi::GetThreadAffinity().Claim(); });
         renderThread.SetThreadStopHook([] { he::rhi::GetThreadAffinity().Release(); });
@@ -981,7 +981,7 @@ int main() {
         renderThread.Start();
     }
     auto submitRender = [&](auto&& fn) {
-        if (useRenderQueue) {
+        if (useRenderThread) {
             renderQueue.BeginFrame();
             renderQueue.Enqueue([&](render::RenderThreadContext&) { fn(); });
             bool timedOut = false;
