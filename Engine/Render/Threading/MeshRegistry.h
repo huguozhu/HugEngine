@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Core/Types.h"
+#include <deque>
 
 #include <unordered_map>
 #include <vector>
@@ -97,7 +98,7 @@ private:
         MeshRegistryEntry entry{};
     };
 
-    std::vector<Record>                  m_Records{Record{}};   // 索引 0 = 哨兵（未注册）
+    std::deque<Record>                   m_Records{Record{}};   // deque: push_back 不搬移 ⇒ Find 的指针稳定   // 索引 0 = 哨兵（未注册）
     std::unordered_map<const void*, u32> m_KeyToIndex;
     std::vector<u32>                     m_FreeIndices;
     u32                                  m_LiveCount = 0;
