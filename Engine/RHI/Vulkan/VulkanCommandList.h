@@ -160,6 +160,17 @@ public:
 
     // L4-3: replay list is driven by the RHI (submit) thread.
     void MarkAsReplayList() { m_IsReplayList = true; }
+
+    // L4-3：影子列表必须继承源列表的"渲染目标状态"，
+    // 否则 BeginRenderPass 会在 "m_SwapchainViews.empty() || !m_CurrentRenderPass" 处静默返回，
+    // 随后 EndRenderPass 就会对不存在的 pass 调用 vkCmdEndRenderPass（访问违例）。
+    void AdoptRenderTargetStateFrom(const VulkanCommandList& src) {
+        m_pSwapChain        = src.m_pSwapChain;
+        m_SwapchainViews    = src.m_SwapchainViews;
+        m_SwapchainExtent   = src.m_SwapchainExtent;
+        m_CurrentRenderPass = src.m_CurrentRenderPass;
+        m_LoadRenderPass    = src.m_LoadRenderPass;
+    }
     void SetFrameIndexForReplay(u32 idx) { m_FrameIndex = idx % kMaxFramesInFlight; }
 
 private:
