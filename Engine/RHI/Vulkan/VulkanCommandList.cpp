@@ -639,6 +639,11 @@ void VulkanCommandList::ResetQueryPool(IRHIQueryPool* pool) {
 }
 
 void VulkanCommandList::GetQueryResults(IRHIQueryPool* pool, u32 first, u32 count, u64* data) {
+    if (m_StreamMode) {
+        // L4-3: queries are never recorded in stream mode; VK_QUERY_RESULT_WAIT_BIT would block forever.
+        if (data) std::memset(data, 0, sizeof(u64) * count);
+        return;
+    }
     auto* vkPool = static_cast<VulkanQueryPool*>(pool);
     vkGetQueryPoolResults(m_Device, vkPool->GetHandle(), first, count,
         sizeof(u64) * count, data, sizeof(u64),
@@ -646,6 +651,7 @@ void VulkanCommandList::GetQueryResults(IRHIQueryPool* pool, u32 first, u32 coun
 }
 
 bool VulkanCommandList::TryGetQueryResults(IRHIQueryPool* pool, u32 first, u32 count, u64* data) {
+    if (m_StreamMode) { return false; }   // L4-3: same as GetQueryResults
     auto* vkPool = static_cast<VulkanQueryPool*>(pool);
     if (!data || count == 0) return false;
     // WITH_AVAILABILITY：每个查询返回 (结果, 是否可用) 两个 u64；**不等待**
