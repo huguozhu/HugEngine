@@ -8,6 +8,7 @@
 #include "RHI/RHI.h"
 #include "Core/Log.h"
 #include "Core/Assert.h"
+#include "RHI/ThreadAffinity.h"   // Map/Unmap 的线程归属断言
 
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <vulkan/vulkan.h>
@@ -177,6 +178,7 @@ VulkanBuffer::~VulkanBuffer() {
 }
 
 void* VulkanBuffer::Map() {
+    HE_ASSERT_RENDER_THREAD();   // Map/Unmap 必须在 RHI 拥有线程（D3D11 的 context 同理）
     // GPU→CPU 回读：始终 invalidate（coherent 内存上为 no-op）
     if (m_IsMapped) {
         VmaAllocationInfo allocInfo;
@@ -189,6 +191,7 @@ void* VulkanBuffer::Map() {
 }
 
 void VulkanBuffer::Unmap() {
+    HE_ASSERT_RENDER_THREAD();   // Map/Unmap 必须在 RHI 拥有线程（D3D11 的 context 同理）
     // CPU→GPU 写入：始终 flush（coherent 内存上为 no-op）
     if (m_IsMapped) {
         VmaAllocationInfo allocInfo;
