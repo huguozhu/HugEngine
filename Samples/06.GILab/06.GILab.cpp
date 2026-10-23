@@ -1719,8 +1719,20 @@ int main() {
                                     g_PipelineMode, g_ProbeInterval, g_ProbeEnabled, g_FurnaceMode,
                                     g_PendingPipelineSwitch, g_PendingHalfResApply, noVsync};
 
-        submitRender([&] { frameRec.RecordScene(frameAborted, deltaTime); });
-        if (frameAborted) continue;   // Acquire 失败：跳过本帧剩余部分
+        // 【P0-1】命令 1 的帧载荷类型化：入参不再捕获栈上局部量，而是随帧携带一份载荷。
+        // 这样 P0-2 把它改成异步时，渲染线程读到的是**本帧的**数据，而不是下一帧改写过的内存。
+        struct FrameScenePayload {
+            f32  deltaTime = 0.0f;
+            u32  frameSlot = 0;
+            bool aborted   = false;   // 由命令 1 写回（Acquire 失败时为 true）
+        };
+        auto scenePayload      = std::make_shared<FrameScenePayload>();
+        scenePayload->deltaTime = deltaTime;
+        scenePayload->frameSlot = static_cast<u32>(frameIndex % rhi::kMaxFramesInFlight);
+        submitRender([&, scenePayload] {
+            frameRec.RecordScene(scenePayload->aborted, scenePayload->deltaTime);
+        });
+        if (scenePayload->aborted) continue;   // Acquire 失败：跳过本帧剩余部分
 
         // UI 依赖（全引用成员；见 main 之前的 GILabUI）
         GILabUI uiDeps{deferredPipeline, forwardPipeline, curPipeline, camCtrl, world, sceneGraph,
