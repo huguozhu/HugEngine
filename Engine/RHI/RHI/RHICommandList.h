@@ -73,10 +73,12 @@ enum class RHICommandType : u32 {
 /// L4-3 batch3/4: render pass / draw / barrier payloads (POD only, RHI-free header).
 /// ClearValue 的数据量随附件数变化 ⇒ 放 arena，内联只记偏移与数量。
 struct RHICommandBeginRenderPass {
+    void* renderPass = nullptr;   // L4-3: render pass 随命令流携带，回放侧不依赖历史状态
     u32 colorCount = 0; u32 colorFormat = 0; u32 depthFormat = 0; u32 loadOp = 0;
     u64 clearOffset = 0; u32 clearCount = 0; u32 pad = 0;
 };
 struct RHICommandBeginOffscreenPass {
+    void* renderPass = nullptr;   // L4-3: 同上
     void* colorImageView = nullptr; void* depthImageView = nullptr;
     u32 width = 0; u32 height = 0; u32 allowSecondary = 0;
     u64 clearOffset = 0; u32 clearCount = 0; u32 pad = 0;

@@ -135,6 +135,7 @@ void VulkanCommandList::BeginRenderPass(u32 colorCount, Format, Format depthForm
     if (m_StreamMode) {
         // L4-3: clear values travel through the stream arena (their size depends on attachment count).
         RHICommandBeginRenderPass p{};
+        p.renderPass = static_cast<void*>(m_CurrentRenderPass);
         p.colorCount  = colorCount;
         p.colorFormat = 0u;   // 该实现丢弃了颜色格式参数（签名里是匿名参数），与直连路径一致
         p.depthFormat = static_cast<u32>(depthFormat);
@@ -370,6 +371,7 @@ void VulkanCommandList::BeginOffscreenPass(
     if (m_StreamMode) {
         // L4-3: same arena-based clear transport as BeginRenderPass.
         RHICommandBeginOffscreenPass p{};
+        p.renderPass = static_cast<void*>(m_CurrentRenderPass);
         p.colorImageView = colorImageView;
         p.depthImageView = depthImageView;
         p.width  = width;

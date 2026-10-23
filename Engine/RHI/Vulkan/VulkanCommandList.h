@@ -161,6 +161,9 @@ public:
     // L4-3: replay list is driven by the RHI (submit) thread.
     void MarkAsReplayList() { m_IsReplayList = true; }
 
+    // L4-3: 回放侧把命令流携带的 render pass 设置到影子列表（不依赖历史状态）。
+    void SetRenderPassHint(void* rp) override { m_CurrentRenderPass = static_cast<VkRenderPass>(rp); }
+
     // L4-3：影子列表必须继承源列表的"渲染目标状态"，
     // 否则 BeginRenderPass 会在 "m_SwapchainViews.empty() || !m_CurrentRenderPass" 处静默返回，
     // 随后 EndRenderPass 就会对不存在的 pass 调用 vkCmdEndRenderPass（访问违例）。

@@ -55,6 +55,10 @@ public:
     ) = 0;
     virtual void EndRenderPass() = 0;
 
+    /// 【L4-3】回放侧提示：命令流自带 render pass 句柄时，先把它交给目标列表。
+    /// 默认空实现（后端无关层不需要知道具体类型；Vulkan 后端会真正的把它记下来）。
+    virtual void SetRenderPassHint(void* /*renderPass*/) {}
+
     // 离屏渲染通道：渲染到自定义纹理附件（非 SwapChain）
     // colorImageView/depthImageView 为后端特定句柄（VkImageView），可空。
     // 必须先调用 SetPipeline 设置匹配的 PSO（render pass 一致）。

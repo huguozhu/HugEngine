@@ -98,6 +98,10 @@ u32 ReplayCommandStream(const RHICommandList& stream, IRHICommandList& cmd) {
             break;
         }
         case RHICommandType::CmdBeginRenderPass: {
+            // L4-3: 命令流自带 render pass，先设置到目标列表（不依赖其历史状态）
+            if (const auto* rp = stream.PayloadAt<RHICommandBeginRenderPass>(i); rp && rp->renderPass) {
+                cmd.SetRenderPassHint(rp->renderPass);
+            }
             const auto* d = stream.PayloadAt<RHICommandBeginRenderPass>(i);
             if (!d) break;
             const ClearValue* clear = nullptr;
@@ -117,6 +121,10 @@ u32 ReplayCommandStream(const RHICommandList& stream, IRHICommandList& cmd) {
             break;
         }
         case RHICommandType::CmdBeginOffscreenPass: {
+            // L4-3: 命令流自带 render pass，先设置到目标列表（不依赖其历史状态）
+            if (const auto* rp = stream.PayloadAt<RHICommandBeginOffscreenPass>(i); rp && rp->renderPass) {
+                cmd.SetRenderPassHint(rp->renderPass);
+            }
             const auto* d = stream.PayloadAt<RHICommandBeginOffscreenPass>(i);
             if (!d) break;
             const ClearValue* clear = nullptr;
