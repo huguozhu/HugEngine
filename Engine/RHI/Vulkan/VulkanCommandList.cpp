@@ -244,6 +244,13 @@ static bool StreamModeFromEnv() {
 
 void VulkanCommandList::Begin() {
     HE_ASSERT_RENDER_THREAD();   // T0.1：录制开始（本帧主命令列表）
+    if (m_StreamMode) {
+        // 【L4-3】流模式：不 vkWaitForFences / 不 vkResetCommandPool / 不 vkBeginCommandBuffer。
+        // 帧槽位与栅栏由执行侧（RHI 线程在 ExecuteSubmit 里新建的那条真实命令列表）负责。
+        m_Stream.Reset();
+        m_IsRecording = true;
+        return;
+    }
     // 等待当前帧槽位的 GPU 栅栏
     vkWaitForFences(m_Device, 1, &m_Fences[m_FrameIndex], VK_TRUE, UINT64_MAX);
 
@@ -299,6 +306,12 @@ void VulkanCommandList::BeginLightweight() {
 }
 
 void VulkanCommandList::End() {
+    if (m_StreamMode) {
+        // 【L4-3】流模式：命令只是被 append 进 `m_Stream`，End 只标记录制结束；
+        // 真正回放 + End 由 RHI 线程的 ExecuteSubmit 完成。
+        m_IsRecording = false;
+        return;
+    }
     // 次级列表走 MTCR 的"录制者"断言（与 BeginSecondary 配对）；主列表仍是拥有线程独占。
     if (m_SecondaryPool) {
         HE_ASSERT_RECORD_THREAD();
