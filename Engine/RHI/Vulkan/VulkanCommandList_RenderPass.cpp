@@ -330,6 +330,11 @@ void VulkanCommandList::BeginRenderPass(u32 colorCount, Format, Format depthForm
 }
 
 void VulkanCommandList::EndRenderPass() {
+    if (m_StreamMode) {
+        // L4-3: record only; the replay list issues the real vkCmd*.
+        m_Stream.Enqueue(RHICommandType::CmdEndRenderPass, u32{0});
+        return;
+    }
     vkCmdEndRenderPass(m_CmdBuffers[m_FrameIndex]);
 }
 
@@ -525,6 +530,11 @@ void VulkanCommandList::BeginOffscreenPassMRT(
 }
 
 void VulkanCommandList::EndOffscreenPass() {
+    if (m_StreamMode) {
+        // L4-3: record only; the replay list issues the real vkCmd*.
+        m_Stream.Enqueue(RHICommandType::CmdEndOffscreenPass, u32{0});
+        return;
+    }
     if (!m_InOffscreenPass) return;
     vkCmdEndRenderPass(m_CmdBuffers[m_FrameIndex]);
     m_InOffscreenPass = false;
