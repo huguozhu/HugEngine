@@ -177,3 +177,40 @@ L4-3 只搬"录制类"命令还不够，下面两类调用若留在渲染线程�
 | 默认启用模式 B | 纯 Vulkan 下它只增加一层编码/翻译，无运行时收益 |
 | 在渲染层分叉两套代码 | 维护成本翻倍，且违反"接口唯一"的设计 |
 | 把呈现（`Present`）也纳入命令流 | 呈现涉及交换链线程归属，等模式 B 的提交路径稳定后再评估 |
+
+## 9. 实施进度（2026-10-23）
+
+### 9.1 批 1：开关骨架 —— 🟡 结构就绪（5 项完成，端到端验证并入批 3）
+
+| # | 内容 | 提交 | 状态 |
+|---|---|---|---|
+| 1 | `VulkanCommandList` 增加 `m_StreamMode` / `m_Stream` 与访问器；环境变量 `HE_RHI_COMMAND_STREAM` | `a9380ad` | ✅ |
+| 2 | 流模式下 `Begin()` 不 `vkWaitForFences`/`vkResetCommandPool`/`vkBeginCommandBuffer`；`End()` 不 `vkEndCommandBuffer` | `6e20071` | ✅ |
+| 3 | `ExecuteSubmit` 增加流模式回放路径：**影子命令列表**（每飞行帧一份、借用源列表的帧槽位）→ `ReplayCommandStream` → `Submit` → 打印 `replayed N commands (slot N)` | `490d256` | ✅ |
+| 4 | `SetPipeline` / `BindDescriptorSet` / `DrawIndexed` 的流模式 append | `e0d6f33` | ✅ |
+| 4.5 | `SetVertexBuffer` / `SetIndexBuffer` 的流模式 append（原本只缓存 `VkBuffer`，不记进流则回放侧无法重绑） | `8dbf4f0` | ✅ |
+| **5** | 让 Forward 的**单个 pass** 走流模式 | — | ⬜ **并入批 3** |
+| **6** | 开关 ON 的四条判据（含 `replayed N`） | — | ⬜ **并入批 3**（依赖 5） |
+
+### 9.2 为什么子任务 5/6 必须并入批 3
+
+"让一个 pass 走流模式"需要**按 pass 切换开关**，而当前开关是**整条命令列表**级别的。更关键的是：真实 pass 还会用到批 1 范围之外、翻译器尚未支持的命令：
+
+| 命令 | 翻译器 | 流模式分支 | 何时可用 |
+|---|---|---|---|
+| `SetPipeline` / `BindDescriptorSet` / `DrawIndexed` | ✅ | ✅ | 批 1 |
+| `SetVertexBuffer` / `SetIndexBuffer` | ✅ | ✅ | 批 1 |
+| `SetPushConstants` | ✅ | ❌ 需 arena 偏移 API（`AllocArena` 只返回指针） | 批 4 |
+| `Draw`（非索引） | ✅ | ❌ | 批 2/4 |
+| `SetViewport` / `SetScissor` / `SetDrawDebugLabel` | ❌（枚举里没有） | ❌ | 批 2 |
+| `BeginRenderPass` / `EndRenderPass` / `BeginOffscreenPass` | ❌ | ❌ | 批 3 |
+| `PipelineBarrier` | 枚举有、翻译器无 | ❌ | 批 4 |
+
+⇒ **任何真实 pass 都要 render pass 边界与屏障**，所以"单 pass 端到端"最早只能在批 3 之后成立。
+届时用同一个开关 + 一个 pass 的 scope 做验证，同时满足子任务 5 与 6。
+
+### 9.3 当前状态（不影响默认行为）
+
+流模式**默认关闭**（`HE_RHI_COMMAND_STREAM` 未设），所有新增分支都是死路径 ⇒ 每批四条判据下转储逐字节一致是预期结果。
+这批工作的价值是：骨架、回放路径、六种命令的装箱都已就位，批 2/3 只需要"加命令 + 加分支"。
+
