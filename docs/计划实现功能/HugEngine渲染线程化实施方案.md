@@ -2811,3 +2811,39 @@ T1.2c（世界快照化收尾：骨骼/材质/Decal/粒子 + 消费侧改读快�
 | 命令 1 具备可异步化的载荷结构（P0-1） | ✅ 已生效（当前仍同步调用，但数据来源已就绪） |
 | 深度 2~3 的真收益 | ❌ 阻塞中，见 21.3 |
 
+
+### 21.5 方案 B（ImDrawData 交接）评估结论：不能解除阻塞
+
+现状（`ImGuiIntegration.cpp:125-136`）**已经**是分线程的：
+
+```cpp
+void BeginFrame() {                 // 游戏线程
+    ImGui_ImplVulkan_NewFrame();
+    ImGui_ImplGlfw_NewFrame();
+    ImGui::NewFrame();
+}
+void EndFrame(cmd) {                // 渲染线程（命令 2）
+    ImGui::Render();                                    // ← 帧在这里结束
+    ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), vkCmdBuf);
+}
+```
+
+"方案 B" 想做的只是把 `ImGui::Render()` 挪回游戏线程、把 `ImDrawData*` 传给渲染线程。它**解决不了**深度问题，有两个硬约束：
+
+| 约束 | 说明 |
+|---|---|
+| **`ImDrawData*` 只在本次帧有效** | `GetDrawData()` 返回的指针在下一次 `ImGui::NewFrame()` 之后失效。异步深度 ≥ 2 时，游戏线程会在渲染线程消费完之前就 `NewFrame()` ⇒ **悬空引用** |
+| **ImGui 上下文的"帧"是线程亲和的** | `NewFrame` → 建控件 → `Render` 必须在同一个 context 上顺序完成，且**不能跨帧重叠**。多 context 也不行：另一个 context 也必须自己做完 NewFrame→控件→Render ⇒ 控件还是在那个线程上建 |
+
+因此可选方案只有三个，且只有 A 能真正加深度：
+
+| 方案 | 能加深度？ | 说明 |
+|---|---|---|
+| A. **UI 整体搬到渲染线程** | ✅ | `NewFrame`+控件+`Render`+`RenderDrawData` 全在渲染线程的命令里；UI 读世界改读快照（**快照化已完成**，见 §21.3 修正）、输入需跨线程传递 |
+| B. ImDrawData 交接 | ❌ | 只能省掉 `Render()` 这一次调用，帧仍被"上一帧未消费完就不能 NewFrame"钉死 |
+| C. 接受深度 1 | ❌（不需要） | 零改动，拿不到 P0 的深度收益 |
+
+**结论**：**P0 的深度收益彻底依赖"UI 搬到渲染线程"（方案 A）**，方案 B 是伪解。
+方案 A 的前置（世界快照化）**已经完成**；剩余成本是"UI 的输入读取要跨线程"（鼠标/键盘状态、
+窗口尺寸、ImGui 的 ini 保存等）。
+
