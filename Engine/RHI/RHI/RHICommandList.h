@@ -57,12 +57,33 @@ enum class RHICommandType : u32 {
     ExecuteSecondary   = 12,   // 主列表执行一条已录好的次级列表（MTCR 合并点）
     ExecuteIndirect    = 13,
     SetViewport        = 14,   // L4-3 batch2
-    SetScissor         = 15,   // L4-3 batch2   // 间接绘制（GBuffer/Forward 的 indirect 分支）
+    SetScissor         = 15,   // L4-3 batch2
+    // L4-3 batch3/4：名字加 Cmd 前缀，避免与同名成员函数（BeginRenderPass/EndRenderPass/Draw/PipelineBarrier）冲突
+    CmdBeginRenderPass    = 16,
+    CmdEndRenderPass      = 17,
+    CmdBeginOffscreenPass = 18,
+    CmdEndOffscreenPass   = 19,
+    CmdDraw               = 20,
+    CmdPipelineBarrier    = 21,
 };
 
 /// 一条命令的载荷：类型擦除 + **内联存储**。
 /// 约定：`payloadSize <= kInlinePayloadBytes` 时参数在 `inlinePayload` 内；超过时 `payloadSize`
 /// 记 0 并把实际数据放在 arena，偏移写在 `arenaOffset`（由 `EnqueueArena` 生成）。
+/// L4-3 batch3/4: render pass / draw / barrier payloads (POD only, RHI-free header).
+/// ClearValue 的数据量随附件数变化 ⇒ 放 arena，内联只记偏移与数量。
+struct RHICommandBeginRenderPass {
+    u32 colorCount = 0; u32 colorFormat = 0; u32 depthFormat = 0; u32 loadOp = 0;
+    u64 clearOffset = 0; u32 clearCount = 0; u32 pad = 0;
+};
+struct RHICommandBeginOffscreenPass {
+    void* colorImageView = nullptr; void* depthImageView = nullptr;
+    u32 width = 0; u32 height = 0; u32 allowSecondary = 0;
+    u64 clearOffset = 0; u32 clearCount = 0; u32 pad = 0;
+};
+struct RHICommandDraw { u32 vertexCount = 0, instanceCount = 1, firstVertex = 0, firstInstance = 0; };
+struct RHICommandPipelineBarrier { u32 srcStage = 0, dstStage = 0, srcState = 0, dstState = 0; };
+
 /// L4-3 batch2: POD only (this header is RHI-free, so no Viewport/ScissorRect types)
 struct RHICommandSetViewport { float x = 0, y = 0, w = 0, h = 0, minZ = 0, maxZ = 1; };
 struct RHICommandSetScissor  { i32 x = 0, y = 0; u32 w = 0, h = 0; };
@@ -168,6 +189,14 @@ public:
                       "RHICommandList：arena 容量耗尽（本阶段容量固定，扩容随 §12 的 A-1 落地）");
         m_ArenaUsed = aligned + size;
         return m_Arena + aligned;
+    }
+
+    /// 【L4-3】把 arena 内的指针换算成相对起点偏移（`AllocArena` 只返回指针）。
+    [[nodiscard]] u64 ArenaOffsetOf(const void* p) const {
+        if (!p || !m_Arena) return 0u;
+        const auto* b = static_cast<const u8*>(p);
+        if (b < m_Arena || b >= m_Arena + m_ArenaUsed) return 0u;
+        return static_cast<u64>(b - m_Arena);
     }
 
     /// 标记本列表是"本帧的提交边界"（将来由 RHI 线程在翻译完成后执行一次 submit）
