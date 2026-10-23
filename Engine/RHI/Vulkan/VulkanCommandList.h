@@ -8,6 +8,7 @@
 
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <vulkan/vulkan.h>
+#include "RHI/RHICommandList.h"   // L4-3：命令流容器
 
 #include "RHI/CommandList.h"
 #include "VulkanSwapChain.h"
@@ -145,6 +146,15 @@ public:
 
     VkCommandBuffer GetHandle() const { return m_CmdBuffers[m_FrameIndex]; }
 
+    // ── 【L4-3】命令流模式 ──
+    // 开启后，所有录制调用只往 `m_Stream` 里 append 纯数据命令，**不产生任何 vkCmd***；
+    // 真正的录制（Begin → 回放 → End）由 RHI 线程在 `ExecuteSubmit` 里完成。
+    // 关闭时（默认）行为与改造前完全一致。
+    void SetStreamMode(bool on) { m_StreamMode = on; }
+    [[nodiscard]] bool IsStreamMode() const { return m_StreamMode; }
+    [[nodiscard]] rhi::RHICommandList* GetStream() { return m_StreamMode ? &m_Stream : nullptr; }
+    void ResetStream() { m_Stream.Reset(); }
+
 private:
     VkDevice         m_Device      = VK_NULL_HANDLE;
     VkQueue          m_Queue       = VK_NULL_HANDLE;
@@ -156,6 +166,10 @@ private:
     VkCommandBuffer  m_CmdBuffers[kMaxFramesInFlight] = {};
     VkFence          m_Fences[kMaxFramesInFlight]     = {};
     u32              m_FrameIndex = 0;
+
+    // 【L4-3】命令流模式开关与流（默认关闭：零行为变化）
+    bool                 m_StreamMode = false;
+    rhi::RHICommandList  m_Stream;
 
     static constexpr u32 kMaxSecondaryCBs = 3;
     VkCommandPool    m_SecondaryPool = VK_NULL_HANDLE;

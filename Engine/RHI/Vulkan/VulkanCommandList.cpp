@@ -236,6 +236,12 @@ void VulkanCommandList::ExecuteSecondary(IRHICommandList* secondary) {
 // Begin / End
 // ============================================================
 
+// 【L4-3】命令流模式开关：环境变量 HE_RHI_COMMAND_STREAM=1 时开启（默认关闭）
+static bool StreamModeFromEnv() {
+    const char* v = std::getenv("HE_RHI_COMMAND_STREAM");
+    return v && v[0] == '1';
+}
+
 void VulkanCommandList::Begin() {
     HE_ASSERT_RENDER_THREAD();   // T0.1：录制开始（本帧主命令列表）
     // 等待当前帧槽位的 GPU 栅栏
