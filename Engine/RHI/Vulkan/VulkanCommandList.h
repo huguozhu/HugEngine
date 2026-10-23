@@ -155,6 +155,10 @@ public:
     [[nodiscard]] rhi::RHICommandList* GetStream() { return m_StreamMode ? &m_Stream : nullptr; }
     void ResetStream() { m_Stream.Reset(); }
 
+    // 【L4-3】影子回放列表需要与源列表落在**同一个帧槽位**（栅栏/命令池/延迟销毁都按槽位索引）。
+    [[nodiscard]] u32 GetFrameIndex() const { return m_FrameIndex; }
+    void SetFrameIndexForReplay(u32 idx) { m_FrameIndex = idx % kMaxFramesInFlight; }
+
 private:
     VkDevice         m_Device      = VK_NULL_HANDLE;
     VkQueue          m_Queue       = VK_NULL_HANDLE;

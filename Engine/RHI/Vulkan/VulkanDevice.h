@@ -132,7 +132,11 @@ public:
     // --- 提交路由（模式 2：RHI 线程是唯一提交者，见 RHI/SubmitRouter.h）---
     void SetSubmitRouter(ISubmitRouter* router) override;
     ISubmitRouter* GetSubmitRouter() const override { return m_SubmitRouter; }
-    void ExecuteSubmit(IRHICommandList* cmdList, RHICommandList* stream) override;   // 仅 RHI 线程
+    void ExecuteSubmit(IRHICommandList* cmdList, RHICommandList* stream) override;
+
+    /// 【L4-3】流模式回放：把 `src` 装箱的命令流翻译进一条**影子命令列表**并提交。
+    /// 影子列表每个飞行帧一份，借用源列表的帧槽位（栅栏/命令池/延迟销毁都按槽位索引）。
+    void SubmitStreamReplay(VulkanCommandList* src);   // 仅 RHI 线程
     void ExecutePresent(IRHISwapChain* swapChain, u32 imageIndex, void* waitSemaphore,
                         bool vsync) override;   // 仅 RHI 线程
 
@@ -356,6 +360,9 @@ private:
 
     // 【A-5】句柄版限流队列：条目 = (占位句柄, 描述符)，drain 时创建并以 Set 填充到资源表
     std::deque<std::pair<RHIPipelineStateHandle, PipelineStateDesc>> m_PendingHandleCreates;
+
+    // 【L4-3】流模式回放用的影子命令列表（每飞行帧一份，懒创建）
+    std::unique_ptr<VulkanCommandList> m_ReplayLists[kMaxFramesInFlight];
 
     // ============================================================
     // Graphics Pipeline Library — 四段库缓存 + fast-link

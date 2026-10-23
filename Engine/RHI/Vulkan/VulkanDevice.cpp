@@ -1053,12 +1053,44 @@ void VulkanDevice::ExecuteSubmit(IRHICommandList* cmdList, RHICommandList* strea
     // 【仅 RHI 线程】路由器在 RHI 线程上调用：**先翻译命令流、再真正 vkQueueSubmit**
     HE_ASSERT_SUBMIT_THREAD();
     if (!cmdList) return;
+
+    // 【L4-3】流模式：源列表只装箱、没有可提交的 VkCommandBuffer ⇒ 走影子列表回放
+    if (auto* vkSrc = dynamic_cast<VulkanCommandList*>(cmdList); vkSrc && vkSrc->IsStreamMode()) {
+        SubmitStreamReplay(vkSrc);
+        return;
+    }
+
     if (stream) {
         // A-1：命令流里是渲染线程 append 的纯数据（绑定/绘制…），在这里一次顺序翻译进主列表；
         // 未知类型/载荷不匹配会跳过（见 ReplayCommandStream 的容错约定）。
         (void)ReplayCommandStream(*stream, *cmdList);
     }
     static_cast<VulkanCommandList*>(cmdList)->Submit();
+}
+
+
+// 【L4-3】把流模式列表装箱的命令翻译进影子列表并提交。
+// 影子列表与源列表共用帧槽位 ⇒ 栅栏等待/推进、命令池、延迟销毁队列都保持一致。
+void VulkanDevice::SubmitStreamReplay(VulkanCommandList* src) {
+    if (!src) return;
+    rhi::RHICommandList* streamData = src->GetStream();
+    if (!streamData) return;
+
+    const u32 slot = src->GetFrameIndex();
+    auto& replay = m_ReplayLists[slot];
+    if (!replay) {
+        auto created = CreateCommandList(QueueType::Graphics);   // 影子列表与源列表同队列
+        replay = std::unique_ptr<VulkanCommandList>(static_cast<VulkanCommandList*>(created.release()));
+        if (!replay) return;
+    }
+    // 影子列表是"真实录制者"：不走流模式，Begin/End 会真正操作 VkCommandBuffer
+    replay->SetStreamMode(false);
+    replay->SetFrameIndexForReplay(slot);
+    replay->Begin();
+    const u32 replayed = ReplayCommandStream(*streamData, *replay);
+    replay->End();
+    replay->Submit();
+    HE_CORE_INFO("[CommandStream] replayed {} commands (slot {})", replayed, slot);
 }
 
 void VulkanDevice::ExecutePresent(IRHISwapChain* swapChain, u32 imageIndex, void* waitSemaphore,
