@@ -466,6 +466,12 @@ void VulkanCommandList::DrawIndexed(u32 indexCount, u32 instanceCount,
 
 void VulkanCommandList::DrawIndexedIndirect(rhi::IRHIBuffer* buffer, u64 offset,
                                              u32 drawCount, u32 stride) {
+    if (m_StreamMode) {
+        // L4-3：间接绘制进流（缓冲句柄 + 偏移/数量/步长都是纯数据）。
+        m_Stream.Enqueue(RHICommandType::CmdDrawIndexedIndirect,
+                         RHICommandDrawIndexedIndirect{ buffer, offset, drawCount, stride });
+        return;
+    }
     EmitDrawLabel();  // 自动插入 DrawCall 级调试 marker（若已设置）
     auto* vkBuf = static_cast<VulkanBuffer*>(buffer);
     vkCmdDrawIndexedIndirect(m_CmdBuffers[m_FrameIndex], vkBuf->GetHandle(),

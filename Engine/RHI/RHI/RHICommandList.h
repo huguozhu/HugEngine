@@ -68,6 +68,7 @@ enum class RHICommandType : u32 {
     CmdDispatch            = 22,
     CmdCopyBuffer          = 23,
     CmdBeginOffscreenPassMRT = 24,
+    CmdDrawIndexedIndirect = 25,
 };
 
 /// 一条命令的载荷：类型擦除 + **内联存储**。
@@ -93,6 +94,7 @@ struct RHICommandBeginOffscreenPassMRT {
     u32   colorCount = 0; u32 width = 0; u32 height = 0;
     u32   allowSecondary = 0; u64 clearOffset = 0; u32 clearCount = 0; u32 pad = 0;
 };
+struct RHICommandDrawIndexedIndirect { void* buffer = nullptr; u64 offset = 0; u32 drawCount = 0; u32 stride = 0; };
 struct RHICommandDraw { u32 vertexCount = 0, instanceCount = 1, firstVertex = 0, firstInstance = 0; };
 struct RHICommandPipelineBarrier { u32 srcStage = 0, dstStage = 0, srcState = 0, dstState = 0; };
 struct RHICommandDispatch { u32 x = 0, y = 1, z = 1; };

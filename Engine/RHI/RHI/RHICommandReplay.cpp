@@ -188,6 +188,13 @@ u32 ReplayCommandStream(const RHICommandList& stream, IRHICommandList& cmd) {
             ++replayed;
             break;
         }
+        case RHICommandType::CmdDrawIndexedIndirect: {
+            const auto* d = stream.PayloadAt<RHICommandDrawIndexedIndirect>(i);
+            if (!d || !d->buffer) break;
+            cmd.DrawIndexedIndirect(static_cast<IRHIBuffer*>(d->buffer), d->offset, d->drawCount, d->stride);
+            ++replayed;
+            break;
+        }
         case RHICommandType::MarkSubmitBoundary:
             // 提交边界由执行端（RHI 线程）自己按帧处理，这里不是一条 RHI 调用
             ++replayed;
