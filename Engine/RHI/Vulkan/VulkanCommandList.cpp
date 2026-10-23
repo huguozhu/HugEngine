@@ -383,8 +383,24 @@ void VulkanCommandList::SetSwapChain(IRHISwapChain* swapchain) {
 }
 
 void VulkanCommandList::SetPipeline(IRHIPipelineState* pso) {
+    if (m_StreamMode) {
+        // L4-3：只记录"要绑哪个 PSO"，真正的 vkCmdBindPipeline 由回放侧执行。
+        // 但**本列表的状态也要同步更新**：后续的 BeginRenderPass 载荷要携带正确的 render pass，
+        // 视图/布局/绑定点也依赖这些成员（否则会带出过期的 render pass，导致附件数不匹配）。
+        auto* vkPsoStream = static_cast<VulkanPipelineState*>(pso);
+        m_CurrentPipeline  = vkPsoStream->GetPipeline();
+        m_CurrentLayout    = vkPsoStream->GetPipelineLayout();
+        m_CurrentBindPoint = vkPsoStream->GetBindPoint();
+        if (VkRenderPass rp = vkPsoStream->GetRenderPass()) m_CurrentRenderPass = rp;
+        m_Stream.Enqueue(RHICommandType::SetPipeline, RHICommandSetPipeline{ pso });
+        return;
+    }
     auto* vkPso = static_cast<VulkanPipelineState*>(pso);
     m_CurrentPipeline   = vkPso->GetPipeline();
+    if (m_IsReplayList) {
+        HE_CORE_INFO("[L4-3] SetPipeline replay pso={} vkPipeline={} rp={}",
+                     (void*)pso, (void*)m_CurrentPipeline, (void*)m_CurrentRenderPass);
+    }
     m_CurrentLayout     = vkPso->GetPipelineLayout();
     m_CurrentBindPoint  = vkPso->GetBindPoint();
 
@@ -621,6 +637,12 @@ void VulkanCommandList::DispatchIndirect(IRHIBuffer* buffer, u64 offset) {
 }
 
 void VulkanCommandList::BindDescriptorSet(u32 setIndex, DescriptorSetHandle setHandle) {
+    if (m_StreamMode) {
+        // L4-3：记录 set 索引 + 句柄；回放侧再解析成 VkDescriptorSet 并绑定。
+        m_Stream.Enqueue(RHICommandType::SetDescriptorSet,
+                         RHICommandSetDescriptorSet{ setIndex, 0u, static_cast<u64>(setHandle) });
+        return;
+    }
     if (!m_VulkanDevice) return;
     VkDescriptorSet ds = m_VulkanDevice->ResolveDescriptorSet(setHandle);
     if (ds == VK_NULL_HANDLE) return;
