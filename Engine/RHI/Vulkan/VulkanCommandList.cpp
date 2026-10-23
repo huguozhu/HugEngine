@@ -420,6 +420,12 @@ void VulkanCommandList::SetIndexBuffer(IRHIBuffer* buffer, u32 offset) {
 
 void VulkanCommandList::Draw(u32 vertexCount, u32 instanceCount,
                               u32 firstVertex, u32 firstInstance) {
+    if (m_StreamMode) {
+        // L4-3: record the draw only; bindings are replayed by the submit thread.
+        m_Stream.Enqueue(RHICommandType::CmdDraw,
+                         RHICommandDraw{ vertexCount, instanceCount, firstVertex, firstInstance });
+        return;
+    }
     EmitDrawLabel();  // 自动插入 DrawCall 级调试 marker（若已设置）
     if (m_CurrentVB) {
         VkDeviceSize offset = 0;
@@ -529,6 +535,18 @@ void VulkanCommandList::ExecuteGeneratedCommands(const DGCExecuteDesc& desc) {
 }
 
 void VulkanCommandList::SetPushConstants(u32 offset, u32 size, const void* data) {
+    if (m_StreamMode) {
+        // L4-3: the caller's data may live on the render thread's stack, so copy it into the stream arena.
+        RHICommandSetPushConstants pc{};
+        pc.size = size;
+        if (size != 0u && data) {
+            void* dst = m_Stream.AllocArena(size, 16);
+            std::memcpy(dst, data, size);
+            pc.arenaOffset = m_Stream.ArenaOffsetOf(dst);
+        }
+        m_Stream.Enqueue(RHICommandType::SetPushConstants, pc);
+        return;
+    }
     VkShaderStageFlags stage;
     if (m_CurrentBindPoint == VK_PIPELINE_BIND_POINT_COMPUTE) {
         stage = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -903,6 +921,13 @@ void VulkanCommandList::PipelineBarrier(
     PipelineStage srcStage, PipelineStage dstStage,
     ResourceState srcState, ResourceState dstState)
 {
+    if (m_StreamMode) {
+        // L4-3: record the barrier; the replay list issues the real vkCmdPipelineBarrier.
+        m_Stream.Enqueue(RHICommandType::CmdPipelineBarrier,
+                         RHICommandPipelineBarrier{ static_cast<u32>(srcStage), static_cast<u32>(dstStage),
+                                                    static_cast<u32>(srcState), static_cast<u32>(dstState) });
+        return;
+    }
     VkMemoryBarrier memoryBarrier{};
     memoryBarrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
     memoryBarrier.srcAccessMask = ToVkAccessFlags(srcState);
