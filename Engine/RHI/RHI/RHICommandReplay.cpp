@@ -53,11 +53,10 @@ u32 ReplayCommandStream(const RHICommandList& stream, IRHICommandList& cmd) {
         case RHICommandType::DrawIndexed: {
             const auto* d = stream.PayloadAt<RHICommandDrawIndexed>(i);
             if (!d) break;
-            if (d->instanceCount > 1u) {
-                cmd.DrawIndexed(d->indexCount, d->instanceCount);   // 实例化重载（SV_InstanceID）
-            } else {
-                cmd.DrawIndexed(d->indexCount, d->startIndex, d->baseVertex);
-            }
+            // L4-3 修正：旧实现把实例化重载当成"两参数"，丢掉了 startIndex/baseVertex，
+            // 且把 instanceCount 传到了 firstIndex 的位置 ⇒ 实例化绘制会画错/画空。
+            // 统一用五参数重载，语义与录制侧一一对应。
+            cmd.DrawIndexed(d->indexCount, d->instanceCount, d->startIndex, d->baseVertex, 0u);
             ++replayed;
             break;
         }
