@@ -1,4 +1,5 @@
 #include "RHI/RHICommandReplay.h"
+#include "Core/Log.h"
 
 #include "RHI/RHICommandList.h"   // 记录端：RHICommand / RHICommandType / 载荷 POD
 #include "RHI/CommandList.h"      // 执行端：IRHICommandList
@@ -7,7 +8,10 @@
 
 namespace he::rhi {
 
-u32 ReplayCommandStream(const RHICommandList& stream, IRHICommandList& cmd) {
+static u32 g_L43PassDraws = 0;
+static u32 g_L43PassW = 0, g_L43PassH = 0;
+
+ u32 ReplayCommandStream(const RHICommandList& stream, IRHICommandList& cmd) {
     u32 replayed = 0;
     for (usize i = 0; i < stream.CommandCount(); ++i) {
         const RHICommand& c = stream.CommandAt(i);
@@ -57,6 +61,7 @@ u32 ReplayCommandStream(const RHICommandList& stream, IRHICommandList& cmd) {
             // 且把 instanceCount 传到了 firstIndex 的位置 ⇒ 实例化绘制会画错/画空。
             // 统一用五参数重载，语义与录制侧一一对应。
             cmd.DrawIndexed(d->indexCount, d->instanceCount, d->startIndex, d->baseVertex, 0u);
+            ++g_L43PassDraws;
             ++replayed;
             break;
         }
@@ -133,10 +138,15 @@ u32 ReplayCommandStream(const RHICommandList& stream, IRHICommandList& cmd) {
             }
             cmd.BeginOffscreenPass(d->colorImageView, d->depthImageView, d->width, d->height,
                                    clear, d->allowSecondary != 0u);
+            g_L43PassDraws = 0; g_L43PassW = d->width; g_L43PassH = d->height;
+
             ++replayed;
             break;
         }
         case RHICommandType::CmdEndOffscreenPass: {
+            if (std::getenv("HE_L43_PASSDRAW")) {
+                HE_CORE_INFO("[L4-3] passdraws offscreen {}x{} draws={}", g_L43PassW, g_L43PassH, g_L43PassDraws);
+            }
             cmd.EndOffscreenPass();
             ++replayed;
             break;
@@ -145,6 +155,7 @@ u32 ReplayCommandStream(const RHICommandList& stream, IRHICommandList& cmd) {
             const auto* d = stream.PayloadAt<RHICommandDraw>(i);
             if (!d) break;
             cmd.Draw(d->vertexCount, d->instanceCount, d->firstVertex, d->firstInstance);
+            ++g_L43PassDraws;
             ++replayed;
             break;
         }
