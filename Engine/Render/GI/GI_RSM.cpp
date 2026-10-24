@@ -2,7 +2,6 @@
 #include "RHI/RHI.h"
 #include "Core/Log.h"
 #include "Core/Assert.h"
-#include "Vulkan/VulkanResources.h"
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
 #include "Scene/MeshComponent.h"
