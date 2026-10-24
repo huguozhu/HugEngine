@@ -214,6 +214,15 @@ static u32 g_L43PassW = 0, g_L43PassH = 0;
             ++replayed;
             break;
         }
+        case RHICommandType::CmdCopyTextureToBuffer: {
+            const auto* d = stream.PayloadAt<RHICommandCopyTextureToBuffer>(i);
+            if (!d || !d->texture || !d->buffer) break;
+            cmd.CopyTextureToBuffer(static_cast<IRHITexture*>(d->texture),
+                                    static_cast<IRHIBuffer*>(d->buffer),
+                                    d->x, d->y, d->width, d->height, d->bufferOffset);
+            ++replayed;
+            break;
+        }
         case RHICommandType::MarkSubmitBoundary:
             // 提交边界由执行端（RHI 线程）自己按帧处理，这里不是一条 RHI 调用
             ++replayed;

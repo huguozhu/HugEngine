@@ -891,7 +891,9 @@ void VulkanCommandList::CopyTextureToBuffer(IRHITexture* src, IRHIBuffer* dst,
                                             u32 x, u32 y, u32 width, u32 height,
                                             u64 bufferOffset) {
     if (m_StreamMode) {
-        // L4-3 skip: CopyTextureToBuffer is not yet representable in the command stream.
+        // L4-3：转储读回依赖这个拷贝，必须进流（否则读回缓冲区恒为零）。
+        m_Stream.Enqueue(RHICommandType::CmdCopyTextureToBuffer,
+                         RHICommandCopyTextureToBuffer{ src, dst, x, y, width, height, 0u, bufferOffset });
         return;
     }
     if (!src || !dst) return;

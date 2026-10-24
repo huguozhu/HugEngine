@@ -68,6 +68,7 @@ enum class RHICommandType : u32 {
     CmdDispatch            = 22,
     CmdCopyBuffer          = 23,
     CmdBeginOffscreenPassMRT = 24,
+    CmdCopyTextureToBuffer = 28,
     CmdDrawIndexedIndirect = 25,
     CmdDrawIndexedIndirectCount = 26,
 };
@@ -87,6 +88,11 @@ struct RHICommandBeginOffscreenPass {
     void* colorImageView = nullptr; void* depthImageView = nullptr;
     u32 width = 0; u32 height = 0; u32 allowSecondary = 0;
     u64 clearOffset = 0; u32 clearCount = 0; u32 pad = 0;
+};
+struct RHICommandCopyTextureToBuffer {
+    void* texture = nullptr; void* buffer = nullptr;
+    u32 x = 0, y = 0, width = 0, height = 0; u32 pad = 0;
+    u64 bufferOffset = 0;
 };
 struct RHICommandBeginOffscreenPassMRT {
     void* renderPass = nullptr;
