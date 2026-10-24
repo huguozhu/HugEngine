@@ -214,3 +214,72 @@ L4-3 只搬"录制类"命令还不够，下面两类调用若留在渲染线程�
 流模式**默认关闭**（`HE_RHI_COMMAND_STREAM` 未设），所有新增分支都是死路径 ⇒ 每批四条判据下转储逐字节一致是预期结果。
 这批工作的价值是：骨架、回放路径、六种命令的装箱都已就位，批 2/3 只需要"加命令 + 加分支"。
 
+
+## 10. 附录 K：批 5（整帧流模式）的诊断记录（2026-10-23 ~ 10-24）
+
+### 10.1 已达成的里程碑
+
+| 里程碑 | 状态 | 证据 |
+|---|---|---|
+| 流模式跑完整帧 | ✅ | 42 帧、每帧回放 1478 条命令 |
+| 干净退出 | ✅ | 无 crash phase；`vkDeviceWaitIdle: Invalid device` 已消失 |
+| 产出全部转储 | ✅ | 20/20 个 `gi_<tag>_*` 文件 |
+| 默认路径零回归 | ✅ | 每次改动都验证 19/20 逐字节一致（`meta.txt` 为已知字节差异） |
+| 与基线一致性 | 🟡 **7/20** | 13 个目标不同，且**全部为零输出** |
+
+### 10.2 关键修复（按发现顺序）
+
+| 修复 | 提交 | 说明 |
+|---|---|---|
+| 流模式只由帧主列表开启 | `b1f2ad1` | 此前 `CreateCommandList` 给内部临时列表（异步计算）也开了流模式 ⇒ 提交未结束的缓冲 ⇒ 崩溃 |
+| 查询读回短路 | `a76e288` | `GetQueryResults` 用 `VK_QUERY_RESULT_WAIT_BIT`，而流模式下查询从未 reset ⇒ 永久阻塞（曾卡在第 3 帧） |
+| 影子列表继承 timeline 信号 | `ef80f5c` | 转储的 `FlushAndWait` 等待的信号由影子列表提交才被 signal |
+| 设备销毁前释放影子列表 | `39fcbbb` | 否则析构时设备已失效 |
+| 恢复 `SetPipeline`/`BindDescriptorSet` 流分支 | `7a19a95` | **这两个分支曾在一次 `git checkout` 回退中丢失**，导致影子列表从不绑 PSO（每帧命令数从 1448→1478） |
+| 流模式下同步更新本地 pipeline/rp 状态 | `7a19a95` | 否则 `BeginRenderPass` 载荷携带过期 render pass ⇒ 附件数不匹配 |
+| `DrawIndexed` 回放修正 | `cabc6d9` | 旧实现实例化时丢掉 `startIndex`/`baseVertex`，且把 `instanceCount` 传到 `firstIndex` |
+
+### 10.3 已排除的假设（每条都有实测依据）
+
+| # | 假设 | 排除依据 |
+|---|---|---|
+| 1 | GBuffer 走 `DrawIndexedIndirect` | 接入后每帧命令数 +0 |
+| 2 | GBuffer 走 `DrawIndexedIndirectCount` | 接入后 +2（不是 GBuffer） |
+| 3 | GBuffer 走 `ExecuteSecondary`（MTCR） | 接入后 +0 |
+| 4 | GBuffer 走 `BeginOffscreenPassMRT` | 回放日志 0 条（GBuffer 用单附件 pass） |
+| 5 | GBuffer 走 `ExecuteGeneratedCommands`（DGC） | 接入后一致性不变 |
+| 6 | 描述符集句柄回放解析失败 | `ResolveDescriptorSet` 失败告警 0 次（`SetPipeline` 回放 63596 次） |
+| 7 | 缺 viewport/scissor 导致零输出 | 强制设全屏 viewport 后 `albedo` 仍为 0 |
+
+### 10.4 当前掌握的确切事实
+
+诊断工具（`HE_L43_HIST=1` / `HE_L43_PASSDRAW=1`）给出的数据：
+
+```
+命令直方图（一帧）：
+  DrawIndexed=349  SetVertexBuffer=349  SetIndexBuffer=349  SetPushConstants=354
+  SetPipeline=19   SetDescriptorSet=11   SetViewport=9  SetScissor=9
+  CmdBeginRenderPass=2  CmdEndRenderPass=2
+  CmdBeginOffscreenPass=8  CmdEndOffscreenPass=9  CmdBeginOffscreenPassMRT=1
+  CmdDraw=6  CmdPipelineBarrier=1
+
+每个 pass 的绘制数：
+  2048x2048 draws=103 / 103 / 103 / 143      ← 阴影/RSM 级
+  1920x1080 draws=1 ×7                        ← 全屏后处理
+```
+
+⇒ **绘制命令确实在流里、确实在正确的 pass 内执行了**，但目标纹理恒为零。
+⇒ 因此问题不在"命令丢失"，而在**写入的落点**（附件/纹理身份）或**读回的时机**。
+
+### 10.5 下一步的候选方向（按可能性排序）
+
+1. **transient 资源身份**：GBuffer/HDR 等目标可能是 transient 资源，每帧在各 Heap 之间重建；
+   流模式下回放用的是"记录时刻的 VkImageView"，而转储读的是"读回时刻的纹理"，
+   两者若已不是同一份内存 ⇒ 读回恒为零。验证方法：把 `HE_GILAB_CONFIG` 里的 transient/aliasing
+   关掉后重跑，若一致性提升即可确认。
+2. **pass 内附件的 layout 转换**：`EnsureDepthAttachmentLayout` 在流模式下被跳过，
+   而它负责把深度附件修到期望 layout；若 layout 不对，写入会被丢弃。
+3. **`SetViewport/SetScissor` 的时机**：只有 9 次调用对应 11 个 pass，
+   若某个 pass 的首次绘制前没有有效视口，写入同样为零（已用强制全屏视口排除过一次，
+   但那只覆盖了 offscreen 路径）。
+
