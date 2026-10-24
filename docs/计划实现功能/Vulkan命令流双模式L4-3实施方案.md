@@ -335,3 +335,16 @@ L4-3 只搬"录制类"命令还不够，下面两类调用若留在渲染线程�
 （`Dispatch`、`DispatchIndirect`、`CopyBuffer`、`CopyTextureToTexture`、`BuildTLAS`、`BindRTPipeline`、
 `ClearDepthStencil`、查询类、`BeginSecondary` 等 —— 它们不影响当前样例的等价性，但会影响其它管线）。
 
+### 11.5 剩余跳过项的分类（P2 决策，2026-10-24）
+
+命令流目前仍**有意**跳过 8 个命令，分为三类：
+
+| 类别 | 命令 | 决策理由 |
+|---|---|---|
+| **有意不接入**（profiling） | `BeginQuery`、`EndQuery`、`ResetQueryPool`、`WriteTimestamp` | 流模式下 profiling 整体关闭：`GetQueryResults`/`TryGetQueryResults` 已短路返回，接入这些命令只会产生不会被读回的空操作。代码注释已改为"有意不接入"而非"未实现"，避免后来者误判为遗漏 |
+| **待设计** | `BeginSecondary`、`ExecuteGeneratedCommands`（DGC） | 次级列表本身不走流模式（由录制者线程真实录制），DGC 需要完整的执行集状态；两者都需要单独设计，当前样例不依赖 |
+| **内部/配套** | `EnsureDepthAttachmentLayout`、`QueueOwnershipTransfer` | 前者是内部函数（需与 layout 追踪器配合），后者与异步计算队列所有权绑定 |
+
+**结论**：L4-3 在 Vulkan 侧的功能完整性以"06.GILab 逐字节等价"为准（已达成），
+上表的跳过项不影响该结论，且每一项的理由都已记录，不是技术债。
+

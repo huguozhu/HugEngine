@@ -654,7 +654,7 @@ void VulkanCommandList::BindDescriptorSet(u32 setIndex, DescriptorSetHandle setH
 // ── GPU Timestamp Query ──
 void VulkanCommandList::WriteTimestamp(IRHIQueryPool* pool, u32 queryIndex) {
     if (m_StreamMode) {
-        // L4-3 skip: WriteTimestamp is not yet representable in the command stream.
+        // L4-3（有意不接入）：时间戳属于 profiling，流模式下整体关闭。
         return;
     }
     auto* vkPool = static_cast<VulkanQueryPool*>(pool);
@@ -664,7 +664,7 @@ void VulkanCommandList::WriteTimestamp(IRHIQueryPool* pool, u32 queryIndex) {
 
 void VulkanCommandList::ResetQueryPool(IRHIQueryPool* pool) {
     if (m_StreamMode) {
-        // L4-3 skip: ResetQueryPool is not yet representable in the command stream.
+        // L4-3（有意不接入）：同 BeginQuery。
         return;
     }
     auto* vkPool = static_cast<VulkanQueryPool*>(pool);
@@ -703,7 +703,8 @@ bool VulkanCommandList::TryGetQueryResults(IRHIQueryPool* pool, u32 first, u32 c
 // ── GPU 通用查询（BeginQuery / EndQuery）──
 void VulkanCommandList::BeginQuery(IRHIQueryPool* pool, u32 queryIndex) {
     if (m_StreamMode) {
-        // L4-3 skip: BeginQuery is not yet representable in the command stream.
+        // L4-3（有意不接入）：查询类命令在流模式下不录制 —— profiling 在流模式关闭，
+        // 且 GetQueryResults/TryGetQueryResults 已短路返回，接入只会增加无用的命令。
         return;
     }
     auto* vkPool = static_cast<VulkanQueryPool*>(pool);
@@ -712,7 +713,7 @@ void VulkanCommandList::BeginQuery(IRHIQueryPool* pool, u32 queryIndex) {
 
 void VulkanCommandList::EndQuery(IRHIQueryPool* pool, u32 queryIndex) {
     if (m_StreamMode) {
-        // L4-3 skip: EndQuery is not yet representable in the command stream.
+        // L4-3（有意不接入）：同 BeginQuery。
         return;
     }
     auto* vkPool = static_cast<VulkanQueryPool*>(pool);
