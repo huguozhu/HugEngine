@@ -71,6 +71,9 @@ enum class RHICommandType : u32 {
     CmdCopyTextureToBuffer = 28,
     CmdDispatchIndirect = 30,
     CmdCopyTextureToTexture = 32,
+    CmdClearDepthStencil = 33,
+    CmdBuildTLAS = 34,
+    CmdBindRTPipeline = 35,
     CmdDrawIndexedIndirect = 25,
     CmdDrawIndexedIndirectCount = 26,
 };
@@ -95,6 +98,10 @@ struct RHICommandDispatch { u32 x = 0, y = 1, z = 1; u32 pad = 0; };
 struct RHICommandDispatchIndirect { void* buffer = nullptr; u64 offset = 0; };
 struct RHICommandCopyBuffer { void* src = nullptr; void* dst = nullptr;
     u64 size = 0; u64 srcOffset = 0; u64 dstOffset = 0; };
+struct RHICommandClearDepthStencil { void* texture = nullptr; float depth = 1.0f; u32 pad = 0; };
+struct RHICommandBuildTLAS { void* tlas = nullptr; void* scratch = nullptr; void* instances = nullptr;
+    u32 instanceCount = 0; u32 update = 0; u32 pad = 0; };
+struct RHICommandBindRTPipeline { void* rtPSO = nullptr; };
 struct RHICommandCopyTextureToTexture { void* src = nullptr; void* dst = nullptr; };
 struct RHICommandCopyTextureToBuffer {
     void* texture = nullptr; void* buffer = nullptr;

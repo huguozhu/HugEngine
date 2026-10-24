@@ -223,6 +223,30 @@ static u32 g_L43PassW = 0, g_L43PassH = 0;
             ++replayed;
             break;
         }
+        case RHICommandType::CmdClearDepthStencil: {
+            const auto* d = stream.PayloadAt<RHICommandClearDepthStencil>(i);
+            if (!d || !d->texture) break;
+            cmd.ClearDepthStencil(static_cast<IRHITexture*>(d->texture), d->depth);
+            ++replayed;
+            break;
+        }
+        case RHICommandType::CmdBuildTLAS: {
+            const auto* d = stream.PayloadAt<RHICommandBuildTLAS>(i);
+            if (!d || !d->tlas) break;
+            cmd.BuildTLAS(static_cast<IRHIAccelerationStructure*>(d->tlas),
+                          static_cast<IRHIBuffer*>(d->scratch),
+                          static_cast<IRHIBuffer*>(d->instances),
+                          d->instanceCount, d->update != 0u);
+            ++replayed;
+            break;
+        }
+        case RHICommandType::CmdBindRTPipeline: {
+            const auto* d = stream.PayloadAt<RHICommandBindRTPipeline>(i);
+            if (!d || !d->rtPSO) break;
+            cmd.BindRTPipeline(static_cast<IRHIRayTracingPipelineState*>(d->rtPSO));
+            ++replayed;
+            break;
+        }
         case RHICommandType::MarkSubmitBoundary:
             // 提交边界由执行端（RHI 线程）自己按帧处理，这里不是一条 RHI 调用
             ++replayed;

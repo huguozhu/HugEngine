@@ -963,7 +963,8 @@ void VulkanCommandList::CopyTextureToBuffer(IRHITexture* src, IRHIBuffer* dst,
 // ============================================================
 void VulkanCommandList::ClearDepthStencil(IRHITexture* texture, float depth) {
     if (m_StreamMode) {
-        // L4-3 skip: ClearDepthStencil is not yet representable in the command stream.
+        m_Stream.Enqueue(RHICommandType::CmdClearDepthStencil,
+                         RHICommandClearDepthStencil{ texture, depth, 0u });
         return;
     }
     if (!texture) return;
@@ -1241,7 +1242,8 @@ void VulkanCommandList::BuildBLAS(IRHIAccelerationStructure* blas, IRHIBuffer* s
 void VulkanCommandList::BuildTLAS(IRHIAccelerationStructure* tlas, IRHIBuffer* scratchBuffer,
                                    IRHIBuffer* instanceBuffer, u32 instanceCount, bool update) {
     if (m_StreamMode) {
-        // L4-3 skip: BuildTLAS is not yet representable in the command stream.
+        m_Stream.Enqueue(RHICommandType::CmdBuildTLAS,
+                         RHICommandBuildTLAS{ tlas, scratchBuffer, instanceBuffer, instanceCount, update ? 1u : 0u, 0u });
         return;
     }
     auto* vkTLAS    = static_cast<VulkanAccelerationStructure*>(tlas);
@@ -1291,7 +1293,7 @@ void VulkanCommandList::BuildTLAS(IRHIAccelerationStructure* tlas, IRHIBuffer* s
 
 void VulkanCommandList::BindRTPipeline(IRHIRayTracingPipelineState* rtPSO) {
     if (m_StreamMode) {
-        // L4-3 skip: BindRTPipeline is not yet representable in the command stream.
+        m_Stream.Enqueue(RHICommandType::CmdBindRTPipeline, RHICommandBindRTPipeline{ rtPSO });
         return;
     }
     auto* vkPSO = static_cast<VulkanRTPipelineState*>(rtPSO);
