@@ -69,6 +69,8 @@ enum class RHICommandType : u32 {
     CmdCopyBuffer          = 23,
     CmdBeginOffscreenPassMRT = 24,
     CmdCopyTextureToBuffer = 28,
+    CmdDispatchIndirect = 30,
+    CmdCopyTextureToTexture = 32,
     CmdDrawIndexedIndirect = 25,
     CmdDrawIndexedIndirectCount = 26,
 };
@@ -89,6 +91,11 @@ struct RHICommandBeginOffscreenPass {
     u32 width = 0; u32 height = 0; u32 allowSecondary = 0;
     u64 clearOffset = 0; u32 clearCount = 0; u32 pad = 0;
 };
+struct RHICommandDispatch { u32 x = 0, y = 1, z = 1; u32 pad = 0; };
+struct RHICommandDispatchIndirect { void* buffer = nullptr; u64 offset = 0; };
+struct RHICommandCopyBuffer { void* src = nullptr; void* dst = nullptr;
+    u64 size = 0; u64 srcOffset = 0; u64 dstOffset = 0; };
+struct RHICommandCopyTextureToTexture { void* src = nullptr; void* dst = nullptr; };
 struct RHICommandCopyTextureToBuffer {
     void* texture = nullptr; void* buffer = nullptr;
     u32 x = 0, y = 0, width = 0, height = 0; u32 pad = 0;
@@ -108,8 +115,6 @@ struct RHICommandDrawIndexedIndirectCount {
 struct RHICommandDrawIndexedIndirect { void* buffer = nullptr; u64 offset = 0; u32 drawCount = 0; u32 stride = 0; };
 struct RHICommandDraw { u32 vertexCount = 0, instanceCount = 1, firstVertex = 0, firstInstance = 0; };
 struct RHICommandPipelineBarrier { u32 srcStage = 0, dstStage = 0, srcState = 0, dstState = 0; };
-struct RHICommandDispatch { u32 x = 0, y = 1, z = 1; };
-struct RHICommandCopyBuffer { void* src = nullptr; void* dst = nullptr; u64 size = 0, srcOffset = 0, dstOffset = 0; };
 
 /// L4-3 batch2: POD only (this header is RHI-free, so no Viewport/ScissorRect types)
 struct RHICommandSetViewport { float x = 0, y = 0, w = 0, h = 0, minZ = 0, maxZ = 1; };

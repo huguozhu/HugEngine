@@ -619,7 +619,8 @@ void VulkanCommandList::SetPushConstants(u32 offset, u32 size, const void* data)
 
 void VulkanCommandList::Dispatch(u32 groupCountX, u32 groupCountY, u32 groupCountZ) {
     if (m_StreamMode) {
-        // L4-3 skip: Dispatch 进流后会破坏帧（疑似 compute 分派与图形 pass 的顺序问题，留待单独排查）。
+        // L4-3：计算分派进流（此前的"破帧"很可能是读回为零造成的假象，现已修复）。
+        m_Stream.Enqueue(RHICommandType::CmdDispatch, RHICommandDispatch{ groupCountX, groupCountY, groupCountZ, 0u });
         return;
     }
     EmitDrawLabel();  // 自动插入 DrawCall 级调试 marker（若已设置）
@@ -628,7 +629,7 @@ void VulkanCommandList::Dispatch(u32 groupCountX, u32 groupCountY, u32 groupCoun
 
 void VulkanCommandList::DispatchIndirect(IRHIBuffer* buffer, u64 offset) {
     if (m_StreamMode) {
-        // L4-3 skip: DispatchIndirect is not yet representable in the command stream.
+        m_Stream.Enqueue(RHICommandType::CmdDispatchIndirect, RHICommandDispatchIndirect{ buffer, offset });
         return;
     }
     EmitDrawLabel();  // 自动插入 DrawCall 级调试 marker（若已设置）
@@ -805,7 +806,8 @@ void VulkanCommandList::EmitDrawLabel() {
 void VulkanCommandList::CopyBuffer(IRHIBuffer* src, IRHIBuffer* dst,
                                     u64 size, u64 srcOffset, u64 dstOffset) {
     if (m_StreamMode) {
-        // L4-3 skip: CopyBuffer is not yet representable in the command stream.
+        m_Stream.Enqueue(RHICommandType::CmdCopyBuffer,
+                         RHICommandCopyBuffer{ src, dst, size, srcOffset, dstOffset });
         return;
     }
     auto* vkSrc = static_cast<VulkanBuffer*>(src);
@@ -821,7 +823,8 @@ void VulkanCommandList::CopyBuffer(IRHIBuffer* src, IRHIBuffer* dst,
 
 void VulkanCommandList::CopyTextureToTexture(IRHITexture* src, IRHITexture* dst) {
     if (m_StreamMode) {
-        // L4-3 skip: CopyTextureToTexture is not yet representable in the command stream.
+        m_Stream.Enqueue(RHICommandType::CmdCopyTextureToTexture,
+                         RHICommandCopyTextureToTexture{ src, dst });
         return;
     }
     auto* vkSrc = static_cast<VulkanTexture*>(src);
