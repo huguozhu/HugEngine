@@ -1101,6 +1101,18 @@ void VulkanDevice::SubmitStreamReplay(VulkanCommandList* src) {
     replay->AdoptRenderTargetStateFrom(*src);
     replay->AdoptTimelineSignalFrom(*src);   // L4-3: 转储等待的 timeline 信号由影子列表 signal   // L4-3: 继承渲染目标状态
     replay->Begin();
+    if (std::getenv("HE_L43_HIST")) {
+        std::vector<u32> hist(64, 0);
+        for (usize ci = 0; ci < streamData->CommandCount(); ++ci) {
+            const u32 ty = static_cast<u32>(streamData->CommandAt(ci).type);
+            if (ty < hist.size()) ++hist[ty];
+        }
+        String line;
+        for (u32 ty = 0; ty < hist.size(); ++ty) {
+            if (hist[ty]) line += std::format("{}={} ", ty, hist[ty]);
+        }
+        HE_CORE_INFO("[L4-3] histogram: {}", line);
+    }
     const u32 replayed = ReplayCommandStream(*streamData, *replay);
     replay->End();
     replay->Submit();
