@@ -517,17 +517,22 @@ int ForwardPipeline::ReloadShader(StringView shaderName,
 void ForwardPipeline::Shutdown() {
     m_InstanceCuller.Shutdown();   // 任务 25：逐实例剔除（须在设备有效时释放 bindless 槽位）
     m_SkinnedBuffers.Shutdown(m_Device);   // 第③段：骨骼矩阵缓冲（同上，须在设备有效时释放槽位）
+    // 【空保护】m_Device 可能为空（重复 Shutdown / Initialize 失败后），
+    // 之前只给 DestroyDescriptorSetLayout 加了判空，下面的循环仍在解引用 ⇒ 崩溃
+    //（实测：02.Cube 退出时崩在 ForwardPipeline.cpp:524）。
     if (m_Device) {
         m_Device->DestroyDescriptorSetLayout(m_PerFrameLayout);
+        for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+            m_Device->DestroyBufferHandle(m_LightBuffers[i]);
+            m_Device->DestroyBufferHandle(m_ObjectBuffers[i]);
+            m_Device->DestroyBufferHandle(m_ShadowBuffers[i]);
+            m_Device->DestroyBufferHandle(m_ShadowObjBuffers[i]);
+        }
     }
     for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-        m_Device->DestroyBufferHandle(m_LightBuffers[i]);
-        m_LightBuffers[i] = {};
-        m_Device->DestroyBufferHandle(m_ObjectBuffers[i]);
-        m_ObjectBuffers[i] = {};
-        m_Device->DestroyBufferHandle(m_ShadowBuffers[i]);
-        m_ShadowBuffers[i] = {};
-        m_Device->DestroyBufferHandle(m_ShadowObjBuffers[i]);
+        m_LightBuffers[i]     = {};
+        m_ObjectBuffers[i]    = {};
+        m_ShadowBuffers[i]    = {};
         m_ShadowObjBuffers[i] = {};
     }
     m_LightGridBuffer.reset();         // Forward+ LightGrid
@@ -535,11 +540,16 @@ void ForwardPipeline::Shutdown() {
     m_PBR_PSO.reset();
     if (m_ToneMap) { m_ToneMap->Shutdown(); m_ToneMap.reset(); }
     if (m_Skybox)  { m_Skybox->Shutdown();  m_Skybox.reset(); }
+    // 同上：这一组也必须判空（HDR 目标 / 深度）
+    if (m_Device) {
+        for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+            m_Device->DestroyTextureHandle(m_HDRTarget[i]);
+            m_Device->DestroyTextureHandle(m_HDRDepth[i]);
+        }
+    }
     for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-        m_Device->DestroyTextureHandle(m_HDRTarget[i]);
         m_HDRTarget[i] = {};
-        m_Device->DestroyTextureHandle(m_HDRDepth[i]);
-        m_HDRDepth[i] = {};
+        m_HDRDepth[i]  = {};
     }
     m_HDRSampler.reset();
     m_SecRecordLists.clear();  // Phase 5-4 sec CB 录制池
