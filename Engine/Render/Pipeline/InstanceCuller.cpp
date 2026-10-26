@@ -76,6 +76,19 @@ bool InstanceCuller::Initialize(rhi::IRHIDevice* device) {
 }
 
 void InstanceCuller::Shutdown() {
+    // 【幂等 + 空保护】Shutdown 可能被调用两次（管线析构 + 引擎关闭），
+    // 或者在 Initialize 失败后调用。此时 m_Device 为空，下一行直接解引用会崩溃
+    //（实测：02.Cube 关闭窗口时崩在 InstanceCuller::Shutdown）。
+    if (!m_Device) {
+        m_PSO = {};
+        for (u32 slot = 0; slot < rhi::kMaxFramesInFlight; ++slot) {
+            m_VisibleSSBOHandle[slot] = 0;
+            m_VisibleBuf[slot] = {};
+        }
+        m_Instances.clear();
+        return;
+    }
+
     m_Device->DestroyPipelineStateHandle(m_PSO); m_PSO = {};
     if (m_Device) {
         for (u32 slot = 0; slot < rhi::kMaxFramesInFlight; ++slot) {
