@@ -48,7 +48,11 @@ bool Denoiser::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     HE_CORE_INFO("Denoiser initialized");
     return true;
 }
-void Denoiser::Shutdown(){m_Device->DestroyPipelineStateHandle(m_PSO); m_PSO = {};if(m_Device&&m_Layout)m_Device->DestroyDescriptorSetLayout(m_Layout);m_Denoised.reset();m_Device->DestroySamplerHandle(m_Sampler); m_Sampler = {};m_Device=nullptr;m_Ready=false;}
+void Denoiser::Shutdown(){
+    // 【空保护】m_Device 可能为空（Shutdown 被调用两次，或 Initialize 失败后进入清理路径），
+    // 直接解引用会崩溃（实测：02.Cube 退出时连续崩在多个 Shutdown 里）。
+    if (!m_Device) return;
+m_Device->DestroyPipelineStateHandle(m_PSO); m_PSO = {};if(m_Device&&m_Layout)m_Device->DestroyDescriptorSetLayout(m_Layout);m_Denoised.reset();m_Device->DestroySamplerHandle(m_Sampler); m_Sampler = {};m_Device=nullptr;m_Ready=false;}
 void Denoiser::OnResize(u32 w,u32 h){m_Width=w;m_Height=h;
     rhi::TextureDesc td;
     td.format=rhi::Format::RGBA16_FLOAT;

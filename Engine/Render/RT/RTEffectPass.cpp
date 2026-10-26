@@ -76,6 +76,10 @@ bool RTEffectPass::Initialize(rhi::IRHIDevice* device,
 }
 
 void RTEffectPass::Shutdown() {
+    // 【空保护】m_Device 可能为空（Shutdown 被调用两次，或 Initialize 失败后进入清理路径），
+    // 直接解引用会崩溃（实测：02.Cube 退出时连续崩在多个 Shutdown 里）。
+    if (!m_Device) return;
+
     m_Device->DestroyTextureHandle(m_Output); m_Output = {};
     m_Device->DestroyBufferHandle(m_LightUB); m_LightUB = {};
     m_Pipeline.reset();

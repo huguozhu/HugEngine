@@ -123,6 +123,10 @@ void CSMTechnique::CreatePSO(rhi::DescriptorSetLayoutHandle layout){
 }
 
 void CSMTechnique::Shutdown(){
+    // 【空保护】m_Device 可能为空（Shutdown 被调用两次，或 Initialize 失败后进入清理路径），
+    // 直接解引用会崩溃（实测：02.Cube 退出时连续崩在多个 Shutdown 里）。
+    if (!m_Device) return;
+
     for(u32 s=0;s<MAX_FRAMES_IN_FLIGHT;++s)
         for(u32 c=0;c<CASCADE_COUNT;++c){   // A-3：二维贴图句柄必须显式销毁
             m_Device->DestroyTextureHandle(m_ShadowMaps[s][c]);

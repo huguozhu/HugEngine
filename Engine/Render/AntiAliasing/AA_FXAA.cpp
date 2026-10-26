@@ -42,6 +42,10 @@ bool AA_FXAA::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
 }
 
 void AA_FXAA::Shutdown() {
+    // 【空保护】m_Device 可能为空（Shutdown 被调用两次，或 Initialize 失败后进入清理路径），
+    // 直接解引用会崩溃（实测：02.Cube 退出时连续崩在多个 Shutdown 里）。
+    if (!m_Device) return;
+
     m_Device->DestroyPipelineStateHandle(m_PSO); m_PSO = {};
     if (m_Device && m_DescLayout != rhi::kInvalidLayout)
         m_Device->DestroyDescriptorSetLayout(m_DescLayout);

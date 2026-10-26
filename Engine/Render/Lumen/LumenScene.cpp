@@ -68,6 +68,10 @@ bool LumenScene::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
 }
 
 void LumenScene::Shutdown() {
+    // 【空保护】m_Device 可能为空（Shutdown 被调用两次，或 Initialize 失败后进入清理路径），
+    // 直接解引用会崩溃（实测：02.Cube 退出时连续崩在多个 Shutdown 里）。
+    if (!m_Device) return;
+
     // 步骤 8/10/14/23 在这里释放 Mesh SDF 缓存、Global SDF clipmap、页表与探针缓冲。
     m_SDF.Shutdown();
     DestroySkeletonPipeline();

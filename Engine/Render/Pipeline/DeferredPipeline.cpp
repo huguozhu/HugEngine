@@ -487,6 +487,10 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
 }
 
 void DeferredPipeline::Shutdown() {
+    // 【空保护】m_Device 可能为空（Shutdown 被调用两次，或 Initialize 失败后进入清理路径），
+    // 直接解引用会崩溃（实测：02.Cube 退出时连续崩在多个 Shutdown 里）。
+    if (!m_Device) return;
+
     // GI Provider 生命周期遍历（§12 架构前置）：Provider 自持的资源（如 Lumen 的
     // Surface Cache atlas / SDF clipmap）必须在这里释放。**必须早于底层 pass 的 Shutdown**
     // —— Provider 只持有它们的引用，反过来会拿到已析构的对象。

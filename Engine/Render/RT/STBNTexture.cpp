@@ -29,6 +29,10 @@ bool STBNTexture::Initialize(rhi::IRHIDevice* device) {
 }
 
 void STBNTexture::Shutdown() {
+    // 【空保护】m_Device 可能为空（Shutdown 被调用两次，或 Initialize 失败后进入清理路径），
+    // 直接解引用会崩溃（实测：02.Cube 退出时连续崩在多个 Shutdown 里）。
+    if (!m_Device) return;
+
     m_Device->DestroyTextureHandle(m_Texture); m_Texture = {};
     m_Device = nullptr;
 }

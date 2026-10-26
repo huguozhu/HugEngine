@@ -131,6 +131,10 @@ bool GI_RSM::Initialize(rhi::IRHIDevice* device, u32, u32) {
 }
 
 void GI_RSM::Shutdown() {
+    // 【空保护】m_Device 可能为空（Shutdown 被调用两次，或 Initialize 失败后进入清理路径），
+    // 直接解引用会崩溃（实测：02.Cube 退出时连续崩在多个 Shutdown 里）。
+    if (!m_Device) return;
+
     m_Device->DestroyTextureHandle(m_RSMPos); m_RSMPos = {};
     m_Device->DestroyTextureHandle(m_RSMFlux); m_RSMFlux = {};
     m_Device->DestroyTextureHandle(m_RSMRadiance); m_RSMRadiance = {};
