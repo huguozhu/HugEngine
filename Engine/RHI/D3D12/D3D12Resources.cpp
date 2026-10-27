@@ -62,7 +62,12 @@ bool D3D12Buffer::Initialize(D3D12Device* device, const BufferDesc& desc) {
     //   · 回读 ⇒ READBACK 堆
     const bool isStorage = HasAny(desc.usage, BufferUsage::Storage);
     D3D12_HEAP_TYPE heapType = D3D12_HEAP_TYPE_DEFAULT;
-    if (!isStorage && (HasAny(desc.usage, BufferUsage::TransferDst) || desc.cpuAccess)) {
+    // 【关键】带 initialData 的非 UAV 缓冲（顶点/索引/常量）直接用 UPLOAD 堆：
+    //   · UPLOAD 堆可以立即 Map 写入，数据当场就有效
+    //   · 之前走 DEFAULT 堆 + 中转缓冲，但**从未执行拷贝** ⇒ 顶点数据全 0
+    //     ⇒ 三角形退化 ⇒ 画面全黑（实测就是这个问题）
+    if (!isStorage && (HasAny(desc.usage, BufferUsage::TransferDst) || desc.cpuAccess ||
+                       desc.initialData != nullptr)) {
         heapType = D3D12_HEAP_TYPE_UPLOAD;
     }
     // UAV 缓冲需要一份等大的 UPLOAD 暂存来承载 CPU 写入
@@ -133,18 +138,55 @@ bool D3D12Buffer::Initialize(D3D12Device* device, const BufferDesc& desc) {
                 m_Resource->Unmap(0, nullptr);
             }
         } else {
-            // 建一个 UPLOAD 中转缓冲，记下来由调用方在下一次提交时拷到目标
+            // DEFAULT 堆（UAV 缓冲）：建 UPLOAD 中转 → 立刻用引擎队列拷一次。
+            // 不留在"下次提交时再拷"是因为缓冲可能在本帧就被读，晚一拍就会读到全零。
             D3D12_RESOURCE_DESC ud = rd;
             D3D12_HEAP_PROPERTIES uh{};
             uh.Type = D3D12_HEAP_TYPE_UPLOAD;
+            uh.CreationNodeMask = 1;
+            uh.VisibleNodeMask = 1;
+            ComPtr<ID3D12Resource> staging;
             if (SUCCEEDED(dev->CreateCommittedResource(&uh, D3D12_HEAP_FLAG_NONE, &ud,
                                                        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
-                                                       IID_PPV_ARGS(&m_UploadStaging)))) {
+                                                       IID_PPV_ARGS(&staging)))) {
                 void* dst = nullptr;
                 D3D12_RANGE range{ 0, 0 };
-                if (SUCCEEDED(m_UploadStaging->Map(0, &range, &dst)) && dst) {
+                if (SUCCEEDED(staging->Map(0, &range, &dst)) && dst) {
                     std::memcpy(dst, desc.initialData, desc.size);
-                    m_UploadStaging->Unmap(0, nullptr);
+                    staging->Unmap(0, nullptr);
+                }
+                // 用引擎队列做拷贝（同队列 FIFO，避免跨队列争用导致 DEVICE_HUNG）
+                ID3D12CommandQueue* q = device->GetQueue();
+                ComPtr<ID3D12CommandAllocator>    a;
+                ComPtr<ID3D12GraphicsCommandList> l;
+                if (q &&
+                    SUCCEEDED(dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&a))) &&
+                    SUCCEEDED(dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, a.Get(), nullptr,
+                                                     IID_PPV_ARGS(&l)))) {
+                    D3D12_RESOURCE_BARRIER b{};
+                    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                    b.Transition.pResource = m_Resource.Get();
+                    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                    b.Transition.StateBefore = initState;
+                    b.Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_DEST;
+                    l->ResourceBarrier(1, &b);
+                    l->CopyBufferRegion(m_Resource.Get(), 0, staging.Get(), 0, desc.size);
+                    b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+                    b.Transition.StateAfter  = initState;
+                    l->ResourceBarrier(1, &b);
+                    l->Close();
+                    ID3D12CommandList* lists[1] = { l.Get() };
+                    q->ExecuteCommandLists(1, lists);
+                    ComPtr<ID3D12Fence> f;
+                    if (SUCCEEDED(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&f)))) {
+                        HANDLE ev = CreateEventEx(nullptr, nullptr, 0, EVENT_ALL_ACCESS);
+                        if (ev) {
+                            q->Signal(f.Get(), 1);
+                            f->SetEventOnCompletion(1, ev);
+                            WaitForSingleObject(ev, 5000);
+                            CloseHandle(ev);
+                        }
+                    }
                 }
             }
         }

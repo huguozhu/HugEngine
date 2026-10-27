@@ -289,7 +289,7 @@ void D3D12Device::WaitFenceOnQueue(QueueType, RHIFenceHandle fence, u64 value) {
 
 void D3D12Device::Submit(IRHICommandList* cmdList, RHICommandList* stream) {
     (void)stream;
-    if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] ...\n"); std::fflush(stdout); }
+    if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] Submit\n"); std::fflush(stdout); }
     if (!cmdList || !m_Queue) return;
     auto* cl = static_cast<D3D12CommandList*>(cmdList);
     ID3D12CommandList* lists[1] = { cl->GetNativeCommandList() };

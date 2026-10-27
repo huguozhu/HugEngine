@@ -41,7 +41,7 @@ bool D3D12CommandList::Initialize(D3D12Device* device, QueueType queue) {
 }
 
 void D3D12CommandList::Begin() {
-    { static int s_n = 0; if (s_n < 3) { ++s_n; if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] ...\n"); std::fflush(stdout); } } }
+    { static int s_n = 0; if (s_n < 3) { ++s_n; if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] Begin\n"); std::fflush(stdout); } } }
 
     if (!m_List || !m_Allocator) return;
     // 每次录制前必须 Reset 分配器与列表
@@ -57,8 +57,8 @@ void D3D12CommandList::Begin() {
 }
 
 void D3D12CommandList::End() {
-    if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] ...\n"); std::fflush(stdout); }
-    { static int s_n = 0; if (s_n < 3) { ++s_n; if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] ...\n"); std::fflush(stdout); } } }
+    if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] End\n"); std::fflush(stdout); }
+    { static int s_n = 0; if (s_n < 3) { ++s_n; if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] End\n"); std::fflush(stdout); } } }
 
     if (!m_List || !m_Recording) return;
     if (FAILED(m_List->Close())) {
@@ -70,7 +70,7 @@ void D3D12CommandList::End() {
 void D3D12CommandList::BeginRenderPass(u32 colorCount, Format colorFormat,
                                        Format depthFormat, const ClearValue* clear,
                                        LoadOp loadOp) {
-    { static int s_n = 0; if (s_n < 3) { ++s_n; if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] ...\n"); std::fflush(stdout); } } }
+    { static int s_n = 0; if (s_n < 3) { ++s_n; if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] BeginRenderPass\n"); std::fflush(stdout); } } }
 
     if (!m_List) return;
 
@@ -86,6 +86,11 @@ void D3D12CommandList::BeginRenderPass(u32 colorCount, Format colorFormat,
     }
 
     m_List->OMSetRenderTargets(colorCount, hasRtv ? &rtv : nullptr, FALSE, nullptr);
+    m_HasRtv = hasRtv;
+    // 告诉交换链：后缓冲现在处于 RENDER_TARGET 状态（截图做屏障时要用真实状态）
+    if (hasRtv && m_SwapChain) {
+        static_cast<D3D12SwapChain*>(m_SwapChain)->MarkBackBufferRendered();
+    }
 
     if (hasRtv && loadOp == LoadOp::Clear) {
         const float c[4] = {
@@ -113,8 +118,8 @@ void D3D12CommandList::BeginRenderPass(u32 colorCount, Format colorFormat,
 }
 
 void D3D12CommandList::EndRenderPass() {
-    if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] ...\n"); std::fflush(stdout); }
-    { static int s_n = 0; if (s_n < 3) { ++s_n; if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] ...\n"); std::fflush(stdout); } } }
+    if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] EndRenderPass\n"); std::fflush(stdout); }
+    { static int s_n = 0; if (s_n < 3) { ++s_n; if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] EndRenderPass\n"); std::fflush(stdout); } } }
 
     // D3D12 没有 pass 结束的概念；资源状态转换由显式 PipelineBarrier 负责
 }
@@ -132,6 +137,7 @@ void D3D12CommandList::BeginOffscreenPass(void* colorImageView, void* depthImage
     const bool hasDsv = (depthImageView != nullptr);
 
     m_List->OMSetRenderTargets(1, hasRtv ? &rtv : nullptr, FALSE, hasDsv ? &dsv : nullptr);
+    m_HasRtv = hasRtv;
 
     if (hasRtv && clear) {
         m_List->ClearRenderTargetView(rtv, clear->color, 0, nullptr);
@@ -192,7 +198,7 @@ void D3D12CommandList::BeginOffscreenPassMRT(void* const* colorImageViews, u32 c
 void D3D12CommandList::EndOffscreenPass() {}
 
 void D3D12CommandList::SetPipeline(IRHIPipelineState* pso) {
-    { static int s_n = 0; if (s_n < 3) { ++s_n; if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] ...\n"); std::fflush(stdout); } } }
+    { static int s_n = 0; if (s_n < 3) { ++s_n; if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] SetPipeline\n"); std::fflush(stdout); } } }
 
     m_Pipeline = static_cast<D3D12PipelineState*>(pso);
     if (!m_List || !m_Pipeline) return;
@@ -202,7 +208,7 @@ void D3D12CommandList::SetPipeline(IRHIPipelineState* pso) {
 }
 
 void D3D12CommandList::SetVertexBuffer(IRHIBuffer* buffer, u32 binding) {
-    if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] ...\n"); std::fflush(stdout); }
+    if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] SetVertexBuffer\n"); std::fflush(stdout); }
     if (!m_List || !buffer) return;
     auto* b = static_cast<D3D12Buffer*>(buffer);
     // 【关键】StrideInBytes 必须非零：D3D12 的 IASetVertexBuffers 收到 0 步长时
@@ -219,7 +225,7 @@ void D3D12CommandList::SetVertexBuffer(IRHIBuffer* buffer, u32 binding) {
 }
 
 void D3D12CommandList::SetIndexBuffer(IRHIBuffer* buffer, u32 offset) {
-    if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] ...\n"); std::fflush(stdout); }
+    if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] SetIndexBuffer\n"); std::fflush(stdout); }
     if (!m_List || !buffer) return;
     auto* b = static_cast<D3D12Buffer*>(buffer);
     D3D12_INDEX_BUFFER_VIEW ibv = b->GetIbv();
@@ -228,7 +234,7 @@ void D3D12CommandList::SetIndexBuffer(IRHIBuffer* buffer, u32 offset) {
 }
 
 void D3D12CommandList::SetViewport(const Viewport& vp) {
-    if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] ...\n"); std::fflush(stdout); }
+    if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] SetViewport\n"); std::fflush(stdout); }
     if (!m_List) return;
     D3D12_VIEWPORT v{};
     v.TopLeftX = vp.x;
@@ -242,11 +248,12 @@ void D3D12CommandList::SetViewport(const Viewport& vp) {
         v.TopLeftY = vp.y + vp.height;
         v.Height   = -vp.height;
     }
+    m_LastVp = v;
     m_List->RSSetViewports(1, &v);
 }
 
 void D3D12CommandList::SetScissor(const ScissorRect& sc) {
-    if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] ...\n"); std::fflush(stdout); }
+    if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] SetScissor\n"); std::fflush(stdout); }
     if (!m_List) return;
     D3D12_RECT r{};
     r.left   = sc.x;
@@ -310,9 +317,18 @@ void D3D12CommandList::SetPushConstants(u32 offset, u32 size, const void* data) 
 }
 
 void D3D12CommandList::Draw(u32 vertexCount, u32 instanceCount, u32 firstVertex, u32 firstInstance) {
-    if (std::getenv("HE_D3D12_NO_DRAW")) return;   // 实验开关：跳过实际绘制
-    { static int s_n = 0; if (s_n < 3) { ++s_n; if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] ...\n"); std::fflush(stdout); } } }
-
+    // 诊断：每 60 次绘制打印一次（D3D12 的 GraphicsCommandList 没有 Get* 查询接口，
+    // 所以这里打印我们自己记录的状态）
+    if (std::getenv("HE_D3D12_TRACE")) {
+        static int s_draw = 0;
+        if (++s_draw % 60 == 1) {
+            std::printf("[DRAW] n=%d verts=%u inst=%u pso=%p rtvSet=%d vp=%.0fx%.0f\n",
+                        s_draw, vertexCount, instanceCount,
+                        static_cast<void*>(m_Pipeline),
+                        m_HasRtv ? 1 : 0, m_LastVp.Width, m_LastVp.Height);
+            std::fflush(stdout);
+        }
+    }
     if (!m_List) return;
     m_List->DrawInstanced(vertexCount, instanceCount, firstVertex, firstInstance);
 }
@@ -435,7 +451,7 @@ void D3D12CommandList::SetTimelineWait(RHIFenceHandle fence, u64 value) {
 }
 
 void D3D12CommandList::Submit() {
-    if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] ...\n"); std::fflush(stdout); }
+    if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] Submit\n"); std::fflush(stdout); }
     if (m_Device) m_Device->Submit(this, nullptr);
 }
 
