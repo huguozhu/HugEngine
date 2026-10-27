@@ -85,6 +85,7 @@ public:
     // 引擎只把 RTV/DSV 的 CPU 句柄（void*）传给命令列表，而 D3D12 做资源屏障
     // 需要 ID3D12Resource*，所以建视图时登记一下，用时反查。
     void RegisterViewResource(UINT64 handle, ID3D12Resource* res);
+    void UnregisterViewResource(UINT64 handle);
     ID3D12Resource* FindViewResource(UINT64 handle) const;
     D3D12_RESOURCE_STATES GetResourceState(ID3D12Resource* res) const;
     void SetResourceState(ID3D12Resource* res, D3D12_RESOURCE_STATES st);
@@ -215,7 +216,10 @@ private:
     /// 采样器堆：根签名声明了 s0..s15 的 SAMPLER 表，D3D12 要求
     /// 绑定时同时设置 CBV_SRV_UAV 与 SAMPLER 两个 shader-visible 堆，
     /// 缺一个就会让 CreateGraphicsPipelineState 返回 E_INVALIDARG。
-    std::unordered_map<UINT64, ComPtr<ID3D12Resource>> m_ViewResources;
+    // 【非持有】此前存的是 ComPtr，会强引用住每张纹理 —— 引擎会创建大量
+    // 1920x1080 的 HDR 目标（实测 12 秒 40 张），这既造成内存泄漏，
+    // 又让句柄映射指向早已不应该存在的实例。改为裸指针，纹理析构时注销。
+    std::unordered_map<UINT64, ID3D12Resource*> m_ViewResources;
     mutable std::unordered_map<ID3D12Resource*, D3D12_RESOURCE_STATES> m_ResStates;
 
     D3D12SwapChain*              m_SwapChainPtr = nullptr;

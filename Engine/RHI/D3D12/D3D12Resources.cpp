@@ -350,9 +350,17 @@ D3D12_INDEX_BUFFER_VIEW D3D12Buffer::GetIbv() const {
 // ===========================================================================
 //  Texture
 // ===========================================================================
-D3D12Texture::~D3D12Texture() = default;
+D3D12Texture::~D3D12Texture() {
+    // 注销视图句柄映射，避免地址被复用时查到错误的资源
+    if (m_OwnerDevice) {
+        if (m_Rtv.ptr) m_OwnerDevice->UnregisterViewResource(static_cast<UINT64>(m_Rtv.ptr));
+        if (m_Dsv.ptr) m_OwnerDevice->UnregisterViewResource(static_cast<UINT64>(m_Dsv.ptr));
+        for (auto& s : m_Srvs) if (s.ptr) m_OwnerDevice->UnregisterViewResource(static_cast<UINT64>(s.ptr));
+    }
+}
 
 bool D3D12Texture::Initialize(D3D12Device* device, const TextureDesc& desc) {
+    m_OwnerDevice = device;
     if (!device || !device->GetDevice()) {
         HE_CORE_ERROR("D3D12Texture: 设备为空");
         return false;
@@ -476,6 +484,8 @@ bool D3D12Texture::Initialize(D3D12Device* device, const TextureDesc& desc) {
     // 一个状态不对的资源而让驱动静默卡死。
     device->SetResourceState(m_Resource.Get(), initState);
 
+    if (m_Width >= 1920) HE_CORE_ERROR("[TEX-BIG] res={} {}x{} dxgi={} depth={} rtvPtr={}",
+        (void*)m_Resource.Get(), m_Width, m_Height, (u32)rd.Format, m_IsDepth ? 1 : 0, (void*)m_Rtv.ptr);
     HE_CORE_INFO("D3D12Texture: 创建 {}x{} mip={} layers={} fmt={}{}",
                  m_Width, m_Height, m_MipLevels, m_ArrayLayers, static_cast<u32>(fmt),
                  m_IsDepth ? " (深度)" : "");

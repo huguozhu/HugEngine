@@ -504,9 +504,17 @@ void D3D12Device::RegisterViewResource(UINT64 handle, ID3D12Resource* res) {
         m_ResStates[res] = D3D12_RESOURCE_STATE_COMMON;
 }
 
+void D3D12Device::UnregisterViewResource(UINT64 handle) {
+    if (!handle) return;
+    const auto it = m_ViewResources.find(handle);
+    if (it == m_ViewResources.end()) return;
+    m_ResStates.erase(it->second);
+    m_ViewResources.erase(it);
+}
+
 ID3D12Resource* D3D12Device::FindViewResource(UINT64 handle) const {
     const auto it = m_ViewResources.find(handle);
-    return it == m_ViewResources.end() ? nullptr : it->second.Get();
+    return it == m_ViewResources.end() ? nullptr : it->second;
 }
 
 D3D12_RESOURCE_STATES D3D12Device::GetResourceState(ID3D12Resource* res) const {

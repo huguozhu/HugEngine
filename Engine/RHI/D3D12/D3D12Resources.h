@@ -120,6 +120,7 @@ private:
     u32    m_MipLevels = 1, m_ArrayLayers = 1;
     Format m_Format = Format::RGBA8_UNORM;
     bool   m_IsDepth = false;
+    D3D12Device* m_OwnerDevice = nullptr;   // 析构时注销视图映射用
 };
 
 // ---------------------------------------------------------------------------
