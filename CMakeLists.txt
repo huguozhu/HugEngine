@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.28)
+﻿cmake_minimum_required(VERSION 3.28)
 project(HugEngine
     VERSION 0.1.0
     DESCRIPTION "Modern real-time rendering engine"
@@ -79,6 +79,13 @@ if(MSVC)
     # 链接器必须显式开 /DEBUG，否则不产出可解析的 exe PDB（只剩编译期 PDB 引用）。
     set(CMAKE_EXE_LINKER_FLAGS_RELEASE    "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /DEBUG")
     set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "${CMAKE_SHARED_LINKER_FLAGS_RELEASE} /DEBUG")
+endif()
+
+# 工具链：D3D12 的着色器构建需要 ShaderToDxil（HLSL 补丁 + dxc）。
+# 必须在 add_subdirectory(Engine) 之前定义，否则 Engine/Shader 里的
+# 「if(TARGET ShaderToDxil)」判断为假，DXIL 着色器不会被生成。
+if(WIN32)
+    add_subdirectory(Tools/ShaderToDxil)
 endif()
 
 add_subdirectory(Engine)

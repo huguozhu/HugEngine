@@ -1,4 +1,4 @@
-# Shader — Slang 编译管线 (L3)
+﻿# Shader — Slang 编译管线 (L3)
 # Phase 2: slangc → SPIR-V → embedded C header
 
 add_library(HugEngineShader INTERFACE)
@@ -439,6 +439,77 @@ if(SLANGC)
         list(APPEND SHADER_IDE_SOURCES "${_shader_rel}")
     endforeach()
     list(REMOVE_DUPLICATES SHADER_IDE_SOURCES)
+
+    # ========================================================================
+    #  D3D12：DXIL 字节码（与 SPIR-V 并列生成）
+    #
+    #  链路：slangc -target hlsl  →  ShaderToDxil（补丁 uint8_t/语义/[loop]）
+    #        →  dxc -T <stage>_6_6  →  DXIL  →  *.dxil.h（C++ 字节数组）
+    #
+    #  为什么不直接用 `slangc -target dxil`：Slang 生成的 HLSL 里会出现
+    #  `vector<uint8_t,4>`，dxc 不认识 uint8_t（实测 -D 宏无效，必须文本替换）；
+    #  另外结构体成员没有语义，需要按名字注入 TEXCOORD/SV_Position。
+    # ========================================================================
+    if(WIN32 AND TARGET ShaderToDxil)
+        set(DXIL_OUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated_dxil")
+        set(DXIL_HEADERS "")
+        set(DXIL_FILES "")
+
+        # 每个阶段用哪个入口名，与 SPIR-V 那边保持一致
+        set(_dxil_pairs "")
+        foreach(SRC ${VERT_SLANG})
+            list(APPEND _dxil_pairs "${SRC}|vertexMain|vertex|vs")
+        endforeach()
+        foreach(SRC ${FRAG_SLANG})
+            list(APPEND _dxil_pairs "${SRC}|fragmentMain|fragment|ps")
+        endforeach()
+        foreach(SRC ${COMP_SLANG})
+            list(APPEND _dxil_pairs "${SRC}|main|compute|cs")
+        endforeach()
+
+        foreach(_pair ${_dxil_pairs})
+            string(REPLACE "|" ";" _parts "${_pair}")
+            list(GET _parts 0 SRC)
+            list(GET _parts 1 ENTRY)
+            list(GET _parts 2 SLANG_STAGE)
+            list(GET _parts 3 DXC_STAGE)
+
+            get_filename_component(FNAME ${SRC} NAME)
+            string(REGEX REPLACE "\\.slang$" "" NAME "${FNAME}")
+            string(REPLACE "." "_" SYM "${NAME}")
+
+            set(HLSL "${DXIL_OUT_DIR}/${NAME}.dxil.hlsl")
+            set(DXIL_H "${DXIL_OUT_DIR}/${NAME}.dxil.h")
+
+            # 第一段：slangc → HLSL（中间产物，失败则跳过该 shader）
+            add_custom_command(
+                OUTPUT ${HLSL}
+                COMMAND ${CMAKE_COMMAND} -E make_directory ${DXIL_OUT_DIR}
+                COMMAND ${SLANGC} ${SRC} -target hlsl -entry ${ENTRY} -stage ${SLANG_STAGE}
+                        -I "${SHADER_DIR}" -o ${HLSL} -Wno-39001
+                DEPENDS ${SRC} ${SLANG_INCLUDES}
+                COMMENT "Slang -> HLSL (D3D12): ${NAME}"
+            )
+            # 第二段：ShaderToDxil → .dxil.h
+            add_custom_command(
+                OUTPUT ${DXIL_H}
+                COMMAND $<TARGET_FILE:ShaderToDxil> ${HLSL} ${ENTRY} ${DXC_STAGE} ${DXIL_H} k_${SYM}_dxil
+                DEPENDS ${HLSL} ShaderToDxil
+                COMMENT "HLSL -> DXIL: ${NAME}"
+            )
+            list(APPEND DXIL_HEADERS ${DXIL_H})
+            list(APPEND DXIL_FILES ${DXIL_H})
+        endforeach()
+
+        add_custom_target(CompileShadersDxil ALL
+            DEPENDS ${DXIL_HEADERS}
+        )
+        add_dependencies(HugEngineShader CompileShadersDxil)
+
+        # 让样例能 include 到 *.dxil.h
+        target_include_directories(HugEngineShader INTERFACE ${DXIL_OUT_DIR})
+        message(STATUS "D3D12 shader path: DXIL enabled")
+    endif()
 
     add_custom_target(CompileShaders ALL
         DEPENDS ${SPV_HEADERS}

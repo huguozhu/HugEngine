@@ -1,4 +1,4 @@
-# RHI — Rendering Hardware Interface (L2)
+﻿# RHI — Rendering Hardware Interface (L2)
 # Phase 1 · Weeks 5-8
 
 add_library(HugEngineRHI STATIC)
@@ -99,3 +99,47 @@ if(HUGENGINE_RHI_VULKAN)
 
     message(STATUS "Vulkan backend: ENABLED (${Vulkan_INCLUDE_DIRS})")
 endif()
+
+    # ========================================================================
+    #  D3D12 后端（Windows 专用）
+    #
+    #  与 Vulkan 后端并列：同一份 IRHIDevice/IRHICommandList 接口，
+    #  由 CreateDevice(Backend::D3D12) 选择。全部实现放在 Engine/RHI/D3D12/。
+    # ========================================================================
+    if(WIN32)
+        set(RHI_D3D12_SOURCES
+            D3D12/D3D12Common.h
+            D3D12/D3D12Converters.h
+            D3D12/D3D12Converters.cpp
+            D3D12/D3D12Device.h
+            D3D12/D3D12Device.cpp
+            D3D12/D3D12Resources.h
+            D3D12/D3D12Resources.cpp
+            D3D12/D3D12SwapChain.h
+            D3D12/D3D12SwapChain.cpp
+            D3D12/D3D12CommandList.h
+            D3D12/D3D12CommandList.cpp
+            D3D12/D3D12BindlessHeap.h
+            D3D12/D3D12BindlessHeap.cpp
+        )
+        target_sources(HugEngineRHI PRIVATE ${RHI_D3D12_SOURCES})
+        huge_source_group(${RHI_D3D12_SOURCES})
+
+        # 需要 DXGI / D3D12 的导入库。d3d12.lib 与 dxgi.lib 在 Windows SDK 里。
+        # d3dcompiler 提供 D3DReflect（从 DXIL 反射输入签名与绑定信息）
+        target_link_libraries(HugEngineRHI PUBLIC d3d12 dxgi dxguid)
+
+        # DXC：DXIL 反射（IDxcUtils::CreateReflection）需要 dxcompiler。
+        # 优先用 Vulkan SDK 自带的（与 slangc 使用的同一份，版本匹配）。
+        if(DEFINED ENV{VULKAN_SDK})
+            target_include_directories(HugEngineRHI PRIVATE "$ENV{VULKAN_SDK}/Include/dxc")
+            target_link_directories(HugEngineRHI PRIVATE "$ENV{VULKAN_SDK}/Lib")
+            target_link_libraries(HugEngineRHI PUBLIC dxcompiler)
+            message(STATUS "D3D12 DXIL reflection: dxcompiler from $ENV{VULKAN_SDK}")
+        else()
+            message(WARNING "VULKAN_SDK 未设置 —— DXIL 反射可能失败")
+        endif()
+        target_compile_definitions(HugEngineRHI PUBLIC HE_RHI_D3D12)
+
+        message(STATUS "D3D12 backend: ENABLED")
+    endif()
