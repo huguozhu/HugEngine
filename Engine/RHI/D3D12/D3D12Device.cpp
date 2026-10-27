@@ -742,9 +742,11 @@ void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, Desc
     auto* tex = static_cast<D3D12Texture*>(texture);
     D3D12_CPU_DESCRIPTOR_HANDLE dst = GetSlotCpuHandle(slot);
     D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
-    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    // 立方体贴图（天空盒/IBL）必须用 TEXTURECUBE 维度建 SRV，否则采样恒为 0
+    srv.ViewDimension = (tex->GetArrayLayers() == 6) ? D3D12_SRV_DIMENSION_TEXTURECUBE : D3D12_SRV_DIMENSION_TEXTURE2D;
     srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    srv.Texture2D.MipLevels = tex->GetMipLevels();
+    if (srv.ViewDimension == D3D12_SRV_DIMENSION_TEXTURECUBE) srv.TextureCube.MipLevels = tex->GetMipLevels();
+    else srv.Texture2D.MipLevels = tex->GetMipLevels();
 
     // 【深度纹理必须显式给 SRV 格式】D3D 的 DSV 格式（D32_FLOAT 等）**不是**合法的
     // SRV 格式；用 Format=UNKNOWN 让运行时自己推断时会命中 D32_FLOAT，
