@@ -973,6 +973,13 @@ bool D3D12PipelineState::Initialize(D3D12Device* device, const PipelineStateDesc
         rt.BlendOpAlpha   = ToD3D12BlendOp(desc.colorBlend[i].alphaBlendOp);
         rt.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
     }
+    if (std::getenv("HE_PSO_DUMP")) {
+        HE_CORE_ERROR("[PSO-D] name={} rtv0={} numRT={} dsv={} topoType={} fill={} cull={} depthClip={} frontCCW={}",
+            desc.debugName.c_str(), (u32)pd.RTVFormats[0], pd.NumRenderTargets, (u32)pd.DSVFormat,
+            (int)pd.PrimitiveTopologyType, (int)pd.RasterizerState.FillMode,
+            (int)pd.RasterizerState.CullMode, pd.RasterizerState.DepthClipEnable ? 1 : 0,
+            pd.RasterizerState.FrontCounterClockwise ? 1 : 0);
+    }
     pd.NodeMask = 0;
     pd.CachedPSO = {};
     pd.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
