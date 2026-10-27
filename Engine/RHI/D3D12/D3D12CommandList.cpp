@@ -57,7 +57,14 @@ void D3D12CommandList::Begin() {
         return;
     }
     m_Recording = true;
-    std::printf("[BGN] done\n"); std::fflush(stdout);
+    // 为整帧申请一块推送常量槽位，并清零
+    m_PushGpu = 0;
+    m_PushCpu = nullptr;
+    D3D12_GPU_DESCRIPTOR_HANDLE dummyCbv{};
+    if (m_Device && m_Device->AllocateConstants(m_PushGpu, dummyCbv)) {
+        m_PushCpu = m_Device->GetConstantSlotPtr(m_PushGpu);
+        if (m_PushCpu) std::memset(m_PushCpu, 0, 256);
+    }
 }
 
 void D3D12CommandList::End() {
@@ -391,23 +398,20 @@ void D3D12CommandList::SetPushConstants(u32 offset, u32 size, const void* data) 
     // 常量：从设备的常量缓冲环取一块 256B，写入数据，然后用
     // SetGraphicsRootConstantBufferView 直接绑到 b0（根签名参数 0）。
     // 这样不依赖描述符堆，也不受 cbuffer 寄存器编号影响。
-    D3D12_GPU_VIRTUAL_ADDRESS gpuAddr = 0;
-    D3D12_GPU_DESCRIPTOR_HANDLE unusedCbv{};
-    if (!m_Device->AllocateConstants(gpuAddr, unusedCbv)) return;
-
-    void* dst = m_Device->GetConstantSlotPtr(gpuAddr);
-    if (!dst) return;
-    const u32 copySize = (size > 256u) ? 256u : size;
-    std::memcpy(static_cast<unsigned char*>(dst) + offset, data, copySize);
+    // 复用 Begin() 里申请的整帧槽位：多次调用按 offset 累加（Vulkan 语义）
+    if (m_PushGpu == 0 || !m_PushCpu) return;
+    if (offset >= 256u) return;
+    const u32 copySize = ((offset + size) > 256u) ? (256u - offset) : size;
+    std::memcpy(static_cast<unsigned char*>(m_PushCpu) + offset, data, copySize);
 
     // 参数 0 = b0 的 root CBV；其余 b1..b7 目前也指向同一块（引擎的 push constant
     // 语义里只有一个块，着色器的其他 cbuffer 由 UpdateDescriptorSet 提供的常量缓冲填充）
     if (m_IsComputePipeline) {
         // 计算管线的根签名是独立的一套，绑定计算侧时必须走 Compute 版本；
         // 图形管线下调用 Compute 版本的任何 Set*Root* 都会让 D3D12 静默卡死。
-        m_List->SetComputeRootConstantBufferView(0, gpuAddr);
+        m_List->SetComputeRootConstantBufferView(0, m_PushGpu);
     } else {
-        m_List->SetGraphicsRootConstantBufferView(0, gpuAddr);
+        m_List->SetGraphicsRootConstantBufferView(0, m_PushGpu);
     }
 }
 

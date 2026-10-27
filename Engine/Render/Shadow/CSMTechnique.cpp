@@ -198,7 +198,9 @@ void CSMTechnique::RenderCascade(rhi::IRHICommandList* cmd,u32 ci,const FrameSce
     cmd->SetPipeline(ResP(m_ShadowPSO));
     cmd->SetFullscreenViewport(static_cast<u32>(m_ShadowMapSize), static_cast<u32>(m_ShadowMapSize));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame,m_ExternalDescSet);
-    auto*objData=static_cast<GPUObjectData*>(m_ExternalObjectBuffer->Map());
+ std::printf("[CSMB] after BindDescriptorSet\n"); std::fflush(stdout);
+    std::printf("[CSMP] before Map buf=%p\n",(void*)m_ExternalObjectBuffer); std::fflush(stdout);
+ auto*objData=static_cast<GPUObjectData*>(m_ExternalObjectBuffer->Map());
     u32 oi=0;
     // 【第③段第 2 批】遍历**快照**里的阴影投射者（顺序 = 旧的 Mesh→Cube→Sphere 相对顺序），
     // 顶点/索引缓冲与索引数从注册表按 meshIndex 取。

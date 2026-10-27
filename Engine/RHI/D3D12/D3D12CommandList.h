@@ -132,6 +132,11 @@ private:
     bool m_Recording = false;
     /// 当前管线是否为计算管线（决定绑定哪一套根签名与描述符表）
     bool m_IsComputePipeline = false;
+    /// 本帧的推送常量槽位。Vulkan 的 vkCmdPushConstants 语义是「同一块数据、
+    /// 多次调用按 offset 累加」，所以整帧必须复用**同一个**槽位；
+    /// 每调用一次就新开槽位会让先前的写入丢失（02.Cube 因此黑屏）。
+    D3D12_GPU_VIRTUAL_ADDRESS m_PushGpu{};
+    void*                     m_PushCpu = nullptr;
     /// 诊断用：记录本帧是否绑过 RTV、以及当前视口
     bool            m_HasRtv = false;
     D3D12_VIEWPORT  m_LastVp{};

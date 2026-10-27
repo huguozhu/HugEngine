@@ -865,6 +865,47 @@ bool D3D12PipelineState::Initialize(D3D12Device* device, const PipelineStateDesc
         HE_CORE_WARN("D3D12PipelineState: 按 HE_D3D12_NO_INPUT_LAYOUT 清空输入布局（实验）");
     }
 
+    // 【按引擎的顶点结构重排输入属性】反射出来的顺序是**着色器里的声明顺序**
+    //（PBR 是 joints/weights/position/normal/uv，offset 一路累到 72 字节），
+    // 而引擎的顶点缓冲是 position/normal/uv/tangent（48 字节步长）。
+    // 直接用声明顺序会让位置读到错误的偏移 ⇒ 几何跑到屏幕外 ⇒ 画面全黑。
+    // 这里按语义优先级重排并重算 offset，与引擎的 Vertex 结构对齐。
+    if (!elems.empty()) {
+        auto prio = [](const std::string& n) -> int {
+            if (n.find("POSITION") != std::string::npos) return 0;
+            if (n.find("NORMAL") != std::string::npos)   return 1;
+            if (n.find("TEXCOORD") != std::string::npos) return 2;
+            if (n.find("TANGENT") != std::string::npos)  return 3;
+            if (n.find("COLOR") != std::string::npos)    return 4;
+            return 5;   // 其余（蒙皮等）排在最后
+        };
+        std::sort(elems.begin(), elems.end(),
+                  [&](const D3D12_INPUT_ELEMENT_DESC& x, const D3D12_INPUT_ELEMENT_DESC& y) {
+                      const int px = prio(x.SemanticName), py = prio(y.SemanticName);
+                      if (px != py) return px < py;
+                      return x.SemanticIndex < y.SemanticIndex;
+                  });
+        u32 cursor = 0;
+        for (auto& e : elems) {
+            e.AlignedByteOffset = cursor;
+            u32 comp = 1;
+            switch (e.Format) {
+                case DXGI_FORMAT_R32G32B32A32_FLOAT: case DXGI_FORMAT_R32G32B32A32_UINT:
+                case DXGI_FORMAT_R32G32B32A32_SINT:  comp = 4; break;
+                case DXGI_FORMAT_R32G32B32_FLOAT:    case DXGI_FORMAT_R32G32B32_UINT:
+                case DXGI_FORMAT_R32G32B32_SINT:     comp = 3; break;
+                case DXGI_FORMAT_R32G32_FLOAT:       case DXGI_FORMAT_R32G32_UINT:
+                case DXGI_FORMAT_R32G32_SINT:        comp = 2; break;
+                default: comp = 1; break;
+            }
+            cursor += comp * 4;
+        }
+        // 引擎明确给了步长就信引擎；否则用重排后的累计值
+        if (desc.vertexLayout.stride == 0) m_VertexStride = cursor;
+        HE_CORE_INFO("D3D12PipelineState: 输入布局按引擎顶点结构重排，共 {} 个元素，步长 {}",
+                     static_cast<u32>(elems.size()), static_cast<u32>(cursor));
+    }
+
     pd.InputLayout.pInputElementDescs = elems.empty() ? nullptr : elems.data();
     pd.InputLayout.NumElements = static_cast<UINT>(elems.size());
 
