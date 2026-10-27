@@ -275,24 +275,30 @@ void D3D12CommandList::SetFullscreenViewport(u32 width, u32 height) {
 }
 
 void D3D12CommandList::BindDescriptorSet(u32 setIndex, DescriptorSetHandle set) {
-    if (!m_List || !m_Device || set == kInvalidSet || setIndex >= 4) return;
-    // 根签名里 set N 对应参数 1+N（参数 0 是 root constants）
+    if (!m_List || !m_Device || set == kInvalidSet || setIndex >= 8) return;
     if (!m_Device->EnsureDescriptorHeaps()) return;
-    ID3D12DescriptorHeap* heaps[2] = { m_Device->GetCbvSrvUavHeap(), m_Device->GetSamplerHeap() };
+
+    ID3D12DescriptorHeap* heaps[2] = { m_Device->GetCbvSrvUavHeap(), m_Device->GetSetSamplerHeap() };
     if (!heaps[0] || !heaps[1]) return;
     m_List->SetDescriptorHeaps(2, heaps);
 
-    // 根签名：0 = root constants，1 = SRV 表（t0..t63），2 = Sampler 表（s0..s15）
     const u32 baseSlot = m_Device->GetSetBaseSlot(set);
-    if (baseSlot != 0xFFFFFFFFu) {
-        const D3D12_GPU_DESCRIPTOR_HANDLE h = m_Device->GetSetGpuHandle(baseSlot);
-        m_List->SetGraphicsRootDescriptorTable(8, h);
-        m_List->SetComputeRootDescriptorTable(8, h);
-    }
-    // 采样器表：整个堆从 0 开始（槽 0 是默认采样器）
-    const D3D12_GPU_DESCRIPTOR_HANDLE samp = m_Device->GetDefaultSamplerGpu();
-    m_List->SetGraphicsRootDescriptorTable(9, samp);
-    m_List->SetComputeRootDescriptorTable(9, samp);
+    if (baseSlot == 0xFFFFFFFFu) return;
+
+    // 根签名：0..7 = root CBV，8..11 = SRV 表(space0..3)，12..15 = Sampler 表(space0..3)
+    const D3D12_GPU_DESCRIPTOR_HANDLE srv  = m_Device->GetSetGpuHandle(baseSlot);
+    const D3D12_GPU_DESCRIPTOR_HANDLE smp  = m_Device->GetSetSamplerGpuHandle(baseSlot);
+
+    // 根签名：0..7 CBV，8..11 SRV，12..15 UAV，16..19 Sampler
+    const u32 uavSlot  = baseSlot + m_Device->GetSetUavOffset(set);
+    const D3D12_GPU_DESCRIPTOR_HANDLE uav = m_Device->GetSetGpuHandle(uavSlot);
+
+    m_List->SetGraphicsRootDescriptorTable(8  + setIndex, srv);
+    m_List->SetGraphicsRootDescriptorTable(12 + setIndex, uav);
+    m_List->SetGraphicsRootDescriptorTable(16 + setIndex, smp);
+    m_List->SetComputeRootDescriptorTable(8  + setIndex, srv);
+    m_List->SetComputeRootDescriptorTable(12 + setIndex, uav);
+    m_List->SetComputeRootDescriptorTable(16 + setIndex, smp);
 }
 
 void D3D12CommandList::SetPushConstants(u32 offset, u32 size, const void* data) {

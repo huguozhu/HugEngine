@@ -71,7 +71,10 @@ bool D3D12Buffer::Initialize(D3D12Device* device, const BufferDesc& desc) {
         heapType = D3D12_HEAP_TYPE_UPLOAD;
     }
     // UAV 缓冲需要一份等大的 UPLOAD 暂存来承载 CPU 写入
-    const bool needStaging = (isStorage && desc.cpuAccess);
+    // UAV 缓冲一律配一份 UPLOAD 暂存：D3D12 的 DEFAULT 堆资源**不能** Map，
+    // 而引擎对所有 SSBO 都会调用 Map()/Unmap() 写数据（不管有没有置 cpuAccess）
+    // ⇒ 没有暂存就会在 Map 时失败（实测 02.Cube 初始化最后一步卡在这里）。
+    const bool needStaging = isStorage;
 
     D3D12_RESOURCE_DESC rd{};
     rd.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
@@ -502,21 +505,38 @@ bool D3D12PipelineState::Initialize(D3D12Device* device, const PipelineStateDesc
     //      s0..s15  : Sampler
     //      b0       : root constants（push constant）
     //  根签名只要少声明一类，PSO 就会被 D3D12 拒绝（E_INVALIDARG）。
-    // 参数布局（顺序很关键，CommandList 里按编号绑定）：
-    //   0..7 : 8 个独立 root CBV（b0..b7）—— 常量缓冲
-    //   8    : SRV 描述符表（t0..t127）
-    //   9    : Sampler 描述符表（s0..s127）
+    // ------------------------------------------------------------------
+    //  参数布局（顺序很关键，CommandList 按编号绑定）
     //
-    // 【为什么每个寄存器单独一个 root CBV】D3D12 的 root CBV 直接携带 GPU 地址，
-    // 不需要描述符堆；而 CBV **描述符表**要求表内每个槽都由 CreateConstantBufferView
-    // 填好且与着色器的寄存器一一对应，稍有错位就会让 PSO 校验失败
-    //（实测所有带 cbuffer 的着色器都返回 E_INVALIDARG，无 cbuffer 的 01.Triangle 正常）。
-    // 用独立 root CBV 后，绑定只需 SetGraphicsRootConstantBufferView。
+    //    0 .. 7   : 8 个 root CBV（b0..b7，space0）
+    //    8 .. 11  : SRV 表，space 0..3
+    //   12 .. 15  : UAV 表，space 0..3
+    //   16 .. 19  : Sampler 表，space 0..3
+    //
+    //  【为什么是 4 个 space】引擎的描述符集索引被 Slang/DXC 翻译成
+    //  `register(tN, space<setIndex>)`（实测 PBR.vert 里
+    //   u_InstanceTransforms 在 space1、u_VisibleInstanceIndices 在 space2、
+    //   u_BoneMatrices 在 space3）。只声明 space0 会被拒绝：
+    //  "Root Signature doesn't match Vertex Shader: Shader SRV descriptor range
+    //   (... RegisterSpace=2) is not fully bound in root signature"。
+    //
+    //  【为什么还要 UAV 表】计算着色器往 SSBO/RWTexture 写数据，用的是
+    //  `register(uN, spaceN)`；缺 UAV 范围会让计算 PSO 直接 E_INVALIDARG。
+    //
+    //  表都用**无界**（NumDescriptors = UINT_MAX）：着色器里既有定长数组
+    //  （u_Textures[64]）也有无界数组（u_InstanceTransforms[]）。
+    // ------------------------------------------------------------------
     static constexpr u32 kRootCbvCount = 8;
+    // 【space 数量】实测引擎最多用到 space5（GBuffer 用到 space5），
+    // 取 8 留余量。注意根签名的参数总数上限是 64 DWORD：
+    // 8 个 root CBV + 3 类表 × 8 = 32，安全。
+    static constexpr u32 kSpaceCount   = 8;
+    static constexpr u32 kTableCount   = kSpaceCount * 3;   // SRV + UAV + Sampler
 
-    D3D12_ROOT_PARAMETER  params[2 + kRootCbvCount]{};
-    D3D12_DESCRIPTOR_RANGE ranges[2]{};
+    D3D12_ROOT_PARAMETER  params[kRootCbvCount + kTableCount]{};
+    D3D12_DESCRIPTOR_RANGE ranges[kTableCount]{};
 
+    // 0..7：root CBV
     for (u32 i = 0; i < kRootCbvCount; ++i) {
         params[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
         params[i].Descriptor.ShaderRegister = i;   // b0..b7
@@ -524,30 +544,33 @@ bool D3D12PipelineState::Initialize(D3D12Device* device, const PipelineStateDesc
         params[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     }
 
-    // 8: SRV 表 t0..t127
-    ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    ranges[0].NumDescriptors = 128;
-    ranges[0].BaseShaderRegister = 0;
-    ranges[0].RegisterSpace = 0;
-    ranges[0].OffsetInDescriptorsFromTableStart = 0;
-    params[kRootCbvCount].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    params[kRootCbvCount].DescriptorTable.NumDescriptorRanges = 1;
-    params[kRootCbvCount].DescriptorTable.pDescriptorRanges = &ranges[0];
-    params[kRootCbvCount].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    // 三组表：SRV(0..3) / UAV(4..7) / SAMPLER(8..11)
+    struct TableSpec { D3D12_DESCRIPTOR_RANGE_TYPE type; u32 rangeBase; u32 paramBase; };
+    const TableSpec tables[3] = {
+        { D3D12_DESCRIPTOR_RANGE_TYPE_SRV,     0,                  kRootCbvCount                    },
+        { D3D12_DESCRIPTOR_RANGE_TYPE_UAV,     kSpaceCount,        kRootCbvCount + kSpaceCount      },
+        { D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, kSpaceCount * 2,    kRootCbvCount + kSpaceCount * 2  },
+    };
 
-    // 9: Sampler 表 s0..s127
-    ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
-    ranges[1].NumDescriptors = 128;
-    ranges[1].BaseShaderRegister = 0;
-    ranges[1].RegisterSpace = 0;
-    ranges[1].OffsetInDescriptorsFromTableStart = 0;
-    params[kRootCbvCount + 1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    params[kRootCbvCount + 1].DescriptorTable.NumDescriptorRanges = 1;
-    params[kRootCbvCount + 1].DescriptorTable.pDescriptorRanges = &ranges[1];
-    params[kRootCbvCount + 1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    for (const auto& spec : tables) {
+        for (u32 s = 0; s < kSpaceCount; ++s) {
+            const u32 ri = spec.rangeBase + s;
+            ranges[ri].RangeType  = spec.type;
+            ranges[ri].NumDescriptors = UINT_MAX;   // 无界
+            ranges[ri].BaseShaderRegister = 0;
+            ranges[ri].RegisterSpace = s;           // 描述符集索引 → 寄存器空间
+            ranges[ri].OffsetInDescriptorsFromTableStart = 0;
+
+            const u32 pi = spec.paramBase + s;
+            params[pi].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            params[pi].DescriptorTable.NumDescriptorRanges = 1;
+            params[pi].DescriptorTable.pDescriptorRanges = &ranges[ri];
+            params[pi].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        }
+    }
 
     D3D12_ROOT_SIGNATURE_DESC rsd{};
-    rsd.NumParameters = 2 + kRootCbvCount;
+    rsd.NumParameters = kRootCbvCount + kTableCount;
     rsd.pParameters = params;
     rsd.NumStaticSamplers = 0;
     rsd.pStaticSamplers = nullptr;
@@ -568,6 +591,38 @@ bool D3D12PipelineState::Initialize(D3D12Device* device, const PipelineStateDesc
                                                  IID_PPV_ARGS(&m_RootSig)),
                         "CreateRootSignature")) {
         return false;
+    }
+
+    // ---- 计算管线 ----
+    //
+    // D3D12 的计算 PSO 与图形 PSO 是**两套完全不同的描述结构**，
+    // 用 CreateGraphicsPipelineState 建计算管线会直接返回 E_INVALIDARG。
+    // 之前只实现了图形分支，导致所有 compute pass（GPUCull / DDGI / 粒子…）
+    // 的 PSO 都失败。
+    if (desc.bindPoint == PipelineBindPoint::Compute ||
+        (desc.computeShader && !desc.computeShader->dxil.empty())) {
+        const ShaderBytecode* cs = desc.computeShader;
+        if (!cs || cs->dxil.empty()) {
+            HE_CORE_ERROR("D3D12PipelineState: 计算管线缺少 DXIL（name={}）", desc.debugName.c_str());
+            return false;
+        }
+        D3D12_COMPUTE_PIPELINE_STATE_DESC cd{};
+        cd.pRootSignature = m_RootSig.Get();
+        cd.CS = { cs->dxil.data(), cs->dxil.size() };
+        cd.NodeMask = 0;
+        cd.CachedPSO = {};
+        cd.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
+
+        HRESULT chr = dev->CreateComputePipelineState(&cd, IID_PPV_ARGS(&m_Pso));
+        if (FAILED(chr)) {
+            HE_CORE_ERROR("D3D12PipelineState: 计算 PSO 创建失败 name={} hr=0x{:08x} CS={}B",
+                          desc.debugName.c_str(), static_cast<u32>(chr),
+                          static_cast<u32>(cd.CS.BytecodeLength));
+            return false;
+        }
+        HE_CORE_INFO("D3D12PipelineState: 计算 PSO 创建成功 name={} CS={}B",
+                     desc.debugName.c_str(), static_cast<u32>(cd.CS.BytecodeLength));
+        return true;
     }
 
     // ---- PSO ----

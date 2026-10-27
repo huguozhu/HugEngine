@@ -55,7 +55,13 @@ public:
     //    · 每个 DescriptorSet 占一段连续槽位（槽位下标 = 堆基址 + binding）
     //    · BindDescriptorSet(setIndex, set) 把这段槽位作为根签名的描述符表绑定
     //  这样引擎侧「按 binding 号更新/绑定」的语义在 D3D12 上得以保留。
-    static constexpr u32 kDescriptorHeapCapacity = 4096;
+    // 【容量】引擎的部分描述符集 layout 里有很大的 binding 号（bindless 数组，
+    // 单个 layout 就要 4000+ 槽），4096 会很快耗尽。D3D12 的 shader-visible
+    // CBV_SRV_UAV 堆上限是 1,000,000 描述符，这里取 65536（约 2 MB）。
+    static constexpr u32 kDescriptorHeapCapacity = 65536;
+    /// shader-visible 的**采样器**堆上限是 4080（D3D12 硬限制），
+    /// 用 4096 会报 "NumDescriptors 4096, but the limit ... is 4080"。
+    static constexpr u32 kSetSamplerCapacity = 2048;
 
     DescriptorSetLayoutHandle CreateDescriptorSetLayout(const DescriptorSetLayoutDesc& desc) override;
     DescriptorSetHandle       AllocateDescriptorSet(DescriptorSetLayoutHandle layout) override;
@@ -80,10 +86,15 @@ public:
     D3D12_GPU_DESCRIPTOR_HANDLE      GetCbvHeapGpuStart() const;
     void*                            GetConstantSlotPtr(D3D12_GPU_VIRTUAL_ADDRESS gpuAddr);
     D3D12_GPU_DESCRIPTOR_HANDLE      GetDefaultSamplerGpu() const;
+    /// 描述符集采样器堆（槽位与 CBV_SRV_UAV 堆一致）
+    ID3D12DescriptorHeap*            GetSetSamplerHeap() const { return m_SetSamplerHeap.Get(); }
+    D3D12_GPU_DESCRIPTOR_HANDLE      GetSetSamplerGpuHandle(u32 slot) const;
     D3D12_GPU_DESCRIPTOR_HANDLE      GetSetGpuHandle(u32 slot) const;
     D3D12_CPU_DESCRIPTOR_HANDLE      GetSlotCpuHandle(u32 slot) const;
     /// 某个描述符集的堆内起始槽位（0xFFFFFFFF 表示无效句柄）
     u32                              GetSetBaseSlot(DescriptorSetHandle set) const;
+    /// UAV 区域相对 baseSlot 的偏移（= 该 set 的 slotCount）
+    u32                              GetSetUavOffset(DescriptorSetHandle set) const;
 
     void* CreateTextureMipStorageView(IRHITexture*, u32) override { return nullptr; }
     void* CreateTextureMipStorageView(IRHITexture*, u32, u32) override { return nullptr; }
@@ -193,6 +204,12 @@ private:
     /// 缺一个就会让 CreateGraphicsPipelineState 返回 E_INVALIDARG。
     ComPtr<ID3D12DescriptorHeap> m_SamplerHeap;
 
+    /// 描述符集的**采样器**堆：与 CBV_SRV_UAV 堆使用**相同的槽位编号**，
+    /// 这样 set 的 baseSlot 在两个堆里都指向同一组索引。
+    /// 必须单独建堆，因为 D3D12 的 SRV 堆放不了采样器。
+    ComPtr<ID3D12DescriptorHeap> m_SetSamplerHeap;
+    UINT                         m_SetSamplerSize = 0;
+
     // ---- 常量缓冲环（替代 root constants）----
     //
     //  【为什么不能只用 root constants】着色器里的 cbuffer 是**多个**
@@ -220,7 +237,9 @@ private:
     std::vector<D3D12SetLayout> m_SetLayouts;      // 1-based 句柄
 
     struct D3D12Set {
-        u32 baseSlot = 0;
+        u32 baseSlot = 0;   // SRV/CBV 区域起点
+        u32 uavBase  = 0;   // UAV 区域起点（= baseSlot + slotCount）
+        u32 slotCount = 0;
         u32 layout   = 0;
     };
     std::vector<D3D12Set> m_DescriptorSets;        // 1-based 句柄

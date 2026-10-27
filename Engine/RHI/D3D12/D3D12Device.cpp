@@ -36,28 +36,28 @@ D3D12Device::~D3D12Device() {
 }
 
 bool D3D12Device::CreateDebugLayer() {
-#if defined(HE_DEBUG)
-    // 【可用性开关】调试层在部分驱动/环境下会让 Draw 调用变得极慢甚至卡住
-    //（GPU-based validation 与 shader 补丁叠加时尤其明显）。
-    // 设 HE_D3D12_NO_DEBUG_LAYER=1 可完全跳过调试层，用于确认"是调试层的问题
-    // 还是我们自己的问题"。
+    // 【重要】本工程并没有定义 HE_DEBUG 宏（全局搜不到），所以此前这段代码
+    // 永远编译不进去 ⇒ 调试层从未启用 ⇒ PSO 创建失败时拿不到任何诊断信息。
+    // 改成**环境变量按需启用**：
+    //   HE_D3D12_DEBUG_LAYER=1  → 打开调试层（并保留全部消息，不做过滤）
+    //   HE_D3D12_GPU_VALIDATION=1 → 额外打开 GPU 端验证（很慢，只在需要时用）
+    static const bool s_wantDebug = (std::getenv("HE_D3D12_DEBUG_LAYER") != nullptr);
+    if (!s_wantDebug) return true;
     if (std::getenv("HE_D3D12_NO_DEBUG_LAYER")) {
         HE_CORE_INFO("[D3D12] 按 HE_D3D12_NO_DEBUG_LAYER 跳过调试层");
         return true;
     }
-    // Debug 构建下打开调试层：能直接看到资源状态错误、描述符越界等
+
     if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&m_Debug)))) {
         m_Debug->EnableDebugLayer();
-        // GPU 端验证（更严格，但会拖慢；阶段 0 先开，问题定位完再关）
         ComPtr<ID3D12Debug1> dbg1;
         if (SUCCEEDED(m_Debug.As(&dbg1))) {
-            dbg1->SetEnableGPUBasedValidation(FALSE);
+            dbg1->SetEnableGPUBasedValidation(std::getenv("HE_D3D12_GPU_VALIDATION") ? TRUE : FALSE);
         }
         HE_CORE_INFO("[D3D12] 调试层已启用");
     } else {
-        HE_CORE_WARN("[D3D12] 调试层不可用（未安装 Graphics Tools？）");
+        HE_CORE_WARN("[D3D12] 调试层不可用（需要 Graphics Tools 可选功能）");
     }
-#endif
     return true;
 }
 
@@ -107,19 +107,9 @@ bool D3D12Device::CreateDeviceAndQueue() {
 
     // 调试消息队列（只记录 ERROR 级，避免刷屏）
     if (SUCCEEDED(m_Device->QueryInterface(IID_PPV_ARGS(&m_InfoQueue)))) {
-        // 【注意 DenyList 的语义】早先把 ERROR 放进 DenyList，等于**屏蔽所有错误**，
-        // 导致 PSO 创建失败时拿不到任何 D3D12 诊断信息（排查被拖了很久）。
-        // 正确做法：DenyList 只放 INFO/MESSAGE 这类噪声级，ERROR/CORRUPTION 必须保留。
-        D3D12_MESSAGE_SEVERITY denials[] = {
-            D3D12_MESSAGE_SEVERITY_INFO,
-            D3D12_MESSAGE_SEVERITY_MESSAGE,
-        };
-        D3D12_INFO_QUEUE_FILTER filter{};
-        filter.DenyList.NumSeverities = 2;
-        filter.DenyList.pSeverityList = denials;
-        filter.DenyList.NumIDs = 0;
-        filter.DenyList.pIDList = nullptr;
-        m_InfoQueue->PushStorageFilter(&filter);
+        // 不做 Severity 过滤：PSO 校验失败的原因常常落在 WARNING/INFO 里，
+        // 过滤掉就查不到（此前把 ERROR 放进 DenyList，等于屏蔽了全部错误）。
+        HE_CORE_INFO("[D3D12] InfoQueue 已接入（不过滤消息）");
         // 【不要设断点】SetBreakOnSeverity(CORRUPTION, TRUE) 在没有调试器附加时
         // 会让进程**永久等待**（表现为 CPU 0%、窗口无响应、日志停在某个 API 调用上）。
         // 实测它让 01.Triangle 卡死在第一个 DrawInstanced 里。
@@ -455,7 +445,45 @@ bool D3D12Device::EnsureDescriptorHeaps() {
         }
         HE_CORE_INFO("D3D12Device: SAMPLER 堆就绪（128 槽全部填充为默认线性采样器）");
     }
+
+    // 描述符集用的采样器堆：与 CBV_SRV_UAV 堆同容量、同槽位编号。
+    // 每个槽先填默认采样器 —— 未绑定采样器的槽也必须是**有效描述符**，
+    // 否则着色器的采样器数组会让 PSO 校验失败。
+    if (!m_SetSamplerHeap) {
+        D3D12_DESCRIPTOR_HEAP_DESC hd{};
+        hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
+        hd.NumDescriptors = kSetSamplerCapacity;   // 采样器堆上限 4080
+        hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        if (FAILED(m_Device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_SetSamplerHeap)))) {
+            HE_CORE_ERROR("D3D12Device: 创建描述符集 SAMPLER 堆失败");
+            return false;
+        }
+        m_SetSamplerSize = m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+
+        D3D12_SAMPLER_DESC sd{};
+        sd.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+        sd.AddressU = sd.AddressV = sd.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+        sd.MaxAnisotropy = 1;
+        sd.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+        sd.MinLOD = 0.0f;
+        sd.MaxLOD = D3D12_FLOAT32_MAX;
+
+        D3D12_CPU_DESCRIPTOR_HANDLE h = m_SetSamplerHeap->GetCPUDescriptorHandleForHeapStart();
+        for (u32 i = 0; i < kSetSamplerCapacity; ++i) {
+            m_Device->CreateSampler(&sd, h);
+            h.ptr += m_SetSamplerSize;
+        }
+        HE_CORE_INFO("D3D12Device: 描述符集 SAMPLER 堆就绪（{} 槽）", kSetSamplerCapacity);
+    }
     return true;
+}
+
+D3D12_GPU_DESCRIPTOR_HANDLE D3D12Device::GetSetSamplerGpuHandle(u32 slot) const {
+    D3D12_GPU_DESCRIPTOR_HANDLE h{};
+    if (!m_SetSamplerHeap) return h;
+    h = m_SetSamplerHeap->GetGPUDescriptorHandleForHeapStart();
+    h.ptr += static_cast<UINT64>(slot) * m_SetSamplerSize;
+    return h;
 }
 
 D3D12_GPU_DESCRIPTOR_HANDLE D3D12Device::GetDefaultSamplerGpu() const {
@@ -536,6 +564,11 @@ D3D12_GPU_DESCRIPTOR_HANDLE D3D12Device::GetCbvHeapGpuStart() const {
 
 ID3D12DescriptorHeap* D3D12Device::GetCbvHeap() const { return m_CbvHeap.Get(); }
 
+u32 D3D12Device::GetSetUavOffset(DescriptorSetHandle set) const {
+    if (set == kInvalidSet || set > m_DescriptorSets.size()) return 0;
+    return m_DescriptorSets[static_cast<size_t>(set - 1)].slotCount;
+}
+
 DescriptorSetLayoutHandle D3D12Device::CreateDescriptorSetLayout(const DescriptorSetLayoutDesc& desc) {
     D3D12SetLayout layout;
     layout.bindings = desc.bindings;
@@ -556,7 +589,9 @@ void D3D12Device::DestroyDescriptorSetLayout(DescriptorSetLayoutHandle layout) {
 DescriptorSetHandle D3D12Device::AllocateDescriptorSet(DescriptorSetLayoutHandle layout) {
     if (layout == kInvalidLayout || layout > m_SetLayouts.size()) return {};
     u32 li = static_cast<u32>(layout - 1);
-    const u32 need = m_SetLayouts[li].slotCount ? m_SetLayouts[li].slotCount : 8;
+    const u32 perSet = m_SetLayouts[li].slotCount ? m_SetLayouts[li].slotCount : 8;
+    // 每个 set 要两块区域：前面放 SRV/CBV，后面放 UAV（同一张 CBV_SRV_UAV 堆）
+    const u32 need = perSet * 2;
 
     // 两个 shader-visible 堆（SRV + SAMPLER）都必须在绑定前就绪
     if (!EnsureDescriptorHeaps()) return {};
@@ -567,8 +602,10 @@ DescriptorSetHandle D3D12Device::AllocateDescriptorSet(DescriptorSetLayoutHandle
         return {};
     }
     D3D12Set s;
-    s.baseSlot = m_NextFreeSlot;
-    s.layout   = li;
+    s.baseSlot  = m_NextFreeSlot;
+    s.uavBase   = m_NextFreeSlot + perSet;
+    s.slotCount = perSet;
+    s.layout    = li;
     m_NextFreeSlot += need;
     m_DescriptorSets.push_back(s);
 
@@ -578,12 +615,22 @@ DescriptorSetHandle D3D12Device::AllocateDescriptorSet(DescriptorSetLayoutHandle
 // ---- UpdateDescriptorSet：把资源写进 set 对应的堆槽位 ----
 static D3D12_SRV_DIMENSION SrvDimFor(DescriptorType) { return D3D12_SRV_DIMENSION_BUFFER; }
 
+// ---------------------------------------------------------------------------
+//  把资源写进描述符集对应的堆槽位
+//
+//  【关键】引擎用 `BindDescriptorSet(setIndex, set)` 的 setIndex 表示描述符集，
+//  而 Slang/DXC 把它翻译成 HLSL 的 `register(tN, space<setIndex>)`。
+//  因此每个 set 对应一个**寄存器空间**，根签名必须为每个 space 各声明一张表。
+//  另外采样器必须写进独立的 SAMPLER 堆（CBV_SRV_UAV 堆放不下）。
+// ---------------------------------------------------------------------------
 void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, DescriptorType type,
                                       IRHIBuffer* buffer) {
     if (set == kInvalidSet || set > m_DescriptorSets.size() || !buffer) return;
+    if (!EnsureDescriptorHeaps()) return;
+
     const auto& s = m_DescriptorSets[static_cast<size_t>(set - 1)];
     auto* b = static_cast<D3D12Buffer*>(buffer);
-    if (!b->GetResource()) return;
+    if (!b || !b->GetResource()) return;
 
     D3D12_CPU_DESCRIPTOR_HANDLE dst = GetSlotCpuHandle(s.baseSlot + binding);
     const u64 size = b->GetSize() ? b->GetSize() : 256;
@@ -603,32 +650,92 @@ void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, Desc
         srv.Buffer.StructureByteStride = static_cast<UINT>(b->GetStride() ? b->GetStride() : 4);
         srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
         m_Device->CreateShaderResourceView(b->GetResource(), &srv, dst);
+
+        // 【同时写一份 UAV】计算着色器要写同一个 SSBO（引擎用 StorageBuffer
+        // 表示只读/读写两用），D3D12 的 UAV 与 SRV 是两种描述符，
+        // 必须分别放在各自的区域里（根签名也各有表）。
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+        uav.Format = DXGI_FORMAT_UNKNOWN;
+        uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        uav.Buffer.FirstElement = 0;
+        uav.Buffer.NumElements  = static_cast<UINT>(size / 4);
+        uav.Buffer.StructureByteStride = static_cast<UINT>(b->GetStride() ? b->GetStride() : 4);
+        uav.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_NONE;
+        D3D12_CPU_DESCRIPTOR_HANDLE uavDst = GetSlotCpuHandle(s.uavBase + binding);
+        m_Device->CreateUnorderedAccessView(b->GetResource(), nullptr, &uav, uavDst);
     }
 }
 
 void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, DescriptorType type,
-                                      IRHITexture* texture, IRHISampler*) {
-    if (set == kInvalidSet || set > m_DescriptorSets.size() || !texture) return;
+                                      IRHITexture* texture, IRHISampler* sampler) {
+    if (set == kInvalidSet || set > m_DescriptorSets.size()) return;
+    if (!EnsureDescriptorHeaps()) return;
+
     const auto& s = m_DescriptorSets[static_cast<size_t>(set - 1)];
+    const u32 slot = s.baseSlot + binding;
+
+    if (type == DescriptorType::Sampler) {
+        if (auto* smp = static_cast<D3D12Sampler*>(sampler)) {
+            D3D12_CPU_DESCRIPTOR_HANDLE dh = m_SetSamplerHeap->GetCPUDescriptorHandleForHeapStart();
+            dh.ptr += static_cast<SIZE_T>(slot) * m_SetSamplerSize;
+            dh = smp->GetDescriptor();
+            // 把采样器复制到描述符集的采样器堆槽位
+            D3D12_CPU_DESCRIPTOR_HANDLE dstS = m_SetSamplerHeap->GetCPUDescriptorHandleForHeapStart();
+            dstS.ptr += static_cast<SIZE_T>(slot) * m_SetSamplerSize;
+            ID3D12DescriptorHeap* src = nullptr;
+            (void)src;
+            // 用 CopyDescriptorsSimple 从采样器自己的堆拷贝
+            m_Device->CopyDescriptorsSimple(1, dstS, smp->GetDescriptor(),
+                                            D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+        }
+        return;
+    }
+
+    if (!texture) return;
     auto* tex = static_cast<D3D12Texture*>(texture);
-    D3D12_CPU_DESCRIPTOR_HANDLE dst = GetSlotCpuHandle(s.baseSlot + binding);
+    D3D12_CPU_DESCRIPTOR_HANDLE dst = GetSlotCpuHandle(slot);
     D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
-    srv.Format = DXGI_FORMAT_UNKNOWN;   // 用资源自身格式
+    srv.Format = DXGI_FORMAT_UNKNOWN;
     srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     srv.Texture2D.MipLevels = tex->GetMipLevels();
     m_Device->CreateShaderResourceView(tex->GetResource(), &srv, dst);
+
+    // StorageImage（RWTexture）需要一个 UAV 视图
+    if (type == DescriptorType::StorageImage) {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+        uav.Format = DXGI_FORMAT_UNKNOWN;
+        uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+        uav.Texture2D.MipSlice = 0;
+        uav.Texture2D.PlaneSlice = 0;
+        m_Device->CreateUnorderedAccessView(tex->GetResource(), nullptr, &uav,
+                                            GetSlotCpuHandle(s.uavBase + binding));
+    }
+
+    // 同时把采样器写到同一槽位（CombinedImageSampler 语义）
+    if (auto* smp = static_cast<D3D12Sampler*>(sampler)) {
+        D3D12_CPU_DESCRIPTOR_HANDLE dstS = m_SetSamplerHeap->GetCPUDescriptorHandleForHeapStart();
+        dstS.ptr += static_cast<SIZE_T>(slot) * m_SetSamplerSize;
+        m_Device->CopyDescriptorsSimple(1, dstS, smp->GetDescriptor(),
+                                        D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+    }
 }
 
 void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, DescriptorType type,
-                                      IRHITexture** textures, IRHISampler**, u32 count) {
+                                      IRHITexture** textures, IRHISampler** samplers, u32 count) {
     for (u32 i = 0; i < count; ++i) {
-        UpdateDescriptorSet(set, binding + i, type, textures ? textures[i] : nullptr, nullptr);
+        UpdateDescriptorSet(set, binding + i, type,
+                            textures ? textures[i] : nullptr,
+                            samplers ? samplers[i] : nullptr);
     }
 }
 
 void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, DescriptorType type,
                                       IRHIBuffer** buffers, u32 count) {
+    if (type == DescriptorType::Sampler) {
+        // 采样器数组（引擎用 buffers=nullptr, samplers=... 之外的形态很少见）
+        return;
+    }
     for (u32 i = 0; i < count; ++i) {
         UpdateDescriptorSet(set, binding + i, type, buffers ? buffers[i] : nullptr);
     }
