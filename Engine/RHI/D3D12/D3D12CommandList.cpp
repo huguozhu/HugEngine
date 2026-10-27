@@ -222,58 +222,75 @@ void D3D12CommandList::BeginOffscreenPass(void* colorImageView, void* depthImage
     std::printf("[BOPB] rtv=%p rtvRes=%p dsv=%p\n", (void*)rtv.ptr, (void*)m_Device->FindViewResource(static_cast<UINT64>(rtv.ptr)), (void*)dsv.ptr); std::fflush(stdout);
     // 【HDR 中间结果转储】进入宽屏离屏 pass 时，把该目标回读并打印首像素。
     // 此刻里面是**上一帧**完整渲染后的结果，可判断几何是否真的画进了 HDR。
+    // 【任意尺寸的渲染目标回读扫描】HE_DUMP_HDR=1 时，把每个离屏 pass 的目标
+    // 拷到回读缓冲，下一帧等 GPU 完成后扫描整张图，统计非零像素与最大值。
+    // 用途：定位"哪个 pass 真正产出了内容"，从而找出黑屏发生在哪一步。
     if (std::getenv("HE_DUMP_HDR") && hasRtv && m_Device && m_Device->GetDevice() && m_Device->GetQueue()) {
         if (ID3D12Resource* hres = m_Device->FindViewResource(static_cast<UINT64>(rtv.ptr))) {
             const D3D12_RESOURCE_DESC hd = hres->GetDesc();
-            if (hd.Width >= 1920) {
-                static ComPtr<ID3D12Resource> s_rb;
-                const u32 rowPitch = static_cast<u32>((hd.Width * 8 + 255) & ~255ull);
-                const u64 need = static_cast<u64>(rowPitch) * hd.Height;
-                if (!s_rb) {
-                    D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_READBACK;
-                    D3D12_RESOURCE_DESC rd{}; rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-                    rd.Width = need; rd.Height = 1; rd.DepthOrArraySize = 1; rd.MipLevels = 1;
-                    rd.Format = DXGI_FORMAT_UNKNOWN; rd.SampleDesc = {1,0};
-                    rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-                    m_Device->GetDevice()->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
-                        D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&s_rb));
-                }
-                static int s_pending = 0;
-                if (s_rb && s_pending) {
-                    // 上一帧已录制过拷贝，此刻 GPU 大概率已完成 → 读回并打印首像素
-                    void* mp = nullptr; D3D12_RANGE rr{0,0};
-                    if (SUCCEEDED(s_rb->Map(0, &rr, &mp)) && mp) {
-                        const float* fp = static_cast<const float*>(mp);
-                        HE_CORE_ERROR("[HDR-DUMP] {}x{} fmt={} px0=({:.3f},{:.3f},{:.3f},{:.3f}) px1=({:.3f},{:.3f},{:.3f},{:.3f})",
-                            (u64)hd.Width, (u32)hd.Height, (u32)hd.Format,
-                            fp[0],fp[1],fp[2],fp[3], fp[4],fp[5],fp[6],fp[7]);
-                        s_rb->Unmap(0, nullptr);
+            const u32 bpp = 8;                       // 只处理 16F/RGBA 类
+            const u32 rowPitch = static_cast<u32>((hd.Width * bpp + 255) & ~255ull);
+            const u64 need = static_cast<u64>(rowPitch) * hd.Height;
+            static ComPtr<ID3D12Resource> s_rb;
+            static int s_pending = 0;
+            static u64 s_key = 0;
+            const u64 key = (static_cast<u64>(hd.Width) << 32) | static_cast<u64>((u32)hd.Format);
+            if (!s_rb || s_key != key) {
+                s_rb.Reset();
+                D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_READBACK;
+                D3D12_RESOURCE_DESC rd{}; rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+                rd.Width = need; rd.Height = 1; rd.DepthOrArraySize = 1; rd.MipLevels = 1;
+                rd.Format = DXGI_FORMAT_UNKNOWN; rd.SampleDesc = {1,0};
+                rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+                m_Device->GetDevice()->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+                    D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&s_rb));
+                s_key = key; s_pending = 0;
+            }
+            if (s_rb && s_pending) {
+                m_Device->WaitIdle();
+                void* mp = nullptr; D3D12_RANGE rr{0,0};
+                if (SUCCEEDED(s_rb->Map(0, &rr, &mp)) && mp) {
+                    const unsigned char* raw = static_cast<const unsigned char*>(mp);
+                    u64 nonZero = 0, total = 0; float mx = 0.0f;
+                    for (u32 yy = 0; yy < static_cast<u32>(hd.Height); yy += 8) {
+                        const float* row = reinterpret_cast<const float*>(raw + static_cast<size_t>(yy) * rowPitch);
+                        for (u32 xx = 0; xx < static_cast<u32>(hd.Width); xx += 8) {
+                            const float r0 = row[xx*4+0], g0 = row[xx*4+1], b0 = row[xx*4+2];
+                            ++total;
+                            if (r0 != 0.0f || g0 != 0.0f || b0 != 0.0f) ++nonZero;
+                            if (r0 > mx) mx = r0; if (g0 > mx) mx = g0; if (b0 > mx) mx = b0;
+                        }
                     }
-                    s_pending = 0;
+                    HE_CORE_ERROR("[RT-SCAN] {}x{} fmt={} 采样={} 非零={} max={}",
+                        static_cast<u64>(hd.Width), static_cast<u32>(hd.Height),
+                        static_cast<u32>(hd.Format), static_cast<u64>(total),
+                        static_cast<u64>(nonZero), mx);
+                    s_rb->Unmap(0, nullptr);
                 }
-                if (s_rb) {
-                    D3D12_RESOURCE_BARRIER bb{};
-                    bb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION; bb.Transition.pResource = hres;
-                    bb.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-                    bb.Transition.StateBefore = m_Device->GetResourceState(hres);
-                    bb.Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_SOURCE;
-                    if (bb.Transition.StateBefore != bb.Transition.StateAfter) m_List->ResourceBarrier(1, &bb);
-                    D3D12_TEXTURE_COPY_LOCATION dst{}; dst.pResource = s_rb.Get();
-                    dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-                    dst.PlacedFootprint.Footprint.Format = hd.Format;
-                    dst.PlacedFootprint.Footprint.Width = static_cast<UINT>(hd.Width);
-                    dst.PlacedFootprint.Footprint.Height = hd.Height;
-                    dst.PlacedFootprint.Footprint.Depth = 1;
-                    dst.PlacedFootprint.Footprint.RowPitch = rowPitch;
-                    D3D12_TEXTURE_COPY_LOCATION src{}; src.pResource = hres;
-                    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.SubresourceIndex = 0;
-                    m_List->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
-                    D3D12_RESOURCE_BARRIER rb = bb;
-                    rb.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
-                    rb.Transition.StateAfter  = m_Device->GetResourceState(hres);
-                    if (rb.Transition.StateBefore != rb.Transition.StateAfter) m_List->ResourceBarrier(1, &rb);
-                    s_pending = 1;
-                }
+                s_pending = 0;
+            }
+            if (s_rb) {
+                D3D12_RESOURCE_BARRIER bb{};
+                bb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION; bb.Transition.pResource = hres;
+                bb.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                bb.Transition.StateBefore = m_Device->GetResourceState(hres);
+                bb.Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_SOURCE;
+                if (bb.Transition.StateBefore != bb.Transition.StateAfter) m_List->ResourceBarrier(1, &bb);
+                D3D12_TEXTURE_COPY_LOCATION dst{}; dst.pResource = s_rb.Get();
+                dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                dst.PlacedFootprint.Footprint.Format = hd.Format;
+                dst.PlacedFootprint.Footprint.Width = static_cast<UINT>(hd.Width);
+                dst.PlacedFootprint.Footprint.Height = hd.Height;
+                dst.PlacedFootprint.Footprint.Depth = 1;
+                dst.PlacedFootprint.Footprint.RowPitch = rowPitch;
+                D3D12_TEXTURE_COPY_LOCATION src{}; src.pResource = hres;
+                src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.SubresourceIndex = 0;
+                m_List->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+                D3D12_RESOURCE_BARRIER rb = bb;
+                rb.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+                rb.Transition.StateAfter  = m_Device->GetResourceState(hres);
+                if (rb.Transition.StateBefore != rb.Transition.StateAfter) m_List->ResourceBarrier(1, &rb);
+                s_pending = 1;
             }
         }
     }
