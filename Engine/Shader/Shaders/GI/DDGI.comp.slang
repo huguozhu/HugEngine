@@ -10,8 +10,8 @@
 #include "SHCommon.slang"    // 球谐共享实现：基函数 / 采样方向 / 重建（本文件不再自带 SH 常数）
 
 // GBuffer 输入（只读，CombinedImageSampler）
-[[vk::binding(kGPUBinding_GBufferA, kGPUDescSet_PerFrame)]] Texture2D<float4> u_GBufferA;
-[[vk::binding(kGPUBinding_GBufferB, kGPUDescSet_PerFrame)]] Texture2D<float4> u_GBufferB;
+[[vk::binding(kGPUBinding_GBufferA, kGPUDescSet_PerFrame)]] Texture2D<float4> u_GBufferA : register(t0, space0);
+[[vk::binding(kGPUBinding_GBufferB, kGPUDescSet_PerFrame)]] Texture2D<float4> u_GBufferB : register(t1, space0);
 [[vk::binding(2, 0)]] Texture2D<float>  u_Depth;  // 深度（DDGI 计算描述符集 binding 2，与 GI_DDGI.cpp 布局一致；勿用 kGPUBinding_Depth=3，那是 Deferred GBuffer 的绑定号）
 [[vk::binding(0, 0)]] SamplerState      u_PointSampler; // 点采样（GBuffer 读取）
 

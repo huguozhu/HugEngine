@@ -15,10 +15,10 @@ struct VSInput {
 
 // GPUObjectData 定义来自 ShaderTypes.slang（C++/Slang 共享）
 
-[[vk::binding(kGPUBinding_ObjectData, kGPUDescSet_PerFrame)]] StructuredBuffer<GPUObjectData> u_Objects;
+[[vk::binding(kGPUBinding_ObjectData, kGPUDescSet_PerFrame)]] StructuredBuffer<GPUObjectData> u_Objects : register(t2, space0);
 // bindless SSBO 数组：实例化网格的实例变换 + 逐实例剔除的可见索引列表（任务 25）
-[[vk::binding(kGPUBinding_BindlessSSBO, kGPUDescSet_PerFrame)]] StructuredBuffer<float4x4> u_InstanceTransforms[];
-[[vk::binding(kGPUBinding_BindlessSSBO, kGPUDescSet_PerFrame)]] StructuredBuffer<uint>     u_VisibleInstanceIndices[];
+[[vk::binding(kGPUBinding_BindlessSSBO, kGPUDescSet_PerFrame)]] StructuredBuffer<float4x4> u_InstanceTransforms[64] : register(t64, space2);
+[[vk::binding(kGPUBinding_BindlessSSBO, kGPUDescSet_PerFrame)]] StructuredBuffer<uint>     u_VisibleInstanceIndices[64] : register(t128, space2);
 
 // offset 0:  viewProjMatrix     (64B) — 当前帧 VP（含当前帧抖动）
 // offset 64: prevViewProjMatrix (64B) — 上一帧 VP（含**上帧**抖动，velocity 因此自带抖动差）

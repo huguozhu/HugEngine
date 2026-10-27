@@ -485,7 +485,7 @@ if(SLANGC)
             add_custom_command(
                 OUTPUT ${HLSL}
                 COMMAND ${CMAKE_COMMAND} -E make_directory ${DXIL_OUT_DIR}
-                COMMAND ${SLANGC} ${SRC} -target hlsl -entry ${ENTRY} -stage ${SLANG_STAGE}
+                COMMAND ${SLANGC} ${SRC} -target hlsl -entry ${ENTRY} -stage ${SLANG_STAGE} -DHE_SHADER_D3D12 -DHE_NO_TEX -DHE_BYPASS_MATRIX
                         -I "${SHADER_DIR}" -o ${HLSL} -Wno-39001
                 DEPENDS ${SRC} ${SLANG_INCLUDES}
                 COMMENT "Slang -> HLSL (D3D12): ${NAME}"

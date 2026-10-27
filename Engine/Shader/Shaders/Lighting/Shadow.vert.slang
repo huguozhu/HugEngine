@@ -18,7 +18,7 @@ layout(location = 0) in float3 inPosition;
 // set=0, binding=26: **阴影专用**对象数据。阴影 pass 的 objectIndex 按"全部投影物体"编号
 // （各技术都遍历 `snapshot.draws` 里的 `bShadowCaster`，顺序一致），与场景绘制用的
 // "视锥剔除后可见列表"编号不同 ⇒ 必须是独立绑定，不能与主管线共用 binding 2。
-[[vk::binding(kGPUBinding_ShadowObjects, kGPUDescSet_PerFrame)]] StructuredBuffer<GPUObjectData> u_Objects;
+[[vk::binding(kGPUBinding_ShadowObjects, kGPUDescSet_PerFrame)]] StructuredBuffer<GPUObjectData> u_Objects : register(t26, space0);
 
 // Push Constants（阴影通道专用：lightViewProj + objectIndex）
 [[vk::push_constant]] cbuffer ShadowConstants {

@@ -14,57 +14,57 @@
 #include "FullscreenVS.slang"   // VSOutput / VSOutputWorldDir（接口唯一出处）
 
 // GBuffer 纹理
-[[vk::binding(kGPUBinding_GBufferA, kGPUDescSet_PerFrame)]] Texture2D<float4> u_GBufferA;  // albedo.rgb + metallic
-[[vk::binding(kGPUBinding_GBufferA, kGPUDescSet_PerFrame)]] SamplerState      u_GBufferSampler;
-[[vk::binding(kGPUBinding_GBufferB, kGPUDescSet_PerFrame)]] Texture2D<float4> u_GBufferB;  // normal*0.5+0.5 + roughness
-[[vk::binding(kGPUBinding_GBufferC, kGPUDescSet_PerFrame)]] Texture2D<float4> u_GBufferC;  // emissive.rgb + ao
-[[vk::binding(kGPUBinding_Depth, kGPUDescSet_PerFrame)]] Texture2D<float>  u_Depth;
-[[vk::binding(kGPUBinding_GBufferE, kGPUDescSet_PerFrame)]] Texture2D<float4> u_GBufferE;  // worldPos.xyz（GBuffer MRT4 直接读取）
-[[vk::binding(kGPUBinding_GBufferF, kGPUDescSet_PerFrame)]] Texture2D<float4> u_GBufferF;  // disneyA：anisotropic, subsurface, specular, sheen（MRT5）
-[[vk::binding(kGPUBinding_GBufferG, kGPUDescSet_PerFrame)]] Texture2D<float4> u_GBufferG;  // disneyB：clearcoat, clearcoatGloss, specularTint.r, specularTint.g（MRT6）
+[[vk::binding(kGPUBinding_GBufferA, kGPUDescSet_PerFrame)]] Texture2D<float4> u_GBufferA : register(t0, space0);  // albedo.rgb + metallic
+[[vk::binding(kGPUBinding_GBufferA, kGPUDescSet_PerFrame)]] SamplerState      u_GBufferSampler : register(s0, space0);
+[[vk::binding(kGPUBinding_GBufferB, kGPUDescSet_PerFrame)]] Texture2D<float4> u_GBufferB : register(t1, space0);  // normal*0.5+0.5 + roughness
+[[vk::binding(kGPUBinding_GBufferC, kGPUDescSet_PerFrame)]] Texture2D<float4> u_GBufferC : register(t2, space0);  // emissive.rgb + ao
+[[vk::binding(kGPUBinding_Depth, kGPUDescSet_PerFrame)]] Texture2D<float>  u_Depth : register(t3, space0);
+[[vk::binding(kGPUBinding_GBufferE, kGPUDescSet_PerFrame)]] Texture2D<float4> u_GBufferE : register(t23, space0);  // worldPos.xyz（GBuffer MRT4 直接读取）
+[[vk::binding(kGPUBinding_GBufferF, kGPUDescSet_PerFrame)]] Texture2D<float4> u_GBufferF : register(t28, space0);  // disneyA：anisotropic, subsurface, specular, sheen（MRT5）
+[[vk::binding(kGPUBinding_GBufferG, kGPUDescSet_PerFrame)]] Texture2D<float4> u_GBufferG : register(t29, space0);  // disneyB：clearcoat, clearcoatGloss, specularTint.r, specularTint.g（MRT6）
 // 光照图键（任务 31）：GBuffer MRT7 = (uv0.x, uv0.y, objectIndex, 0)。
 // 【为什么用点采样】键是**索引**：线性过滤会把相邻像素的页号与 UV 混成无意义的中间值
 // （页号 3 与 4 之间插值出 3.5 = 另一个物体）。查表必须是无过滤的最近邻。
-[[vk::binding(kGPUBinding_LightmapKey, kGPUDescSet_PerFrame)]] Texture2D<float4> u_LightmapKey;
+[[vk::binding(kGPUBinding_LightmapKey, kGPUDescSet_PerFrame)]] Texture2D<float4> u_LightmapKey : register(t30, space0);
 
 // Shadow + IBL + RSM (复用 Forward PBR 绑定)
-[[vk::binding(kGPUBinding_ShadowMap0, kGPUDescSet_PerFrame)]] Texture2D<float>  u_ShadowMap0;
-[[vk::binding(kGPUBinding_ShadowMap0, kGPUDescSet_PerFrame)]] SamplerState      u_ShadowSampler;
-[[vk::binding(kGPUBinding_SpotShadow_DL, kGPUDescSet_PerFrame)]] Texture2D<float>  u_SpotShadowMap;  // 聚光灯阴影贴图（Deferred 专用 binding 9）
-[[vk::binding(kGPUBinding_ShadowMap1, kGPUDescSet_PerFrame)]] Texture2D<float> u_ShadowMap1;
-[[vk::binding(kGPUBinding_ShadowMap2, kGPUDescSet_PerFrame)]] Texture2D<float> u_ShadowMap2;
-[[vk::binding(kGPUBinding_IrradianceMap, kGPUDescSet_PerFrame)]] TextureCube<float4> u_IrradianceMap;
-[[vk::binding(kGPUBinding_IrradianceMap, kGPUDescSet_PerFrame)]] SamplerState        u_IBLSampler;
-[[vk::binding(kGPUBinding_PrefilterMap, kGPUDescSet_PerFrame)]] TextureCube<float4> u_PrefilterMap;
-[[vk::binding(kGPUBinding_BRDF_LUT, kGPUDescSet_PerFrame)]] Texture2D<float2>   u_BRDF_LUT;
+[[vk::binding(kGPUBinding_ShadowMap0, kGPUDescSet_PerFrame)]] Texture2D<float>  u_ShadowMap0 : register(t4, space0);
+[[vk::binding(kGPUBinding_ShadowMap0, kGPUDescSet_PerFrame)]] SamplerState      u_ShadowSampler : register(s4, space0);
+[[vk::binding(kGPUBinding_SpotShadow_DL, kGPUDescSet_PerFrame)]] Texture2D<float>  u_SpotShadowMap : register(t9, space0);  // 聚光灯阴影贴图（Deferred 专用 binding 9）
+[[vk::binding(kGPUBinding_ShadowMap1, kGPUDescSet_PerFrame)]] Texture2D<float> u_ShadowMap1 : register(t10, space0);
+[[vk::binding(kGPUBinding_ShadowMap2, kGPUDescSet_PerFrame)]] Texture2D<float> u_ShadowMap2 : register(t11, space0);
+[[vk::binding(kGPUBinding_IrradianceMap, kGPUDescSet_PerFrame)]] TextureCube<float4> u_IrradianceMap : register(t12, space0);
+[[vk::binding(kGPUBinding_IrradianceMap, kGPUDescSet_PerFrame)]] SamplerState        u_IBLSampler : register(s12, space0);
+[[vk::binding(kGPUBinding_PrefilterMap, kGPUDescSet_PerFrame)]] TextureCube<float4> u_PrefilterMap : register(t13, space0);
+[[vk::binding(kGPUBinding_BRDF_LUT, kGPUDescSet_PerFrame)]] Texture2D<float2>   u_BRDF_LUT : register(t14, space0);
 // RSM 贴图（15/16）：**本着色器不采样它们**。Deferred 的 RSM 源由共享的半分辨率 pass
 // （GI/RSM_Indirect.frag.slang）求值，这里只采下面的 u_RSMIndirect（L_o/albedo = E/π）。
 // 声明保留是为了与 Forward 的 PBR.frag（内联 RSM 求和，同样用 15/16）共用同一套 binding 号，
 // 两套 per-frame set 的布局各自独立。任务 30 起 16 号只存编码法线（此前 .a 兼存通量）。
-[[vk::binding(kGPUBinding_RSMPosition, kGPUDescSet_PerFrame)]] Texture2D<float4>   u_RSMPositionMap;
-[[vk::binding(kGPUBinding_RSMFlux, kGPUDescSet_PerFrame)]] Texture2D<float4>   u_RSMNormalMap;
+[[vk::binding(kGPUBinding_RSMPosition, kGPUDescSet_PerFrame)]] Texture2D<float4>   u_RSMPositionMap : register(t15, space0);
+[[vk::binding(kGPUBinding_RSMFlux, kGPUDescSet_PerFrame)]] Texture2D<float4>   u_RSMNormalMap : register(t16, space0);
 // RSM 间接光辐照度 E（半分辨率，由 GI/RSM_Indirect.frag.slang 产出；任务 16）
-[[vk::binding(kGPUBinding_RSMIndirect, kGPUDescSet_PerFrame)]] Texture2D<float4> u_RSMIndirect;
+[[vk::binding(kGPUBinding_RSMIndirect, kGPUDescSet_PerFrame)]] Texture2D<float4> u_RSMIndirect : register(t5, space0);
 
 // GPULight / GPUShadowData 定义来自 ShaderTypes.slang（C++/Slang 共享）
 
-[[vk::binding(kGPUBinding_Lights_DL, kGPUDescSet_PerFrame)]] StructuredBuffer<GPULight>      u_Lights;
-[[vk::binding(kGPUBinding_ShadowData_DL, kGPUDescSet_PerFrame)]] StructuredBuffer<GPUShadowData> u_ShadowData;
-[[vk::binding(kGPUBinding_SSGI, kGPUDescSet_PerFrame)]] Texture2D<float4> u_SSGI;  // SSGI 间接光照
-[[vk::binding(kGPUBinding_SSAO_DL, kGPUDescSet_PerFrame)]] Texture2D<float4> u_SSAO;  // SSAO 环境光遮蔽
-[[vk::binding(kGPUBinding_SSR, kGPUDescSet_PerFrame)]] Texture2D<float4> u_SSR;   // SSR 屏幕空间反射
-[[vk::binding(kGPUBinding_Lumen, kGPUDescSet_PerFrame)]] Texture2D<float4> u_Lumen;  // Lumen 输出（间接漫反射/镜面共用）
-[[vk::binding(kGPUBinding_DDGIProbes, kGPUDescSet_PerFrame)]] StructuredBuffer<float4> u_DDGIProbes;  // DDGI 探针数据（步骤 30：每探针 4 float4 的 SH）
+[[vk::binding(kGPUBinding_Lights_DL, kGPUDescSet_PerFrame)]] StructuredBuffer<GPULight>      u_Lights : register(t17, space0);
+[[vk::binding(kGPUBinding_ShadowData_DL, kGPUDescSet_PerFrame)]] StructuredBuffer<GPUShadowData> u_ShadowData : register(t18, space0);
+[[vk::binding(kGPUBinding_SSGI, kGPUDescSet_PerFrame)]] Texture2D<float4> u_SSGI : register(t19, space0);  // SSGI 间接光照
+[[vk::binding(kGPUBinding_SSAO_DL, kGPUDescSet_PerFrame)]] Texture2D<float4> u_SSAO : register(t20, space0);  // SSAO 环境光遮蔽
+[[vk::binding(kGPUBinding_SSR, kGPUDescSet_PerFrame)]] Texture2D<float4> u_SSR : register(t21, space0);   // SSR 屏幕空间反射
+[[vk::binding(kGPUBinding_Lumen, kGPUDescSet_PerFrame)]] Texture2D<float4> u_Lumen : register(t32, space0);  // Lumen 输出（间接漫反射/镜面共用）
+[[vk::binding(kGPUBinding_DDGIProbes, kGPUDescSet_PerFrame)]] StructuredBuffer<float4> u_DDGIProbes : register(t22, space0);  // DDGI 探针数据（步骤 30：每探针 4 float4 的 SH）
 
 // RT 效果输出纹理（由 DeferredPipeline 通过 LightingPass 绑定）
 // 通过 push constant 的 rt*Source 字段在 shader 内选择 RT 或屏幕空间源
-[[vk::binding(kGPUBinding_RT_ShadowMask, kGPUDescSet_PerFrame)]] Texture2D<float>  u_RT_ShadowMask;  // RT 阴影遮罩（0=全影, 1=无影）
-[[vk::binding(kGPUBinding_RT_Reflection, kGPUDescSet_PerFrame)]] Texture2D<float4> u_RT_Reflection;  // RT 反射（rgb=反射色, a=有效标记）
-[[vk::binding(kGPUBinding_RT_AO, kGPUDescSet_PerFrame)]] Texture2D<float>  u_RT_AO;          // RT 环境光遮蔽（0=全遮蔽, 1=无遮蔽）
-[[vk::binding(kGPUBinding_RT_GI, kGPUDescSet_PerFrame)]] Texture2D<float4> u_RT_GI;          // RT 间接漫反射（rgb=间接光, a=有效标记）
+[[vk::binding(kGPUBinding_RT_ShadowMask, kGPUDescSet_PerFrame)]] Texture2D<float>  u_RT_ShadowMask : register(t24, space0);  // RT 阴影遮罩（0=全影, 1=无影）
+[[vk::binding(kGPUBinding_RT_Reflection, kGPUDescSet_PerFrame)]] Texture2D<float4> u_RT_Reflection : register(t25, space0);  // RT 反射（rgb=反射色, a=有效标记）
+[[vk::binding(kGPUBinding_RT_AO, kGPUDescSet_PerFrame)]] Texture2D<float>  u_RT_AO : register(t26, space0);          // RT 环境光遮蔽（0=全遮蔽, 1=无遮蔽）
+[[vk::binding(kGPUBinding_RT_GI, kGPUDescSet_PerFrame)]] Texture2D<float4> u_RT_GI : register(t27, space0);          // RT 间接漫反射（rgb=间接光, a=有效标记）
 
-[[vk::binding(kGPUBinding_LightGrid, kGPUDescSet_PerFrame)]]  StructuredBuffer<LightGridCell> u_LightGrid;       // 每 cluster 的光源列表头
-[[vk::binding(kGPUBinding_LightIndexList, kGPUDescSet_PerFrame)]]  StructuredBuffer<uint>          u_LightIndexList;  // 扁平光源索引数组
+[[vk::binding(kGPUBinding_LightGrid, kGPUDescSet_PerFrame)]]  StructuredBuffer<LightGridCell> u_LightGrid : register(t7, space0);       // 每 cluster 的光源列表头
+[[vk::binding(kGPUBinding_LightIndexList, kGPUDescSet_PerFrame)]]  StructuredBuffer<uint>          u_LightIndexList : register(t8, space0);  // 扁平光源索引数组
 
 // Cluster 网格参数（push constant 传入）
 // worldPos 由 GBuffer MRT4 直接读取，无需 Camera invViewProj

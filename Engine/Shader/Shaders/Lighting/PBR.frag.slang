@@ -295,8 +295,12 @@ float4 fragmentMain(PBRVSOutput input) : SV_Target0 {
         ? u_Textures[texBase + kGPUMaterialTexSlot_BaseColor].Sample(u_Samplers[texBase + kGPUMaterialTexSlot_BaseColor], input.uv)
         : float4(1.0);
     float3 albedo = baseColorF.rgb * baseColorSample.rgb;
-    float alpha   = baseColorF.a * baseColorSample.a;
-    if (alpha < alphaCutoffF) discard;
+        float alpha   = baseColorF.a * baseColorSample.a;
+        // alpha test only for a sane cutoff in (0,1]; a garbage/zero alpha
+        // (engine snapshot has float3 baseColorFactor) would otherwise
+        // discard every fragment and leave the HDR target empty (black screen).
+        float effAlpha = (alpha > 0.0) ? alpha : 1.0;
+        if (alphaCutoffF > 0.0 && alphaCutoffF <= 1.0 && effAlpha < alphaCutoffF) discard;
 
     // 法线：按纹理存在掩码判断——无法线贴图（占位白会错误偏转 N，
     // 导致 +Y 表面被下方光源照亮的穿透问题）时直接用几何法线
