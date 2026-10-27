@@ -158,6 +158,45 @@ Entity CreateShapeEntity(World& world, SceneGraph& sg,
 // ============================================================
 // 主函数
 // ============================================================
+// ============================================================================
+// RenderDoc 抓帧支持：运行时若被 renderdoccmd 启动并设置了 HE_RD_CAPTURE=<帧号>，
+// 就在指定帧自动开始/结束一次抓帧，无需人工按 F12。
+// ============================================================================
+#include <cstdlib>
+#include <windows.h>
+#include "renderdoc_app.h"
+
+namespace {
+RENDERDOC_API_1_6_0* g_RdApi = nullptr;
+
+void RenderDocInit() {
+    if (HMODULE mod = GetModuleHandleA("renderdoc.dll")) {
+        auto getApi = reinterpret_cast<pRENDERDOC_GetAPI>(GetProcAddress(mod, "RENDERDOC_GetAPI"));
+        if (getApi) {
+            void* api = nullptr;
+            if (getApi(eRENDERDOC_API_Version_1_6_0, &api) == 1 && api) {
+                g_RdApi = static_cast<RENDERDOC_API_1_6_0*>(api);
+                g_RdApi->SetCaptureFilePathTemplate("rdoc/cube");
+                std::printf("[RD] RenderDoc 已就绪\n");
+                std::fflush(stdout);
+            }
+        }
+    }
+}
+
+void RenderDocFrameBegin(int frame) {
+    const char* env = std::getenv("HE_RD_CAPTURE");
+    if (!g_RdApi || !env) return;
+    if (frame == std::atoi(env)) { g_RdApi->TriggerCapture(); std::printf("[RD] 触发抓帧 frame=%d\n", frame); std::fflush(stdout); }
+}
+
+void RenderDocFrameEnd(int frame) {
+    const char* env = std::getenv("HE_RD_CAPTURE");
+    if (!g_RdApi || !env) return;
+    // TriggerCapture 模式无需手动结束
+}
+}
+
 int main() {
     // --- 1. 引擎启动 ---
     EngineConfig config;
@@ -1005,7 +1044,12 @@ int main() {
     // L4-1：帧外壳的 acquire/present 收口（L4-3 把整帧变成命令流时只改这里）
     rhi::FramePresenter framePresenter(swapchain.get());
 
+    RenderDocInit();
+    int rdFrame = 0;
+
     while (!engine.GetWindow()->ShouldClose()) {
+        ++rdFrame;
+        RenderDocFrameBegin(rdFrame);
         // 计算帧时间
         f64 now       = glfwGetTime();
         f32 deltaTime = static_cast<f32>(now - lastTime);
