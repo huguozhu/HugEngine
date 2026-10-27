@@ -1,8 +1,11 @@
-#include "AI/Runtime/Backend/GPUBackend.h"
+﻿#include "AI/Runtime/Backend/GPUBackend.h"
 
-#include "AITensorScale.comp.spv.h"    // k_AITensorScale_comp_spv（内置：逐元素缩放）
-#include "AITextureSample.comp.spv.h"  // k_AITextureSample_comp_spv（内置：纹理采样）
-#include "AITextureGen.comp.spv.h"     // k_AITextureGen_comp_spv（内置：GPU 生成纹理）
+#include "AITensorScale.comp.spv.h"
+#include "AITensorScale.comp.dxil.h"    // k_AITensorScale_comp_spv（内置：逐元素缩放）
+#include "AITextureSample.comp.spv.h"
+#include "AITextureSample.comp.dxil.h"  // k_AITextureSample_comp_spv（内置：纹理采样）
+#include "AITextureGen.comp.spv.h"
+#include "AITextureGen.comp.dxil.h"     // k_AITextureGen_comp_spv（内置：GPU 生成纹理）
 #include "Core/Log.h"
 
 #include <cstring>

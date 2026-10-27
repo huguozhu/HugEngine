@@ -1,7 +1,11 @@
-#include "PostProcess/SkyboxPass.h"
+﻿#include "PostProcess/SkyboxPass.h"
+#include <iterator>
 #include "Skybox.vert.spv.h"
+#include "Skybox.vert.dxil.h"
 #include "Skybox.frag.spv.h"
+#include "Skybox.frag.dxil.h"
 #include "PhysicalSky.frag.spv.h"
+#include "PhysicalSky.frag.dxil.h"
 #include "Scene/World.h"
 #include "Scene/SkyboxComponent.h"
 #include "Scene/PhysicalSkyComponent.h"
@@ -21,12 +25,21 @@ bool SkyboxPass::Initialize(rhi::IRHIDevice* device,u32,u32){
 
     m_VS.stage=rhi::ShaderStage::Vertex;
     m_VS.spirv=k_Skybox_vert_spv;
+    m_VS.dxil.assign(std::begin(k_Skybox_vert_dxil), std::end(k_Skybox_vert_dxil));
+    m_VS.dxil.assign(std::begin(k_Skybox_vert_dxil), std::end(k_Skybox_vert_dxil));
+    m_VS.dxil.assign(std::begin(k_Skybox_vert_dxil), std::end(k_Skybox_vert_dxil));
     m_VS.entryPoint="main";
     m_FS.stage=rhi::ShaderStage::Pixel;
     m_FS.spirv=k_Skybox_frag_spv;
+    m_FS.dxil.assign(std::begin(k_Skybox_frag_dxil), std::end(k_Skybox_frag_dxil));
+    m_FS.dxil.assign(std::begin(k_Skybox_frag_dxil), std::end(k_Skybox_frag_dxil));
+    m_FS.dxil.assign(std::begin(k_Skybox_frag_dxil), std::end(k_Skybox_frag_dxil));
     m_FS.entryPoint="main";
     m_PS_FS.stage=rhi::ShaderStage::Pixel;
     m_PS_FS.spirv=k_PhysicalSky_frag_spv;
+    m_PS_FS.dxil.assign(std::begin(k_PhysicalSky_frag_dxil), std::end(k_PhysicalSky_frag_dxil));
+    m_PS_FS.dxil.assign(std::begin(k_PhysicalSky_frag_dxil), std::end(k_PhysicalSky_frag_dxil));
+    m_PS_FS.dxil.assign(std::begin(k_PhysicalSky_frag_dxil), std::end(k_PhysicalSky_frag_dxil));
     m_PS_FS.entryPoint="main";
 
     rhi::DescriptorSetLayoutDesc layout;layout.bindings={

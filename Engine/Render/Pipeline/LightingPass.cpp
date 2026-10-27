@@ -1,4 +1,5 @@
-#include "Core/Assert.h"   // HE_ASSERT
+﻿#include "Core/Assert.h"   // HE_ASSERT
+#include <iterator>
 // ============================================================
 // LightingPass.cpp — 延迟光照 Pass 实现
 // 拥有 HDR 目标纹理 + Lighting PSO + 描述符集
@@ -10,7 +11,9 @@
 
 // SPIR-V 嵌入头文件
 #include "DeferredLighting.vert.spv.h"
+#include "DeferredLighting.vert.dxil.h"
 #include "DeferredLighting.frag.spv.h"
+#include "DeferredLighting.frag.dxil.h"
 
 namespace he::render {
 
@@ -429,9 +432,15 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
     rhi::ShaderBytecode lVS, lFS;
     lVS.stage = rhi::ShaderStage::Vertex;
     lVS.spirv = k_DeferredLighting_vert_spv;
+    lVS.dxil.assign(std::begin(k_DeferredLighting_vert_dxil), std::end(k_DeferredLighting_vert_dxil));
+    lVS.dxil.assign(std::begin(k_DeferredLighting_vert_dxil), std::end(k_DeferredLighting_vert_dxil));
+    lVS.dxil.assign(std::begin(k_DeferredLighting_vert_dxil), std::end(k_DeferredLighting_vert_dxil));
     lVS.entryPoint = "main";
     lFS.stage = rhi::ShaderStage::Pixel;
     lFS.spirv = k_DeferredLighting_frag_spv;
+    lFS.dxil.assign(std::begin(k_DeferredLighting_frag_dxil), std::end(k_DeferredLighting_frag_dxil));
+    lFS.dxil.assign(std::begin(k_DeferredLighting_frag_dxil), std::end(k_DeferredLighting_frag_dxil));
+    lFS.dxil.assign(std::begin(k_DeferredLighting_frag_dxil), std::end(k_DeferredLighting_frag_dxil));
     lFS.entryPoint = "main";
 
     rhi::PushConstantRange lpc;

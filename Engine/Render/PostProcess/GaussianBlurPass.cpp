@@ -1,12 +1,15 @@
-// PostProcess/GaussianBlurPass.cpp — 7×7 可分离高斯模糊实现
+﻿// PostProcess/GaussianBlurPass.cpp — 7×7 可分离高斯模糊实现
 #include "GaussianBlurPass.h"
+#include <iterator>
 #include "Core/Log.h"
 #include "Core/Assert.h"
 #include "Math/Math.h"  // float2
 
 // 着色器字节码
-#include "SSAO.vert.spv.h"              // 复用通用全屏三角形顶点着色器
+#include "SSAO.vert.spv.h"
+#include "SSAO.vert.dxil.h"              // 复用通用全屏三角形顶点着色器
 #include "GaussianBlur.frag.spv.h"
+#include "GaussianBlur.frag.dxil.h"
 
 namespace he::render {
 
@@ -30,9 +33,15 @@ bool GaussianBlurPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
     rhi::ShaderBytecode vs, fs;
     vs.stage = rhi::ShaderStage::Vertex;
     vs.spirv = k_SSAO_vert_spv;
+    vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+    vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+    vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
     vs.entryPoint = "vertexMain";
     fs.stage = rhi::ShaderStage::Pixel;
     fs.spirv = k_GaussianBlur_frag_spv;
+    fs.dxil.assign(std::begin(k_GaussianBlur_frag_dxil), std::end(k_GaussianBlur_frag_dxil));
+    fs.dxil.assign(std::begin(k_GaussianBlur_frag_dxil), std::end(k_GaussianBlur_frag_dxil));
+    fs.dxil.assign(std::begin(k_GaussianBlur_frag_dxil), std::end(k_GaussianBlur_frag_dxil));
     fs.entryPoint = "fragmentMain";
 
     // Push constant：texelSize (float2)

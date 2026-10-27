@@ -1,9 +1,10 @@
-// ============================================================
+﻿// ============================================================
 // GBufferRenderer.cpp — GBuffer 纹理所有权 + 渲染实现
 // 负责 5 MRT + Depth 纹理创建、PSO 创建、描述符集管理、
 // RenderGraph 导入接口。内部委托给 IGBufferRenderer（CPU/GPU 策略）。
 // ============================================================
 #include "Pipeline/GBufferRenderer.h"
+#include <iterator>
 #include "Pipeline/GBufferRenderer_CPU.h"
 #include "Pipeline/GBufferRenderer_GPU.h"
 #include "Scene/MeshComponent.h"
@@ -12,7 +13,9 @@
 
 // SPIR-V 嵌入头文件
 #include "GBuffer.vert.spv.h"
+#include "GBuffer.vert.dxil.h"
 #include "GBuffer.frag.spv.h"
+#include "GBuffer.frag.dxil.h"
 
 namespace he::render {
 
@@ -214,9 +217,15 @@ void GBufferRenderer::CreatePSO(rhi::IRHIDevice* device) {
     rhi::ShaderBytecode gbVS, gbFS;
     gbVS.stage = rhi::ShaderStage::Vertex;
     gbVS.spirv = k_GBuffer_vert_spv;
+    gbVS.dxil.assign(std::begin(k_GBuffer_vert_dxil), std::end(k_GBuffer_vert_dxil));
+    gbVS.dxil.assign(std::begin(k_GBuffer_vert_dxil), std::end(k_GBuffer_vert_dxil));
+    gbVS.dxil.assign(std::begin(k_GBuffer_vert_dxil), std::end(k_GBuffer_vert_dxil));
     gbVS.entryPoint = "main";
     gbFS.stage = rhi::ShaderStage::Pixel;
     gbFS.spirv = k_GBuffer_frag_spv;
+    gbFS.dxil.assign(std::begin(k_GBuffer_frag_dxil), std::end(k_GBuffer_frag_dxil));
+    gbFS.dxil.assign(std::begin(k_GBuffer_frag_dxil), std::end(k_GBuffer_frag_dxil));
+    gbFS.dxil.assign(std::begin(k_GBuffer_frag_dxil), std::end(k_GBuffer_frag_dxil));
     gbFS.entryPoint = "main";
 
     // 顶点布局

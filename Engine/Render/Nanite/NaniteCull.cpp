@@ -1,4 +1,4 @@
-// ============================================================
+﻿// ============================================================
 // Nanite/NaniteCull.cpp — 「计数 → 间接绘制」链的计数端（§14.8 任务 3）
 //   + 实例剔除（任务 13）+ per-instance cluster BVH（任务 14）
 //   + 三阶段簇剔除（任务 15：Phase 1 掩码 → Phase 2 Hi-Z → Phase 3 LOD 选择）
@@ -22,13 +22,18 @@
 // ============================================================
 
 #include "Nanite/NaniteCull.h"
+#include <iterator>
 
 #include "Core/Log.h"
 
-#include "Nanite_Cull.comp.spv.h"             // 由 Shader 编译管线生成（slangc → SPIR-V → spv_to_header.py）
-#include "Nanite_InstanceCull.comp.spv.h"     // 【任务 13】同上
-#include "Nanite_ClusterBVH.comp.spv.h"       // 【任务 14】per-instance cluster BVH 的 DFS 遍历
-#include "Nanite_HiZDownsample.comp.spv.h"    // 【任务 15】模块自持的 Hi-Z 下采样（与既有 HiZDownsample 同口径）
+#include "Nanite_Cull.comp.spv.h"
+#include "Nanite_Cull.comp.dxil.h"             // 由 Shader 编译管线生成（slangc → SPIR-V → spv_to_header.py）
+#include "Nanite_InstanceCull.comp.spv.h"
+#include "Nanite_InstanceCull.comp.dxil.h"     // 【任务 13】同上
+#include "Nanite_ClusterBVH.comp.spv.h"
+#include "Nanite_ClusterBVH.comp.dxil.h"       // 【任务 14】per-instance cluster BVH 的 DFS 遍历
+#include "Nanite_HiZDownsample.comp.spv.h"
+#include "Nanite_HiZDownsample.comp.dxil.h"    // 【任务 15】模块自持的 Hi-Z 下采样（与既有 HiZDownsample 同口径）
 
 // 【任务 13 的契约交叉验证】`NaniteInstanceGpuObject` 是 `GPUSceneObject` 的 RHI-free 镜像。
 // 只有本 .cpp（Render 目标）能 include 真身，因此把"逐字段同布局"这条硬契约钉在这里：
@@ -202,6 +207,9 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     // ── 3. compute PSO ──
     m_CS.stage      = rhi::ShaderStage::Compute;
     m_CS.spirv      = k_Nanite_Cull_comp_spv;
+    m_CS.dxil.assign(std::begin(k_Nanite_Cull_comp_dxil), std::end(k_Nanite_Cull_comp_dxil));
+    m_CS.dxil.assign(std::begin(k_Nanite_Cull_comp_dxil), std::end(k_Nanite_Cull_comp_dxil));
+    m_CS.dxil.assign(std::begin(k_Nanite_Cull_comp_dxil), std::end(k_Nanite_Cull_comp_dxil));
     m_CS.entryPoint = "main";
 
     rhi::PushConstantRange pc;
@@ -238,6 +246,9 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
 
         m_InstanceCullCS.stage      = rhi::ShaderStage::Compute;
         m_InstanceCullCS.spirv      = k_Nanite_InstanceCull_comp_spv;
+        m_InstanceCullCS.dxil.assign(std::begin(k_Nanite_InstanceCull_comp_dxil), std::end(k_Nanite_InstanceCull_comp_dxil));
+        m_InstanceCullCS.dxil.assign(std::begin(k_Nanite_InstanceCull_comp_dxil), std::end(k_Nanite_InstanceCull_comp_dxil));
+        m_InstanceCullCS.dxil.assign(std::begin(k_Nanite_InstanceCull_comp_dxil), std::end(k_Nanite_InstanceCull_comp_dxil));
         m_InstanceCullCS.entryPoint = "main";
 
         rhi::PushConstantRange cullPc;
@@ -431,6 +442,9 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
 
         m_BVHCS.stage      = rhi::ShaderStage::Compute;
         m_BVHCS.spirv      = k_Nanite_ClusterBVH_comp_spv;
+        m_BVHCS.dxil.assign(std::begin(k_Nanite_ClusterBVH_comp_dxil), std::end(k_Nanite_ClusterBVH_comp_dxil));
+        m_BVHCS.dxil.assign(std::begin(k_Nanite_ClusterBVH_comp_dxil), std::end(k_Nanite_ClusterBVH_comp_dxil));
+        m_BVHCS.dxil.assign(std::begin(k_Nanite_ClusterBVH_comp_dxil), std::end(k_Nanite_ClusterBVH_comp_dxil));
         m_BVHCS.entryPoint = "main";
 
         rhi::PushConstantRange bvhPc;
@@ -472,6 +486,9 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
 
         m_HiZBuildCS.stage      = rhi::ShaderStage::Compute;
         m_HiZBuildCS.spirv      = k_Nanite_HiZDownsample_comp_spv;
+        m_HiZBuildCS.dxil.assign(std::begin(k_Nanite_HiZDownsample_comp_dxil), std::end(k_Nanite_HiZDownsample_comp_dxil));
+        m_HiZBuildCS.dxil.assign(std::begin(k_Nanite_HiZDownsample_comp_dxil), std::end(k_Nanite_HiZDownsample_comp_dxil));
+        m_HiZBuildCS.dxil.assign(std::begin(k_Nanite_HiZDownsample_comp_dxil), std::end(k_Nanite_HiZDownsample_comp_dxil));
         m_HiZBuildCS.entryPoint = "main";
 
         rhi::PushConstantRange hizPc;

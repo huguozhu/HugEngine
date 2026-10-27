@@ -1,4 +1,4 @@
-#include "Pipeline/DeferredPipeline.h"
+﻿#include "Pipeline/DeferredPipeline.h"
 // 阶段 1 T1.4：环境参数（太阳方向 + 浑浊度）走快照，本文件不再直接读世界
 #include "Threading/SceneSnapshotBuilder.h"
 #include "GI/GI_IBL.h"
@@ -26,7 +26,9 @@
 #include <string>
 #include <unordered_set>
 #include "DeferredLighting.vert.spv.h"
+#include "DeferredLighting.vert.dxil.h"
 #include "DeferredLighting.frag.spv.h"
+#include "DeferredLighting.frag.dxil.h"
 
 // DGC 开关（编译期常量，默认 false 保留传统 ExecuteIndirect 回退）
 // 语义与落点详见 DeferredPipeline.cpp 的同名常量：true = GPU 生成绘制命令

@@ -1,4 +1,7 @@
-#include "Pipeline/ForwardPipeline.h"
+﻿#include "Pipeline/ForwardPipeline.h"
+#include <iterator>
+#include "PBR.vert.dxil.h"
+#include "PBR.frag.dxil.h"
 
 #include "Threading/RenderThreadContext.h"   // T2.6：帧上下文（唯一 RHI 出口）
 #include "Pipeline/PhysicalLight.h"  // render::KelvinToRGB
@@ -77,10 +80,12 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height)
     // --- PBR 着色器 ---
     m_VS.stage      = rhi::ShaderStage::Vertex;
     m_VS.spirv      = k_PBR_vert_spv;
+    m_VS.dxil.assign(std::begin(k_PBR_vert_dxil), std::end(k_PBR_vert_dxil));
     m_VS.entryPoint = "main";
 
     m_FS.stage      = rhi::ShaderStage::Pixel;
     m_FS.spirv      = k_PBR_frag_spv;
+    m_FS.dxil.assign(std::begin(k_PBR_frag_dxil), std::end(k_PBR_frag_dxil));
     m_FS.entryPoint = "main";
 
     rhi::VertexInputLayout vertexLayout;

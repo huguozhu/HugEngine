@@ -1,4 +1,4 @@
-// ============================================================
+﻿// ============================================================
 // ReSTIRPass.cpp — ReSTIR DI 时空重采样 Pass 实现
 // Init → Temporal → Spatial 三个 compute dispatch 顺序执行
 // ============================================================
@@ -10,8 +10,11 @@
 
 // ReSTIR 着色器 SPIR-V
 #include "ReSTIR_Init.comp.spv.h"
+#include "ReSTIR_Init.comp.dxil.h"
 #include "ReSTIR_Temporal.comp.spv.h"
+#include "ReSTIR_Temporal.comp.dxil.h"
 #include "ReSTIR_Spatial.comp.spv.h"
+#include "ReSTIR_Spatial.comp.dxil.h"
 
 #include <glm/gtc/type_ptr.hpp>
 #include <cstring>

@@ -1,9 +1,12 @@
-#include "GI/RSMIndirect.h"
+﻿#include "GI/RSMIndirect.h"
+#include <iterator>
 #include "Core/Log.h"
 #include <cstring>
 
-#include "SSAO.vert.spv.h"          // 全屏三角顶点着色器（与 SSGI/AO 共用）
+#include "SSAO.vert.spv.h"
+#include "SSAO.vert.dxil.h"          // 全屏三角顶点着色器（与 SSGI/AO 共用）
 #include "RSM_Indirect.frag.spv.h"
+#include "RSM_Indirect.frag.dxil.h"
 
 namespace he::render {
 
@@ -49,9 +52,15 @@ bool RSMIndirect::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     rhi::ShaderBytecode vs, fs;
     vs.stage      = rhi::ShaderStage::Vertex;
     vs.spirv      = k_SSAO_vert_spv;
+    vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+    vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+    vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
     vs.entryPoint = "vertexMain";
     fs.stage      = rhi::ShaderStage::Pixel;
     fs.spirv      = k_RSM_Indirect_frag_spv;
+    fs.dxil.assign(std::begin(k_RSM_Indirect_frag_dxil), std::end(k_RSM_Indirect_frag_dxil));
+    fs.dxil.assign(std::begin(k_RSM_Indirect_frag_dxil), std::end(k_RSM_Indirect_frag_dxil));
+    fs.dxil.assign(std::begin(k_RSM_Indirect_frag_dxil), std::end(k_RSM_Indirect_frag_dxil));
     fs.entryPoint = "fragmentMain";
 
     rhi::PipelineStateDesc psoDesc;

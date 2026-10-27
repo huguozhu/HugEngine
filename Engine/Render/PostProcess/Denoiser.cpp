@@ -1,8 +1,11 @@
-// PostProcess/Denoiser.cpp — 双边模糊降噪
+﻿// PostProcess/Denoiser.cpp — 双边模糊降噪
 #include "PostProcess/Denoiser.h"
+#include <iterator>
 #include "Core/Log.h"
 #include "SSAO.vert.spv.h"
+#include "SSAO.vert.dxil.h"
 #include "Denoise.frag.spv.h"
+#include "Denoise.frag.dxil.h"
 
 namespace he::render {
 
@@ -23,9 +26,15 @@ bool Denoiser::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     rhi::ShaderBytecode vs,fs;
     vs.stage=rhi::ShaderStage::Vertex;
     vs.spirv=k_SSAO_vert_spv;
+    vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+    vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+    vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
     vs.entryPoint="vertexMain";
     fs.stage=rhi::ShaderStage::Pixel;
     fs.spirv=k_Denoise_frag_spv;
+    fs.dxil.assign(std::begin(k_Denoise_frag_dxil), std::end(k_Denoise_frag_dxil));
+    fs.dxil.assign(std::begin(k_Denoise_frag_dxil), std::end(k_Denoise_frag_dxil));
+    fs.dxil.assign(std::begin(k_Denoise_frag_dxil), std::end(k_Denoise_frag_dxil));
     fs.entryPoint="fragmentMain";
     rhi::PipelineStateDesc d;
     d.vertexShader=&vs;

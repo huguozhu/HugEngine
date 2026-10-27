@@ -1,4 +1,4 @@
-#include "Pipeline/GPUWorkGraph.h"
+﻿#include "Pipeline/GPUWorkGraph.h"
 #include "Core/Log.h"
 #include "Core/Assert.h"
 #include <cstring>
@@ -6,6 +6,7 @@
 // ── 内嵌 WorkGraph_Entry 着色器（默认 Entry 节点 Compute Shader）──
 // 由 shader 编译管线生成：slangc → SPIR-V → spv_to_header.py → .spv.h
 #include "WorkGraph_Entry.comp.spv.h"
+#include "WorkGraph_Entry.comp.dxil.h"
 
 namespace he::render {
 

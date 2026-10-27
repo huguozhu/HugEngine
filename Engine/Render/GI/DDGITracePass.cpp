@@ -1,4 +1,4 @@
-// ============================================================
+﻿// ============================================================
 // DDGITracePass.cpp — DDGI 探针射线的硬件光追 march（任务 17 / B4 · M5.2-A）
 // ============================================================
 #include "GI/DDGITracePass.h"
@@ -6,8 +6,10 @@
 #include "Pipeline/Material.h"   // ShaderTypes.slang（RTRayEffectPushConstant）
 
 #include "DDGI_Trace.rgen.spv.h"
-#include "RT_GI.rchit.spv.h"   // 命中点出射辐射度：与 RTGI 共用，保证两源量纲一致
-#include "RT_GI.rmiss.spv.h"   // 未命中只置 a=-1，回退在 rgen 里做（它绑着 IBL）
+#include "RT_GI.rchit.spv.h"
+// (该着色器暂无 DXIL：RT_GI.rchit)   // 命中点出射辐射度：与 RTGI 共用，保证两源量纲一致
+#include "RT_GI.rmiss.spv.h"
+// (该着色器暂无 DXIL：RT_GI.rmiss)   // 未命中只置 a=-1，回退在 rgen 里做（它绑着 IBL）
 
 #include <cstring>
 

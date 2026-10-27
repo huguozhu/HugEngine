@@ -1,6 +1,9 @@
-#include "AntiAliasing/AA_TAA.h"
+﻿#include "AntiAliasing/AA_TAA.h"
+#include <iterator>
 #include "TAA_Resolve.vert.spv.h"
+#include "TAA_Resolve.vert.dxil.h"
 #include "TAA_Resolve.frag.spv.h"
+#include "TAA_Resolve.frag.dxil.h"
 #include "Core/Log.h"
 #include "Core/Assert.h"
 #include <glm/gtc/matrix_transform.hpp>
@@ -87,9 +90,15 @@ void AA_TAA::CreatePSO() {
     rhi::ShaderBytecode vs, fs;
     vs.stage      = rhi::ShaderStage::Vertex;
     vs.spirv      = k_TAA_Resolve_vert_spv;
+    vs.dxil.assign(std::begin(k_TAA_Resolve_vert_dxil), std::end(k_TAA_Resolve_vert_dxil));
+    vs.dxil.assign(std::begin(k_TAA_Resolve_vert_dxil), std::end(k_TAA_Resolve_vert_dxil));
+    vs.dxil.assign(std::begin(k_TAA_Resolve_vert_dxil), std::end(k_TAA_Resolve_vert_dxil));
     vs.entryPoint = "main";
     fs.stage      = rhi::ShaderStage::Pixel;
     fs.spirv      = k_TAA_Resolve_frag_spv;
+    fs.dxil.assign(std::begin(k_TAA_Resolve_frag_dxil), std::end(k_TAA_Resolve_frag_dxil));
+    fs.dxil.assign(std::begin(k_TAA_Resolve_frag_dxil), std::end(k_TAA_Resolve_frag_dxil));
+    fs.dxil.assign(std::begin(k_TAA_Resolve_frag_dxil), std::end(k_TAA_Resolve_frag_dxil));
     fs.entryPoint = "main";
 
     rhi::PushConstantRange pc;

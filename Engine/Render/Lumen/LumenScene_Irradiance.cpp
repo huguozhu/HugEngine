@@ -1,4 +1,4 @@
-// ============================================================
+﻿// ============================================================
 // LumenScene_Irradiance.cpp — 步骤 24：由探针 SH 采样出逐像素辐照度，并贴到 Provider 输出
 //
 // 【两段分工】
@@ -14,14 +14,21 @@
 // ============================================================
 
 #include "Lumen/LumenScene.h"
+#include <iterator>
 
 #include "Core/Log.h"
 #include "Lumen_ScreenProbe_SHProject.comp.spv.h"
+#include "Lumen_ScreenProbe_SHProject.comp.dxil.h"
 #include "Lumen_ProbeIrradiance.comp.spv.h"
+#include "Lumen_ProbeIrradiance.comp.dxil.h"
 #include "Lumen_FarFieldCompare.comp.spv.h"
+#include "Lumen_FarFieldCompare.comp.dxil.h"
 #include "Lumen_FarFieldMerge.comp.spv.h"
+#include "Lumen_FarFieldMerge.comp.dxil.h"
 #include "Lumen_Irradiance.frag.spv.h"
+#include "Lumen_Irradiance.frag.dxil.h"
 #include "SSAO.vert.spv.h"
+#include "SSAO.vert.dxil.h"
 
 #include <cstring>
 
@@ -78,6 +85,9 @@ void LumenScene::CreateIrradianceGPUObjects() {
     rhi::ShaderBytecode cs;
     cs.stage      = rhi::ShaderStage::Compute;
     cs.spirv      = k_Lumen_ProbeIrradiance_comp_spv;
+    cs.dxil.assign(std::begin(k_Lumen_ProbeIrradiance_comp_dxil), std::end(k_Lumen_ProbeIrradiance_comp_dxil));
+    cs.dxil.assign(std::begin(k_Lumen_ProbeIrradiance_comp_dxil), std::end(k_Lumen_ProbeIrradiance_comp_dxil));
+    cs.dxil.assign(std::begin(k_Lumen_ProbeIrradiance_comp_dxil), std::end(k_Lumen_ProbeIrradiance_comp_dxil));
     cs.entryPoint = "main";
 
     rhi::PipelineStateDesc pso;
@@ -184,9 +194,15 @@ void LumenScene::CreateIrradianceCopyPipeline() {
     rhi::ShaderBytecode vs, fs;
     vs.stage      = rhi::ShaderStage::Vertex;
     vs.spirv      = k_SSAO_vert_spv;
+    vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+    vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+    vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
     vs.entryPoint = "vertexMain";
     fs.stage      = rhi::ShaderStage::Pixel;
     fs.spirv      = k_Lumen_Irradiance_frag_spv;
+    fs.dxil.assign(std::begin(k_Lumen_Irradiance_frag_dxil), std::end(k_Lumen_Irradiance_frag_dxil));
+    fs.dxil.assign(std::begin(k_Lumen_Irradiance_frag_dxil), std::end(k_Lumen_Irradiance_frag_dxil));
+    fs.dxil.assign(std::begin(k_Lumen_Irradiance_frag_dxil), std::end(k_Lumen_Irradiance_frag_dxil));
     fs.entryPoint = "fragmentMain";
 
     rhi::PipelineStateDesc d;
@@ -294,6 +310,9 @@ void LumenScene::CreateFarFieldCompareGPUObjects() {
     rhi::ShaderBytecode cs;
     cs.stage      = rhi::ShaderStage::Compute;
     cs.spirv      = k_Lumen_FarFieldCompare_comp_spv;
+    cs.dxil.assign(std::begin(k_Lumen_FarFieldCompare_comp_dxil), std::end(k_Lumen_FarFieldCompare_comp_dxil));
+    cs.dxil.assign(std::begin(k_Lumen_FarFieldCompare_comp_dxil), std::end(k_Lumen_FarFieldCompare_comp_dxil));
+    cs.dxil.assign(std::begin(k_Lumen_FarFieldCompare_comp_dxil), std::end(k_Lumen_FarFieldCompare_comp_dxil));
     cs.entryPoint = "main";
 
     rhi::PipelineStateDesc pso;
@@ -340,6 +359,9 @@ void LumenScene::CreateFarFieldCompareGPUObjects() {
     rhi::ShaderBytecode mcs;
     mcs.stage = rhi::ShaderStage::Compute;
     mcs.spirv = k_Lumen_FarFieldMerge_comp_spv;
+    mcs.dxil.assign(std::begin(k_Lumen_FarFieldMerge_comp_dxil), std::end(k_Lumen_FarFieldMerge_comp_dxil));
+    mcs.dxil.assign(std::begin(k_Lumen_FarFieldMerge_comp_dxil), std::end(k_Lumen_FarFieldMerge_comp_dxil));
+    mcs.dxil.assign(std::begin(k_Lumen_FarFieldMerge_comp_dxil), std::end(k_Lumen_FarFieldMerge_comp_dxil));
     mcs.entryPoint = "main";
     rhi::PipelineStateDesc mpso;
     mpso.bindPoint            = rhi::PipelineBindPoint::Compute;

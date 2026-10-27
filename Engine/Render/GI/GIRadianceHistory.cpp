@@ -1,11 +1,14 @@
-// GI/GIRadianceHistory.cpp — 前帧 HDR 辐射度（GI 源共享）
+﻿// GI/GIRadianceHistory.cpp — 前帧 HDR 辐射度（GI 源共享）
 //
 // 实现本身是把 GI_DDGI 里原有的 CaptureHDR 抽出来；除了所有权搬到这里，渲染流程
 // （FullscreenCopy + 线性采样自动降采样）与判定条件保持不变，以免影响 DDGI 探针行为。
 #include "GI/GIRadianceHistory.h"
+#include <iterator>
 #include "Core/Log.h"
 #include "Fullscreen.vert.spv.h"
+#include "Fullscreen.vert.dxil.h"
 #include "FullscreenCopy.frag.spv.h"
+#include "FullscreenCopy.frag.dxil.h"
 
 namespace he::render {
 
@@ -42,9 +45,15 @@ bool GIRadianceHistory::Initialize(rhi::IRHIDevice* device, u32 width, u32 heigh
     rhi::ShaderBytecode vs, fs;
     vs.stage      = rhi::ShaderStage::Vertex;
     vs.spirv      = k_Fullscreen_vert_spv;
+    vs.dxil.assign(std::begin(k_Fullscreen_vert_dxil), std::end(k_Fullscreen_vert_dxil));
+    vs.dxil.assign(std::begin(k_Fullscreen_vert_dxil), std::end(k_Fullscreen_vert_dxil));
+    vs.dxil.assign(std::begin(k_Fullscreen_vert_dxil), std::end(k_Fullscreen_vert_dxil));
     vs.entryPoint = "vertexMain";
     fs.stage      = rhi::ShaderStage::Pixel;
     fs.spirv      = k_FullscreenCopy_frag_spv;
+    fs.dxil.assign(std::begin(k_FullscreenCopy_frag_dxil), std::end(k_FullscreenCopy_frag_dxil));
+    fs.dxil.assign(std::begin(k_FullscreenCopy_frag_dxil), std::end(k_FullscreenCopy_frag_dxil));
+    fs.dxil.assign(std::begin(k_FullscreenCopy_frag_dxil), std::end(k_FullscreenCopy_frag_dxil));
     fs.entryPoint = "fragmentMain";
 
     rhi::PipelineStateDesc pd;

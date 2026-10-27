@@ -1,4 +1,4 @@
-// ============================================================
+﻿// ============================================================
 // ImGuiIntegration.cpp — ImGui v1.91 + GLFW + Vulkan
 //
 // Vulkan 特定资源（RenderPass / DescriptorPool）通过 RHI 接口创建，
@@ -25,6 +25,20 @@ void ImGuiIntegration::Initialize(GLFWwindow* window, rhi::IRHIDevice* device,
                                    rhi::IRHISwapChain* swapchain) {
     m_Window = window;
     m_Device = device;
+
+    // 【多后端】ImGui 的渲染后端实现（imgui_impl_vulkan）只支持 Vulkan，
+    // 且本文件通过 VulkanDeviceAccess 直接取 VkInstance/VkDevice/VkQueue。
+    // 在 D3D12 等其它后端上必须**直接跳过**：
+    //   · 若继续走 Vulkan 路径，会对 D3D12 设备做 static_cast<VulkanDevice*>
+    //     拿到垃圾指针，后续 vkCreate* 收到非法句柄 —— 实测表现为进程死等、不出帧。
+    //   · 调用方（样例）已经用 `if (imgui.IsInitialized())` 守卫所有 UI 代码，
+    //     所以跳过是安全的：只是没有 UI，渲染照常。
+    if (device && device->GetBackend() != rhi::Backend::Vulkan) {
+        HE_CORE_INFO("ImGui: 当前后端不是 Vulkan（{}），跳过 UI 初始化",
+                     static_cast<int>(device->GetBackend()));
+        m_Initialized = false;
+        return;
+    }
     IMGUI_CHECKVERSION();
     m_Context = ImGui::CreateContext();
     ImGui::StyleColorsDark();

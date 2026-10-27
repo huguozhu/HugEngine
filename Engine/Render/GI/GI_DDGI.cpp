@@ -1,9 +1,11 @@
-// GI/GI_DDGI.cpp — 动态探针 GI（Compute Shader 更新 + 时间混合 + 探针网格）
+﻿// GI/GI_DDGI.cpp — 动态探针 GI（Compute Shader 更新 + 时间混合 + 探针网格）
 #include "GI/GI_DDGI.h"
+#include <iterator>
 #include "GI/GIProbeGrid.h"   // 探针网格拟合规则（纯几何、可单测）
 #include "Core/Log.h"
 #include "Subsystem/RenderSubsystem.h"
 #include "DDGI.comp.spv.h"
+#include "DDGI.comp.dxil.h"
 #include <cstring>
 #include <cstdio>
 
@@ -135,6 +137,9 @@ bool GI_DDGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     rhi::ShaderBytecode cs;
     cs.stage      = rhi::ShaderStage::Compute;
     cs.spirv      = k_DDGI_comp_spv;
+    cs.dxil.assign(std::begin(k_DDGI_comp_dxil), std::end(k_DDGI_comp_dxil));
+    cs.dxil.assign(std::begin(k_DDGI_comp_dxil), std::end(k_DDGI_comp_dxil));
+    cs.dxil.assign(std::begin(k_DDGI_comp_dxil), std::end(k_DDGI_comp_dxil));
     cs.entryPoint = "main";
 
     rhi::PipelineStateDesc psoDesc;

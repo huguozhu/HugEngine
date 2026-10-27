@@ -1,9 +1,12 @@
-// GI/GI_SSR.cpp — 屏幕空间反射
+﻿// GI/GI_SSR.cpp — 屏幕空间反射
 #include "GI/GI_SSR.h"
+#include <iterator>
 #include "Pipeline/Camera.h"   // CameraData：SetCamera 注入的真实相机（GetProjMatrix）
 #include "Core/Log.h"
 #include "SSAO.vert.spv.h"
+#include "SSAO.vert.dxil.h"
 #include "SSR.frag.spv.h"
+#include "SSR.frag.dxil.h"
 #include <glm/gtc/matrix_transform.hpp>
 #include <cstring>
 
@@ -63,9 +66,15 @@ bool GI_SSR::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     rhi::ShaderBytecode vs, fs;
     vs.stage = rhi::ShaderStage::Vertex;
     vs.spirv = k_SSAO_vert_spv;
+    vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+    vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+    vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
     vs.entryPoint = "vertexMain";
     fs.stage = rhi::ShaderStage::Pixel;
     fs.spirv = k_SSR_frag_spv;
+    fs.dxil.assign(std::begin(k_SSR_frag_dxil), std::end(k_SSR_frag_dxil));
+    fs.dxil.assign(std::begin(k_SSR_frag_dxil), std::end(k_SSR_frag_dxil));
+    fs.dxil.assign(std::begin(k_SSR_frag_dxil), std::end(k_SSR_frag_dxil));
     fs.entryPoint = "fragmentMain";
     rhi::PipelineStateDesc d;
     d.vertexShader = &vs;

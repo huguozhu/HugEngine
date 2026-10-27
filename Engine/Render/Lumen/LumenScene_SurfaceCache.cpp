@@ -1,4 +1,4 @@
-// ============================================================
+﻿// ============================================================
 // LumenScene_SurfaceCache.cpp — 步骤 14：页表 + 页状态机（GPU 镜像与一致性校验）
 //
 // 【分成单独一个 .cpp】LumenScene.cpp 管"输出纹理 + 占位 pass"，这里管 L2 的页表；
@@ -6,18 +6,26 @@
 // ============================================================
 
 #include "Lumen/LumenScene.h"
+#include <iterator>
 
 #include "Core/Log.h"
 #include "Lumen/ScreenProbe.slang"
 #include "Lumen/LumenSH.h"             // SH 常数/重建（与 shader 的 ScreenProbeSampling.slang 同源）
 #include "Lumen/SurfaceCache.slang"     // 共享布局（与 C++ 镜像同源）
 #include "SurfaceCache_Capture.comp.spv.h"
+#include "SurfaceCache_Capture.comp.dxil.h"
 #include "ScreenProbe_Gather.comp.spv.h"
+#include "ScreenProbe_Gather.comp.dxil.h"
 #include "Lumen_SurfaceCacheSample.comp.spv.h"
+#include "Lumen_SurfaceCacheSample.comp.dxil.h"
 #include "Lumen_ScreenProbe_SHProject.comp.spv.h"
+#include "Lumen_ScreenProbe_SHProject.comp.dxil.h"
 #include "ScreenProbe_Trace.comp.spv.h"
+#include "ScreenProbe_Trace.comp.dxil.h"
 #include "SurfaceCache_Feedback.comp.spv.h"
+#include "SurfaceCache_Feedback.comp.dxil.h"
 #include "SurfaceCache_PageCheck.comp.spv.h"
+#include "SurfaceCache_PageCheck.comp.dxil.h"
 
 #include <algorithm>
 #include <chrono>   // 步骤 37：页表上传三段耗时
@@ -176,6 +184,9 @@ void LumenScene::CreatePageCheckGPUObjects() {
     rhi::ShaderBytecode cs;
     cs.stage      = rhi::ShaderStage::Compute;
     cs.spirv      = k_SurfaceCache_PageCheck_comp_spv;
+    cs.dxil.assign(std::begin(k_SurfaceCache_PageCheck_comp_dxil), std::end(k_SurfaceCache_PageCheck_comp_dxil));
+    cs.dxil.assign(std::begin(k_SurfaceCache_PageCheck_comp_dxil), std::end(k_SurfaceCache_PageCheck_comp_dxil));
+    cs.dxil.assign(std::begin(k_SurfaceCache_PageCheck_comp_dxil), std::end(k_SurfaceCache_PageCheck_comp_dxil));
     cs.entryPoint = "main";
 
     rhi::PipelineStateDesc pso;
@@ -273,6 +284,9 @@ void LumenScene::CreateCaptureGPUObjects() {
     rhi::ShaderBytecode cs;
     cs.stage      = rhi::ShaderStage::Compute;
     cs.spirv      = k_SurfaceCache_Capture_comp_spv;
+    cs.dxil.assign(std::begin(k_SurfaceCache_Capture_comp_dxil), std::end(k_SurfaceCache_Capture_comp_dxil));
+    cs.dxil.assign(std::begin(k_SurfaceCache_Capture_comp_dxil), std::end(k_SurfaceCache_Capture_comp_dxil));
+    cs.dxil.assign(std::begin(k_SurfaceCache_Capture_comp_dxil), std::end(k_SurfaceCache_Capture_comp_dxil));
     cs.entryPoint = "main";
 
     rhi::PipelineStateDesc pso;
@@ -535,6 +549,9 @@ void LumenScene::CreateShadeGPUObjects() {
     rhi::ShaderBytecode cs;
     cs.stage      = rhi::ShaderStage::Compute;
     cs.spirv      = k_Lumen_SurfaceCacheSample_comp_spv;
+    cs.dxil.assign(std::begin(k_Lumen_SurfaceCacheSample_comp_dxil), std::end(k_Lumen_SurfaceCacheSample_comp_dxil));
+    cs.dxil.assign(std::begin(k_Lumen_SurfaceCacheSample_comp_dxil), std::end(k_Lumen_SurfaceCacheSample_comp_dxil));
+    cs.dxil.assign(std::begin(k_Lumen_SurfaceCacheSample_comp_dxil), std::end(k_Lumen_SurfaceCacheSample_comp_dxil));
     cs.entryPoint = "main";
 
     rhi::PipelineStateDesc pso;
@@ -784,6 +801,9 @@ void LumenScene::CreateProbeTraceGPUObjects() {
     rhi::ShaderBytecode cs;
     cs.stage      = rhi::ShaderStage::Compute;
     cs.spirv      = k_ScreenProbe_Trace_comp_spv;
+    cs.dxil.assign(std::begin(k_ScreenProbe_Trace_comp_dxil), std::end(k_ScreenProbe_Trace_comp_dxil));
+    cs.dxil.assign(std::begin(k_ScreenProbe_Trace_comp_dxil), std::end(k_ScreenProbe_Trace_comp_dxil));
+    cs.dxil.assign(std::begin(k_ScreenProbe_Trace_comp_dxil), std::end(k_ScreenProbe_Trace_comp_dxil));
     cs.entryPoint = "main";
 
     rhi::PipelineStateDesc pso;
@@ -938,6 +958,9 @@ void LumenScene::CreateProbeGPUObjects() {
     rhi::ShaderBytecode cs;
     cs.stage      = rhi::ShaderStage::Compute;
     cs.spirv      = k_ScreenProbe_Gather_comp_spv;
+    cs.dxil.assign(std::begin(k_ScreenProbe_Gather_comp_dxil), std::end(k_ScreenProbe_Gather_comp_dxil));
+    cs.dxil.assign(std::begin(k_ScreenProbe_Gather_comp_dxil), std::end(k_ScreenProbe_Gather_comp_dxil));
+    cs.dxil.assign(std::begin(k_ScreenProbe_Gather_comp_dxil), std::end(k_ScreenProbe_Gather_comp_dxil));
     cs.entryPoint = "main";
 
     rhi::PipelineStateDesc pso;
@@ -1074,6 +1097,9 @@ void LumenScene::CreateFeedbackGPUObjects() {
     rhi::ShaderBytecode cs;
     cs.stage      = rhi::ShaderStage::Compute;
     cs.spirv      = k_SurfaceCache_Feedback_comp_spv;
+    cs.dxil.assign(std::begin(k_SurfaceCache_Feedback_comp_dxil), std::end(k_SurfaceCache_Feedback_comp_dxil));
+    cs.dxil.assign(std::begin(k_SurfaceCache_Feedback_comp_dxil), std::end(k_SurfaceCache_Feedback_comp_dxil));
+    cs.dxil.assign(std::begin(k_SurfaceCache_Feedback_comp_dxil), std::end(k_SurfaceCache_Feedback_comp_dxil));
     cs.entryPoint = "main";
 
     rhi::PipelineStateDesc pso;
@@ -1323,6 +1349,9 @@ void LumenScene::CreateSHGPUObjects() {
     rhi::ShaderBytecode cs;
     cs.stage      = rhi::ShaderStage::Compute;
     cs.spirv      = k_Lumen_ScreenProbe_SHProject_comp_spv;
+    cs.dxil.assign(std::begin(k_Lumen_ScreenProbe_SHProject_comp_dxil), std::end(k_Lumen_ScreenProbe_SHProject_comp_dxil));
+    cs.dxil.assign(std::begin(k_Lumen_ScreenProbe_SHProject_comp_dxil), std::end(k_Lumen_ScreenProbe_SHProject_comp_dxil));
+    cs.dxil.assign(std::begin(k_Lumen_ScreenProbe_SHProject_comp_dxil), std::end(k_Lumen_ScreenProbe_SHProject_comp_dxil));
     cs.entryPoint = "main";
 
     rhi::PipelineStateDesc pso;

@@ -1,7 +1,10 @@
-#include "Shadow/SpotShadowTechnique.h"
+﻿#include "Shadow/SpotShadowTechnique.h"
+#include <iterator>
 #include "Pipeline/Camera.h"
 #include "Shadow.vert.spv.h"
+#include "Shadow.vert.dxil.h"
 #include "Shadow.frag.spv.h"
+#include "Shadow.frag.dxil.h"
 // 第③段第 2 批：按 meshIndex 从注册表取顶点/索引缓冲（不再遍历 ECS）
 #include "Threading/MeshRegistry.h"
 #include "Scene/World.h"
@@ -23,9 +26,15 @@ bool SpotShadowTechnique::Initialize(rhi::IRHIDevice* device){
     m_Device=device;
     m_ShadowVS.stage=rhi::ShaderStage::Vertex;
     m_ShadowVS.spirv=k_Shadow_vert_spv;
+    m_ShadowVS.dxil.assign(std::begin(k_Shadow_vert_dxil), std::end(k_Shadow_vert_dxil));
+    m_ShadowVS.dxil.assign(std::begin(k_Shadow_vert_dxil), std::end(k_Shadow_vert_dxil));
+    m_ShadowVS.dxil.assign(std::begin(k_Shadow_vert_dxil), std::end(k_Shadow_vert_dxil));
     m_ShadowVS.entryPoint="main";
     m_ShadowFS.stage=rhi::ShaderStage::Pixel;
     m_ShadowFS.spirv=k_Shadow_frag_spv;
+    m_ShadowFS.dxil.assign(std::begin(k_Shadow_frag_dxil), std::end(k_Shadow_frag_dxil));
+    m_ShadowFS.dxil.assign(std::begin(k_Shadow_frag_dxil), std::end(k_Shadow_frag_dxil));
+    m_ShadowFS.dxil.assign(std::begin(k_Shadow_frag_dxil), std::end(k_Shadow_frag_dxil));
     m_ShadowFS.entryPoint="main";
 
     // 每个飞行帧各一张 2D 深度纹理（每帧清空重画 ⇒ 必须分份，理由见头文件）

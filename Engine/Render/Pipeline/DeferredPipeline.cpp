@@ -1,4 +1,4 @@
-#include "Pipeline/DeferredPipeline.h"
+﻿#include "Pipeline/DeferredPipeline.h"
 // 阶段 1 附录 E（E-2①）：注册点要读骨骼网格的缓冲与材质字段
 #include "Scene/SkeletalMeshComponent.h"
 #include "GI/GI_IBL.h"
@@ -27,7 +27,9 @@
 #include <cmath>
 #include <unordered_set>
 #include "Fullscreen.vert.spv.h"
+#include "Fullscreen.vert.dxil.h"
 #include "FullscreenCopy.frag.spv.h"
+#include "FullscreenCopy.frag.dxil.h"
 
 // ── DGC 开关（Device Generated Commands，VK_EXT_device_generated_commands）──
 // 语义：`true` = 让 **GPU 自己生成绘制命令**（GPU-driven 绘制）——GPU 侧的实例剔除与

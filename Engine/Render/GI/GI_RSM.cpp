@@ -1,4 +1,5 @@
-#include "GI/GI_RSM.h"
+﻿#include "GI/GI_RSM.h"
+#include <iterator>
 #include "RHI/RHI.h"
 #include "Core/Log.h"
 #include "Core/Assert.h"
@@ -9,7 +10,9 @@
 // 第③段第 3 批：按 meshIndex 从注册表取顶点/索引缓冲（不再遍历 ECS）
 #include "Threading/MeshRegistry.h"
 #include "RSM_Generate.vert.spv.h"
+#include "RSM_Generate.vert.dxil.h"
 #include "RSM_Generate.frag.spv.h"
+#include "RSM_Generate.frag.dxil.h"
 #include <cstdio>
 
 namespace he::render {
@@ -88,9 +91,15 @@ bool GI_RSM::Initialize(rhi::IRHIDevice* device, u32, u32) {
     rhi::ShaderBytecode vs, fs;
     vs.stage      = rhi::ShaderStage::Vertex;
     vs.spirv      = k_RSM_Generate_vert_spv;
+    vs.dxil.assign(std::begin(k_RSM_Generate_vert_dxil), std::end(k_RSM_Generate_vert_dxil));
+    vs.dxil.assign(std::begin(k_RSM_Generate_vert_dxil), std::end(k_RSM_Generate_vert_dxil));
+    vs.dxil.assign(std::begin(k_RSM_Generate_vert_dxil), std::end(k_RSM_Generate_vert_dxil));
     vs.entryPoint = "main";
     fs.stage      = rhi::ShaderStage::Pixel;
     fs.spirv      = k_RSM_Generate_frag_spv;
+    fs.dxil.assign(std::begin(k_RSM_Generate_frag_dxil), std::end(k_RSM_Generate_frag_dxil));
+    fs.dxil.assign(std::begin(k_RSM_Generate_frag_dxil), std::end(k_RSM_Generate_frag_dxil));
+    fs.dxil.assign(std::begin(k_RSM_Generate_frag_dxil), std::end(k_RSM_Generate_frag_dxil));
     fs.entryPoint = "main";
 
     rhi::VertexInputLayout vertexLayout;

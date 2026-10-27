@@ -1,7 +1,9 @@
-#include "PostProcess/PTAtrousPass.h"
+﻿#include "PostProcess/PTAtrousPass.h"
+#include <iterator>
 #include "Core/Log.h"
 #include "Core/Assert.h"
-#include "PT_Atrous.comp.spv.h"   // k_PT_Atrous_comp_spv
+#include "PT_Atrous.comp.spv.h"
+#include "PT_Atrous.comp.dxil.h"   // k_PT_Atrous_comp_spv
 
 #include <algorithm>   // std::clamp
 
@@ -51,6 +53,9 @@ bool PTAtrousPass::Initialize(rhi::IRHIDevice* device, const Config& cfg) {
     rhi::ShaderBytecode cs;
     cs.stage = rhi::ShaderStage::Compute;
     cs.spirv = k_PT_Atrous_comp_spv;
+    cs.dxil.assign(std::begin(k_PT_Atrous_comp_dxil), std::end(k_PT_Atrous_comp_dxil));
+    cs.dxil.assign(std::begin(k_PT_Atrous_comp_dxil), std::end(k_PT_Atrous_comp_dxil));
+    cs.dxil.assign(std::begin(k_PT_Atrous_comp_dxil), std::end(k_PT_Atrous_comp_dxil));
     cs.entryPoint = "main";
     rhi::PushConstantRange pc;
     pc.stageMask = rhi::kStageMaskCompute;

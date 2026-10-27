@@ -1,4 +1,4 @@
-// ============================================================
+﻿// ============================================================
 // LumenScene_ProbeFilter.cpp — 步骤 35：Screen Probe 的空间 + 时域滤波
 //
 // 【它在 L6 里的位置】L6 = 时间混合 + 空间滤波 + 异步 Compute。本文件是第一件事：
@@ -25,10 +25,12 @@
 // ============================================================
 
 #include "Lumen/LumenScene.h"
+#include <iterator>
 
 #include "Core/Log.h"
 #include "Lumen/ScreenProbe.slang"
 #include "ScreenProbe_Filter.comp.spv.h"
+#include "ScreenProbe_Filter.comp.dxil.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -84,6 +86,9 @@ void LumenScene::CreateProbeFilterGPUObjects() {
     rhi::ShaderBytecode cs;
     cs.stage      = rhi::ShaderStage::Compute;
     cs.spirv      = k_ScreenProbe_Filter_comp_spv;
+    cs.dxil.assign(std::begin(k_ScreenProbe_Filter_comp_dxil), std::end(k_ScreenProbe_Filter_comp_dxil));
+    cs.dxil.assign(std::begin(k_ScreenProbe_Filter_comp_dxil), std::end(k_ScreenProbe_Filter_comp_dxil));
+    cs.dxil.assign(std::begin(k_ScreenProbe_Filter_comp_dxil), std::end(k_ScreenProbe_Filter_comp_dxil));
     cs.entryPoint = "main";
 
     rhi::PipelineStateDesc pso;

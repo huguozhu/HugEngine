@@ -1,11 +1,14 @@
-// AntiAliasing/AA_FXAA.cpp — FXAA 实现
+﻿// AntiAliasing/AA_FXAA.cpp — FXAA 实现
 #include "AA_FXAA.h"
+#include <iterator>
 #include "Core/Log.h"
 #include "Core/Assert.h"
 
 // 着色器
 #include "FXAA.vert.spv.h"
+#include "FXAA.vert.dxil.h"
 #include "FXAA.frag.spv.h"
+#include "FXAA.frag.dxil.h"
 
 namespace he::render {
 
@@ -90,9 +93,15 @@ void AA_FXAA::CreatePSO() {
     rhi::ShaderBytecode vs, fs;
     vs.stage=rhi::ShaderStage::Vertex;
     vs.spirv=k_FXAA_vert_spv;
+    vs.dxil.assign(std::begin(k_FXAA_vert_dxil), std::end(k_FXAA_vert_dxil));
+    vs.dxil.assign(std::begin(k_FXAA_vert_dxil), std::end(k_FXAA_vert_dxil));
+    vs.dxil.assign(std::begin(k_FXAA_vert_dxil), std::end(k_FXAA_vert_dxil));
     vs.entryPoint="vertexMain";
     fs.stage=rhi::ShaderStage::Pixel;
     fs.spirv=k_FXAA_frag_spv;
+    fs.dxil.assign(std::begin(k_FXAA_frag_dxil), std::end(k_FXAA_frag_dxil));
+    fs.dxil.assign(std::begin(k_FXAA_frag_dxil), std::end(k_FXAA_frag_dxil));
+    fs.dxil.assign(std::begin(k_FXAA_frag_dxil), std::end(k_FXAA_frag_dxil));
     fs.entryPoint="fragmentMain";
 
     rhi::PushConstantRange pcr;

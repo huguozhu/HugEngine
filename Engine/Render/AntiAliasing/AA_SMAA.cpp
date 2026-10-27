@@ -1,4 +1,4 @@
-// AntiAliasing/AA_SMAA.cpp — SMAA 子像素形态学抗锯齿实现
+﻿// AntiAliasing/AA_SMAA.cpp — SMAA 子像素形态学抗锯齿实现
 //
 // 3 Pass 算法：
 //   1. EdgeDetection   — 亮度梯度 → R8 边缘纹理（离屏）
@@ -6,14 +6,19 @@
 //   3. Neighborhood    — 4 邻域加权混合 → BackBuffer（RenderPass 内）
 //
 #include "AA_SMAA.h"
+#include <iterator>
 #include "Core/Log.h"
 #include "Core/Assert.h"
 
 // 着色器字节码（slangc → SPIR-V → .spv.h）
-#include "SSAO.vert.spv.h"                    // 顶点着色器（全屏三角形，共享）
-#include "SMAA_EdgeDetect.frag.spv.h"         // Pass 1
-#include "SMAA_BlendWeight.frag.spv.h"        // Pass 2
-#include "SMAA_Neighborhood.frag.spv.h"       // Pass 3
+#include "SSAO.vert.spv.h"
+#include "SSAO.vert.dxil.h"                    // 顶点着色器（全屏三角形，共享）
+#include "SMAA_EdgeDetect.frag.spv.h"
+#include "SMAA_EdgeDetect.frag.dxil.h"         // Pass 1
+#include "SMAA_BlendWeight.frag.spv.h"
+#include "SMAA_BlendWeight.frag.dxil.h"        // Pass 2
+#include "SMAA_Neighborhood.frag.spv.h"
+#include "SMAA_Neighborhood.frag.dxil.h"       // Pass 3
 
 namespace he::render {
 
@@ -257,9 +262,15 @@ void AA_SMAA::CreateEdgePSO() {
     rhi::ShaderBytecode vs, fs;
     vs.stage      = rhi::ShaderStage::Vertex;
     vs.spirv      = k_SSAO_vert_spv;
+    vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+    vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+    vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
     vs.entryPoint = "vertexMain";
     fs.stage      = rhi::ShaderStage::Pixel;
     fs.spirv      = k_SMAA_EdgeDetect_frag_spv;
+    fs.dxil.assign(std::begin(k_SMAA_EdgeDetect_frag_dxil), std::end(k_SMAA_EdgeDetect_frag_dxil));
+    fs.dxil.assign(std::begin(k_SMAA_EdgeDetect_frag_dxil), std::end(k_SMAA_EdgeDetect_frag_dxil));
+    fs.dxil.assign(std::begin(k_SMAA_EdgeDetect_frag_dxil), std::end(k_SMAA_EdgeDetect_frag_dxil));
     fs.entryPoint = "fragmentMain";
 
     rhi::PushConstantRange pcr;
@@ -297,9 +308,15 @@ void AA_SMAA::CreateBlendPSO() {
     rhi::ShaderBytecode vs, fs;
     vs.stage      = rhi::ShaderStage::Vertex;
     vs.spirv      = k_SSAO_vert_spv;
+    vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+    vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+    vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
     vs.entryPoint = "vertexMain";
     fs.stage      = rhi::ShaderStage::Pixel;
     fs.spirv      = k_SMAA_BlendWeight_frag_spv;
+    fs.dxil.assign(std::begin(k_SMAA_BlendWeight_frag_dxil), std::end(k_SMAA_BlendWeight_frag_dxil));
+    fs.dxil.assign(std::begin(k_SMAA_BlendWeight_frag_dxil), std::end(k_SMAA_BlendWeight_frag_dxil));
+    fs.dxil.assign(std::begin(k_SMAA_BlendWeight_frag_dxil), std::end(k_SMAA_BlendWeight_frag_dxil));
     fs.entryPoint = "fragmentMain";
 
     rhi::PushConstantRange pcr;
@@ -342,9 +359,15 @@ void AA_SMAA::CreateNeighborPSO() {
     rhi::ShaderBytecode vs, fs;
     vs.stage      = rhi::ShaderStage::Vertex;
     vs.spirv      = k_SSAO_vert_spv;
+    vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+    vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+    vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
     vs.entryPoint = "vertexMain";
     fs.stage      = rhi::ShaderStage::Pixel;
     fs.spirv      = k_SMAA_Neighborhood_frag_spv;
+    fs.dxil.assign(std::begin(k_SMAA_Neighborhood_frag_dxil), std::end(k_SMAA_Neighborhood_frag_dxil));
+    fs.dxil.assign(std::begin(k_SMAA_Neighborhood_frag_dxil), std::end(k_SMAA_Neighborhood_frag_dxil));
+    fs.dxil.assign(std::begin(k_SMAA_Neighborhood_frag_dxil), std::end(k_SMAA_Neighborhood_frag_dxil));
     fs.entryPoint = "fragmentMain";
 
     rhi::PushConstantRange pcr;

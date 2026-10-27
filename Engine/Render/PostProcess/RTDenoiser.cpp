@@ -1,9 +1,12 @@
-// PostProcess/RTDenoiser.cpp — RT 效果时域累积降噪器实现
+﻿// PostProcess/RTDenoiser.cpp — RT 效果时域累积降噪器实现
 #include "PostProcess/RTDenoiser.h"
+#include <iterator>
 #include "Core/Log.h"
 #include "Core/Assert.h"
-#include "SSAO.vert.spv.h"             // 全屏三角形 VS（k_SSAO_vert_spv）
-#include "RT_DenoiseTemporal.frag.spv.h" // 时域累积 FS（k_RT_DenoiseTemporal_frag_spv）
+#include "SSAO.vert.spv.h"
+#include "SSAO.vert.dxil.h"             // 全屏三角形 VS（k_SSAO_vert_spv）
+#include "RT_DenoiseTemporal.frag.spv.h"
+#include "RT_DenoiseTemporal.frag.dxil.h" // 时域累积 FS（k_RT_DenoiseTemporal_frag_spv）
 
 namespace he::render {
 
@@ -87,9 +90,15 @@ void RTDenoiser::CreatePSO() {
     rhi::ShaderBytecode vs, fs;
     vs.stage      = rhi::ShaderStage::Vertex;
     vs.spirv      = k_SSAO_vert_spv;
+    vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+    vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+    vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
     vs.entryPoint = "vertexMain";
     fs.stage      = rhi::ShaderStage::Pixel;
     fs.spirv      = k_RT_DenoiseTemporal_frag_spv;
+    fs.dxil.assign(std::begin(k_RT_DenoiseTemporal_frag_dxil), std::end(k_RT_DenoiseTemporal_frag_dxil));
+    fs.dxil.assign(std::begin(k_RT_DenoiseTemporal_frag_dxil), std::end(k_RT_DenoiseTemporal_frag_dxil));
+    fs.dxil.assign(std::begin(k_RT_DenoiseTemporal_frag_dxil), std::end(k_RT_DenoiseTemporal_frag_dxil));
     fs.entryPoint = "fragmentMain";
 
     // Push constant：32B（float2 texelSize + 3×float + uint + 2×float pad）

@@ -1,4 +1,4 @@
-// ============================================================
+﻿// ============================================================
 // DecalPass.cpp — GBuffer 投影贴花 Pass 实现（任务 24）
 // ============================================================
 
@@ -11,7 +11,9 @@
 #include "Core/Log.h"
 
 #include "DecalProject.vert.spv.h"
+#include "DecalProject.vert.dxil.h"
 #include "DecalProject.frag.spv.h"
+#include "DecalProject.frag.dxil.h"
 
 #include <algorithm>
 #include <cmath>

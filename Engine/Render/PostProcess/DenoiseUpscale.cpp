@@ -1,8 +1,11 @@
-// PostProcess/DenoiseUpscale.cpp — 降噪结果的重建升采样（全屏引导滤波）
+﻿// PostProcess/DenoiseUpscale.cpp — 降噪结果的重建升采样（全屏引导滤波）
 #include "PostProcess/DenoiseUpscale.h"
+#include <iterator>
 #include "Core/Log.h"
 #include "SSAO.vert.spv.h"
+#include "SSAO.vert.dxil.h"
 #include "Denoise_Upscale.frag.spv.h"
+#include "Denoise_Upscale.frag.dxil.h"
 
 namespace he::render {
 
@@ -34,9 +37,15 @@ bool DenoiseUpscale::Initialize(rhi::IRHIDevice* device, u32 outW, u32 outH) {
     rhi::ShaderBytecode vs, fs;
     vs.stage      = rhi::ShaderStage::Vertex;
     vs.spirv      = k_SSAO_vert_spv;
+    vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+    vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+    vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
     vs.entryPoint = "vertexMain";
     fs.stage      = rhi::ShaderStage::Pixel;
     fs.spirv      = k_Denoise_Upscale_frag_spv;
+    fs.dxil.assign(std::begin(k_Denoise_Upscale_frag_dxil), std::end(k_Denoise_Upscale_frag_dxil));
+    fs.dxil.assign(std::begin(k_Denoise_Upscale_frag_dxil), std::end(k_Denoise_Upscale_frag_dxil));
+    fs.dxil.assign(std::begin(k_Denoise_Upscale_frag_dxil), std::end(k_Denoise_Upscale_frag_dxil));
     fs.entryPoint = "fragmentMain";
     rhi::PipelineStateDesc d;
     d.vertexShader       = &vs;

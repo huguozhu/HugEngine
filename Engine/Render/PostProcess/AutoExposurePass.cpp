@@ -1,9 +1,11 @@
-// PostProcess/AutoExposurePass.cpp — 自动曝光（Compute reduction + CPU 平均）
+﻿// PostProcess/AutoExposurePass.cpp — 自动曝光（Compute reduction + CPU 平均）
 #include "AutoExposurePass.h"
+#include <iterator>
 #include "Core/Log.h"
 #include "Core/Assert.h"
 #include "Core/CVar.h"
 #include "AutoExposure.comp.spv.h"
+#include "AutoExposure.comp.dxil.h"
 #include <algorithm>
 
 namespace he::render {
@@ -35,6 +37,9 @@ bool AutoExposurePass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
     // Compute PSO
     m_CS.stage = rhi::ShaderStage::Compute;
     m_CS.spirv = k_AutoExposure_comp_spv;
+    m_CS.dxil.assign(std::begin(k_AutoExposure_comp_dxil), std::end(k_AutoExposure_comp_dxil));
+    m_CS.dxil.assign(std::begin(k_AutoExposure_comp_dxil), std::end(k_AutoExposure_comp_dxil));
+    m_CS.dxil.assign(std::begin(k_AutoExposure_comp_dxil), std::end(k_AutoExposure_comp_dxil));
     m_CS.entryPoint = "main";
     rhi::PushConstantRange pc;
     pc.stageMask = rhi::kStageMaskCompute;

@@ -1,14 +1,16 @@
-// ============================================================
+﻿// ============================================================
 // InstanceCuller.cpp — 逐实例 GPU 视锥剔除（任务 25）
 // 阶段 1 第①段（§15.1）：逐网格实例缓冲的状态与生命周期从组件搬到本类（按 meshIndex 索引），
 // 实例变换数据由 `FrameSceneSnapshot` 按值送达 ⇒ 渲染期不再读 InstancedMeshComponent。
 // ============================================================
 
 #include "Pipeline/InstanceCuller.h"
+#include <iterator>
 #include "Math/Geometry.h"   // Frustum::FromViewProj（六平面提取）
 #include "Core/Log.h"
 
 #include "InstancedCull.comp.spv.h"
+#include "InstancedCull.comp.dxil.h"
 
 #include <cstdio>
 #include <cstring>
@@ -53,6 +55,9 @@ bool InstanceCuller::Initialize(rhi::IRHIDevice* device) {
     // 3. Compute PSO
     m_CS.stage = rhi::ShaderStage::Compute;
     m_CS.spirv = k_InstancedCull_comp_spv;
+    m_CS.dxil.assign(std::begin(k_InstancedCull_comp_dxil), std::end(k_InstancedCull_comp_dxil));
+    m_CS.dxil.assign(std::begin(k_InstancedCull_comp_dxil), std::end(k_InstancedCull_comp_dxil));
+    m_CS.dxil.assign(std::begin(k_InstancedCull_comp_dxil), std::end(k_InstancedCull_comp_dxil));
     m_CS.entryPoint = "main";
 
     rhi::PushConstantRange pc;

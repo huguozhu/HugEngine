@@ -1,14 +1,21 @@
-#include "GI/GI_IBL.h"
+﻿#include "GI/GI_IBL.h"
+#include <iterator>
 #include "RHI/RHI.h"
 #include "Core/Log.h"
 #include "Core/Assert.h"
 // 按需包含 IBL Shader SPV（修改 IBL shader 只重编译 GI_IBL.cpp）
 #include "IBL_Irradiance.vert.spv.h"
+#include "IBL_Irradiance.vert.dxil.h"
 #include "IBL_Irradiance.frag.spv.h"
+#include "IBL_Irradiance.frag.dxil.h"
 #include "IBL_Prefilter.vert.spv.h"
+#include "IBL_Prefilter.vert.dxil.h"
 #include "IBL_Prefilter.frag.spv.h"
+#include "IBL_Prefilter.frag.dxil.h"
 #include "IBL_BRDF_LUT.vert.spv.h"
+#include "IBL_BRDF_LUT.vert.dxil.h"
 #include "IBL_BRDF_LUT.frag.spv.h"
+#include "IBL_BRDF_LUT.frag.dxil.h"
 
 using namespace he;
 using namespace he::rhi;
@@ -130,9 +137,15 @@ bool GI_IBL::Initialize(rhi::IRHIDevice* device, u32, u32) {
         rhi::ShaderBytecode vs, fs;
         vs.stage      = rhi::ShaderStage::Vertex;
         vs.spirv      = k_IBL_Irradiance_vert_spv;
+        vs.dxil.assign(std::begin(k_IBL_Irradiance_vert_dxil), std::end(k_IBL_Irradiance_vert_dxil));
+        vs.dxil.assign(std::begin(k_IBL_Irradiance_vert_dxil), std::end(k_IBL_Irradiance_vert_dxil));
+        vs.dxil.assign(std::begin(k_IBL_Irradiance_vert_dxil), std::end(k_IBL_Irradiance_vert_dxil));
         vs.entryPoint = "main";
         fs.stage      = rhi::ShaderStage::Pixel;
         fs.spirv      = k_IBL_Irradiance_frag_spv;
+        fs.dxil.assign(std::begin(k_IBL_Irradiance_frag_dxil), std::end(k_IBL_Irradiance_frag_dxil));
+        fs.dxil.assign(std::begin(k_IBL_Irradiance_frag_dxil), std::end(k_IBL_Irradiance_frag_dxil));
+        fs.dxil.assign(std::begin(k_IBL_Irradiance_frag_dxil), std::end(k_IBL_Irradiance_frag_dxil));
         fs.entryPoint = "main";
 
         rhi::PipelineStateDesc psoDesc;
@@ -166,9 +179,15 @@ bool GI_IBL::Initialize(rhi::IRHIDevice* device, u32, u32) {
         rhi::ShaderBytecode vs, fs;
         vs.stage      = rhi::ShaderStage::Vertex;
         vs.spirv      = k_IBL_Prefilter_vert_spv;
+        vs.dxil.assign(std::begin(k_IBL_Prefilter_vert_dxil), std::end(k_IBL_Prefilter_vert_dxil));
+        vs.dxil.assign(std::begin(k_IBL_Prefilter_vert_dxil), std::end(k_IBL_Prefilter_vert_dxil));
+        vs.dxil.assign(std::begin(k_IBL_Prefilter_vert_dxil), std::end(k_IBL_Prefilter_vert_dxil));
         vs.entryPoint = "main";
         fs.stage      = rhi::ShaderStage::Pixel;
         fs.spirv      = k_IBL_Prefilter_frag_spv;
+        fs.dxil.assign(std::begin(k_IBL_Prefilter_frag_dxil), std::end(k_IBL_Prefilter_frag_dxil));
+        fs.dxil.assign(std::begin(k_IBL_Prefilter_frag_dxil), std::end(k_IBL_Prefilter_frag_dxil));
+        fs.dxil.assign(std::begin(k_IBL_Prefilter_frag_dxil), std::end(k_IBL_Prefilter_frag_dxil));
         fs.entryPoint = "main";
 
         rhi::PipelineStateDesc psoDesc;
@@ -195,9 +214,15 @@ bool GI_IBL::Initialize(rhi::IRHIDevice* device, u32, u32) {
         rhi::ShaderBytecode vs, fs;
         vs.stage      = rhi::ShaderStage::Vertex;
         vs.spirv      = k_IBL_BRDF_LUT_vert_spv;
+        vs.dxil.assign(std::begin(k_IBL_BRDF_LUT_vert_dxil), std::end(k_IBL_BRDF_LUT_vert_dxil));
+        vs.dxil.assign(std::begin(k_IBL_BRDF_LUT_vert_dxil), std::end(k_IBL_BRDF_LUT_vert_dxil));
+        vs.dxil.assign(std::begin(k_IBL_BRDF_LUT_vert_dxil), std::end(k_IBL_BRDF_LUT_vert_dxil));
         vs.entryPoint = "main";
         fs.stage      = rhi::ShaderStage::Pixel;
         fs.spirv      = k_IBL_BRDF_LUT_frag_spv;
+        fs.dxil.assign(std::begin(k_IBL_BRDF_LUT_frag_dxil), std::end(k_IBL_BRDF_LUT_frag_dxil));
+        fs.dxil.assign(std::begin(k_IBL_BRDF_LUT_frag_dxil), std::end(k_IBL_BRDF_LUT_frag_dxil));
+        fs.dxil.assign(std::begin(k_IBL_BRDF_LUT_frag_dxil), std::end(k_IBL_BRDF_LUT_frag_dxil));
         fs.entryPoint = "main";
 
         rhi::PipelineStateDesc psoDesc;

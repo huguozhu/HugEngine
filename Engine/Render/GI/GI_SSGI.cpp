@@ -1,9 +1,12 @@
-// PostProcess/SSGI.cpp — 屏幕空间全局光照
+﻿// PostProcess/SSGI.cpp — 屏幕空间全局光照
 #include "GI/GI_SSGI.h"
+#include <iterator>
 #include "Core/Log.h"
 #include "Pipeline/Camera.h"   // CameraData：SetCamera 注入的真实相机（GetViewMatrix/GetProjMatrix）
 #include "SSAO.vert.spv.h"
+#include "SSAO.vert.dxil.h"
 #include "SSGI.frag.spv.h"
+#include "SSGI.frag.dxil.h"
 #include <glm/gtc/matrix_transform.hpp>
 #include <random>
 #include <cstring>
@@ -72,9 +75,15 @@ bool GI_SSGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     rhi::ShaderBytecode vs, fs;
     vs.stage      = rhi::ShaderStage::Vertex;
     vs.spirv      = k_SSAO_vert_spv;
+    vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+    vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+    vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
     vs.entryPoint = "vertexMain";
     fs.stage      = rhi::ShaderStage::Pixel;
     fs.spirv      = k_SSGI_frag_spv;
+    fs.dxil.assign(std::begin(k_SSGI_frag_dxil), std::end(k_SSGI_frag_dxil));
+    fs.dxil.assign(std::begin(k_SSGI_frag_dxil), std::end(k_SSGI_frag_dxil));
+    fs.dxil.assign(std::begin(k_SSGI_frag_dxil), std::end(k_SSGI_frag_dxil));
     fs.entryPoint = "fragmentMain";
 
     rhi::PipelineStateDesc psoDesc;
