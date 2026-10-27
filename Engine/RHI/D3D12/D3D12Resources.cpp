@@ -145,6 +145,10 @@ bool D3D12Buffer::Initialize(D3D12Device* device, const BufferDesc& desc) {
             // DEFAULT 堆（UAV 缓冲）：建 UPLOAD 中转 → 立刻用引擎队列拷一次。
             // 不留在"下次提交时再拷"是因为缓冲可能在本帧就被读，晚一拍就会读到全零。
             D3D12_RESOURCE_DESC ud = rd;
+            // 【必须清掉 UAV 标志】UPLOAD 堆的资源不能带 ALLOW_UNORDERED_ACCESS，
+            // 否则 CreateCommittedResource 直接返回 E_INVALIDARG（中转缓冲只是拷贝源，
+            // 不需要 UAV）。rd 是从目标缓冲复制的，标志必须显式清掉。
+            ud.Flags = D3D12_RESOURCE_FLAG_NONE;
             D3D12_HEAP_PROPERTIES uh{};
             uh.Type = D3D12_HEAP_TYPE_UPLOAD;
             uh.CreationNodeMask = 1;
