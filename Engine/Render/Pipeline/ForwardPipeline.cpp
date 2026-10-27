@@ -575,6 +575,7 @@ void ForwardPipeline::Shutdown() {
 }
 
 void ForwardPipeline::NextFrame() {
+    { static int s=0; if (s<4) { ++s; std::printf("[FP] NextFrame %d\n", s); std::fflush(stdout); } }
     // 【读数】帧边界：攒够 120 帧打印一次 CPU 分解（HE_CPU_PASSES=1）
     CpuSections::Frame();
     // 【T2.4 步骤 (b)】推进快照槽位：命令载荷指向的快照在其被消费完之前不会被复用
@@ -601,6 +602,7 @@ void ForwardPipeline::NextFrame() {
 }
 
 void ForwardPipeline::BeginFrame(rhi::IRHICommandList* cmd, u32 width, u32 height) {
+    { static int s=0; if (s<4) { ++s; std::printf("[FP] BeginFrame %d\n", s); std::fflush(stdout); } }
     cmd->SetViewport({
         0, static_cast<float>(height),
         static_cast<float>(width), -static_cast<float>(height),
@@ -653,6 +655,7 @@ void ForwardPipeline::CollectLights(PushConstantData& pc)
 // 去重收集场景材质 → 写入单个 bindless 材质 SSBO 并注册
 // 每材质（materialID）只写一份 GPUMaterialData；buffer 内元素索引 = materialID >> 2
 void ForwardPipeline::UploadMaterialBindless() {
+    { static int s=0; if (s<4) { ++s; std::printf("[FP] UploadMat %d\n", s); std::fflush(stdout); } }
     // 材质数组来自**快照**（阶段 1 T1.4/T1.5）：收集/去重（按 materialID）、按 materialID >> 2 补空槽、
     // 以及「组件 → PBRMaterial」的映射都已在收集侧完成（`SceneSnapshotBuilder::BuildMaterials` +
     // `MakePBRMaterial` 的唯一实现）。本函数不再遍历世界 ⇒ `World&` 参数消失（附录 B1 随之下降）。
@@ -685,6 +688,7 @@ void ForwardPipeline::UploadMaterialBindless() {
 // ============================================================
 
 void ForwardPipeline::BeginHDRPass(rhi::IRHICommandList* cmd, u32 width, u32 height) {
+    { static int s=0; if (s<4) { ++s; std::printf("[FP] BeginHDRPass %d\n", s); std::fflush(stdout); } }
     // 同步当前渲染尺寸（多线程路径 / ToneMap 视口需要）
     if (width != m_HDRWidth || height != m_HDRHeight) {
         ResizeHDRTarget(width, height);
@@ -793,6 +797,7 @@ void ForwardPipeline::UpdateIBLBindings(GI_IBL* gi) {
 }
 
 void ForwardPipeline::RenderSkybox(rhi::IRHICommandList* cmd, const CameraData& camera) {
+    { static int s=0; if (s<4) { ++s; std::printf("[FP] Skybox %d\n", s); std::fflush(stdout); } }
     if (!m_Skybox) return;
     SubsystemContext ctx;
     ctx.camera = &camera;

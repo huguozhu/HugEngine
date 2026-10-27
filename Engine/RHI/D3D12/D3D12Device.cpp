@@ -644,6 +644,7 @@ static D3D12_SRV_DIMENSION SrvDimFor(DescriptorType) { return D3D12_SRV_DIMENSIO
 // ---------------------------------------------------------------------------
 void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, DescriptorType type,
                                       IRHIBuffer* buffer) {
+    { static int s=0; if (s<12) { ++s; std::printf("[STP] UDS1 n=%d\n", s); std::fflush(stdout); } }
     if (set == kInvalidSet || set > m_DescriptorSets.size() || !buffer) return;
     if (!EnsureDescriptorHeaps()) return;
 
@@ -687,6 +688,7 @@ void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, Desc
 
 void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, DescriptorType type,
                                       IRHITexture* texture, IRHISampler* sampler) {
+    { static int s=0; if (s<12) { ++s; std::printf("[STP] UDS2 n=%d\n", s); std::fflush(stdout); } }
     if (set == kInvalidSet || set > m_DescriptorSets.size()) return;
     if (!EnsureDescriptorHeaps()) return;
 
@@ -768,6 +770,7 @@ void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, Desc
 
 void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, DescriptorType type,
                                       IRHITexture** textures, IRHISampler** samplers, u32 count) {
+    { static int s=0; if (s<12) { ++s; std::printf("[STP] UDS3 n=%d\n", s); std::fflush(stdout); } }
     for (u32 i = 0; i < count; ++i) {
         UpdateDescriptorSet(set, binding + i, type,
                             textures ? textures[i] : nullptr,
@@ -777,6 +780,7 @@ void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, Desc
 
 void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, DescriptorType type,
                                       IRHIBuffer** buffers, u32 count) {
+    { static int s=0; if (s<12) { ++s; std::printf("[STP] UDS4 n=%d\n", s); std::fflush(stdout); } }
     if (type == DescriptorType::Sampler) {
         // 采样器数组（引擎用 buffers=nullptr, samplers=... 之外的形态很少见）
         return;

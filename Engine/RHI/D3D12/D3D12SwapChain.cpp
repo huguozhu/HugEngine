@@ -118,6 +118,7 @@ bool D3D12SwapChain::AcquireNextImage() {
 }
 
 void D3D12SwapChain::Present(bool vsync) {
+    { static int s=0; if (s<4) { ++s; HE_CORE_INFO("[步骤] Present #{}", s); } }
     if (!m_SwapChain) return;
 
     // 帧计数 & 截图（截图必须在 Present 之前，见 CaptureIfRequested 的注释）

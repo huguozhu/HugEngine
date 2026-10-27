@@ -41,22 +41,27 @@ bool D3D12CommandList::Initialize(D3D12Device* device, QueueType queue) {
 }
 
 void D3D12CommandList::Begin() {
+    { static int s=0; if (s<4) { ++s; std::printf("[STP] Begin %d\n", s); std::fflush(stdout); } }
     { static int s_n = 0; if (s_n < 3) { ++s_n; if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] Begin\n"); std::fflush(stdout); } } }
 
-    if (!m_List || !m_Allocator) return;
+    if (!m_List || !m_Allocator) { std::printf("[BGN] no list/alloc\n"); std::fflush(stdout); return; }
     // 每次录制前必须 Reset 分配器与列表
+    std::printf("[BGN] before alloc Reset\n"); std::fflush(stdout);
     if (FAILED(m_Allocator->Reset())) {
         HE_CORE_ERROR("D3D12CommandList::Begin: 分配器 Reset 失败（可能仍被 GPU 使用）");
         return;
     }
+    std::printf("[BGN] before list Reset\n"); std::fflush(stdout);
     if (FAILED(m_List->Reset(m_Allocator.Get(), nullptr))) {
         HE_CORE_ERROR("D3D12CommandList::Begin: 列表 Reset 失败");
         return;
     }
     m_Recording = true;
+    std::printf("[BGN] done\n"); std::fflush(stdout);
 }
 
 void D3D12CommandList::End() {
+    { static int s=0; if (s<4) { ++s; std::printf("[STP] End %d\n", s); std::fflush(stdout); } }
     if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] End\n"); std::fflush(stdout); }
     { static int s_n = 0; if (s_n < 3) { ++s_n; if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] End\n"); std::fflush(stdout); } } }
 
@@ -70,6 +75,7 @@ void D3D12CommandList::End() {
 void D3D12CommandList::BeginRenderPass(u32 colorCount, Format colorFormat,
                                        Format depthFormat, const ClearValue* clear,
                                        LoadOp loadOp) {
+    { static int s=0; if (s<4) { ++s; std::printf("[STP] BRP %d\n", s); std::fflush(stdout); } }
     { static int s_n = 0; if (s_n < 3) { ++s_n; if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] BeginRenderPass\n"); std::fflush(stdout); } } }
 
     if (!m_List) return;
@@ -128,6 +134,7 @@ void D3D12CommandList::BeginOffscreenPass(void* colorImageView, void* depthImage
                                           u32 width, u32 height,
                                           const ClearValue* clear,
                                           bool allowSecondary) {
+    { static int s=0; if (s<4) { ++s; std::printf("[STP] BOP %d\n", s); std::fflush(stdout); } }
     (void)allowSecondary;
     if (!m_List) return;
 
@@ -136,7 +143,8 @@ void D3D12CommandList::BeginOffscreenPass(void* colorImageView, void* depthImage
     const bool hasRtv = (colorImageView != nullptr);
     const bool hasDsv = (depthImageView != nullptr);
 
-    m_List->OMSetRenderTargets(1, hasRtv ? &rtv : nullptr, FALSE, hasDsv ? &dsv : nullptr);
+    // RTV 数量必须与指针一致：只有深度附件的 pass 传 1+nullptr 是非法调用（设备会被移除）
+    m_List->OMSetRenderTargets(hasRtv ? 1u : 0u, hasRtv ? &rtv : nullptr, FALSE, hasDsv ? &dsv : nullptr);
     m_HasRtv = hasRtv;
 
     if (hasRtv && clear) {
@@ -164,6 +172,7 @@ void D3D12CommandList::BeginOffscreenPassMRT(void* const* colorImageViews, u32 c
                                              void* depthImageView, u32 width, u32 height,
                                              const ClearValue* clears,
                                              bool allowSecondary) {
+    { static int s=0; if (s<4) { ++s; std::printf("[STP] BOPM %d\n", s); std::fflush(stdout); } }
     (void)allowSecondary;
     if (!m_List || colorCount == 0) return;
 
@@ -225,6 +234,7 @@ void D3D12CommandList::SetVertexBuffer(IRHIBuffer* buffer, u32 binding) {
 }
 
 void D3D12CommandList::SetIndexBuffer(IRHIBuffer* buffer, u32 offset) {
+    { static int s=0; if (s<4) { ++s; std::printf("[STP] SetIB %d\n", s); std::fflush(stdout); } }
     if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] SetIndexBuffer\n"); std::fflush(stdout); }
     if (!m_List || !buffer) return;
     auto* b = static_cast<D3D12Buffer*>(buffer);
@@ -275,6 +285,7 @@ void D3D12CommandList::SetFullscreenViewport(u32 width, u32 height) {
 }
 
 void D3D12CommandList::BindDescriptorSet(u32 setIndex, DescriptorSetHandle set) {
+    { static int s=0; if (s<4) { ++s; std::printf("[STP] BindSet %d\n", s); std::fflush(stdout); } }
     if (!m_List || !m_Device || set == kInvalidSet || setIndex >= 8) return;
     if (!m_Device->EnsureDescriptorHeaps()) return;
 
@@ -302,6 +313,7 @@ void D3D12CommandList::BindDescriptorSet(u32 setIndex, DescriptorSetHandle set) 
 }
 
 void D3D12CommandList::SetPushConstants(u32 offset, u32 size, const void* data) {
+    { static int s=0; if (s<4) { ++s; std::printf("[STP] PushConst %d\n", s); std::fflush(stdout); } }
     if (!m_List || !m_Device || !data || size == 0) return;
 
     // 常量：从设备的常量缓冲环取一块 256B，写入数据，然后用
@@ -323,6 +335,7 @@ void D3D12CommandList::SetPushConstants(u32 offset, u32 size, const void* data) 
 }
 
 void D3D12CommandList::Draw(u32 vertexCount, u32 instanceCount, u32 firstVertex, u32 firstInstance) {
+    { static int s=0; if (s<4) { ++s; std::printf("[STP] Draw %d\n", s); std::fflush(stdout); } }
     // 诊断：每 60 次绘制打印一次（D3D12 的 GraphicsCommandList 没有 Get* 查询接口，
     // 所以这里打印我们自己记录的状态）
     if (std::getenv("HE_D3D12_TRACE")) {
@@ -392,6 +405,7 @@ void D3D12CommandList::DrawIndexedIndirectCount(IRHIBuffer* buffer, u64 offset,
 }
 
 void D3D12CommandList::Dispatch(u32 x, u32 y, u32 z) {
+    { static int s=0; if (s<4) { ++s; std::printf("[STP] Dispatch %d\n", s); std::fflush(stdout); } }
     if (!m_List) return;
     m_List->Dispatch(x, y, z);
 }
@@ -457,6 +471,7 @@ void D3D12CommandList::SetTimelineWait(RHIFenceHandle fence, u64 value) {
 }
 
 void D3D12CommandList::Submit() {
+    { static int s=0; if (s<4) { ++s; std::printf("[STP] Submit %d\n", s); std::fflush(stdout); } }
     if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] Submit\n"); std::fflush(stdout); }
     if (m_Device) m_Device->Submit(this, nullptr);
 }

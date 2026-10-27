@@ -260,6 +260,7 @@ void D3D12Buffer::Unmap() {
     // 多槽轮转时若上一代拷贝还没跑完就 Reset 分配器，D3D12 会直接判设备丢失
     //（实测 02.Cube 初始化阶段出现 0x887a0005）。这里改成只有一个槽，
     // 每次 Reset 前**必须**等上一次的围栏完成，正确性优先。
+    HE_CORE_INFO("[Unmap 进入] size={} staging={}", static_cast<u64>(m_Size), m_NeedsStagingCopy ? 1 : 0);
     if (m_NeedsStagingCopy && m_CpuStaging && m_Device && m_Size > 0) {
         const u32 copySize = static_cast<u32>((m_Size + 3) & ~3ull);
 
@@ -285,7 +286,7 @@ void D3D12Buffer::Unmap() {
                 HANDLE ev = CreateEventEx(nullptr, nullptr, 0, EVENT_ALL_ACCESS);
                 if (ev) {
                     s_fence->SetEventOnCompletion(s_value, ev);
-                    WaitForSingleObject(ev, INFINITE);
+                    WaitForSingleObject(ev, 5000);   // 上限 5 秒，避免死等
                     CloseHandle(ev);
                 }
             }
