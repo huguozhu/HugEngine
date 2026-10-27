@@ -48,8 +48,17 @@ void D3D12CommandList::Begin() {
     // 每次录制前必须 Reset 分配器与列表
     std::printf("[BGN] before alloc Reset\n"); std::fflush(stdout);
     if (FAILED(m_Allocator->Reset())) {
-        HE_CORE_ERROR("D3D12CommandList::Begin: 分配器 Reset 失败（可能仍被 GPU 使用）");
-        return;
+        // 【关键】分配器仍被 GPU 使用时 Reset 会失败。此前直接 return，
+        // 列表停留在 Close 状态，之后所有录制（清屏、绘制、屏障）都被 D3D12 丢弃，
+        // 调试层报 "This API cannot be called on a closed command list"，
+        // 表现就是「引擎在出帧、几何也在提交，但画面全黑」。
+        // 这里等 GPU 空闲后重试一次。
+        HE_CORE_WARN("D3D12CommandList::Begin: 分配器 Reset 失败，等待 GPU 空闲后重试");
+        if (m_Device) m_Device->WaitIdle();
+        if (FAILED(m_Allocator->Reset())) {
+            HE_CORE_ERROR("D3D12CommandList::Begin: 分配器 Reset 仍失败");
+            return;
+        }
     }
     std::printf("[BGN] before list Reset\n"); std::fflush(stdout);
     if (FAILED(m_List->Reset(m_Allocator.Get(), nullptr))) {
