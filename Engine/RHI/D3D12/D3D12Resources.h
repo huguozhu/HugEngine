@@ -53,6 +53,8 @@ private:
     D3D12_GPU_VIRTUAL_ADDRESS m_GpuAddress = 0;
     usize m_Size = 0;
     u32   m_Stride = 0;
+    /// 资源的当前 D3D12 状态（屏障要求 StateBefore 与实际一致）
+    D3D12_RESOURCE_STATES m_State = D3D12_RESOURCE_STATE_COMMON;
     bool  m_PersistentlyMapped = false;
     void* m_MappedPtr = nullptr;
     ComPtr<ID3D12Resource> m_UploadStaging;   // initialData 的上传中转

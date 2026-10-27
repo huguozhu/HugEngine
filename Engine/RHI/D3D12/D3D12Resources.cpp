@@ -103,6 +103,7 @@ bool D3D12Buffer::Initialize(D3D12Device* device, const BufferDesc& desc) {
     const D3D12_RESOURCE_STATES initState =
         (heapType == D3D12_HEAP_TYPE_UPLOAD) ? D3D12_RESOURCE_STATE_GENERIC_READ
                                              : D3D12_RESOURCE_STATE_COMMON;
+    m_State = initState;
 
     if (!HE_D3D12_CHECK(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, initState,
                                                      nullptr, IID_PPV_ARGS(&m_Resource)),
@@ -229,65 +230,63 @@ void D3D12Buffer::Unmap() {
         target->Unmap(0, &range);
     }
 
-    // 暂存 → GPU 的实际拷贝。
+    // 暂存 → GPU 的实际拷贝（用引擎队列）。
     //
-    // 【同步策略】D3D12 的命令分配器只有在「关联的列表执行完毕」后才能 Reset，
-    // 否则 Reset 会阻塞（实测表现为进程死等）。
-    // 因此用 **3 组 allocator/list 轮转**：每次取一组，先等它上一次的围栏完成，
-    // 再 Reset —— 这样最多只等一代，不会无限阻塞。
-    if (m_NeedsStagingCopy && m_CpuStaging && m_Device && m_Device->GetDevice() && m_Size > 0) {
-        struct CopySlot {
-            ComPtr<ID3D12CommandAllocator>    alloc;
-            ComPtr<ID3D12GraphicsCommandList> list;
-            u64                               value = 0;
-        };
-        // 【必须用引擎自己的队列】另建队列会让「暂存→资源的拷贝」和引擎的绘制
-        // 并发的读写同一资源，D3D12 判定跨队列争用 ⇒ DEVICE_HUNG / REMOVED
-        //（实测 02.Cube 初始化后半段设备丢失就是这个原因，与截图那处同类）。
-        ID3D12Device* dev = (m_Device && m_Device->GetDevice()) ? m_Device->GetDevice() : nullptr;
-        static ComPtr<ID3D12Fence>        s_fence;
-        static u64                        s_fenceValue = 0;
-        static CopySlot                   s_slots[3];
-        static u32                        s_next = 0;
+    // 【同步策略：单槽 + 无条件等待】
+    // 多槽轮转时若上一代拷贝还没跑完就 Reset 分配器，D3D12 会直接判设备丢失
+    //（实测 02.Cube 初始化阶段出现 0x887a0005）。这里改成只有一个槽，
+    // 每次 Reset 前**必须**等上一次的围栏完成，正确性优先。
+    if (m_NeedsStagingCopy && m_CpuStaging && m_Device && m_Size > 0) {
+        const u32 copySize = static_cast<u32>((m_Size + 3) & ~3ull);
 
-        ID3D12CommandQueue* s_queue = (m_Device && m_Device->GetQueue()) ? m_Device->GetQueue() : nullptr;
+        ID3D12Device* dev = (m_Device->GetDevice()) ? m_Device->GetDevice() : nullptr;
+        ID3D12CommandQueue* queue = m_Device->GetQueue();
+        static ComPtr<ID3D12CommandAllocator>    s_alloc;
+        static ComPtr<ID3D12GraphicsCommandList> s_list;
+        static ComPtr<ID3D12Fence>               s_fence;
+        static u64                               s_value = 0;
+        static bool                              s_ready = false;
 
-        if (!s_fence && dev) {
-            if (FAILED(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&s_fence)))) {
-                HE_CORE_ERROR("D3D12Buffer: 暂存拷贝的围栏创建失败");
-            } else {
-                for (auto& s : s_slots) {
-                    dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&s.alloc));
-                    dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, s.alloc.Get(),
-                                           nullptr, IID_PPV_ARGS(&s.list));
-                    s.list->Close();
-                }
-            }
+        if (dev && queue && !s_ready) {
+            s_ready = SUCCEEDED(dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&s_alloc))) &&
+                      SUCCEEDED(dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, s_alloc.Get(),
+                                                       nullptr, IID_PPV_ARGS(&s_list))) &&
+                      SUCCEEDED(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&s_fence)));
+            if (s_ready) { s_list->Close(); HE_CORE_INFO("D3D12Buffer: 暂存拷贝通道就绪"); }
         }
 
-        if (s_queue && s_fence) {
-            CopySlot& slot = s_slots[s_next];
-            s_next = (s_next + 1) % 3;
-
-            // 等这一组上一次的拷贝完成（最多一代延迟）
-            if (slot.value != 0 && s_fence->GetCompletedValue() < slot.value) {
+        if (dev && queue && s_ready) {
+            // 等上一次拷贝完成（无条件，避免非法 Reset）
+            if (s_value != 0 && s_fence->GetCompletedValue() < s_value) {
                 HANDLE ev = CreateEventEx(nullptr, nullptr, 0, EVENT_ALL_ACCESS);
                 if (ev) {
-                    s_fence->SetEventOnCompletion(slot.value, ev);
-                    WaitForSingleObject(ev, 2000);
+                    s_fence->SetEventOnCompletion(s_value, ev);
+                    WaitForSingleObject(ev, INFINITE);
                     CloseHandle(ev);
                 }
             }
+            if (SUCCEEDED(s_alloc->Reset()) && SUCCEEDED(s_list->Reset(s_alloc.Get(), nullptr))) {
+                // 【必须转成 COPY_DEST】CopyBufferRegion 要求目标资源处于 COPY_DEST
+                // 状态；UAV 缓冲当前是 UNORDERED_ACCESS，直接拷贝会让 D3D12
+                // 判定非法操作并移除设备（实测 0x887a0005 就来自这里）。
+                D3D12_RESOURCE_BARRIER b{};
+                b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                b.Transition.pResource   = m_Resource.Get();
+                b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                b.Transition.StateBefore = m_State;
+                b.Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_DEST;
+                s_list->ResourceBarrier(1, &b);
 
-            if (slot.alloc && slot.list &&
-                SUCCEEDED(slot.alloc->Reset()) &&
-                SUCCEEDED(slot.list->Reset(slot.alloc.Get(), nullptr))) {
-                slot.list->CopyBufferRegion(m_Resource.Get(), 0, m_CpuStaging.Get(), 0, m_Size);
-                slot.list->Close();
-                ID3D12CommandList* lists[1] = { slot.list.Get() };
-                s_queue->ExecuteCommandLists(1, lists);
-                slot.value = ++s_fenceValue;
-                s_queue->Signal(s_fence.Get(), slot.value);
+                s_list->CopyBufferRegion(m_Resource.Get(), 0, m_CpuStaging.Get(), 0, copySize);
+
+                b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+                b.Transition.StateAfter  = m_State;
+                s_list->ResourceBarrier(1, &b);
+                s_list->Close();
+                ID3D12CommandList* lists[1] = { s_list.Get() };
+                queue->ExecuteCommandLists(1, lists);
+                s_value += 1;
+                queue->Signal(s_fence.Get(), s_value);
             }
         }
     }
