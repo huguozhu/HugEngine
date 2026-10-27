@@ -1,0 +1,836 @@
+﻿// ============================================================================
+//  D3D12Resources.cpp —— Buffer / Texture / Sampler / PipelineState 的实现
+// ============================================================================
+#include "D3D12Resources.h"
+#include "D3D12Device.h"
+#include "D3D12Converters.h"
+#include <d3dcompiler.h>
+#include <dxcapi.h>       // IDxcUtils::CreateReflection（DXIL 反射）
+#include <string>
+#include <algorithm>
+#include <memory>
+#include <cstring>
+#include <cstdlib>
+
+#if defined(_WIN32)
+
+namespace he::rhi::d3d12 {
+
+// ===========================================================================
+//  Buffer
+// ===========================================================================
+D3D12Buffer::~D3D12Buffer() {
+    // 持久映射的缓冲要先解除映射再释放
+    if (m_PersistentlyMapped && m_Resource) {
+        m_Resource->Unmap(0, nullptr);
+        m_PersistentlyMapped = false;
+    }
+}
+
+bool D3D12Buffer::Initialize(D3D12Device* device, const BufferDesc& desc) {
+    if (!device || !device->GetDevice()) {
+        HE_CORE_ERROR("D3D12Buffer: 设备为空");
+        return false;
+    }
+    // 【D3D12 比 Vulkan 严格】CreateCommittedResource 拒绝 0 字节缓冲
+    //（返回 E_INVALIDARG），而引擎在某些路径下会创建空缓冲（例如可选特性
+    // 未启用时的占位缓冲）。这里按 256 字节对齐做最小分配，逻辑大小仍记 0，
+    // 上层行为不变。
+    ID3D12Device* dev = device->GetDevice();
+    m_Device = device;   // Unmap 的暂存拷贝需要它
+    m_Size   = desc.size;
+    m_Stride = static_cast<u32>(desc.stride);
+
+    // 光追缓冲（BLAS/TLAS 的存储、SBT）需要 D3D12_RESOURCE_FLAG_RAYTRACING_ACCELERATION_STRUCTURE，
+    // 而本后端的 BLAS/TLAS/SBT 属阶段 4，尚未实现。这里直接拒绝，
+    // 避免 CreateCommittedResource 抛 E_INVALIDARG 噪音。
+    if (HasAny(desc.usage, BufferUsage::AccelerationStruct) ||
+        HasAny(desc.usage, BufferUsage::ShaderBindingTable)) {
+        HE_CORE_INFO("D3D12Buffer: 跳过光追缓冲（阶段 4 未实现）size={}", static_cast<u64>(desc.size));
+        return false;
+    }
+
+    // 实际分配大小：至少 256 字节（D3D12 的常量缓冲/间接参数都要求 256 对齐）
+    const u64 allocSize = (desc.size == 0) ? 256ull
+                                          : ((static_cast<u64>(desc.size) + 255ull) & ~255ull);
+
+    // 堆类型：
+    //   · Storage（UAV）⇒ **必须** DEFAULT 堆。D3D12 禁止 UPLOAD 堆的缓冲带
+    //     ALLOW_UNORDERED_ACCESS（实测 CreateCommittedResource 返回 E_INVALIDARG）。
+    //     CPU 更新走「暂存缓冲 + CopyBufferRegion」，见下方 m_CpuStaging。
+    //   · 其余 cpuAccess ⇒ UPLOAD 堆（可以直接 Map 写）
+    //   · 回读 ⇒ READBACK 堆
+    const bool isStorage = HasAny(desc.usage, BufferUsage::Storage);
+    D3D12_HEAP_TYPE heapType = D3D12_HEAP_TYPE_DEFAULT;
+    if (!isStorage && (HasAny(desc.usage, BufferUsage::TransferDst) || desc.cpuAccess)) {
+        heapType = D3D12_HEAP_TYPE_UPLOAD;
+    }
+    // UAV 缓冲需要一份等大的 UPLOAD 暂存来承载 CPU 写入
+    const bool needStaging = (isStorage && desc.cpuAccess);
+
+    D3D12_RESOURCE_DESC rd{};
+    rd.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
+    rd.Alignment        = 0;
+    rd.Width            = allocSize;
+    rd.Height           = 1;
+    rd.DepthOrArraySize = 1;
+    rd.MipLevels        = 1;
+    rd.Format           = DXGI_FORMAT_UNKNOWN;
+    rd.SampleDesc       = { 1, 0 };
+    rd.Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    rd.Flags            = D3D12_RESOURCE_FLAG_NONE;
+
+    // 允许 UAV 的缓冲需要显式声明
+    if (HasAny(desc.usage, BufferUsage::Storage)) {
+        rd.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    }
+
+    D3D12_HEAP_PROPERTIES hp{};
+    hp.Type = heapType;
+    hp.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+    hp.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+    hp.CreationNodeMask = 1;
+    hp.VisibleNodeMask  = 1;
+
+    const D3D12_RESOURCE_STATES initState =
+        (heapType == D3D12_HEAP_TYPE_UPLOAD) ? D3D12_RESOURCE_STATE_GENERIC_READ
+                                             : D3D12_RESOURCE_STATE_COMMON;
+
+    if (!HE_D3D12_CHECK(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, initState,
+                                                     nullptr, IID_PPV_ARGS(&m_Resource)),
+                        "CreateCommittedResource(Buffer)")) {
+        HE_CORE_ERROR("D3D12Buffer 失败: size={} alloc={} usage=0x{:x} cpuAccess={}",
+                      static_cast<u64>(desc.size), allocSize,
+                      static_cast<u32>(desc.usage), desc.cpuAccess);
+        return false;
+    }
+
+    m_GpuAddress = m_Resource->GetGPUVirtualAddress();
+
+    // UAV 缓冲的 CPU 暂存：Map() 返回它的映射指针，Unmap() 用 CopyBufferRegion 拷到 GPU
+    if (needStaging) {
+        D3D12_RESOURCE_DESC srd = rd;
+        srd.Flags = D3D12_RESOURCE_FLAG_NONE;
+        D3D12_HEAP_PROPERTIES shp{};
+        shp.Type = D3D12_HEAP_TYPE_UPLOAD;
+        shp.CreationNodeMask = 1;
+        shp.VisibleNodeMask  = 1;
+        if (FAILED(dev->CreateCommittedResource(&shp, D3D12_HEAP_FLAG_NONE, &srd,
+                                                D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                IID_PPV_ARGS(&m_CpuStaging)))) {
+            HE_CORE_WARN("D3D12Buffer: UAV 暂存缓冲创建失败，CPU 更新将不可用");
+        }
+        m_NeedsStagingCopy = (m_CpuStaging != nullptr);
+    }
+
+    // 初始数据：UPLOAD 堆可以直接 Map 写入；DEFAULT 堆需要中转缓冲 + 一次拷贝
+    if (desc.initialData) {
+        if (heapType == D3D12_HEAP_TYPE_UPLOAD) {
+            void* dst = nullptr;
+            D3D12_RANGE range{ 0, 0 };
+            if (SUCCEEDED(m_Resource->Map(0, &range, &dst)) && dst) {
+                std::memcpy(dst, desc.initialData, desc.size);
+                m_Resource->Unmap(0, nullptr);
+            }
+        } else {
+            // 建一个 UPLOAD 中转缓冲，记下来由调用方在下一次提交时拷到目标
+            D3D12_RESOURCE_DESC ud = rd;
+            D3D12_HEAP_PROPERTIES uh{};
+            uh.Type = D3D12_HEAP_TYPE_UPLOAD;
+            if (SUCCEEDED(dev->CreateCommittedResource(&uh, D3D12_HEAP_FLAG_NONE, &ud,
+                                                       D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                       IID_PPV_ARGS(&m_UploadStaging)))) {
+                void* dst = nullptr;
+                D3D12_RANGE range{ 0, 0 };
+                if (SUCCEEDED(m_UploadStaging->Map(0, &range, &dst)) && dst) {
+                    std::memcpy(dst, desc.initialData, desc.size);
+                    m_UploadStaging->Unmap(0, nullptr);
+                }
+            }
+        }
+    }
+    HE_CORE_INFO("D3D12Buffer: 创建 {} 字节 heap={} usage=0x{:x}",
+                 static_cast<u64>(desc.size),
+                 (heapType == D3D12_HEAP_TYPE_UPLOAD ? "UPLOAD" : "DEFAULT"),
+                 static_cast<u32>(desc.usage));
+    return true;
+}
+
+void* D3D12Buffer::Map() {
+    if (!m_Resource) return nullptr;
+    if (m_MappedPtr) return m_MappedPtr;
+
+    D3D12_RANGE range{ 0, 0 };   // 声明 CPU 不读，驱动可以避免不必要的同步
+    void* p = nullptr;
+
+    // UAV 缓冲不能直接 Map，用暂存缓冲
+    ID3D12Resource* target = m_NeedsStagingCopy ? m_CpuStaging.Get() : m_Resource.Get();
+    if (!target) return nullptr;
+    if (FAILED(target->Map(0, &range, &p))) {
+        HE_CORE_ERROR("D3D12Buffer::Map 失败");
+        return nullptr;
+    }
+    m_MappedPtr = p;
+    m_PersistentlyMapped = true;
+    return p;
+}
+
+void D3D12Buffer::Unmap() {
+    if (!m_Resource || !m_MappedPtr) return;
+
+    ID3D12Resource* target = m_NeedsStagingCopy ? m_CpuStaging.Get() : m_Resource.Get();
+    if (target) {
+        D3D12_RANGE range{ 0, 0 };
+        target->Unmap(0, &range);
+    }
+
+    // 暂存 → GPU 的实际拷贝。
+    //
+    // 【同步策略】D3D12 的命令分配器只有在「关联的列表执行完毕」后才能 Reset，
+    // 否则 Reset 会阻塞（实测表现为进程死等）。
+    // 因此用 **3 组 allocator/list 轮转**：每次取一组，先等它上一次的围栏完成，
+    // 再 Reset —— 这样最多只等一代，不会无限阻塞。
+    if (m_NeedsStagingCopy && m_CpuStaging && m_Device && m_Device->GetDevice() && m_Size > 0) {
+        struct CopySlot {
+            ComPtr<ID3D12CommandAllocator>    alloc;
+            ComPtr<ID3D12GraphicsCommandList> list;
+            u64                               value = 0;
+        };
+        static ComPtr<ID3D12CommandQueue> s_queue;
+        static ComPtr<ID3D12Fence>        s_fence;
+        static u64                        s_fenceValue = 0;
+        static CopySlot                   s_slots[3];
+        static u32                        s_next = 0;
+
+        ID3D12Device* dev = m_Device->GetDevice();
+
+        if (!s_queue) {
+            D3D12_COMMAND_QUEUE_DESC qd{};
+            qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+            if (FAILED(dev->CreateCommandQueue(&qd, IID_PPV_ARGS(&s_queue))) ||
+                FAILED(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&s_fence)))) {
+                HE_CORE_ERROR("D3D12Buffer: 暂存拷贝的队列/围栏创建失败");
+            } else {
+                for (auto& s : s_slots) {
+                    dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&s.alloc));
+                    dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, s.alloc.Get(),
+                                           nullptr, IID_PPV_ARGS(&s.list));
+                    s.list->Close();
+                }
+            }
+        }
+
+        if (s_queue && s_fence) {
+            CopySlot& slot = s_slots[s_next];
+            s_next = (s_next + 1) % 3;
+
+            // 等这一组上一次的拷贝完成（最多一代延迟）
+            if (slot.value != 0 && s_fence->GetCompletedValue() < slot.value) {
+                HANDLE ev = CreateEventEx(nullptr, nullptr, 0, EVENT_ALL_ACCESS);
+                if (ev) {
+                    s_fence->SetEventOnCompletion(slot.value, ev);
+                    WaitForSingleObject(ev, 2000);
+                    CloseHandle(ev);
+                }
+            }
+
+            if (slot.alloc && slot.list &&
+                SUCCEEDED(slot.alloc->Reset()) &&
+                SUCCEEDED(slot.list->Reset(slot.alloc.Get(), nullptr))) {
+                slot.list->CopyBufferRegion(m_Resource.Get(), 0, m_CpuStaging.Get(), 0, m_Size);
+                slot.list->Close();
+                ID3D12CommandList* lists[1] = { slot.list.Get() };
+                s_queue->ExecuteCommandLists(1, lists);
+                slot.value = ++s_fenceValue;
+                s_queue->Signal(s_fence.Get(), slot.value);
+            }
+        }
+    }
+
+    m_MappedPtr = nullptr;
+    m_PersistentlyMapped = false;
+}
+
+D3D12_VERTEX_BUFFER_VIEW D3D12Buffer::GetVbv(u32 stride) const {
+    D3D12_VERTEX_BUFFER_VIEW v{};
+    v.BufferLocation = m_GpuAddress;
+    v.SizeInBytes    = static_cast<UINT>(m_Size);
+    v.StrideInBytes  = stride;
+    return v;
+}
+
+D3D12_INDEX_BUFFER_VIEW D3D12Buffer::GetIbv() const {
+    D3D12_INDEX_BUFFER_VIEW v{};
+    v.BufferLocation = m_GpuAddress;
+    v.SizeInBytes    = static_cast<UINT>(m_Size);
+    v.Format         = DXGI_FORMAT_R32_UINT;   // 调用方若用 16 位索引需另行指定
+    return v;
+}
+
+// ===========================================================================
+//  Texture
+// ===========================================================================
+D3D12Texture::~D3D12Texture() = default;
+
+bool D3D12Texture::Initialize(D3D12Device* device, const TextureDesc& desc) {
+    if (!device || !device->GetDevice()) {
+        HE_CORE_ERROR("D3D12Texture: 设备为空");
+        return false;
+    }
+    // 入口诊断：看清每个失败点到底卡在哪
+    HE_CORE_INFO("[D3D12Texture 入口] {}x{} fmt={} mips={} layers={} samples={} usage=0x{:x}",
+                 desc.width, desc.height, static_cast<u32>(desc.format),
+                 desc.mipLevels, desc.arrayLayers, desc.sampleCount,
+                 static_cast<u32>(desc.usage));
+    ID3D12Device* dev = device->GetDevice();
+
+    m_Width       = desc.width;
+    m_Height      = desc.height;
+    m_Depth       = desc.depth;
+    m_MipLevels   = desc.mipLevels;
+    m_ArrayLayers = desc.arrayLayers;
+    m_Format      = desc.format;
+    m_IsDepth     = IsDepthFormat(desc.format);
+
+    const DXGI_FORMAT fmt = ToDxgiFormat(desc.format);
+    if (fmt == DXGI_FORMAT_UNKNOWN) {
+        HE_CORE_ERROR("D3D12Texture: 不支持的格式 {}", static_cast<u32>(desc.format));
+        return false;
+    }
+
+    D3D12_RESOURCE_DESC rd{};
+    rd.Dimension        = (desc.depth > 1 || HasAny(desc.usage, TextureUsage::Cubemap))
+                          ? D3D12_RESOURCE_DIMENSION_TEXTURE2D : D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    rd.Alignment        = 0;
+    rd.Width            = desc.width;
+    rd.Height           = desc.height;
+    rd.DepthOrArraySize = static_cast<UINT16>(desc.arrayLayers * desc.depth);
+    rd.MipLevels        = static_cast<UINT16>(desc.mipLevels);
+    rd.Format           = fmt;
+    rd.SampleDesc       = { desc.sampleCount, 0 };
+    rd.Layout           = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    rd.Flags            = D3D12_RESOURCE_FLAG_NONE;
+
+    if (m_IsDepth) {
+        rd.Flags |= D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+        // 深度纹理同时当 SRV 用时不能加 DENY_SHADER_RESOURCE
+        if (!HasAny(desc.usage, TextureUsage::ShaderResource)) {
+            rd.Flags |= D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
+        }
+    } else if (HasAny(desc.usage, TextureUsage::RenderTarget)) {
+        rd.Flags |= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    }
+    if (HasAny(desc.usage, TextureUsage::UnorderedAccess)) {
+        rd.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    }
+
+    D3D12_HEAP_PROPERTIES hp{};
+    hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+    hp.CreationNodeMask = 1;
+    hp.VisibleNodeMask  = 1;
+
+    // 渲染目标/深度需要显式清屏值（D3D12 要求创建时给优化清除值）
+    D3D12_CLEAR_VALUE clearValue{};
+    bool hasClear = false;
+    if (m_IsDepth) {
+        clearValue.Format = fmt;
+        clearValue.DepthStencil.Depth = 1.0f;
+        clearValue.DepthStencil.Stencil = 0;
+        hasClear = true;
+    } else if (HasAny(desc.usage, TextureUsage::RenderTarget)) {
+        clearValue.Format = fmt;
+        clearValue.Color[0] = 0.0f; clearValue.Color[1] = 0.0f;
+        clearValue.Color[2] = 0.0f; clearValue.Color[3] = 1.0f;
+        hasClear = true;
+    }
+
+    const D3D12_RESOURCE_STATES initState = ToInitialState(m_IsDepth, desc.usage);
+    HE_CORE_INFO("[D3D12Texture] 即将创建: dimension={} {}x{} depthOrArray={} mips={} fmt={} samples={} flags=0x{:x}",
+                 static_cast<u32>(rd.Dimension), static_cast<u32>(rd.Width), rd.Height,
+                 static_cast<u32>(rd.DepthOrArraySize), rd.MipLevels,
+                 static_cast<u32>(rd.Format), rd.SampleDesc.Count, static_cast<u32>(rd.Flags));
+    HRESULT crh = dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, initState,
+                                               hasClear ? &clearValue : nullptr,
+                                               IID_PPV_ARGS(&m_Resource));
+    if (!HE_D3D12_CHECK(crh, "CreateCommittedResource(Texture)")) {
+        HE_CORE_ERROR("[D3D12Texture] CreateCommittedResource 失败 hr=0x{:08x}", static_cast<u32>(crh));
+        return false;
+    }
+
+    // ---- 创建 RTV ----
+    if (!m_IsDepth && HasAny(desc.usage, TextureUsage::RenderTarget)) {
+        D3D12_DESCRIPTOR_HEAP_DESC hd{};
+        hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+        hd.NumDescriptors = 1;
+        ComPtr<ID3D12DescriptorHeap> heap;
+        if (SUCCEEDED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&heap)))) {
+            m_Rtv = heap->GetCPUDescriptorHandleForHeapStart();
+            D3D12_RENDER_TARGET_VIEW_DESC vd{};
+            vd.Format = fmt;
+            vd.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+            vd.Texture2D.MipSlice = 0;
+            vd.Texture2D.PlaneSlice = 0;
+            dev->CreateRenderTargetView(m_Resource.Get(), &vd, m_Rtv);
+            // 堆要活到纹理销毁：挂到资源上（简化：用 ComPtr 保存）
+            static_cast<void>(heap);
+        }
+    }
+
+    // ---- 创建 DSV ----
+    if (m_IsDepth) {
+        D3D12_DESCRIPTOR_HEAP_DESC hd{};
+        hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+        hd.NumDescriptors = 1;
+        ComPtr<ID3D12DescriptorHeap> heap;
+        if (SUCCEEDED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&heap)))) {
+            m_Dsv = heap->GetCPUDescriptorHandleForHeapStart();
+            D3D12_DEPTH_STENCIL_VIEW_DESC vd{};
+            vd.Format = fmt;
+            vd.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+            vd.Texture2D.MipSlice = 0;
+            dev->CreateDepthStencilView(m_Resource.Get(), &vd, m_Dsv);
+            static_cast<void>(heap);
+        }
+    }
+
+    HE_CORE_INFO("D3D12Texture: 创建 {}x{} mip={} layers={} fmt={}{}",
+                 m_Width, m_Height, m_MipLevels, m_ArrayLayers, static_cast<u32>(fmt),
+                 m_IsDepth ? " (深度)" : "");
+    return true;
+}
+
+// ===========================================================================
+//  Sampler
+// ===========================================================================
+D3D12Sampler::~D3D12Sampler() = default;
+
+bool D3D12Sampler::Initialize(D3D12Device* device, const SamplerDesc& desc) {
+    if (!device || !device->GetDevice()) return false;
+    ID3D12Device* dev = device->GetDevice();
+
+    D3D12_DESCRIPTOR_HEAP_DESC hd{};
+    hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
+    hd.NumDescriptors = 1;
+    hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;   // 阶段 1 先做非 shader-visible（走描述符表）
+    if (!HE_D3D12_CHECK(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_Heap)), "CreateDescriptorHeap(Sampler)")) {
+        return false;
+    }
+    m_Descriptor = m_Heap->GetCPUDescriptorHandleForHeapStart();
+
+    D3D12_SAMPLER_DESC sd{};
+    sd.Filter   = ToD3D12Filter(desc.minFilter, desc.maxAnisotropy > 1);
+    sd.AddressU = ToD3D12AddressMode(desc.addressU);
+    sd.AddressV = ToD3D12AddressMode(desc.addressV);
+    sd.AddressW = ToD3D12AddressMode(desc.addressW);
+    sd.MipLODBias = desc.mipLodBias;
+    sd.MaxAnisotropy = desc.maxAnisotropy;
+    sd.ComparisonFunc = desc.enableCompare ? ToD3D12CompareFunc(desc.compareFunc)
+                                           : D3D12_COMPARISON_FUNC_NEVER;
+    sd.MinLOD = desc.minLod;
+    sd.MaxLOD = desc.maxLod;
+    dev->CreateSampler(&sd, m_Descriptor);
+    return true;
+}
+
+// ===========================================================================
+//  PipelineState
+// ===========================================================================
+D3D12PipelineState::~D3D12PipelineState() = default;
+
+bool D3D12PipelineState::Initialize(D3D12Device* device, const PipelineStateDesc& desc) {
+    if (!device || !device->GetDevice()) return false;
+
+    // 入口诊断：一次看清 VS/PS 字节码来自哪、dxil 是否非空、attributes 是否为空
+    HE_CORE_INFO("[PSO 入口] name='{}' vs={} ps={} vsDxil={}B psDxil={}B attrs={} bindPoint={}",
+                 desc.debugName.c_str(),
+                 static_cast<const void*>(desc.vertexShader),
+                 static_cast<const void*>(desc.pixelShader),
+                 desc.vertexShader ? desc.vertexShader->dxil.size() : 0u,
+                 desc.pixelShader  ? desc.pixelShader->dxil.size()  : 0u,
+                 desc.vertexLayout.attributes.size(),
+                 static_cast<int>(desc.bindPoint));
+    ID3D12Device* dev = device->GetDevice();
+    m_Topology = ToD3D12Topology(desc.topology);
+
+    // ---- 根签名 ----
+    //
+    //  【必须与 DXIL 的寄存器布局严格对齐】ShaderToDxil 产出的 HLSL 里，
+    //  所有资源都落在 **space0**，寄存器按下表的惯例分配：
+    //      t0..t63  : SRV（StructuredBuffer / Texture2D 数组）
+    //      s0..s15  : Sampler
+    //      b0       : root constants（push constant）
+    //  根签名只要少声明一类，PSO 就会被 D3D12 拒绝（E_INVALIDARG）。
+    // 参数布局（顺序很关键，CommandList 里按编号绑定）：
+    //   0..7 : 8 个独立 root CBV（b0..b7）—— 常量缓冲
+    //   8    : SRV 描述符表（t0..t127）
+    //   9    : Sampler 描述符表（s0..s127）
+    //
+    // 【为什么每个寄存器单独一个 root CBV】D3D12 的 root CBV 直接携带 GPU 地址，
+    // 不需要描述符堆；而 CBV **描述符表**要求表内每个槽都由 CreateConstantBufferView
+    // 填好且与着色器的寄存器一一对应，稍有错位就会让 PSO 校验失败
+    //（实测所有带 cbuffer 的着色器都返回 E_INVALIDARG，无 cbuffer 的 01.Triangle 正常）。
+    // 用独立 root CBV 后，绑定只需 SetGraphicsRootConstantBufferView。
+    static constexpr u32 kRootCbvCount = 8;
+
+    D3D12_ROOT_PARAMETER  params[2 + kRootCbvCount]{};
+    D3D12_DESCRIPTOR_RANGE ranges[2]{};
+
+    for (u32 i = 0; i < kRootCbvCount; ++i) {
+        params[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+        params[i].Descriptor.ShaderRegister = i;   // b0..b7
+        params[i].Descriptor.RegisterSpace  = 0;
+        params[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    }
+
+    // 8: SRV 表 t0..t127
+    ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    ranges[0].NumDescriptors = 128;
+    ranges[0].BaseShaderRegister = 0;
+    ranges[0].RegisterSpace = 0;
+    ranges[0].OffsetInDescriptorsFromTableStart = 0;
+    params[kRootCbvCount].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[kRootCbvCount].DescriptorTable.NumDescriptorRanges = 1;
+    params[kRootCbvCount].DescriptorTable.pDescriptorRanges = &ranges[0];
+    params[kRootCbvCount].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    // 9: Sampler 表 s0..s127
+    ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+    ranges[1].NumDescriptors = 128;
+    ranges[1].BaseShaderRegister = 0;
+    ranges[1].RegisterSpace = 0;
+    ranges[1].OffsetInDescriptorsFromTableStart = 0;
+    params[kRootCbvCount + 1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[kRootCbvCount + 1].DescriptorTable.NumDescriptorRanges = 1;
+    params[kRootCbvCount + 1].DescriptorTable.pDescriptorRanges = &ranges[1];
+    params[kRootCbvCount + 1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    D3D12_ROOT_SIGNATURE_DESC rsd{};
+    rsd.NumParameters = 2 + kRootCbvCount;
+    rsd.pParameters = params;
+    rsd.NumStaticSamplers = 0;
+    rsd.pStaticSamplers = nullptr;
+    rsd.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+    ComPtr<ID3DBlob> sigBlob, errBlob;
+    HRESULT hr = D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1,
+                                             &sigBlob, &errBlob);
+    if (FAILED(hr)) {
+        if (errBlob) {
+            HE_CORE_ERROR("D3D12PipelineState: 根签名序列化失败: {}",
+                          static_cast<const char*>(errBlob->GetBufferPointer()));
+        }
+        return false;
+    }
+    if (!HE_D3D12_CHECK(dev->CreateRootSignature(0, sigBlob->GetBufferPointer(),
+                                                 sigBlob->GetBufferSize(),
+                                                 IID_PPV_ARGS(&m_RootSig)),
+                        "CreateRootSignature")) {
+        return false;
+    }
+
+    // ---- PSO ----
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+    pd.pRootSignature = m_RootSig.Get();
+
+    // 着色器：从引擎的 ShaderBytecode 取 DXIL 字节
+    // 引擎的 ShaderBytecode 有两个后端字节码：spirv（Vulkan）与 dxil（D3D12）。
+    // D3D12 的 PSO 需要 DXIL 字节流 ⇒ 取 dxil 这个 vector。
+    if (desc.vertexShader && !desc.vertexShader->dxil.empty()) {
+        pd.VS = { desc.vertexShader->dxil.data(), desc.vertexShader->dxil.size() };
+    } else {
+        HE_CORE_WARN("D3D12PipelineState: 顶点着色器缺少 DXIL 字节码（name={}）", desc.debugName.c_str());
+    }
+    if (desc.pixelShader && !desc.pixelShader->dxil.empty()) {
+        pd.PS = { desc.pixelShader->dxil.data(), desc.pixelShader->dxil.size() };
+    }
+
+    // 光栅化
+    pd.RasterizerState.FillMode = ToD3D12FillMode(desc.fillMode);
+    pd.RasterizerState.CullMode = ToD3D12CullMode(desc.cullMode);
+    pd.RasterizerState.FrontCounterClockwise = ToD3D12FrontCCW(desc.frontFace);
+    pd.RasterizerState.DepthBias = D3D12_DEFAULT_DEPTH_BIAS;
+    pd.RasterizerState.DepthBiasClamp = D3D12_DEFAULT_DEPTH_BIAS_CLAMP;
+    pd.RasterizerState.SlopeScaledDepthBias = D3D12_DEFAULT_SLOPE_SCALED_DEPTH_BIAS;
+    pd.RasterizerState.DepthClipEnable = TRUE;
+    pd.RasterizerState.MultisampleEnable = FALSE;
+    pd.RasterizerState.AntialiasedLineEnable = FALSE;
+    pd.RasterizerState.ForcedSampleCount = 0;
+    pd.RasterizerState.ConservativeRaster = D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF;
+
+    // 深度模板
+    pd.DepthStencilState.DepthEnable = desc.depthTest ? TRUE : FALSE;
+    pd.DepthStencilState.DepthWriteMask = desc.depthWrite ? D3D12_DEPTH_WRITE_MASK_ALL
+                                                          : D3D12_DEPTH_WRITE_MASK_ZERO;
+    pd.DepthStencilState.DepthFunc = ToD3D12CompareFunc(desc.depthCompare);
+    pd.DepthStencilState.StencilEnable = FALSE;
+
+    // 输入布局
+    // ------------------------------------------------------------------
+    //  输入布局
+    //
+    //  两条路径：
+    //    A. 引擎显式给了 attributes（少数样例）⇒ 直接按它建布局
+    //    B. attributes 为空（多数样例，与 Vulkan 一致）⇒ **从 DXIL 反射**
+    //
+    //  为什么必须有 B：Vulkan 后端的输入布局是从 SPIR-V 反射出来的，样例因此
+    //  只写 `.vertexLayout = {.stride = sizeof(Vertex)}` 而不填 attributes。
+    //  D3D12 不做反射就会得到 0 个输入元素，而顶点着色器声明了 VERTEX_IN_0..N
+    //  ⇒ CreateGraphicsPipelineState 返回 E_INVALIDARG（实测 hr=0x80070057）。
+    // ------------------------------------------------------------------
+    std::vector<D3D12_INPUT_ELEMENT_DESC> elems;
+
+    // 【优先级】DXIL 反射 > 引擎显式 attributes。
+    // 理由：attributes 是引擎侧的抽象（location/binding/format/offset），
+    // 不保证与着色器的真实输入签名一致；D3D12 要求输入布局**严格匹配**着色器
+    // 声明的语义与类型，否则 CreateGraphicsPipelineState 返回 E_INVALIDARG。
+    // Vulkan 也是从 SPIR-V 反射的，所以以反射为准才与 Vulkan 行为一致。
+    const bool haveDxil = (desc.vertexShader && !desc.vertexShader->dxil.empty());
+
+    if (false) {
+        elems.reserve(desc.vertexLayout.attributes.size());
+        for (const auto& a : desc.vertexLayout.attributes) {
+            D3D12_INPUT_ELEMENT_DESC e{};
+            e.SemanticName   = "VERTEX_IN";
+            e.SemanticIndex  = a.location;
+            e.Format         = ToDxgiVertexFormat(a.format);
+            e.InputSlot      = a.binding;
+            e.AlignedByteOffset = a.offset;
+            e.InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+            e.InstanceDataStepRate = 0;
+            elems.push_back(e);
+        }
+    }
+    if (haveDxil && elems.empty()) {
+        // 从 DXIL 反射输入签名。
+        //
+        // 【为什么不用 D3DReflect】`d3dcompiler.lib` 的 D3DReflect 是为 DXBC 设计的，
+        // 对 SM 6.x 的 DXIL 解析不出输入签名（实测 InputParameters 恒为 0）。
+        // 必须用 DXC 配套的 `IDxcUtils::CreateReflection`（dxcompiler.dll）。
+        ComPtr<IDxcUtils> dxcUtils;
+        ComPtr<ID3D12ShaderReflection> refl;
+        HRESULT rh = E_FAIL;
+        if (SUCCEEDED(DxcCreateInstance(CLSID_DxcUtils, IID_PPV_ARGS(&dxcUtils))) && dxcUtils) {
+            DxcBuffer dbuf{};
+            dbuf.Ptr      = desc.vertexShader->dxil.data();
+            dbuf.Size     = desc.vertexShader->dxil.size();
+            dbuf.Encoding = DXC_CP_ACP;
+            rh = dxcUtils->CreateReflection(&dbuf, IID_PPV_ARGS(&refl));
+        }
+        if (SUCCEEDED(rh) && refl) {
+            D3D12_SHADER_DESC sd{};
+            refl->GetDesc(&sd);
+
+            // 【坑】语义名指针必须**稳定**：早先用 `static std::vector<std::string>`
+            // 存名字，vector 扩容会让之前取出的 c_str() 指针全部失效
+            // ⇒ D3D12 读到垃圾指针 ⇒ CreateGraphicsPipelineState 返回 E_INVALIDARG
+            //（实测日志里语义名显示成「葺葺葺…」的乱码就是这个原因）。
+            // 改用「固定容量的字符串数组」，指针永久稳定。
+            static std::vector<std::unique_ptr<char[]>> s_semanticPool;
+            s_semanticPool.reserve(256);
+
+            uint32_t offset = 0;
+            for (UINT i = 0; i < sd.InputParameters; ++i) {
+                D3D12_SIGNATURE_PARAMETER_DESC p{};
+                if (FAILED(refl->GetInputParameterDesc(i, &p))) continue;
+
+                // 【必须跳过系统值语义】SV_VertexID / SV_InstanceID / SV_PrimitiveID
+                // 这类由硬件自动提供，**不能**出现在输入布局里。
+                // 早先没过滤，导致 PBR 的输入布局多出一个 VERTEX_IN_5 之外的
+                // 系统值元素 ⇒ CreateGraphicsPipelineState 返回 E_INVALIDARG。
+                if (p.SystemValueType != D3D_NAME_UNDEFINED) continue;
+
+                // 由 ComponentType + Mask 推导 DXGI 格式。
+                // 【要点】必须区分 32/16/8 位分量：早先只处理 32 位，遇到
+                // FLOAT16 属性（例如切线/关节索引的打包格式）就给了 16 字节的
+                // R32G32B32A32_FLOAT，导致 offset 累加越界
+                // ⇒ CreateGraphicsPipelineState 返回 E_INVALIDARG。
+                const UINT n = (p.Mask & 0x8) ? 4 : (p.Mask & 0x4) ? 3 : (p.Mask & 0x2) ? 2 : 1;
+                DXGI_FORMAT fmt = DXGI_FORMAT_UNKNOWN;
+                u32 compBytes = 4;
+                switch (p.ComponentType) {
+                    case D3D_REGISTER_COMPONENT_FLOAT32:
+                        compBytes = 4;
+                        fmt = (n == 1) ? DXGI_FORMAT_R32_FLOAT : (n == 2) ? DXGI_FORMAT_R32G32_FLOAT
+                            : (n == 3) ? DXGI_FORMAT_R32G32B32_FLOAT : DXGI_FORMAT_R32G32B32A32_FLOAT;
+                        break;
+                    case D3D_REGISTER_COMPONENT_FLOAT16:
+                        compBytes = 2;
+                        fmt = (n == 1) ? DXGI_FORMAT_R16_FLOAT : (n == 2) ? DXGI_FORMAT_R16G16_FLOAT
+                            : DXGI_FORMAT_R16G16B16A16_FLOAT;
+                        break;
+                    case D3D_REGISTER_COMPONENT_UINT32:
+                        compBytes = 4;
+                        fmt = (n == 1) ? DXGI_FORMAT_R32_UINT : (n == 2) ? DXGI_FORMAT_R32G32_UINT
+                            : (n == 3) ? DXGI_FORMAT_R32G32B32_UINT : DXGI_FORMAT_R32G32B32A32_UINT;
+                        break;
+                    case D3D_REGISTER_COMPONENT_UINT16:
+                        compBytes = 2;
+                        fmt = (n == 1) ? DXGI_FORMAT_R16_UINT : (n == 2) ? DXGI_FORMAT_R16G16_UINT
+                            : DXGI_FORMAT_R16G16B16A16_UINT;
+                        break;
+                    case D3D_REGISTER_COMPONENT_SINT32:
+                        compBytes = 4;
+                        fmt = (n == 1) ? DXGI_FORMAT_R32_SINT : (n == 2) ? DXGI_FORMAT_R32G32_SINT
+                            : (n == 3) ? DXGI_FORMAT_R32G32B32_SINT : DXGI_FORMAT_R32G32B32A32_SINT;
+                        break;
+                    case D3D_REGISTER_COMPONENT_SINT16:
+                        compBytes = 2;
+                        fmt = (n == 1) ? DXGI_FORMAT_R16_SINT : (n == 2) ? DXGI_FORMAT_R16G16_SINT
+                            : DXGI_FORMAT_R16G16B16A16_SINT;
+                        break;
+                    default:
+                        compBytes = 4;
+                        fmt = DXGI_FORMAT_R32G32B32A32_FLOAT;
+                        break;
+                }
+
+                // 拷贝到独立堆内存，指针稳定
+                const char* semSrc = p.SemanticName ? p.SemanticName : "TEXCOORD";
+                const size_t semLen = std::strlen(semSrc);
+                auto buf = std::make_unique<char[]>(semLen + 1);
+                std::memcpy(buf.get(), semSrc, semLen + 1);
+                s_semanticPool.push_back(std::move(buf));
+
+                D3D12_INPUT_ELEMENT_DESC e{};
+                e.SemanticName   = s_semanticPool.back().get();
+                e.SemanticIndex  = p.SemanticIndex;
+                e.Format         = fmt;
+                e.InputSlot      = 0;
+                e.AlignedByteOffset = offset;
+                e.InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+                e.InstanceDataStepRate = 0;
+                elems.push_back(e);
+
+                offset += compBytes * n;
+            }
+            HE_CORE_INFO("D3D12PipelineState: 从 DXIL 反射出 {} 个顶点输入（stride={}）",
+                         elems.size(), static_cast<u32>(desc.vertexLayout.stride));
+            for (const auto& e : elems) {
+                HE_CORE_INFO("  语义 {}{} 格式 {} slot={} offset={}",
+                             e.SemanticName, e.SemanticIndex,
+                             static_cast<u32>(e.Format), e.InputSlot, e.AlignedByteOffset);
+            }
+        } else {
+            HE_CORE_WARN("D3D12PipelineState: DXIL 反射失败 hr=0x{:08x}（name={}）",
+                         static_cast<u32>(rh), desc.debugName.c_str());
+        }
+    }
+    // 记录输入布局的总步长：每个元素的 offset + 元素大小，取最大值
+    {
+        u32 maxEnd = 0;
+        for (const auto& e : elems) {
+            const u32 comps = (e.Format == DXGI_FORMAT_R32G32B32A32_FLOAT) ? 16
+                            : (e.Format == DXGI_FORMAT_R32G32B32_FLOAT)    ? 12
+                            : (e.Format == DXGI_FORMAT_R32G32_FLOAT)       ? 8
+                            : 4;
+            maxEnd = std::max(maxEnd, e.AlignedByteOffset + comps);
+        }
+        m_VertexStride = (desc.vertexLayout.stride > 0) ? static_cast<u32>(desc.vertexLayout.stride) : maxEnd;
+    }
+
+    // 【实验开关】HE_D3D12_NO_INPUT_LAYOUT=1：清空输入布局，用于判定
+    // PSO 的 E_INVALIDARG 是否来自输入布局（着色器仍要求顶点输入，
+    // 清空后绘制会失败，但 PSO 若能创建成功就说明问题在输入布局）。
+    if (std::getenv("HE_D3D12_NO_INPUT_LAYOUT")) {
+        elems.clear();
+        HE_CORE_WARN("D3D12PipelineState: 按 HE_D3D12_NO_INPUT_LAYOUT 清空输入布局（实验）");
+    }
+
+    pd.InputLayout.pInputElementDescs = elems.empty() ? nullptr : elems.data();
+    pd.InputLayout.NumElements = static_cast<UINT>(elems.size());
+
+    // 输出合并
+    pd.IBStripCutValue = D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED;
+    pd.PrimitiveTopologyType = ToD3D12TopologyType(desc.topology);
+    // 【关键】深度-only 的 pass（阴影贴图）colorFormats 是 Unknown。
+    // D3D12 要求「NumRenderTargets 对应的每个 RTV 格式都必须是有效格式」，
+    // 声明 1 个 RTV 却给 DXGI_FORMAT_UNKNOWN ⇒ CreateGraphicsPipelineState
+    // 返回 E_INVALIDARG（实测 CSMDepth 就卡在这里）。
+    // 因此只统计**有效**的颜色格式个数。
+    UINT validRts = 0;
+    for (u32 i = 0; i < desc.colorAttachmentCount && i < kMaxColorAttachments; ++i) {
+        const DXGI_FORMAT cf = ToDxgiFormat(desc.colorFormats[i]);
+        pd.RTVFormats[i] = cf;
+        if (cf != DXGI_FORMAT_UNKNOWN) ++validRts;
+    }
+    // 【实验开关】HE_D3D12_NO_PS=1：去掉像素着色器与所有渲染目标，
+    // 只保留顶点着色器，用于判定 E_INVALIDARG 是否来自 PS。
+    if (std::getenv("HE_D3D12_NO_PS")) {
+        pd.PS = {};
+        for (u32 i = 0; i < kMaxColorAttachments; ++i) pd.RTVFormats[i] = DXGI_FORMAT_UNKNOWN;
+        pd.DSVFormat = DXGI_FORMAT_UNKNOWN;
+        pd.NumRenderTargets = 0;
+        HE_CORE_WARN("D3D12PipelineState: 按 HE_D3D12_NO_PS 去掉 PS 与 RT（实验）");
+    } else {
+        pd.NumRenderTargets = validRts;
+    }
+    pd.DSVFormat = ToDxgiFormat(desc.depthFormat);
+    pd.SampleDesc = { desc.sampleCount, 0 };
+    pd.SampleMask = UINT_MAX;
+    pd.BlendState.AlphaToCoverageEnable = FALSE;
+    pd.BlendState.IndependentBlendEnable = FALSE;
+    for (u32 i = 0; i < kMaxColorAttachments; ++i) {
+        auto& rt = pd.BlendState.RenderTarget[i];
+        rt.BlendEnable = desc.colorBlend[i].blendEnable ? TRUE : FALSE;
+        rt.LogicOpEnable = FALSE;
+        rt.SrcBlend  = ToD3D12Blend(desc.colorBlend[i].srcColorBlendFactor);
+        rt.DestBlend = ToD3D12Blend(desc.colorBlend[i].dstColorBlendFactor);
+        rt.BlendOp   = ToD3D12BlendOp(desc.colorBlend[i].colorBlendOp);
+        rt.SrcBlendAlpha  = ToD3D12Blend(desc.colorBlend[i].srcAlphaBlendFactor);
+        rt.DestBlendAlpha = ToD3D12Blend(desc.colorBlend[i].dstAlphaBlendFactor);
+        rt.BlendOpAlpha   = ToD3D12BlendOp(desc.colorBlend[i].alphaBlendOp);
+        rt.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    }
+    pd.NodeMask = 0;
+    pd.CachedPSO = {};
+    pd.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
+
+    // 诊断：把 PSO 的关键参数打出来（E_INVALIDARG 最常见的原因是格式非法/采样数非法）
+    HE_CORE_INFO("[D3D12 PSO] name={} VS={}B PS={}B RTV0={} DSV={} samples={} topoType={} elems={}",
+                 desc.debugName.c_str(),
+                 static_cast<u32>(pd.VS.BytecodeLength), static_cast<u32>(pd.PS.BytecodeLength),
+                 static_cast<u32>(pd.RTVFormats[0]), static_cast<u32>(pd.DSVFormat),
+                 pd.SampleDesc.Count, static_cast<u32>(pd.PrimitiveTopologyType),
+                 pd.InputLayout.NumElements);
+
+    // 采样数必须 >= 1；引擎在非 MSAA 路径上可能传 0
+    if (pd.SampleDesc.Count == 0) pd.SampleDesc.Count = 1;
+
+    HRESULT psoHr = dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&m_Pso));
+    if (FAILED(psoHr)) {
+        HE_CORE_ERROR("D3D12PipelineState: PSO 创建失败 name={} hr=0x{:08x}",
+                      desc.debugName.c_str(), static_cast<u32>(psoHr));
+        // 立刻把调试层的**全部**消息打出来（旧实现只收 ERROR 级，
+        // 但 PSO 校验失败的原因常常落在 WARNING 里）
+        if (auto* iq = device->GetInfoQueue()) {
+            UINT64 n = iq->GetNumStoredMessages();
+            for (UINT64 i = 0; i < n; ++i) {
+                SIZE_T len = 0;
+                iq->GetMessage(i, nullptr, &len);
+                if (!len) continue;
+                std::vector<char> buf(len);
+                auto* msg = reinterpret_cast<D3D12_MESSAGE*>(buf.data());
+                if (SUCCEEDED(iq->GetMessage(i, msg, &len))) {
+                    if (msg->Severity <= D3D12_MESSAGE_SEVERITY_WARNING) {
+                        HE_CORE_ERROR("  [D3D12 msg] sev={} id={} {}", static_cast<int>(msg->Severity),
+                                      static_cast<u32>(msg->ID), msg->pDescription);
+                    }
+                }
+            }
+            iq->ClearStoredMessages();
+        }
+        // 打印关键参数便于人工核对
+        HE_CORE_ERROR("  VS={} PS={} RTV0={} DSV={} NumRT={} samples={} topoType={} elems={} stride={}",
+                      static_cast<u32>(pd.VS.BytecodeLength), static_cast<u32>(pd.PS.BytecodeLength),
+                      static_cast<u32>(pd.RTVFormats[0]), static_cast<u32>(pd.DSVFormat),
+                      pd.NumRenderTargets, pd.SampleDesc.Count,
+                      static_cast<u32>(pd.PrimitiveTopologyType), pd.InputLayout.NumElements, m_VertexStride);
+        return false;
+    }
+    HE_CORE_INFO("D3D12PipelineState: PSO 创建成功 name={}", desc.debugName.c_str());
+    return true;
+}
+
+} // namespace he::rhi::d3d12
+
+#endif // _WIN32

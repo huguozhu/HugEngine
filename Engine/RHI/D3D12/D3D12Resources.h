@@ -1,0 +1,151 @@
+﻿// ============================================================================
+//  D3D12Resources.h —— D3D12 的资源与管线对象
+//
+//  包含 Buffer / Texture / Sampler / PipelineState 四个实现。
+//  设计要点：
+//    · Buffer：DEFAULT 堆用于 GPU 资源，UPLOAD 堆用于 CPU 频繁写入，
+//      READBACK 堆用于回读。cpuAccess 决定堆类型。
+//    · Texture：DEFAULT 堆 + RTV/DSV/SRV 描述符（描述符从设备的分堆里分配）。
+//    · Sampler：D3D12 的采样器也是描述符，放在独立的 SAMPLER 堆里。
+//    · PipelineState：由根签名 + PSO 组成；阶段 2 完成完整实现，
+//      当前只建立 PSO（根签名先用空根签名占位）。
+// ============================================================================
+#pragma once
+
+#if defined(_WIN32)
+
+#include "D3D12Common.h"
+#include "RHI/Shader.h"
+#include <vector>
+
+namespace he::rhi::d3d12 {
+
+class D3D12Device;
+
+// ---------------------------------------------------------------------------
+//  Buffer
+// ---------------------------------------------------------------------------
+class D3D12Buffer final : public IRHIBuffer {
+public:
+    ~D3D12Buffer() override;
+
+    bool Initialize(D3D12Device* device, const BufferDesc& desc);
+
+    usize  GetSize() const override { return m_Size; }
+    void*  Map() override;
+    void   Unmap() override;
+    u64    GetDeviceAddress() const override { return m_GpuAddress; }
+
+    /// 供 CommandList 使用：顶点/索引/常量/间接参数视图
+    ID3D12Resource* GetResource() const { return m_Resource.Get(); }
+    D3D12_GPU_VIRTUAL_ADDRESS GetGpuAddress() const { return m_GpuAddress; }
+    D3D12_VERTEX_BUFFER_VIEW   GetVbv(u32 stride) const;
+    D3D12_INDEX_BUFFER_VIEW    GetIbv() const;
+
+    /// 创建时记录的顶点步长（0 表示不是顶点缓冲）
+    u32 GetStride() const { return m_Stride; }
+
+    /// 供 CommandList 使用：拿到底层资源
+    ID3D12Resource* GetNativeHandle() const { return m_Resource.Get(); }
+
+private:
+    ComPtr<ID3D12Resource> m_Resource;
+    D3D12_GPU_VIRTUAL_ADDRESS m_GpuAddress = 0;
+    usize m_Size = 0;
+    u32   m_Stride = 0;
+    bool  m_PersistentlyMapped = false;
+    void* m_MappedPtr = nullptr;
+    ComPtr<ID3D12Resource> m_UploadStaging;   // initialData 的上传中转
+    // UAV 缓冲的 CPU 暂存：D3D12 禁止在 UPLOAD 堆上建 UAV 缓冲，
+    // 所以「CPU 可写 + GPU 可写」的缓冲需要 DEFAULT 主资源 + UPLOAD 暂存，
+    // Unmap 时用 CopyBufferRegion 把暂存拷到主资源。
+    ComPtr<ID3D12Resource> m_CpuStaging;
+    bool                   m_NeedsStagingCopy = false;
+    D3D12Device*           m_Device = nullptr;
+};
+
+// ---------------------------------------------------------------------------
+//  Texture
+// ---------------------------------------------------------------------------
+class D3D12Texture final : public IRHITexture {
+public:
+    ~D3D12Texture() override;
+
+    bool Initialize(D3D12Device* device, const TextureDesc& desc);
+
+    u32    GetWidth()  const override { return m_Width; }
+    u32    GetHeight() const override { return m_Height; }
+    u32    GetDepth()  const override { return m_Depth; }
+    u32    GetMipLevels()   const override { return m_MipLevels; }
+    u32    GetArrayLayers() const override { return m_ArrayLayers; }
+    Format GetFormat() const override { return m_Format; }
+    void*  GetNativeHandle() const override { return m_Resource.Get(); }
+    void*  GetNativeHandle(u32 index) const override {
+        if (m_Srvs.empty() || index >= m_Srvs.size()) return nullptr;
+        return reinterpret_cast<void*>(m_Srvs[index].ptr);
+    }
+
+    ID3D12Resource* GetResource() const { return m_Resource.Get(); }
+    D3D12_CPU_DESCRIPTOR_HANDLE GetRtv() const { return m_Rtv; }
+    D3D12_CPU_DESCRIPTOR_HANDLE GetDsv() const { return m_Dsv; }
+    D3D12_CPU_DESCRIPTOR_HANDLE GetSrv(u32 mip = 0) const {
+        return (mip < m_Srvs.size()) ? m_Srvs[mip] : D3D12_CPU_DESCRIPTOR_HANDLE{};
+    }
+    bool IsDepth() const { return m_IsDepth; }
+
+private:
+    ComPtr<ID3D12Resource> m_Resource;
+    ComPtr<ID3D12Resource> m_UploadStaging;
+    D3D12_CPU_DESCRIPTOR_HANDLE m_Rtv{};
+    D3D12_CPU_DESCRIPTOR_HANDLE m_Dsv{};
+    std::vector<D3D12_CPU_DESCRIPTOR_HANDLE> m_Srvs;
+    u32    m_Width = 1, m_Height = 1, m_Depth = 1;
+    u32    m_MipLevels = 1, m_ArrayLayers = 1;
+    Format m_Format = Format::RGBA8_UNORM;
+    bool   m_IsDepth = false;
+};
+
+// ---------------------------------------------------------------------------
+//  Sampler
+// ---------------------------------------------------------------------------
+class D3D12Sampler final : public IRHISampler {
+public:
+    ~D3D12Sampler() override;
+
+    bool Initialize(D3D12Device* device, const SamplerDesc& desc);
+
+    D3D12_CPU_DESCRIPTOR_HANDLE GetDescriptor() const { return m_Descriptor; }
+
+private:
+    D3D12_CPU_DESCRIPTOR_HANDLE m_Descriptor{};
+    ComPtr<ID3D12DescriptorHeap> m_Heap;   // 每个采样器一个 1-slot 堆（阶段 1 简化）
+};
+
+// ---------------------------------------------------------------------------
+//  PipelineState
+// ---------------------------------------------------------------------------
+class D3D12PipelineState final : public IRHIPipelineState {
+public:
+    ~D3D12PipelineState() override;
+
+    bool Initialize(D3D12Device* device, const PipelineStateDesc& desc);
+
+    void* GetNativeHandle() const override { return m_Pso.Get(); }
+
+    ID3D12PipelineState*   GetPso() const { return m_Pso.Get(); }
+    ID3D12RootSignature*   GetRootSignature() const { return m_RootSig.Get(); }
+    D3D12_PRIMITIVE_TOPOLOGY GetTopology() const { return m_Topology; }
+    u32 GetVertexStride() const { return m_VertexStride; }
+
+private:
+    ComPtr<ID3D12RootSignature> m_RootSig;
+    ComPtr<ID3D12PipelineState> m_Pso;
+    D3D12_PRIMITIVE_TOPOLOGY    m_Topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+    /// 输入布局的总步长（由 DXIL 反射或引擎 attributes 累加得出），
+    /// 用于缓冲 stride 为 0 时兜底（D3D12 要求 StrideInBytes 非零）
+    u32                         m_VertexStride = 0;
+};
+
+} // namespace he::rhi::d3d12
+
+#endif // _WIN32
