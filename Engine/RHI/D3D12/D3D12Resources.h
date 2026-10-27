@@ -109,6 +109,11 @@ private:
     ComPtr<ID3D12Resource> m_Resource;
     ComPtr<ID3D12Resource> m_UploadStaging;
     D3D12_CPU_DESCRIPTOR_HANDLE m_Rtv{};
+    // 【必须持有堆】RTV/DSV 的描述符堆如果只是局部变量，作用域结束就被释放，
+    // m_Rtv/m_Dsv 会指向已释放的堆 ⇒ 变成垃圾描述符 ⇒
+    // OMSetRenderTargets 收到非法 RTV 让驱动静默卡死（实测 02.Cube 死在这里）。
+    ComPtr<ID3D12DescriptorHeap> m_RtvHeap;
+    ComPtr<ID3D12DescriptorHeap> m_DsvHeap;
     D3D12_CPU_DESCRIPTOR_HANDLE m_Dsv{};
     std::vector<D3D12_CPU_DESCRIPTOR_HANDLE> m_Srvs;
     u32    m_Width = 1, m_Height = 1, m_Depth = 1;

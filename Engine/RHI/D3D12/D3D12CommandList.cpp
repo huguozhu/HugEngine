@@ -188,10 +188,12 @@ void D3D12CommandList::BeginOffscreenPass(void* colorImageView, void* depthImage
 
     std::printf("[BOPB] rtv=%p rtvRes=%p dsv=%p\n", (void*)rtv.ptr, (void*)m_Device->FindViewResource(static_cast<UINT64>(rtv.ptr)), (void*)dsv.ptr); std::fflush(stdout);
     m_List->OMSetRenderTargets(hasRtv ? 1u : 0u, hasRtv ? &rtv : nullptr, FALSE, hasDsv ? &dsv : nullptr);
+    std::printf("[BOPC] after OMSetRT\n"); std::fflush(stdout);
     m_HasRtv = hasRtv;
 
     if (hasRtv && clear) {
         m_List->ClearRenderTargetView(rtv, clear->color, 0, nullptr);
+        std::printf("[BOPD] after ClearRTV\n"); std::fflush(stdout);
     }
     if (hasDsv) {
         m_List->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,

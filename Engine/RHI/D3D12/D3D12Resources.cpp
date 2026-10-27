@@ -435,9 +435,8 @@ bool D3D12Texture::Initialize(D3D12Device* device, const TextureDesc& desc) {
         D3D12_DESCRIPTOR_HEAP_DESC hd{};
         hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
         hd.NumDescriptors = 1;
-        ComPtr<ID3D12DescriptorHeap> heap;
-        if (SUCCEEDED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&heap)))) {
-            m_Rtv = heap->GetCPUDescriptorHandleForHeapStart();
+        if (SUCCEEDED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_RtvHeap)))) {
+            m_Rtv = m_RtvHeap->GetCPUDescriptorHandleForHeapStart();
             D3D12_RENDER_TARGET_VIEW_DESC vd{};
             vd.Format = fmt;
             vd.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
@@ -445,8 +444,7 @@ bool D3D12Texture::Initialize(D3D12Device* device, const TextureDesc& desc) {
             vd.Texture2D.PlaneSlice = 0;
             dev->CreateRenderTargetView(m_Resource.Get(), &vd, m_Rtv);
     device->RegisterViewResource(static_cast<UINT64>(m_Rtv.ptr), m_Resource.Get());
-            // 堆要活到纹理销毁：挂到资源上（简化：用 ComPtr 保存）
-            static_cast<void>(heap);
+
         }
     }
 
@@ -455,18 +453,21 @@ bool D3D12Texture::Initialize(D3D12Device* device, const TextureDesc& desc) {
         D3D12_DESCRIPTOR_HEAP_DESC hd{};
         hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
         hd.NumDescriptors = 1;
-        ComPtr<ID3D12DescriptorHeap> heap;
-        if (SUCCEEDED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&heap)))) {
-            m_Dsv = heap->GetCPUDescriptorHandleForHeapStart();
+        if (SUCCEEDED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_DsvHeap)))) {
+            m_Dsv = m_DsvHeap->GetCPUDescriptorHandleForHeapStart();
             D3D12_DEPTH_STENCIL_VIEW_DESC vd{};
             vd.Format = fmt;
             vd.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
             vd.Texture2D.MipSlice = 0;
             dev->CreateDepthStencilView(m_Resource.Get(), &vd, m_Dsv);
     device->RegisterViewResource(static_cast<UINT64>(m_Dsv.ptr), m_Resource.Get());
-            static_cast<void>(heap);
         }
     }
+
+    // 【登记真实初始状态】命令列表做 RENDER_TARGET / DEPTH_WRITE 屏障时要靠它。
+    // 不登记就会默认成 COMMON，从而跳过屏障，导致 OMSetRenderTargets 收到
+    // 一个状态不对的资源而让驱动静默卡死。
+    device->SetResourceState(m_Resource.Get(), initState);
 
     HE_CORE_INFO("D3D12Texture: 创建 {}x{} mip={} layers={} fmt={}{}",
                  m_Width, m_Height, m_MipLevels, m_ArrayLayers, static_cast<u32>(fmt),
