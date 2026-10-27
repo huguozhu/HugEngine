@@ -241,20 +241,20 @@ void D3D12Buffer::Unmap() {
             ComPtr<ID3D12GraphicsCommandList> list;
             u64                               value = 0;
         };
-        static ComPtr<ID3D12CommandQueue> s_queue;
+        // 【必须用引擎自己的队列】另建队列会让「暂存→资源的拷贝」和引擎的绘制
+        // 并发的读写同一资源，D3D12 判定跨队列争用 ⇒ DEVICE_HUNG / REMOVED
+        //（实测 02.Cube 初始化后半段设备丢失就是这个原因，与截图那处同类）。
+        ID3D12Device* dev = (m_Device && m_Device->GetDevice()) ? m_Device->GetDevice() : nullptr;
         static ComPtr<ID3D12Fence>        s_fence;
         static u64                        s_fenceValue = 0;
         static CopySlot                   s_slots[3];
         static u32                        s_next = 0;
 
-        ID3D12Device* dev = m_Device->GetDevice();
+        ID3D12CommandQueue* s_queue = (m_Device && m_Device->GetQueue()) ? m_Device->GetQueue() : nullptr;
 
-        if (!s_queue) {
-            D3D12_COMMAND_QUEUE_DESC qd{};
-            qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-            if (FAILED(dev->CreateCommandQueue(&qd, IID_PPV_ARGS(&s_queue))) ||
-                FAILED(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&s_fence)))) {
-                HE_CORE_ERROR("D3D12Buffer: 暂存拷贝的队列/围栏创建失败");
+        if (!s_fence && dev) {
+            if (FAILED(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&s_fence)))) {
+                HE_CORE_ERROR("D3D12Buffer: 暂存拷贝的围栏创建失败");
             } else {
                 for (auto& s : s_slots) {
                     dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&s.alloc));
