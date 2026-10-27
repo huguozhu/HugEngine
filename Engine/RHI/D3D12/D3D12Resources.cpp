@@ -1009,6 +1009,20 @@ bool D3D12PipelineState::Initialize(D3D12Device* device, const PipelineStateDesc
                      static_cast<u32>(elems.size()), static_cast<u32>(cursor));
     }
 
+    // ENGINE VERTEX LAYOUT: vectors are 16-byte aligned (stride 64):
+    //   POSITION@0, NORMAL@16, TEXCOORD@32, BLENDINDICES@40 (4x uint8), BLENDWEIGHT@44
+    // Tight packing would shift skinning data and collapse skinned meshes.
+    {
+        static const UINT kOff[5] = { 0u, 16u, 32u, 40u, 44u };
+        static const DXGI_FORMAT kFmt[5] = { DXGI_FORMAT_R32G32B32_FLOAT, DXGI_FORMAT_R32G32B32_FLOAT,
+            DXGI_FORMAT_R32G32_FLOAT, DXGI_FORMAT_R8G8B8A8_UINT, DXGI_FORMAT_R32G32B32A32_FLOAT };
+        for (size_t k = 0; k < elems.size() && k < 5; ++k) {
+            elems[k].AlignedByteOffset = kOff[k];
+            elems[k].Format = kFmt[k];
+        }
+        if (elems.size() == 5) m_VertexStride = 64u;
+    }
+
     pd.InputLayout.pInputElementDescs = elems.empty() ? nullptr : elems.data();
     pd.InputLayout.NumElements = static_cast<UINT>(elems.size());
 
