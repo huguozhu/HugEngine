@@ -42,7 +42,6 @@ bool D3D12CommandList::Initialize(D3D12Device* device, QueueType queue) {
 
 void D3D12CommandList::Begin() {
     { static int s=0; if (s<4) { ++s; std::printf("[STP] Begin %d\n", s); std::fflush(stdout); } }
-    { static int s_n = 0; if (s_n < 3) { ++s_n; if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] Begin\n"); std::fflush(stdout); } } }
 
     if (!m_List || !m_Allocator) { std::printf("[BGN] no list/alloc\n"); std::fflush(stdout); return; }
     // 每次录制前必须 Reset 分配器与列表
@@ -79,7 +78,6 @@ void D3D12CommandList::Begin() {
 void D3D12CommandList::End() {
     { static int s=0; if (s<4) { ++s; std::printf("[STP] End %d\n", s); std::fflush(stdout); } }
     if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] End\n"); std::fflush(stdout); }
-    { static int s_n = 0; if (s_n < 3) { ++s_n; if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] End\n"); std::fflush(stdout); } } }
 
     if (!m_List || !m_Recording) return;
     if (FAILED(m_List->Close())) {
@@ -92,7 +90,6 @@ void D3D12CommandList::BeginRenderPass(u32 colorCount, Format colorFormat,
                                        Format depthFormat, const ClearValue* clear,
                                        LoadOp loadOp) {
     { static int s=0; if (s<4) { ++s; std::printf("[STP] BRP %d\n", s); std::fflush(stdout); } }
-    { static int s_n = 0; if (s_n < 3) { ++s_n; if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] BeginRenderPass\n"); std::fflush(stdout); } } }
 
     if (!m_List) return;
 
@@ -164,7 +161,6 @@ void D3D12CommandList::BeginRenderPass(u32 colorCount, Format colorFormat,
 
 void D3D12CommandList::EndRenderPass() {
     if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] EndRenderPass\n"); std::fflush(stdout); }
-    { static int s_n = 0; if (s_n < 3) { ++s_n; if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] EndRenderPass\n"); std::fflush(stdout); } } }
 
     // D3D12 没有 pass 结束的概念；资源状态转换由显式 PipelineBarrier 负责
 }
@@ -345,7 +341,6 @@ void D3D12CommandList::BeginOffscreenPassMRT(void* const* colorImageViews, u32 c
 void D3D12CommandList::EndOffscreenPass() {}
 
 void D3D12CommandList::SetPipeline(IRHIPipelineState* pso) {
-    { static int s_n = 0; if (s_n < 3) { ++s_n; if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] SetPipeline\n"); std::fflush(stdout); } } }
 
     m_Pipeline = static_cast<D3D12PipelineState*>(pso);
     if (!m_List || !m_Pipeline) return;
