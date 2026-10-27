@@ -1,4 +1,4 @@
-// ============================================================
+﻿// ============================================================
 // 07.Nanite — Cornell Box 场景 + 延迟渲染管线；Nanite 虚拟几何（cluster 光栅化）实验台
 //
 // 基线自 06.GILab 整体拷贝：先保证与既有验收口径（白炉 / 逐帧 dump / 开关不变性）完全一致，
@@ -188,7 +188,7 @@ int main() {
     // 2. 创建 Vulkan RHI 设备
     // ============================================================
     rhi::DeviceInitDesc rhiDesc;
-    rhiDesc.backend          = rhi::Backend::Vulkan;
+    rhiDesc.backend          = rhi::ResolveBackendFromEnv();
     rhiDesc.enableValidation = true;
     rhiDesc.windowHandle     = engine.GetWindow()->GetNativeHandleRaw();
 
@@ -1142,7 +1142,8 @@ int main() {
         submitRender(recordScene);
         if (frameAborted) continue;
 
-        imgui.BeginFrame();
+        if (imgui.IsInitialized()) imgui.BeginFrame();   // 非 Vulkan 后端没有 UI
+        if (imgui.IsInitialized()) {   // 非 Vulkan 后端没有 UI，整块跳过
         ImGui::SetNextWindowPos({10, 10}, ImGuiCond_Once);
         ImGui::SetNextWindowBgAlpha(0.55f);
         ImGui::Begin("07.Nanite (Cornell Box)");
@@ -1819,6 +1820,7 @@ int main() {
             ImGui::Text("Total GPU: %.2fms (%.0f FPS)", totalMs, totalMs > 0 ? 1000.0f / totalMs : 0);
         }
         ImGui::End();
+        }   // end if (imgui.IsInitialized())
 
         // GPU Profiler 面板（按 F1 切换）
         if (ImGui::IsKeyPressed(ImGuiKey_F1))
@@ -1827,7 +1829,7 @@ int main() {
 
         // ---- 命令 2：ImGui 录制 + End + Submit + 读数 + Present ----
         auto recordUiAndPresent = [&]() {
-            imgui.EndFrame(cmdList.get());
+            if (imgui.IsInitialized()) imgui.EndFrame(cmdList.get());
             cmdList->EndRenderPass();
 
             // ── 白炉探针：把 HDR 目标上的两个像素拷进 host 可见缓冲 ──

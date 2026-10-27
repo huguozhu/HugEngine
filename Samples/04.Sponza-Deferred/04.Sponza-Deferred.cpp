@@ -1,4 +1,4 @@
-// ============================================================
+﻿// ============================================================
 // 04.Sponza-Deferred — Sponza 场景 + 延迟渲染管线
 //
 // 与 03.Sponza-Forward 相同的 Sponza 场景（glTF 加载 + 纹理 + Skybox），
@@ -108,7 +108,7 @@ int main() {
     // 2. 创建 Vulkan RHI 设备
     // ============================================================
     rhi::DeviceInitDesc rhiDesc;
-    rhiDesc.backend          = rhi::Backend::Vulkan;
+    rhiDesc.backend          = rhi::ResolveBackendFromEnv();
     rhiDesc.enableValidation = true;
     rhiDesc.windowHandle     = engine.GetWindow()->GetNativeHandleRaw();
 
@@ -721,7 +721,8 @@ int main() {
         submitRender(recordScene);
         if (frameAborted) continue;   // Acquire 失败：跳过本帧剩余部分
 
-        imgui.BeginFrame();
+        if (imgui.IsInitialized()) imgui.BeginFrame();   // 非 Vulkan 后端没有 UI
+        if (imgui.IsInitialized()) {   // 非 Vulkan 后端没有 UI，整块跳过
         ImGui::SetNextWindowPos({10, 10}, ImGuiCond_Once);
         ImGui::SetNextWindowBgAlpha(0.55f);
         ImGui::Begin("04.Sponza-Deferred");
@@ -1157,6 +1158,7 @@ int main() {
             ImGui::Text("%u 网格  |  %u 方向光  |  %u 点光  |  %u 聚光", meshCount, dirLightCount, 1, spotCount);
         }
         ImGui::End();
+        }   // end if (imgui.IsInitialized())
 
         // GPU Profiler 面板（按 F1 切换）
         if (ImGui::IsKeyPressed(ImGuiKey_F1))
@@ -1165,7 +1167,7 @@ int main() {
 
         // ---- 命令 2：ImGui 录制 + End + Submit + AsyncCompute + Present ----
         auto recordUiAndPresent = [&]() {
-            imgui.EndFrame(cmdList.get());
+            if (imgui.IsInitialized()) imgui.EndFrame(cmdList.get());
             cmdList->EndRenderPass();
             framePresenter.EndRecording();   // L4-2：End + Submit 收口
             pipeline.FlushComputeWork();  // AsyncCompute: Graphics Submit 之后提交 Compute 工作

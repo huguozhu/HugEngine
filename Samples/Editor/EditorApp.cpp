@@ -1,4 +1,4 @@
-// Samples/Editor/EditorApp.cpp
+﻿// Samples/Editor/EditorApp.cpp
 
 #include "EditorApp.h"
 #include "RHI/FramePresenter.h"   // 【T2.5】帧外壳收口
@@ -91,7 +91,7 @@ void EditorApp::InitEngine() {
 
     // ���� RHI �豸
     rhi::DeviceInitDesc rhiDesc;
-    rhiDesc.backend          = rhi::Backend::Vulkan;
+    rhiDesc.backend          = rhi::ResolveBackendFromEnv();
     rhiDesc.enableValidation = true;
     rhiDesc.windowHandle     = m_Engine->GetWindow()->GetNativeHandleRaw();
 

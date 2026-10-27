@@ -1,7 +1,8 @@
-#include "Features/FeatureGPUInference.h"
+﻿#include "Features/FeatureGPUInference.h"
 
 #include "AI/Runtime/AIDevice.h"
-#include "AITensorAdd.comp.spv.h"   // k_AITensorAdd_comp_spv（外部核 SPIR-V）
+#include "AITensorAdd.comp.spv.h"
+#include "AITensorAdd.comp.dxil.h"   // k_AITensorAdd_comp_spv（外部核 SPIR-V）
 #include "Core/Log.h"
 #include "imgui.h"
 

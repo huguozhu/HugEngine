@@ -1,4 +1,4 @@
-// ============================================================
+﻿// ============================================================
 // 02.Cube — HugEngine PBR 前向渲染管线演示
 //
 // 使用逐物体 Push Constants 的 PBR 渲染：
@@ -8,6 +8,7 @@
 // 自由相机：WASD + 鼠标右键旋转
 // ============================================================
 
+#include <cstdio>
 #include "Core/Core.h"
 #include "Core/CVar.h"
 #include "Core/Engine.h"
@@ -170,7 +171,7 @@ int main() {
 
     // --- 2. 创建 RHI 设备 ---
     rhi::DeviceInitDesc rhiDesc;
-    rhiDesc.backend          = rhi::Backend::Vulkan;
+    rhiDesc.backend          = rhi::ResolveBackendFromEnv();
     // 注意：本机（Intel Arc B370 + 该版驱动 + Vulkan SDK 1.4.341 验证层）存在
     // 预先存在的驱动编译器崩溃（HEAD 同样复现）：开启验证层时 igc-default64.dll
     // 在 shader 编译线程随机 SIGSEGV。关闭验证层后稳定（RT 管线编译约 20s/个）。
@@ -702,12 +703,14 @@ int main() {
     render::DeferredPipeline deferredPipeline;
         render::PathTracingPipeline pathTracingPipeline;
     forwardPipeline.Initialize(device.get());
+    if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] ...\n"); std::fflush(stdout); }
     forwardPipeline.SetUseRenderGraph(false);
     forwardPipeline.SetMultiThreadedRecording(false);
     forwardPipeline.SetSwapChain(swapchain.get());
     forwardPipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
 
     deferredPipeline.Initialize(device.get());
+    if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] ...\n"); std::fflush(stdout); }
     deferredPipeline.SetSwapChain(swapchain.get());
     deferredPipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
 
@@ -715,6 +718,7 @@ int main() {
     // 全路径追踪管线（r.Pipeline.Mode=3，设备支持 RT 时才可用）
     // 定位：参考渲染器（ground truth），用于校验实时 GI 近似的正确性
     pathTracingPipeline.Initialize(device.get());
+    if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] ...\n"); std::fflush(stdout); }
     pathTracingPipeline.SetSwapChain(swapchain.get());
     pathTracingPipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
     // PT 复用 Deferred 的加速结构（同一份 BLAS/TLAS，避免重复内存）
@@ -814,16 +818,22 @@ int main() {
     }
 
     // --- 6. 创建命令列表 ---
+    HE_CORE_INFO("[Cube 进度] 6. 创建命令列表");
     auto cmdList = device->CreateCommandList();
+    HE_CORE_INFO("[Cube 进度] 6.1 cmdList={}", static_cast<const void*>(cmdList.get()));
     cmdList->SetSwapChain(swapchain.get());
+    HE_CORE_INFO("[Cube 进度] 6.2 SetSwapChain 完成");
     cmdList->SetPipeline(forwardPipeline.GetPipelineState());
+    HE_CORE_INFO("[Cube 进度] 6.3 SetPipeline 完成");
 
     // --- 6.5. 获取 GLFW 窗口句柄 ---
     GLFWwindow* glfwWin = engine.GetWindow()->GetNativeHandle();
 
     // --- 6.6. ImGui ---
+    HE_CORE_INFO("[Cube 进度] 6.6 开始 ImGui 初始化");
     editor::ImGuiIntegration imgui;
     imgui.Initialize(glfwWin, device.get(), swapchain.get());
+    HE_CORE_INFO("[Cube 进度] 6.7 ImGui 完成 initialized={}", imgui.IsInitialized());
 
     // --- 7. 相机 ---
     render::CameraController camCtrl;
@@ -1335,7 +1345,8 @@ int main() {
         submitRender(recordScene);
         if (frameAborted) continue;
 
-        imgui.BeginFrame();
+        if (imgui.IsInitialized()) imgui.BeginFrame();   // 非 Vulkan 后端没有 UI
+        if (imgui.IsInitialized()) {   // 非 Vulkan 后端没有 UI，整块跳过
         ImGui::SetNextWindowPos({10, 10}, ImGuiCond_Once);
         ImGui::SetNextWindowBgAlpha(0.5f);
         ImGui::Begin("HugEngine");
@@ -1726,9 +1737,10 @@ int main() {
         }
 
         ImGui::End();
+        }   // end if (imgui.IsInitialized())
         // ---- 命令 2：ImGui 录制 + End + Submit + Present ----
         auto recordUiAndPresent = [&]() {
-            imgui.EndFrame(cmdList.get());
+            if (imgui.IsInitialized()) imgui.EndFrame(cmdList.get());
             cmdList->EndDebugLabel();  // 闭合 BackBuffer pass 级标记
             cmdList->EndRenderPass();  // 关闭 ImGui RP（RG 和 non-RG 都需要）
             framePresenter.EndRecording();   // L4-2：End + Submit 收口

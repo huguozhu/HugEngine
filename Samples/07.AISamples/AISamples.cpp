@@ -1,4 +1,4 @@
-// ============================================================
+﻿// ============================================================
 // 07.AISamples — AI 综合示例（原 05~10 六个 AI Sample 合并）
 //
 // 共享引擎/RHI/AI 设备/渲染管线/相机，6 个功能模块独立文件：
@@ -58,7 +58,7 @@ int main() {
     engine.Initialize();
 
     rhi::DeviceInitDesc rhiDesc;
-    rhiDesc.backend          = rhi::Backend::Vulkan;
+    rhiDesc.backend          = rhi::ResolveBackendFromEnv();
     rhiDesc.enableValidation = false;
     rhiDesc.windowHandle     = engine.GetWindow()->GetNativeHandleRaw();
     auto device = rhi::CreateDevice(rhiDesc.backend);
@@ -266,7 +266,8 @@ int main() {
         if (frameAborted) continue;   // Acquire 失败：跳过本帧剩余部分
 
         // ImGui：顶部功能切换 TabBar + 当前功能面板（CPU 侧，游戏线程）
-        imgui.BeginFrame();
+        if (imgui.IsInitialized()) imgui.BeginFrame();   // 非 Vulkan 后端没有 UI
+        if (imgui.IsInitialized()) {   // 非 Vulkan 后端没有 UI，整块跳过
         ImGui::SetNextWindowPos({10, 10}, ImGuiCond_Once);
         ImGui::SetNextWindowBgAlpha(0.5f);
         ImGui::Begin("AI Samples");
@@ -290,12 +291,13 @@ int main() {
             ImGui::EndTabBar();
         }
         ImGui::End();
+        }   // end if (imgui.IsInitialized())
 
         cur->RenderUI();   // 当前功能面板
 
         // ---- 命令 2：ImGui 录制 + End + Submit + Present ----
         auto recordUiAndPresent = [&]() {
-            imgui.EndFrame(cmdList.get());
+            if (imgui.IsInitialized()) imgui.EndFrame(cmdList.get());
             cmdList->EndDebugLabel();   // 闭合 BackBuffer pass 级标记
             cmdList->EndRenderPass();
             framePresenter.EndRecording();   // L4-2：End + Submit 收口

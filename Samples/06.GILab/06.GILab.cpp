@@ -1,4 +1,4 @@
-// ============================================================
+﻿// ============================================================
 // 06.GILab — Cornell Box 场景 + 延迟渲染管线（GI 对比 / 开发实验室）
 //
 // 用途：检验与对比各种 GI（IBL/RSM/SSGI/DDGI/SSR）在同一 Cornell Box 场景下的效果，
@@ -1046,7 +1046,7 @@ void GILabFrameRecorder::RecordUiAndPresent(u64 renderFrameIndex, bool dumpThisF
     cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
         rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
 
-    imgui.EndFrame(cmdList.get());
+    if (imgui.IsInitialized()) imgui.EndFrame(cmdList.get());
     cmdList->EndRenderPass();
 
     // ── 白炉探针：把 HDR 目标上的两个像素拷进 host 可见缓冲 ──
@@ -1187,7 +1187,7 @@ int main() {
 
     // ---- 2. 创建 Vulkan RHI 设备 ----
     rhi::DeviceInitDesc rhiDesc;
-    rhiDesc.backend          = rhi::Backend::Vulkan;
+    rhiDesc.backend          = rhi::ResolveBackendFromEnv();
     rhiDesc.enableValidation = true;
     rhiDesc.windowHandle     = engine.GetWindow()->GetNativeHandleRaw();
 
@@ -1741,7 +1741,7 @@ int main() {
                        g_ProbeEnabled, g_ProbeInterval, g_FurnaceMode,
                        g_PendingPipelineSwitch, g_PendingHalfResApply};
 
-        imgui.BeginFrame();
+        if (imgui.IsInitialized()) imgui.BeginFrame();   // 非 Vulkan 后端没有 UI
         uiDeps.DrawMainPanel();   // 主窗口（实现见 main 之前）
 
         // ---- 独立 GI 控制面板：渲染管线 → GI 质量档位 → GI 四通道（可用性 + 参数） ----

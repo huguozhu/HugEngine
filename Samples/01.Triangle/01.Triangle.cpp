@@ -1,4 +1,4 @@
-// ============================================================
+﻿// ============================================================
 // 01.Triangle — HugEngine RHI 渲染三角形（光栅化 + Ray Tracing + Mesh Shader）
 //
 // 光栅化：   传统 VS→PS 管线，纯红色三角形
@@ -14,11 +14,14 @@
 #include "RHI/FramePresenter.h"   // L4-1：帧外壳（acquire/present）收口
 #include "Editor/ImGuiIntegration.h"
 #include "Triangle.vert.spv.h"
+#include "Triangle.vert.dxil.h"
 #include "Triangle.frag.spv.h"
+#include "Triangle.frag.dxil.h"
 #include "RT_Triangle.rgen.spv.h"
 #include "RT_Background.rmiss.spv.h"
 #include "Triangle.mesh.spv.h"
 #include "TriangleMesh.frag.spv.h"
+#include "TriangleMesh.frag.dxil.h"
 #include "imgui.h"
 
 #include <cstring>
@@ -38,7 +41,7 @@ int main() {
     engine.Initialize();
 
     he::rhi::DeviceInitDesc rhiDesc;
-    rhiDesc.backend          = he::rhi::Backend::Vulkan;
+    rhiDesc.backend          = he::rhi::ResolveBackendFromEnv();
     rhiDesc.enableValidation = true;
     rhiDesc.windowHandle     = engine.GetWindow()->GetNativeHandleRaw();
 
@@ -72,8 +75,8 @@ int main() {
         .initialData = kVertices, .stride = sizeof(Vertex),
     });
 
-    he::rhi::ShaderBytecode vertShader{he::rhi::ShaderStage::Vertex, k_Triangle_vert_spv, {}, "main"};
-    he::rhi::ShaderBytecode fragShader{he::rhi::ShaderStage::Pixel,  k_Triangle_frag_spv, {}, "main"};
+    he::rhi::ShaderBytecode vertShader = he::rhi::MakeShaderBytecode(he::rhi::ShaderStage::Vertex, k_Triangle_vert_spv, k_Triangle_vert_dxil, "main");
+    he::rhi::ShaderBytecode fragShader = he::rhi::MakeShaderBytecode(he::rhi::ShaderStage::Pixel, k_Triangle_frag_spv, k_Triangle_frag_dxil, "main");
 
     auto pipeline = device->CreatePipelineState({
         .vertexShader = &vertShader, .pixelShader = &fragShader,
@@ -91,8 +94,8 @@ int main() {
     rhi::DescriptorSetHandle       rtSet    = rhi::kInvalidSet;
 
     if (rtSupported) {
-        he::rhi::ShaderBytecode rgen{he::rhi::ShaderStage::RayGen, k_RT_Triangle_rgen_spv, {}, "main"};
-        he::rhi::ShaderBytecode rmiss{he::rhi::ShaderStage::Miss,  k_RT_Background_rmiss_spv, {}, "main"};
+        he::rhi::ShaderBytecode rgen = he::rhi::MakeShaderBytecode(he::rhi::ShaderStage::RayGen, k_RT_Triangle_rgen_spv, nullptr, "main");
+        he::rhi::ShaderBytecode rmiss = he::rhi::MakeShaderBytecode(he::rhi::ShaderStage::Miss, k_RT_Background_rmiss_spv, nullptr, "main");
 
         rhi::DescriptorSetLayoutDesc ldesc;
         ldesc.bindings = {{ 0, rhi::DescriptorType::StorageImage, 1, 0x100 }};
@@ -111,7 +114,12 @@ int main() {
         rtpDesc.debugName = "RT_Triangle";
 
         rtPSO = device->CreateRTPipelineState(rtpDesc);
-        HE_ASSERT(rtPSO, "RT PSO 创建失败");
+        // 光追是**可选**路径：D3D12 后端的 RTPipelineState 属阶段 4，尚未实现。
+        // 这里失败不应当中断整个样例 —— 图形路径（CreatePipelineState + Draw(3)）
+        // 才是阶段 0/1 的验收目标。
+        if (!rtPSO) {
+            HE_CORE_WARN("01.Triangle: RT PSO 不可用（当前后端未实现光追），跳过光追路径");
+        }
 
         // SBT —— 三条硬性要求（与引擎 RTPass::BuildSBT 的写法保持一致）：
         //   1) 承载缓冲必须带 SHADER_BINDING_TABLE 用途，否则 deviceAddress 找不到有效缓冲
@@ -152,8 +160,8 @@ int main() {
     std::unique_ptr<he::rhi::IRHIPipelineState> meshPSO;
 
     if (meshSupported) {
-        he::rhi::ShaderBytecode meshShader{he::rhi::ShaderStage::Mesh, k_Triangle_mesh_spv, {}, "main"};
-        he::rhi::ShaderBytecode meshFrag{he::rhi::ShaderStage::Pixel,  k_TriangleMesh_frag_spv, {}, "main"};
+        he::rhi::ShaderBytecode meshShader = he::rhi::MakeShaderBytecode(he::rhi::ShaderStage::Mesh, k_Triangle_mesh_spv, nullptr, "main");
+        he::rhi::ShaderBytecode meshFrag = he::rhi::MakeShaderBytecode(he::rhi::ShaderStage::Pixel, k_TriangleMesh_frag_spv, k_TriangleMesh_frag_dxil, "main");
 
         meshPSO = device->CreatePipelineState({
             .pixelShader = &meshFrag,
@@ -249,8 +257,8 @@ int main() {
         }
 
         // ── ImGui（在主 RP 内渲染，覆盖在场景之上）──
-        imgui.BeginFrame();
-        {
+        if (imgui.IsInitialized()) imgui.BeginFrame();   // 非 Vulkan 后端没有 UI
+        if (imgui.IsInitialized()) {
             ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_FirstUseEver);
             ImGui::SetNextWindowSize(ImVec2(260, 160), ImGuiCond_FirstUseEver);
             ImGui::Begin("渲染模式");
@@ -277,7 +285,7 @@ int main() {
             ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
             ImGui::End();
         }
-        imgui.EndFrame(cmdList.get());
+        if (imgui.IsInitialized()) imgui.EndFrame(cmdList.get());
 
         cmdList->EndRenderPass();
         framePresenter.EndRecording();   // L4-2：End + Submit 收口

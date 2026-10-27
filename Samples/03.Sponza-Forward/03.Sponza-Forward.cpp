@@ -1,4 +1,4 @@
-// ============================================================
+﻿// ============================================================
 // 03.Sponza-Forward — 加载 Sponza glTF 场景，自由相机漫游
 //
 // 使用 glTFLoader (cgltf) 加载完整的 Sponza 场景，
@@ -118,7 +118,7 @@ int main() {
     // 2. 创建 Vulkan RHI 设备
     // ============================================================
     rhi::DeviceInitDesc rhiDesc;
-    rhiDesc.backend          = rhi::Backend::Vulkan;
+    rhiDesc.backend          = rhi::ResolveBackendFromEnv();
     rhiDesc.enableValidation = true;
     rhiDesc.windowHandle     = engine.GetWindow()->GetNativeHandleRaw();
 
@@ -461,15 +461,11 @@ int main() {
         rtLayout1 = device->CreateDescriptorSetLayout(rtSet1Desc);
 
         // 5.5.2 准备 Shader 字节码
-        rhi::ShaderBytecode rgen{ rhi::ShaderStage::RayGen,
-            k_RT_Sponza_rgen_spv, {}, "main" };
-        rhi::ShaderBytecode rmiss{ rhi::ShaderStage::Miss,
-            k_RT_Sponza_rmiss_spv, {}, "main" };
-        rhi::ShaderBytecode rchit{ rhi::ShaderStage::ClosestHit,
-            k_RT_Sponza_rchit_spv, {}, "main" };
+        rhi::ShaderBytecode rgen = he::rhi::MakeShaderBytecode(rhi::ShaderStage::RayGen, k_RT_Sponza_rgen_spv, nullptr, "main");
+        rhi::ShaderBytecode rmiss = he::rhi::MakeShaderBytecode(rhi::ShaderStage::Miss, k_RT_Sponza_rmiss_spv, nullptr, "main");
+        rhi::ShaderBytecode rchit = he::rhi::MakeShaderBytecode(rhi::ShaderStage::ClosestHit, k_RT_Sponza_rchit_spv, nullptr, "main");
         // Callable: bindless 纹理采样（Phase 5 测试 CallableKHR 是否绕过 slangc bug）
-        rhi::ShaderBytecode rcall{ rhi::ShaderStage::Callable,
-            k_RT_Bindless_rcall_spv, {}, "main" };
+        rhi::ShaderBytecode rcall = he::rhi::MakeShaderBytecode(rhi::ShaderStage::Callable, k_RT_Bindless_rcall_spv, nullptr, "main");
 
         // 5.5.3 Shader Group 定义
         // Group 0=RayGen, 1=Miss, 2=Hit, 3=Callable（bindless 采样）
@@ -805,7 +801,8 @@ int main() {
         submitRender(recordScene);
         if (frameAborted) continue;   // Acquire 失败：跳过本帧剩余部分
 
-        imgui.BeginFrame();
+        if (imgui.IsInitialized()) imgui.BeginFrame();   // 非 Vulkan 后端没有 UI
+        if (imgui.IsInitialized()) {   // 非 Vulkan 后端没有 UI，整块跳过
         ImGui::SetNextWindowPos({10, 10}, ImGuiCond_Once);
         ImGui::SetNextWindowBgAlpha(0.55f);
         ImGui::Begin("03.Sponza-Forward 控制面板");
@@ -1011,9 +1008,10 @@ int main() {
                 meshCount, dirLightCount, 1);
         }
         ImGui::End();
+        }   // end if (imgui.IsInitialized())
         // ---- 命令 2：ImGui 录制 + End + Submit + Present ----
         auto recordUiAndPresent = [&]() {
-            imgui.EndFrame(cmdList.get());
+            if (imgui.IsInitialized()) imgui.EndFrame(cmdList.get());
             cmdList->EndRenderPass();  // 关闭 ImGui RP
             framePresenter.EndRecording();   // L4-2：End + Submit 收口
             framePresenter.EndFrame(true);

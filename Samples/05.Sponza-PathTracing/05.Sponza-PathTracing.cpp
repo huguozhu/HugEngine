@@ -1,4 +1,4 @@
-// ============================================================
+﻿// ============================================================
 // 05.Sponza-PathTracing — Sponza 场景 + 全路径追踪管线
 //
 // 与 03.Sponza-Forward / 04.Sponza-Deferred 相同的 Sponza 场景
@@ -132,7 +132,7 @@ int main() {
     // 2. 创建 Vulkan RHI 设备
     // ============================================================
     rhi::DeviceInitDesc rhiDesc;
-    rhiDesc.backend          = rhi::Backend::Vulkan;
+    rhiDesc.backend          = rhi::ResolveBackendFromEnv();
     rhiDesc.enableValidation = true;
     rhiDesc.windowHandle     = engine.GetWindow()->GetNativeHandleRaw();
 
@@ -822,7 +822,8 @@ int main() {
         submitRender(recordScene);
         if (frameAborted) continue;
 
-        imgui.BeginFrame();
+        if (imgui.IsInitialized()) imgui.BeginFrame();   // 非 Vulkan 后端没有 UI
+        if (imgui.IsInitialized()) {   // 非 Vulkan 后端没有 UI，整块跳过
         ImGui::SetNextWindowPos({10, 10}, ImGuiCond_Once);
         ImGui::SetNextWindowBgAlpha(0.55f);
         ImGui::Begin("05.Sponza-PathTracing");
@@ -979,10 +980,11 @@ int main() {
             ImGui::Text("分辨率: %ux%u", swapchain->GetWidth(), swapchain->GetHeight());
         }
         ImGui::End();
+        }   // end if (imgui.IsInitialized())
 
         // ---- 命令 2：ImGui 录制 + End + Submit + WaitIdle + 探测读回 + Present ----
         auto recordUiAndPresent = [&]() {
-            imgui.EndFrame(cmdList.get());
+            if (imgui.IsInitialized()) imgui.EndFrame(cmdList.get());
             cmdList->EndRenderPass();
             framePresenter.EndRecording();   // L4-2：End + Submit 收口
 
