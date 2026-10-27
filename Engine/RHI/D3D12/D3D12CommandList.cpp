@@ -233,7 +233,18 @@ void D3D12CommandList::BeginOffscreenPass(void* colorImageView, void* depthImage
         std::printf("[BOPD] after ClearRTV\n"); std::fflush(stdout);
     }
     if (hasDsv) {
-        m_List->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
+        // 【只有带模板的格式才能传 STENCIL 标志】D32_FLOAT 没有模板位，
+        // 同时传 DEPTH|STENCIL 会让整个 ClearDepthStencilView 被拒，
+        // 深度缓冲留在未初始化状态 ⇒ 所有物体（含天空盒）都过不了深度测试 ⇒ 画面全黑。
+        D3D12_CLEAR_FLAGS dflags = D3D12_CLEAR_FLAG_DEPTH;
+        if (m_Device) {
+            if (ID3D12Resource* dres = m_Device->FindViewResource(static_cast<UINT64>(dsv.ptr))) {
+                const DXGI_FORMAT df = dres->GetDesc().Format;
+                if (df == DXGI_FORMAT_D24_UNORM_S8_UINT || df == DXGI_FORMAT_D32_FLOAT_S8X24_UINT)
+                    dflags |= D3D12_CLEAR_FLAG_STENCIL;
+            }
+        }
+        m_List->ClearDepthStencilView(dsv, dflags,
                                        clear ? clear->depth : 1.0f,
                                        clear ? clear->stencil : 0, 0, nullptr);
     }
@@ -306,7 +317,18 @@ void D3D12CommandList::BeginOffscreenPassMRT(void* const* colorImageViews, u32 c
         }
     }
     if (hasDsv) {
-        m_List->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
+        // 【只有带模板的格式才能传 STENCIL 标志】D32_FLOAT 没有模板位，
+        // 同时传 DEPTH|STENCIL 会让整个 ClearDepthStencilView 被拒，
+        // 深度缓冲留在未初始化状态 ⇒ 所有物体（含天空盒）都过不了深度测试 ⇒ 画面全黑。
+        D3D12_CLEAR_FLAGS dflags = D3D12_CLEAR_FLAG_DEPTH;
+        if (m_Device) {
+            if (ID3D12Resource* dres = m_Device->FindViewResource(static_cast<UINT64>(dsv.ptr))) {
+                const DXGI_FORMAT df = dres->GetDesc().Format;
+                if (df == DXGI_FORMAT_D24_UNORM_S8_UINT || df == DXGI_FORMAT_D32_FLOAT_S8X24_UINT)
+                    dflags |= D3D12_CLEAR_FLAG_STENCIL;
+            }
+        }
+        m_List->ClearDepthStencilView(dsv, dflags,
                                        clears ? clears[0].depth : 1.0f,
                                        clears ? clears[0].stencil : 0, 0, nullptr);
     }
