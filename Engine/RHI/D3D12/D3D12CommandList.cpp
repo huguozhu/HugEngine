@@ -459,21 +459,31 @@ void D3D12CommandList::DrawIndexed(u32 indexCount, u32 instanceCount, u32 firstI
 void D3D12CommandList::DrawIndexedIndirect(IRHIBuffer* buffer, u64 offset, u32 drawCount, u32 stride) {
     if (!m_List || !buffer) return;
     auto* b = static_cast<D3D12Buffer*>(buffer);
-    // D3D12 用 ExecuteIndirect 表达间接绘制：需要一个「参数缓冲 + MaxCommandCount」
-    // 以及一个已保存的签名（阶段 3 创建）。这里先用 D3D12 内置的签名。
-    ComPtr<ID3D12CommandSignature> sig;
-    D3D12_INDIRECT_ARGUMENT_DESC arg{};
-    arg.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED;
-    D3D12_COMMAND_SIGNATURE_DESC sd{};
-    sd.ByteStride = stride ? stride : sizeof(D3D12_DRAW_INDEXED_ARGUMENTS);
-    sd.NumArgumentDescs = 1;
-    sd.pArgumentDescs = &arg;
-    sd.NodeMask = 0;
-    if (FAILED(m_Device->GetDevice()->CreateCommandSignature(&sd, nullptr, IID_PPV_ARGS(&sig)))) {
-        HE_CORE_ERROR("D3D12 DrawIndexedIndirect: 创建命令签名失败");
-        return;
+
+    // 命令签名按 stride 缓存：必须活到 GPU 执行完，否则间接绘制无效（id=921）
+    const u32 want = stride ? stride : static_cast<u32>(sizeof(D3D12_DRAW_INDEXED_ARGUMENTS));
+    ID3D12CommandSignature* sig = nullptr;
+    auto it = m_CmdSigs.find(want);
+    if (it != m_CmdSigs.end()) {
+        sig = it->second.Get();
+    } else {
+        D3D12_INDIRECT_ARGUMENT_DESC arg{};
+        arg.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED;
+        D3D12_COMMAND_SIGNATURE_DESC sd{};
+        sd.ByteStride = want;
+        sd.NumArgumentDescs = 1;
+        sd.pArgumentDescs = &arg;
+        sd.NodeMask = 0;
+        ComPtr<ID3D12CommandSignature> created;
+        if (FAILED(m_Device->GetDevice()->CreateCommandSignature(&sd, nullptr, IID_PPV_ARGS(&created)))) {
+            HE_CORE_ERROR("D3D12 DrawIndexedIndirect: 创建命令签名失败");
+            return;
+        }
+        sig = created.Get();
+        m_CmdSigs[want] = created;
     }
-    m_List->ExecuteIndirect(sig.Get(), drawCount, b->GetResource(), offset, nullptr, 0);
+
+    m_List->ExecuteIndirect(sig, drawCount, b->GetResource(), offset, nullptr, 0);
 }
 
 void D3D12CommandList::DrawIndexedIndirectCount(IRHIBuffer* buffer, u64 offset,
