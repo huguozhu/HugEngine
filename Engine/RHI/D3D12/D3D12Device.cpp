@@ -218,12 +218,22 @@ void D3D12Device::WaitIdle() {
     if (FAILED(m_Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)))) return;
     HANDLE ev = CreateEventEx(nullptr, nullptr, 0, EVENT_ALL_ACCESS);
     if (!ev) return;
+    HE_CORE_INFO("[WaitIdle 进入]");
     m_Queue->Signal(fence.Get(), 1);
     if (fence->GetCompletedValue() < 1) {
         fence->SetEventOnCompletion(1, ev);
-        WaitForSingleObject(ev, INFINITE);
+        // 【不能无限等待】若 GPU 侧有未完成的非法操作，INFINITE 会让进程永久挂起、
+        // 且不产生任何日志（实测 02.Cube 初始化末尾就是这样停住的）。
+        // 改成有上限的等待，超时就明确报出来。
+        const DWORD r = WaitForSingleObject(ev, 8000);
+        if (r == WAIT_TIMEOUT) {
+            HE_CORE_ERROR("[WaitIdle] 等待 GPU 超时 8 秒，队列可能已挂起");
+            const HRESULT rr = m_Device->GetDeviceRemovedReason();
+            HE_CORE_ERROR("[WaitIdle] GetDeviceRemovedReason=0x{:08x}", static_cast<u32>(rr));
+        }
     }
     CloseHandle(ev);
+    HE_CORE_INFO("[WaitIdle 完成]");
 }
 
 RHIFenceHandle D3D12Device::CreateFence() {
