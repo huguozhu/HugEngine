@@ -497,6 +497,27 @@ bool D3D12Device::EnsureDescriptorHeaps() {
     return true;
 }
 
+void D3D12Device::RegisterViewResource(UINT64 handle, ID3D12Resource* res) {
+    if (!handle || !res) return;
+    m_ViewResources[handle] = res;
+    if (m_ResStates.find(res) == m_ResStates.end())
+        m_ResStates[res] = D3D12_RESOURCE_STATE_COMMON;
+}
+
+ID3D12Resource* D3D12Device::FindViewResource(UINT64 handle) const {
+    const auto it = m_ViewResources.find(handle);
+    return it == m_ViewResources.end() ? nullptr : it->second.Get();
+}
+
+D3D12_RESOURCE_STATES D3D12Device::GetResourceState(ID3D12Resource* res) const {
+    const auto it = m_ResStates.find(res);
+    return it == m_ResStates.end() ? D3D12_RESOURCE_STATE_COMMON : it->second;
+}
+
+void D3D12Device::SetResourceState(ID3D12Resource* res, D3D12_RESOURCE_STATES st) {
+    if (res) m_ResStates[res] = st;
+}
+
 D3D12_GPU_DESCRIPTOR_HANDLE D3D12Device::GetSetSamplerGpuHandle(u32 slot) const {
     D3D12_GPU_DESCRIPTOR_HANDLE h{};
     if (!m_SetSamplerHeap) return h;

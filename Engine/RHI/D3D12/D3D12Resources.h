@@ -81,7 +81,17 @@ public:
     u32    GetMipLevels()   const override { return m_MipLevels; }
     u32    GetArrayLayers() const override { return m_ArrayLayers; }
     Format GetFormat() const override { return m_Format; }
-    void*  GetNativeHandle() const override { return m_Resource.Get(); }
+    void*  GetNativeHandle() const override {
+        // 【语义对齐】引擎把 GetNativeHandle() 当「图像视图」用（Vulkan 侧返回
+        // VkImageView，直接传给 BeginOffscreenPass 当 RTV/DSV）。之前这里返回
+        // ID3D12Resource*，命令列表按 CPU 描述符句柄解释后得到垃圾指针，
+        // OMSetRenderTargets 收到非法 DSV 会让驱动卡死（实测 02.Cube 第一帧
+        // 的 CSM 阴影 pass 就死在这里）。
+        if (m_IsDepth && m_Dsv.ptr) return reinterpret_cast<void*>(m_Dsv.ptr);
+        if (m_Rtv.ptr)              return reinterpret_cast<void*>(m_Rtv.ptr);
+        if (m_Dsv.ptr)              return reinterpret_cast<void*>(m_Dsv.ptr);
+        return nullptr;
+    }
     void*  GetNativeHandle(u32 index) const override {
         if (m_Srvs.empty() || index >= m_Srvs.size()) return nullptr;
         return reinterpret_cast<void*>(m_Srvs[index].ptr);

@@ -440,6 +440,7 @@ bool D3D12Texture::Initialize(D3D12Device* device, const TextureDesc& desc) {
             vd.Texture2D.MipSlice = 0;
             vd.Texture2D.PlaneSlice = 0;
             dev->CreateRenderTargetView(m_Resource.Get(), &vd, m_Rtv);
+    device->RegisterViewResource(static_cast<UINT64>(m_Rtv.ptr), m_Resource.Get());
             // 堆要活到纹理销毁：挂到资源上（简化：用 ComPtr 保存）
             static_cast<void>(heap);
         }
@@ -458,6 +459,7 @@ bool D3D12Texture::Initialize(D3D12Device* device, const TextureDesc& desc) {
             vd.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
             vd.Texture2D.MipSlice = 0;
             dev->CreateDepthStencilView(m_Resource.Get(), &vd, m_Dsv);
+    device->RegisterViewResource(static_cast<UINT64>(m_Dsv.ptr), m_Resource.Get());
             static_cast<void>(heap);
         }
     }

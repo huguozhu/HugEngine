@@ -78,6 +78,14 @@ public:
     ID3D12DescriptorHeap*            GetSamplerHeap()   const { return m_SamplerHeap.Get(); }
     /// 确保两个 shader-visible 堆都已创建（懒初始化）
     bool                             EnsureDescriptorHeaps();
+
+    // ---- 视图句柄 -> 资源 的反查 ----
+    // 引擎只把 RTV/DSV 的 CPU 句柄（void*）传给命令列表，而 D3D12 做资源屏障
+    // 需要 ID3D12Resource*，所以建视图时登记一下，用时反查。
+    void RegisterViewResource(UINT64 handle, ID3D12Resource* res);
+    ID3D12Resource* FindViewResource(UINT64 handle) const;
+    D3D12_RESOURCE_STATES GetResourceState(ID3D12Resource* res) const;
+    void SetResourceState(ID3D12Resource* res, D3D12_RESOURCE_STATES st);
     /// 分配一块常量缓冲（返回映射地址与它的 GPU 描述符句柄）
     bool AllocateConstants(D3D12_GPU_VIRTUAL_ADDRESS& outGpuAddr,
                            D3D12_GPU_DESCRIPTOR_HANDLE& outCbvHandle);
@@ -202,6 +210,9 @@ private:
     /// 采样器堆：根签名声明了 s0..s15 的 SAMPLER 表，D3D12 要求
     /// 绑定时同时设置 CBV_SRV_UAV 与 SAMPLER 两个 shader-visible 堆，
     /// 缺一个就会让 CreateGraphicsPipelineState 返回 E_INVALIDARG。
+    std::unordered_map<UINT64, ComPtr<ID3D12Resource>> m_ViewResources;
+    mutable std::unordered_map<ID3D12Resource*, D3D12_RESOURCE_STATES> m_ResStates;
+
     ComPtr<ID3D12DescriptorHeap> m_SamplerHeap;
 
     /// 描述符集的**采样器**堆：与 CBV_SRV_UAV 堆使用**相同的槽位编号**，
