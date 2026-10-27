@@ -5,6 +5,8 @@
 #include "D3D12Device.h"
 #include "D3D12Converters.h"
 #include <cstdio>
+#include <cstdlib>
+#include <vector>
 
 #if defined(_WIN32)
 
@@ -116,10 +118,13 @@ bool D3D12SwapChain::AcquireNextImage() {
 }
 
 void D3D12SwapChain::Present(bool vsync) {
-    if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] ...\n"); std::fflush(stdout); }
     if (!m_SwapChain) return;
 
-    // 帧计数：确认 D3D12 后端在真正出帧（每 60 帧打一次，避免刷屏）
+    // 帧计数 & 截图（截图必须在 Present 之前，见 CaptureIfRequested 的注释）
+    ++m_FrameCount;
+    CaptureIfRequested();
+
+    // 帧计数日志：确认 D3D12 后端在真正出帧（每 60 帧打一次，避免刷屏）
     static u64 s_frames = 0;
     ++s_frames;
     if (s_frames % 60 == 1) {
@@ -137,16 +142,205 @@ void D3D12SwapChain::Present(bool vsync) {
 }
 
 void* D3D12SwapChain::GetCurrentBackBufferView() const {
-    if (m_Index >= m_Buffers.size()) return nullptr;
+    if (!m_SwapChain || !m_RtvHeap) return nullptr;
+    const u32 idx = m_SwapChain->GetCurrentBackBufferIndex();
+    if (idx >= m_Buffers.size()) return nullptr;
     D3D12_CPU_DESCRIPTOR_HANDLE h = m_RtvHeap->GetCPUDescriptorHandleForHeapStart();
-    h.ptr += static_cast<SIZE_T>(m_Index) * m_RtvSize;
+    h.ptr += static_cast<SIZE_T>(idx) * m_RtvSize;
     return reinterpret_cast<void*>(h.ptr);
 }
 
 D3D12_CPU_DESCRIPTOR_HANDLE D3D12SwapChain::GetCurrentRtv() const {
+    // 【必须用实时索引】DXGI 的 FLIP_DISCARD 交换链在每次 Present 后轮换后缓冲。
+    // 引擎的 FramePresenter::BeginFrame() 会调 AcquireNextImage()，但**样例不一定
+    // 都调用**（01.Triangle 就没有）⇒ 缓存的 m_Index 会过期，
+    // 结果是「画到缓冲 0、呈现缓冲 1」⇒ 屏幕全黑。
     D3D12_CPU_DESCRIPTOR_HANDLE h = m_RtvHeap->GetCPUDescriptorHandleForHeapStart();
-    h.ptr += static_cast<SIZE_T>(m_Index) * m_RtvSize;
+    if (!m_SwapChain || !m_RtvHeap) return h;
+    const u32 idx = m_SwapChain->GetCurrentBackBufferIndex();
+    h.ptr += static_cast<SIZE_T>(idx) * m_RtvSize;
     return h;
+}
+
+
+// ============================================================================
+//  截图支持（调试用）
+//
+//  用法：set HE_CAPTURE_FRAME=3   → 第 3 帧在 Present 之前把后缓冲存成
+//        capture_frame3.png
+//
+//  【为什么必须在 Present 之前】FLIP_DISCARD 交换链在 Present 之后内容未定义，
+//  之后读到的永远是空缓冲（在 D3D11 后端上踩过这个坑）。
+// ============================================================================
+#include <wincodec.h>
+#pragma comment(lib, "windowscodecs.lib")
+
+namespace {
+
+/// 把 RGBA8 像素写成 PNG（用 WIC，无第三方依赖）
+bool SaveRgbaToPng(const wchar_t* path, const unsigned char* rgba, u32 w, u32 h) {
+    ComPtr<IWICImagingFactory> factory;
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(&factory)))) {
+        HE_CORE_ERROR("[截图] 无法创建 WIC 工厂");
+        return false;
+    }
+    ComPtr<IWICStream> stream;
+    if (FAILED(factory->CreateStream(&stream))) return false;
+    if (FAILED(stream->InitializeFromFilename(path, GENERIC_WRITE))) return false;
+
+    ComPtr<IWICBitmapEncoder> encoder;
+    if (FAILED(factory->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder))) return false;
+    if (FAILED(encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache))) return false;
+
+    ComPtr<IWICBitmapFrameEncode> frame;
+    if (FAILED(encoder->CreateNewFrame(&frame, nullptr))) return false;
+    if (FAILED(frame->Initialize(nullptr))) return false;
+    if (FAILED(frame->SetSize(w, h))) return false;
+
+    WICPixelFormatGUID fmt = GUID_WICPixelFormat32bppRGBA;
+    if (FAILED(frame->SetPixelFormat(&fmt))) return false;
+
+    const UINT stride = w * 4;
+    const UINT size   = stride * h;
+    if (FAILED(frame->WritePixels(h, stride, size, const_cast<BYTE*>(rgba)))) return false;
+    if (FAILED(frame->Commit())) return false;
+    if (FAILED(encoder->Commit())) return false;
+    return true;
+}
+
+} // namespace
+
+void D3D12SwapChain::CaptureIfRequested() {
+    if (!m_CaptureInit) {
+        m_CaptureInit = true;
+        if (const char* v = std::getenv("HE_CAPTURE_FRAME")) m_CaptureAt = std::atoi(v);
+        HE_CORE_INFO("[D3D12 截图] HE_CAPTURE_FRAME={} (0/-1 表示不截图)", m_CaptureAt);
+    }
+    if (m_CaptureAt <= 0 || static_cast<int>(m_FrameCount) != m_CaptureAt) return;
+
+    ID3D12Device* dev = m_Device ? m_Device->GetDevice() : nullptr;
+    const u32 liveIdx = m_SwapChain ? m_SwapChain->GetCurrentBackBufferIndex() : m_Index;
+    if (!dev || liveIdx >= m_Buffers.size() || !m_Buffers[liveIdx]) return;
+
+    // 【做法】后缓冲 → 回读**缓冲**（不是回读纹理），用 CopyTextureRegion
+    // 带 PlacedFootprint 表达行间距。回读纹理在部分驱动上 CreateCommittedResource
+    // 会返回 E_INVALIDARG（实测就是这里失败），缓冲形式则稳定。
+    const D3D12_RESOURCE_DESC bd = m_Buffers[liveIdx]->GetDesc();
+    const u32 w = static_cast<u32>(bd.Width);
+    const u32 h = static_cast<u32>(bd.Height);
+    const u32 rowPitch = (w * 4 + 255u) & ~255u;     // D3D12 要求 256 对齐
+    const u64 totalSize = static_cast<u64>(rowPitch) * h;
+
+    D3D12_HEAP_PROPERTIES hp{};
+    hp.Type = D3D12_HEAP_TYPE_READBACK;
+    hp.CreationNodeMask = 1;
+    hp.VisibleNodeMask  = 1;
+
+    D3D12_RESOURCE_DESC rd{};
+    rd.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
+    rd.Width            = totalSize;
+    rd.Height           = 1;
+    rd.DepthOrArraySize = 1;
+    rd.MipLevels        = 1;
+    rd.Format           = DXGI_FORMAT_UNKNOWN;
+    rd.SampleDesc       = { 1, 0 };
+    rd.Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    rd.Flags            = D3D12_RESOURCE_FLAG_NONE;
+
+    ComPtr<ID3D12Resource> readback;
+    HRESULT hr = dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+                                              D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                              IID_PPV_ARGS(&readback));
+    if (FAILED(hr)) {
+        HE_CORE_ERROR("[D3D12 截图] 回读缓冲创建失败 hr=0x{:08x}", static_cast<u32>(hr));
+        return;
+    }
+
+    // 【必须用引擎自己的队列】另建队列会把「后缓冲的状态转换」和「引擎的绘制」
+    // 放到两个队列上并发执行，D3D12 会直接判定资源被跨队列争用 ⇒ DEVICE_HUNG
+    //（实测另建队列后设备每秒丢一次）。用同一个队列则天然 FIFO 有序。
+    ID3D12CommandQueue* queue = m_Device ? m_Device->GetQueue() : nullptr;
+    if (!queue) return;
+
+    ComPtr<ID3D12CommandAllocator>    alloc;
+    ComPtr<ID3D12GraphicsCommandList> list;
+    if (FAILED(dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&alloc))) ||
+        FAILED(dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, alloc.Get(), nullptr,
+                                      IID_PPV_ARGS(&list)))) {
+        HE_CORE_ERROR("[D3D12 截图] 命令对象创建失败");
+        return;
+    }
+
+    D3D12_RESOURCE_BARRIER b{};
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    b.Transition.pResource   = m_Buffers[liveIdx].Get();
+    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    b.Transition.StateBefore = m_BackBufferState;    // 真实状态（PRESENT 或 RENDER_TARGET）
+    b.Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    list->ResourceBarrier(1, &b);
+
+    D3D12_TEXTURE_COPY_LOCATION dst{};
+    dst.pResource       = readback.Get();
+    dst.Type            = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    dst.PlacedFootprint.Footprint.Format   = bd.Format;
+    dst.PlacedFootprint.Footprint.Width    = w;
+    dst.PlacedFootprint.Footprint.Height   = h;
+    dst.PlacedFootprint.Footprint.Depth    = 1;
+    dst.PlacedFootprint.Footprint.RowPitch = rowPitch;
+    dst.PlacedFootprint.Offset             = 0;
+
+    D3D12_TEXTURE_COPY_LOCATION src{};
+    src.pResource        = m_Buffers[liveIdx].Get();
+    src.Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    src.SubresourceIndex = 0;
+
+    list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+
+    b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    b.Transition.StateAfter  = m_BackBufferState;    // 恢复
+    list->ResourceBarrier(1, &b);
+    list->Close();
+
+    ID3D12CommandList* lists[1] = { list.Get() };
+    queue->ExecuteCommandLists(1, lists);
+
+    ComPtr<ID3D12Fence> fence;
+    if (SUCCEEDED(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)))) {
+        HANDLE ev = CreateEventEx(nullptr, nullptr, 0, EVENT_ALL_ACCESS);
+        if (ev) {
+            queue->Signal(fence.Get(), 1);
+            fence->SetEventOnCompletion(1, ev);
+            WaitForSingleObject(ev, 5000);
+            CloseHandle(ev);
+        }
+    }
+
+    D3D12_RANGE range{ 0, 0 };
+    void* mapped = nullptr;
+    if (FAILED(readback->Map(0, &range, &mapped)) || !mapped) {
+        HE_CORE_ERROR("[D3D12 截图] 映射回读缓冲失败");
+        return;
+    }
+
+    std::vector<unsigned char> rgba(static_cast<size_t>(w) * h * 4);
+    const unsigned char* base = static_cast<const unsigned char*>(mapped);
+    for (u32 y = 0; y < h; ++y) {
+        const unsigned char* s = base + static_cast<size_t>(y) * rowPitch;
+        unsigned char* d = rgba.data() + static_cast<size_t>(y) * w * 4;
+        for (u32 x = 0; x < w; ++x) {
+            d[x*4+0] = s[x*4+2];   // B → R
+            d[x*4+1] = s[x*4+1];   // G
+            d[x*4+2] = s[x*4+0];   // R → B
+            d[x*4+3] = 255;
+        }
+    }
+    readback->Unmap(0, nullptr);
+
+    wchar_t path[128];
+    swprintf_s(path, L"capture_frame%llu.png", static_cast<unsigned long long>(m_FrameCount));
+    const bool ok = SaveRgbaToPng(path, rgba.data(), w, h);
+    HE_CORE_INFO("[D3D12 截图] 第 {} 帧 {}x{} 保存: {}", m_FrameCount, w, h, ok ? "成功" : "失败");
 }
 
 } // namespace he::rhi::d3d12

@@ -130,6 +130,9 @@ private:
     IRHISwapChain*    m_SwapChain = nullptr;
     D3D12PipelineState* m_Pipeline = nullptr;
     bool m_Recording = false;
+    /// 诊断用：记录本帧是否绑过 RTV、以及当前视口
+    bool            m_HasRtv = false;
+    D3D12_VIEWPORT  m_LastVp{};
 };
 
 } // namespace he::rhi::d3d12

@@ -38,7 +38,22 @@ public:
     /// 供命令列表使用：拿到当前后缓冲的 RTV（CPU 句柄）
     D3D12_CPU_DESCRIPTOR_HANDLE GetCurrentRtv() const;
 
+    /// 标记后缓冲已经被写成 RENDER_TARGET（命令列表 BeginRenderPass 时调用）。
+    /// D3D12 的屏障要求 StateBefore 严格等于资源**当前**状态，猜错会让设备挂起
+    /// （实测截图时猜 RENDER_TARGET、实际是 PRESENT ⇒ DEVICE_HUNG）。
+    void MarkBackBufferRendered() { m_BackBufferState = D3D12_RESOURCE_STATE_RENDER_TARGET; }
+
+    /// 【调试】按环境变量 HE_CAPTURE_FRAME=N 在第 N 帧把后缓冲存成 PNG。
+    /// 必须在 **Present 之前** 调用：FLIP_DISCARD 交换链在 Present 之后内容未定义。
+    void CaptureIfRequested();
+
 private:
+    u64  m_FrameCount  = 0;
+    int  m_CaptureAt   = -1;    // -1 = 未读取环境变量；0 = 不截图
+    bool m_CaptureInit = false;
+    /// 后缓冲的当前 D3D12 状态（未渲染过时是 PRESENT）
+    D3D12_RESOURCE_STATES m_BackBufferState = D3D12_RESOURCE_STATE_PRESENT;
+
     bool CreateBuffers();
 
     ComPtr<IDXGISwapChain3>   m_SwapChain;
