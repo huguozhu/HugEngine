@@ -144,6 +144,44 @@ void D3D12CommandList::BeginOffscreenPass(void* colorImageView, void* depthImage
     const bool hasDsv = (depthImageView != nullptr);
 
     // RTV 数量必须与指针一致：只有深度附件的 pass 传 1+nullptr 是非法调用（设备会被移除）
+    // 【必须做资源屏障】D3D12 要求绑定为 RTV/DSV 的资源处于 RENDER_TARGET /
+    // DEPTH_WRITE 状态。引擎只把 CPU 句柄传进来，所以先按句柄反查资源，
+    // 再按记录的状态做一次转换（否则 OMSetRenderTargets / Clear 会静默卡死）。
+    std::printf("[BOPA] barrier begin\n"); std::fflush(stdout);
+    if (m_Device) {
+        if (hasRtv) {
+            if (auto* res = m_Device->FindViewResource(static_cast<UINT64>(rtv.ptr))) {
+                const auto from = m_Device->GetResourceState(res);
+                if (from != D3D12_RESOURCE_STATE_RENDER_TARGET) {
+                    D3D12_RESOURCE_BARRIER b{};
+                    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                    b.Transition.pResource = res;
+                    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                    b.Transition.StateBefore = from;
+                    b.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+                    m_List->ResourceBarrier(1, &b);
+                    m_Device->SetResourceState(res, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                }
+            }
+        }
+        if (hasDsv) {
+            if (auto* res = m_Device->FindViewResource(static_cast<UINT64>(dsv.ptr))) {
+                const auto from = m_Device->GetResourceState(res);
+                if (from != D3D12_RESOURCE_STATE_DEPTH_WRITE) {
+                    D3D12_RESOURCE_BARRIER b{};
+                    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                    b.Transition.pResource = res;
+                    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                    b.Transition.StateBefore = from;
+                    b.Transition.StateAfter = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+                    m_List->ResourceBarrier(1, &b);
+                    m_Device->SetResourceState(res, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+                }
+            }
+        }
+    }
+
+    std::printf("[BOPB] before OMSetRT rtvPtr=%p dsvPtr=%p dsvRes=%p\n", (void*)rtv.ptr, (void*)dsv.ptr, (void*)m_Device->FindViewResource(static_cast<UINT64>(dsv.ptr))); std::fflush(stdout);
     m_List->OMSetRenderTargets(hasRtv ? 1u : 0u, hasRtv ? &rtv : nullptr, FALSE, hasDsv ? &dsv : nullptr);
     m_HasRtv = hasRtv;
 
@@ -160,6 +198,7 @@ void D3D12CommandList::BeginOffscreenPass(void* colorImageView, void* depthImage
     vp.Width  = static_cast<float>(width);
     vp.Height = static_cast<float>(height);
     vp.MaxDepth = 1.0f;
+    std::printf("[BOPY] before VP\n"); std::fflush(stdout);
     m_List->RSSetViewports(1, &vp);
     D3D12_RECT rc{ 0, 0, static_cast<LONG>(width), static_cast<LONG>(height) };
     m_List->RSSetScissorRects(1, &rc);
@@ -212,7 +251,14 @@ void D3D12CommandList::SetPipeline(IRHIPipelineState* pso) {
     m_Pipeline = static_cast<D3D12PipelineState*>(pso);
     if (!m_List || !m_Pipeline) return;
     m_List->SetPipelineState(m_Pipeline->GetPso());
-    m_List->SetGraphicsRootSignature(m_Pipeline->GetRootSignature());
+    // 【图形/计算根签名是两套独立绑定】计算管线必须用 SetComputeRootSignature，
+    // 否则后面 SetComputeRootDescriptorTable 没有根签名可用，D3D12 会静默卡死。
+    m_IsComputePipeline = m_Pipeline->IsCompute();
+    if (m_IsComputePipeline) {
+        m_List->SetComputeRootSignature(m_Pipeline->GetRootSignature());
+    } else {
+        m_List->SetGraphicsRootSignature(m_Pipeline->GetRootSignature());
+    }
     m_List->IASetPrimitiveTopology(m_Pipeline->GetTopology());
 }
 
@@ -292,24 +338,37 @@ void D3D12CommandList::BindDescriptorSet(u32 setIndex, DescriptorSetHandle set) 
     ID3D12DescriptorHeap* heaps[2] = { m_Device->GetCbvSrvUavHeap(), m_Device->GetSetSamplerHeap() };
     if (!heaps[0] || !heaps[1]) return;
     m_List->SetDescriptorHeaps(2, heaps);
+    std::printf("[BS] heaps ok\n"); std::fflush(stdout);
 
     const u32 baseSlot = m_Device->GetSetBaseSlot(set);
+    std::printf("[BS] base ok\n"); std::fflush(stdout);
     if (baseSlot == 0xFFFFFFFFu) return;
+    std::printf("[BS] baseret ok\n"); std::fflush(stdout);
 
     // 根签名：0..7 = root CBV，8..11 = SRV 表(space0..3)，12..15 = Sampler 表(space0..3)
     const D3D12_GPU_DESCRIPTOR_HANDLE srv  = m_Device->GetSetGpuHandle(baseSlot);
-    const D3D12_GPU_DESCRIPTOR_HANDLE smp  = m_Device->GetSetSamplerGpuHandle(baseSlot);
+    // 采样器堆只有 2048 槽，统一从槽 0 起绑定（见 UpdateDescriptorSet 的说明）
+    const D3D12_GPU_DESCRIPTOR_HANDLE smp  = m_Device->GetSetSamplerGpuHandle(0);
 
     // 根签名：0..7 CBV，8..11 SRV，12..15 UAV，16..19 Sampler
     const u32 uavSlot  = baseSlot + m_Device->GetSetUavOffset(set);
     const D3D12_GPU_DESCRIPTOR_HANDLE uav = m_Device->GetSetGpuHandle(uavSlot);
 
+    // 【参数偏移必须与根签名一致】根签名布局：8 个 root CBV 之后依次是
+    //   SRV 表 8..15、UAV 表 16..23、Sampler 表 24..31（每类 8 个寄存器空间）。
+    // 之前这里用 12/16 是老布局（当时 kSpaceCount=4）的偏移，把 UAV/Sampler
+    // 表绑到了 SRV 的槽位上，描述符类型对不上会让 D3D12 直接卡死。
+    std::printf("[BS] srv=%llu uav=%llu\n",(unsigned long long)srv.ptr,(unsigned long long)uav.ptr); std::fflush(stdout);
     m_List->SetGraphicsRootDescriptorTable(8  + setIndex, srv);
-    m_List->SetGraphicsRootDescriptorTable(12 + setIndex, uav);
-    m_List->SetGraphicsRootDescriptorTable(16 + setIndex, smp);
+    std::printf("[BS] g-srv ok\n"); std::fflush(stdout);
+    m_List->SetGraphicsRootDescriptorTable(16 + setIndex, uav);
+    std::printf("[BS] g-uav ok\n"); std::fflush(stdout);
+    m_List->SetGraphicsRootDescriptorTable(24 + setIndex, smp);
+    std::printf("[BS] g-smp ok\n"); std::fflush(stdout);
     m_List->SetComputeRootDescriptorTable(8  + setIndex, srv);
-    m_List->SetComputeRootDescriptorTable(12 + setIndex, uav);
-    m_List->SetComputeRootDescriptorTable(16 + setIndex, smp);
+    m_List->SetComputeRootDescriptorTable(16 + setIndex, uav);
+    m_List->SetComputeRootDescriptorTable(24 + setIndex, smp);
+    std::printf("[BS] tables ok\n"); std::fflush(stdout);
 }
 
 void D3D12CommandList::SetPushConstants(u32 offset, u32 size, const void* data) {

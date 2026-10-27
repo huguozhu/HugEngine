@@ -130,6 +130,8 @@ private:
     IRHISwapChain*    m_SwapChain = nullptr;
     D3D12PipelineState* m_Pipeline = nullptr;
     bool m_Recording = false;
+    /// 当前管线是否为计算管线（决定绑定哪一套根签名与描述符表）
+    bool m_IsComputePipeline = false;
     /// 诊断用：记录本帧是否绑过 RTV、以及当前视口
     bool            m_HasRtv = false;
     D3D12_VIEWPORT  m_LastVp{};

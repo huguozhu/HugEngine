@@ -1,4 +1,5 @@
-﻿// ============================================================================
+﻿#include <cstdio>
+// ============================================================================
 //  D3D12Resources.cpp —— Buffer / Texture / Sampler / PipelineState 的实现
 // ============================================================================
 #include "D3D12Resources.h"
@@ -226,7 +227,8 @@ bool D3D12Buffer::Initialize(D3D12Device* device, const BufferDesc& desc) {
     return true;
 }
 
-void* D3D12Buffer::Map() {
+void* D3D12Buffer::Map() {    std::printf("[BUF] Map enter\n"); std::fflush(stdout);
+
     if (!m_Resource) return nullptr;
     if (m_MappedPtr) return m_MappedPtr;
 
@@ -245,7 +247,8 @@ void* D3D12Buffer::Map() {
     return p;
 }
 
-void D3D12Buffer::Unmap() {
+void D3D12Buffer::Unmap() {    std::printf("[BUF] Unmap enter\n"); std::fflush(stdout);
+
     if (!m_Resource || !m_MappedPtr) return;
 
     ID3D12Resource* target = m_NeedsStagingCopy ? m_CpuStaging.Get() : m_Resource.Get();
@@ -261,7 +264,8 @@ void D3D12Buffer::Unmap() {
     //（实测 02.Cube 初始化阶段出现 0x887a0005）。这里改成只有一个槽，
     // 每次 Reset 前**必须**等上一次的围栏完成，正确性优先。
     HE_CORE_INFO("[Unmap 进入] size={} staging={}", static_cast<u64>(m_Size), m_NeedsStagingCopy ? 1 : 0);
-    if (m_NeedsStagingCopy && m_CpuStaging && m_Device && m_Size > 0) {
+    if (m_NeedsStagingCopy && m_CpuStaging && m_Device && m_Size > 0 &&
+        std::getenv("HE_D3D12_STAGING_COPY") != nullptr) {
         const u32 copySize = static_cast<u32>((m_Size + 3) & ~3ull);
 
         ID3D12Device* dev = (m_Device->GetDevice()) ? m_Device->GetDevice() : nullptr;
@@ -646,6 +650,7 @@ bool D3D12PipelineState::Initialize(D3D12Device* device, const PipelineStateDesc
                           static_cast<u32>(cd.CS.BytecodeLength));
             return false;
         }
+        m_IsCompute = true;
         HE_CORE_INFO("D3D12PipelineState: 计算 PSO 创建成功 name={} CS={}B",
                      desc.debugName.c_str(), static_cast<u32>(cd.CS.BytecodeLength));
         return true;

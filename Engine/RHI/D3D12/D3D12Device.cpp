@@ -714,7 +714,12 @@ void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, Desc
     if (!EnsureDescriptorHeaps()) return;
 
     const auto& s = m_DescriptorSets[static_cast<size_t>(set - 1)];
-    const u32 slot = s.baseSlot + binding;
+    // 【采样器堆的槽位不能叠加 baseSlot】CBV_SRV_UAV 堆开了 65536 槽（部分 layout
+    // 的 binding 号达 4000+），而 shader-visible 采样器堆上限只有 4080，
+    // 叠加后 GPU 句柄会越界，SetGraphicsRootDescriptorTable 收到非法句柄会让
+    // D3D12 静默卡死（实测 02.Cube 第一帧阴影 pass 绑定描述符集时卡在这里）。
+    // 采样器改为按 binding 单独编号，并从槽 0 起绑定整张表。
+    const u32 slot = binding;
 
     if (type == DescriptorType::Sampler) {
         if (auto* smp = static_cast<D3D12Sampler*>(sampler)) {

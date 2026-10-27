@@ -148,10 +148,13 @@ public:
     ID3D12RootSignature*   GetRootSignature() const { return m_RootSig.Get(); }
     D3D12_PRIMITIVE_TOPOLOGY GetTopology() const { return m_Topology; }
     u32 GetVertexStride() const { return m_VertexStride; }
+    /// 是否计算管线（图形/计算根签名是两套独立绑定）
+    bool IsCompute() const { return m_IsCompute; }
 
 private:
     ComPtr<ID3D12RootSignature> m_RootSig;
     ComPtr<ID3D12PipelineState> m_Pso;
+    bool m_IsCompute = false;
     D3D12_PRIMITIVE_TOPOLOGY    m_Topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
     /// 输入布局的总步长（由 DXIL 反射或引擎 attributes 累加得出），
     /// 用于缓冲 stride 为 0 时兜底（D3D12 要求 StrideInBytes 非零）
