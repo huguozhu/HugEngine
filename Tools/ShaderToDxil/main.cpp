@@ -27,6 +27,7 @@
 #include <map>
 #include <fstream>
 #include <sstream>
+#include <cctype>
 
 // ---------------------------------------------------------------------------
 //  文件读写
@@ -224,6 +225,35 @@ static void PatchUint8(std::string& s) {
     ReplaceAll(s, "uint8_t", "uint");
 }
 
+/// 把着色器里所有 cbuffer 的寄存器统一到 b0。
+///
+/// 【为什么必须做】Slang 为同一个 push-constant 块在不同的着色器阶段生成
+/// **不同的 register**：顶点着色器里是 `register(b0)`，像素着色器里可能是
+/// `register(b1)`。而 D3D12 的根签名只能给「root constants」分配**一个**寄存器
+/// （我们用 b0）。两者不一致时 CreateGraphicsPipelineState 返回 E_INVALIDARG
+/// （实测 ForwardPBR 的 PSO 就卡在这里：PS 需要 b1 的 CBV，根签名里没有）。
+static std::string PatchCBuffers(const std::string& src) {
+    std::string out;
+    out.reserve(src.size());
+    size_t pos = 0;
+    while (pos < src.size()) {
+        const size_t s = src.find("cbuffer", pos);
+        if (s == std::string::npos) { out.append(src, pos, std::string::npos); break; }
+        out.append(src, pos, s - pos);
+        // 找 "register(bN)"
+        const size_t r = src.find("register(b", s);
+        if (r == std::string::npos) { out.append(src, s, std::string::npos); break; }
+        const size_t numBeg = r + 10;                 // "register(b" 之后
+        size_t numEnd = numBeg;
+        while (numEnd < src.size() && isdigit(static_cast<unsigned char>(src[numEnd]))) ++numEnd;
+        if (numEnd == numBeg) { out.append(src, s, r + 10 - s); pos = r + 10; continue; }
+        out.append(src, s, numBeg - s);               // 保留到 register(b
+        out += '0';                                   // 寄存器号统一为 0
+        pos = numEnd;
+    }
+    return out;
+}
+
 /// 给 for 循环加 [loop]：抑制 DXC 的激进展开（某些循环展开后编译时间爆炸）
 static void PatchLoops(std::string& s) {
     size_t p = 0;
@@ -297,6 +327,9 @@ int main(int argc, char** argv) {
     const bool isVertex = (std::string(stage) == "vs" || std::string(stage) == "ms");
     std::string patched = InjectSemantics(src, isVertex);
     PatchUint8(patched);
+    // 【已回退】PatchCBuffers 会把所有 cbuffer 归一到 b0，导致多个 cbuffer 重叠
+    //（dxc 报 "resource X at register 0 overlaps with resource Y"）。
+    // 正确的做法是保留着色器自己的寄存器分配（b0/b1/...），根签名用 root CBV 覆盖 b0..b7。
     PatchLoops(patched);
 
     // 落一份补丁后的 HLSL 便于排查（设 HE_DUMP_DXIL_HLSL=path 覆盖默认名）
