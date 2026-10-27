@@ -8,7 +8,10 @@
 #include "MeshVS.slang"   // PositionOnlyVSOutput（同形状深度类 pass 接口唯一出处）
 #include "ShaderTypes.slang"  // GPUObjectData / ShadowPushConstant 共享定义
 
-layout(location = 0) in float3 inPosition;
+// explicit semantics (D3D12) + vk::location (Vulkan)
+struct ShadowVertexInput {
+    [[vk::location(0)]] float3 inPosition : POSITION0;
+};
 // 注：阴影通道仅需位置，normal(loc=1) 和 uv(loc=2) 不声明，避免 Vulkan 验证警告
 // 顶点缓冲 stride 仍为 sizeof(StaticVertex)=32，位置数据在偏移 0 处
 
@@ -27,7 +30,8 @@ layout(location = 0) in float3 inPosition;
     uint     _pad[3];
 };
 
-PositionOnlyVSOutput vertexMain() {
+PositionOnlyVSOutput vertexMain(ShadowVertexInput vin) {
+    const float3 inPosition = vin.inPosition;
     PositionOnlyVSOutput output;
     GPUObjectData obj = u_Objects[objectIndex];
     float4 worldPos = mul(obj.worldMatrix, float4(inPosition, 1.0));

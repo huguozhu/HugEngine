@@ -7,8 +7,11 @@
 #include "ShaderTypes.slang"  // GPUObjectData / GPULight 共享定义
 // ============================================================
 
-layout(location = 0) in float3 inPosition;
-layout(location = 1) in float3 inNormal;
+// explicit semantics (D3D12) + vk::location (Vulkan)
+struct RSMVertexInput {
+    [[vk::location(0)]] float3 inPosition : POSITION0;
+    [[vk::location(1)]] float3 inNormal   : NORMAL0;
+};
 
 // GPU Object（128 bytes，匹配 CPU GPUObjectData）
 // GPUObjectData 定义来自 ShaderTypes.slang（C++/Slang 共享）
@@ -23,7 +26,9 @@ layout(location = 1) in float3 inNormal;
     float4   vplAlbedo;    // Fragment 侧用（VPL 漫反射率），同样只为布局一致
 };
 
-RSMVSOutput vertexMain() {
+RSMVSOutput vertexMain(RSMVertexInput vin) {
+    const float3 inPosition = vin.inPosition;
+    const float3 inNormal   = vin.inNormal;
     GPUObjectData obj = u_Objects[objectIndex];
     float4 worldPos4 = mul(obj.worldMatrix, float4(inPosition, 1.0));
 

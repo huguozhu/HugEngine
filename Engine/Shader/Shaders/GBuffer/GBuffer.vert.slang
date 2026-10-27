@@ -8,9 +8,9 @@
 #include "common.slang"
 
 struct VSInput {
-    [[vk::location(0)]] float3 positionOS;
-    [[vk::location(1)]] float3 normalOS;
-    [[vk::location(2)]] float2 uv;
+    [[vk::location(0)]] float3 positionOS : POSITION0;
+    [[vk::location(1)]] float3 normalOS   : NORMAL0;
+    [[vk::location(2)]] float2 uv         : TEXCOORD0;
 };
 
 // GPUObjectData 定义来自 ShaderTypes.slang（C++/Slang 共享）

@@ -3,9 +3,13 @@
 // ============================================================
 
 #include "MeshVS.slang"   // PositionOnlyVSOutput（同形状深度类 pass 接口唯一出处）
-layout(location = 0) in float2 inPosition;
+// explicit semantics (D3D12) + vk::location (Vulkan)
+struct TriangleVertexInput {
+    [[vk::location(0)]] float2 inPosition : POSITION0;
+};
 
-PositionOnlyVSOutput vertexMain() {
+PositionOnlyVSOutput vertexMain(TriangleVertexInput vin) {
+    const float2 inPosition = vin.inPosition;
     PositionOnlyVSOutput output;
     output.position = float4(inPosition, 0.0, 1.0);
     return output;
