@@ -152,7 +152,9 @@ void D3D12CommandList::BeginOffscreenPass(void* colorImageView, void* depthImage
         if (hasRtv) {
             if (auto* res = m_Device->FindViewResource(static_cast<UINT64>(rtv.ptr))) {
                 const auto from = m_Device->GetResourceState(res);
-                if (from != D3D12_RESOURCE_STATE_RENDER_TARGET) {
+                const bool needs = (from == D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE ||
+                                     from == D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                if (needs) {
                     D3D12_RESOURCE_BARRIER b{};
                     b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
                     b.Transition.pResource = res;
@@ -167,7 +169,10 @@ void D3D12CommandList::BeginOffscreenPass(void* colorImageView, void* depthImage
         if (hasDsv) {
             if (auto* res = m_Device->FindViewResource(static_cast<UINT64>(dsv.ptr))) {
                 const auto from = m_Device->GetResourceState(res);
-                if (from != D3D12_RESOURCE_STATE_DEPTH_WRITE) {
+                const bool needs = (from == D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE ||
+                                     from == D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE ||
+                                     from == D3D12_RESOURCE_STATE_DEPTH_READ);
+                if (needs) {
                     D3D12_RESOURCE_BARRIER b{};
                     b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
                     b.Transition.pResource = res;
@@ -181,7 +186,7 @@ void D3D12CommandList::BeginOffscreenPass(void* colorImageView, void* depthImage
         }
     }
 
-    std::printf("[BOPB] before OMSetRT rtvPtr=%p dsvPtr=%p dsvRes=%p\n", (void*)rtv.ptr, (void*)dsv.ptr, (void*)m_Device->FindViewResource(static_cast<UINT64>(dsv.ptr))); std::fflush(stdout);
+    std::printf("[BOPB] rtv=%p rtvRes=%p dsv=%p\n", (void*)rtv.ptr, (void*)m_Device->FindViewResource(static_cast<UINT64>(rtv.ptr)), (void*)dsv.ptr); std::fflush(stdout);
     m_List->OMSetRenderTargets(hasRtv ? 1u : 0u, hasRtv ? &rtv : nullptr, FALSE, hasDsv ? &dsv : nullptr);
     m_HasRtv = hasRtv;
 
@@ -331,6 +336,7 @@ void D3D12CommandList::SetFullscreenViewport(u32 width, u32 height) {
 }
 
 void D3D12CommandList::BindDescriptorSet(u32 setIndex, DescriptorSetHandle set) {
+    static int s_call=0; std::printf("[BSN] call#%d setIndex=%u set=%llu\n", ++s_call, setIndex, (unsigned long long)set); std::fflush(stdout);
     { static int s=0; if (s<4) { ++s; std::printf("[STP] BindSet %d\n", s); std::fflush(stdout); } }
     if (!m_List || !m_Device || set == kInvalidSet || setIndex >= 8) return;
     if (!m_Device->EnsureDescriptorHeaps()) return;
@@ -365,9 +371,14 @@ void D3D12CommandList::BindDescriptorSet(u32 setIndex, DescriptorSetHandle set) 
     std::printf("[BS] g-uav ok\n"); std::fflush(stdout);
     m_List->SetGraphicsRootDescriptorTable(24 + setIndex, smp);
     std::printf("[BS] g-smp ok\n"); std::fflush(stdout);
-    m_List->SetComputeRootDescriptorTable(8  + setIndex, srv);
-    m_List->SetComputeRootDescriptorTable(16 + setIndex, uav);
-    m_List->SetComputeRootDescriptorTable(24 + setIndex, smp);
+    // 【只有计算管线才绑计算表】图形管线没有绑定过 SetComputeRootSignature，
+    // 此时调用 SetComputeRootDescriptorTable 会让 D3D12 静默卡死
+    //（实测 02.Cube 第一帧阴影 pass 绑定描述符集时死在这里）。
+    if (m_IsComputePipeline) {
+        m_List->SetComputeRootDescriptorTable(8  + setIndex, srv);
+        m_List->SetComputeRootDescriptorTable(16 + setIndex, uav);
+        m_List->SetComputeRootDescriptorTable(24 + setIndex, smp);
+    }
     std::printf("[BS] tables ok\n"); std::fflush(stdout);
 }
 
@@ -389,8 +400,13 @@ void D3D12CommandList::SetPushConstants(u32 offset, u32 size, const void* data) 
 
     // 参数 0 = b0 的 root CBV；其余 b1..b7 目前也指向同一块（引擎的 push constant
     // 语义里只有一个块，着色器的其他 cbuffer 由 UpdateDescriptorSet 提供的常量缓冲填充）
-    m_List->SetGraphicsRootConstantBufferView(0, gpuAddr);
-    m_List->SetComputeRootConstantBufferView(0, gpuAddr);
+    if (m_IsComputePipeline) {
+        // 计算管线的根签名是独立的一套，绑定计算侧时必须走 Compute 版本；
+        // 图形管线下调用 Compute 版本的任何 Set*Root* 都会让 D3D12 静默卡死。
+        m_List->SetComputeRootConstantBufferView(0, gpuAddr);
+    } else {
+        m_List->SetGraphicsRootConstantBufferView(0, gpuAddr);
+    }
 }
 
 void D3D12CommandList::Draw(u32 vertexCount, u32 instanceCount, u32 firstVertex, u32 firstInstance) {
