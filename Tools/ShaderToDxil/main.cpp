@@ -77,40 +77,30 @@ static std::string AssignSemantic(const std::string& memberName,
                                  bool isVertexStage) {
     const bool isFloat4 = (typeText.rfind("float4", 0) == 0);
 
-    // position：VS 输出必须是 SV_Position（否则顶点不进裁剪空间）；PS 输入用
-    // TEXCOORD0 反而更安全（PS 的 SV_Position 是像素坐标，语义不同）。
+    // position：VS 输出必须是 SV_Position（否则顶点不进裁剪空间）；
+    // PS 输入的 position 则是像素坐标，用 TEXCOORD（本项目不用）。
     if (Has(memberName, "position") || Has(memberName, "Position")) {
-        return (isVertexStage && isFloat4) ? " : SV_Position" : " : TEXCOORD0";
+        if (isVertexStage && isFloat4) return " : SV_Position";
+        // 非 float4 的 position 不能当 SV_Position（类型必须是 float4），
+        // 退化成普通 TEXCOORD —— 但**必须占用一个序号**，
+        // 否则后面的成员又从 0 开始，dxc 会报 "Semantic 'TEXCOORD' overlap at 0"。
+        const int nth = counters["__seq"]++;
+        return std::string(" : TEXCOORD") + std::to_string(nth);
     }
 
-    // 已登记的名字 → 基准索引
-    struct Entry { const char* key; int base; };
-    static const Entry kTable[] = {
-        { "worldPos",     1 },
-        { "worldNormal",  2 },
-        { "normal",       2 },
-        { "uv",           3 },
-        { "texCoord",     3 },
-        { "tangent",      4 },
-        { "bitangent",    5 },
-        { "color",        6 },
-        { "objectIndex",  7 },
-        { "worldDir",     8 },
-        { "viewDir",      9 },
-        { "depth",       10 },
-    };
-
-    for (const auto& e : kTable) {
-        if (Has(memberName, e.key)) {
-            const std::string k = e.key;
-            const int nth = counters[k]++;          // 同名第 n 次 ⇒ 索引递增
-            return std::string(" : TEXCOORD") + std::to_string(e.base + nth);
-        }
-    }
-
-    // 未登记：从 kUnknownBase 起顺序分配（同一结构体内顺序稳定，两侧一致）
-    const int nth = counters["__unknown"]++;
-    return std::string(" : TEXCOORD") + std::to_string(SemanticTable::kUnknownBase + nth);
+    // 【按声明顺序从 0 密集编号】
+    //
+    // D3D12 的 VS→PS 链接校验是按「语义 + 序号」逐项对照的，而且两侧的
+    // **硬件寄存器是按声明顺序依次分配**的。因此：
+    //   · 序号必须是 0..N-1 的密集序列（稀疏会出现
+    //     "Semantic 'TEXCOORD' is defined for mismatched hardware registers"）
+    //   · 两侧必须用**相同的声明顺序**才能对上
+    //
+    // 之前按「成员名查表」给固定序号（uv 恒为 TEXCOORD3），看起来两侧一致，
+    // 但 PS 的输入签名里只有 uv 一个元素 ⇒ 它落在寄存器 0，而 VS 的
+    // TEXCOORD3 落在寄存器 3 ⇒ 仍然判定不匹配（实测 ToneMap 卡在这里）。
+    const int nth = counters["__seq"]++;
+    return std::string(" : TEXCOORD") + std::to_string(nth);
 }
 
 /// 是否是「需要注入语义」的结构体：名字含 Output / Input
@@ -152,6 +142,25 @@ static std::string InjectSemantics(std::string src, bool isVertexStage) {
 
         out.append(src, s, braceOpen - s + 1);      // "struct X {"
         const std::string body = src.substr(braceOpen + 1, i - braceOpen - 1);
+
+        // 【PS 输入必须带 SV_Position】
+        //
+        // D3D12 的 VS→PS 链接校验按「语义 + 序号」逐项对照，而且两阶段的
+        // 通用寄存器是**按签名里的出现顺序**依次分配的：
+        //   VS 输出：[SV_Position, TEXCOORD0]  ⇒ TEXCOORD0 落在通用寄存器 1
+        //   PS 输入：[TEXCOORD0]               ⇒ 落在通用寄存器 0
+        // ⇒ 报 "Semantic 'TEXCOORD' is defined for mismatched hardware registers"。
+        // 实测给 PS 输入补一个 SV_Position 成员后 ToneMap 的 PSO 立刻创建成功。
+        // 这里统一给「像素阶段的输入结构」补上，保证两侧寄存器对齐。
+        if (!isVertexStage && name.find("Input") != std::string::npos) {
+            bool hasPos = false;
+            for (const char* key : { "position", "Position" }) {
+                if (body.find(key) != std::string::npos) { hasPos = true; break; }
+            }
+            if (!hasPos) {
+                out += "\n    float4 position_0 : SV_Position;   // 对齐 VS 输出的通用寄存器编号";
+            }
+        }
 
         if (!IsSignatureStruct(name)) {
             out += body;
