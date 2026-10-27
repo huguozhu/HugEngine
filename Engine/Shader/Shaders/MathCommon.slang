@@ -1,4 +1,4 @@
-// ============================================================
+﻿// ============================================================
 // MathCommon.slang — 纯数学/颜色工具（**零绑定、零 include**）
 //
 // 【为什么要与 common.slang 分开】这些函数是纯计算（PI 常数、sRGB 传递函数、感知亮度、
@@ -27,14 +27,21 @@ static const float HE_EPSILON = 0.0001;
 float3 LinearToSRGB(float3 c) {
     float3 lo = c * 12.92;
     float3 hi = 1.055 * pow(max(c, 0.0), float3(1.0 / 2.4)) - 0.055;
-    return c <= 0.0031308 ? lo : hi;
+    // 【跨后端】逐分量选择不能用三元运算符，也不能用 select()——
+    // DXC 的 HLSL 后端会把两者都展开成 `cond ? a : b`，遇到向量条件直接报
+    // "condition for short-circuiting ternary operator must be scalar"。
+    // 因此改用「step + lerp」的纯算术形式：
+    //   step(c, t) 在 HLSL 里是 (t >= c) ? 1 : 0  ⇒ 正好是 c <= t 的掩码
+    float3 mask = step(c, float3(0.0031308));
+    return lerp(hi, lo, mask);
 }
 
 // sRGB → 线性空间（标准分段传递函数）
 float3 SRGBToLinear(float3 c) {
     float3 lo = c / 12.92;
     float3 hi = pow((max(c, 0.0) + 0.055) / 1.055, float3(2.4));
-    return c <= 0.04045 ? lo : hi;
+    float3 mask = step(c, float3(0.04045));
+    return lerp(hi, lo, mask);
 }
 
 // 亮度计算（感知加权）

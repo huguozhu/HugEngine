@@ -1,4 +1,6 @@
-#pragma once
+﻿#pragma once
+
+#include <iterator>
 
 #include "RHI/Types.h"
 #include "Core/Types.h"
@@ -33,6 +35,44 @@ struct ShaderBytecode {
     std::vector<u8>         dxil;
     String                  entryPoint = kDefaultShaderEntryPoint;
 };
+
+/// 从两套字节码构造 ShaderBytecode（Vulkan 用 SPIR-V，D3D12 用 DXIL）。
+///
+/// 【为什么用模板】构建系统生成的两套头文件容器类型不同：
+///   · `*.spv.h`  产出 `std::vector<uint32_t>`（便于按 32 位字校验）
+///   · `*.dxil.h` 产出原始数组 `const unsigned char[N]`（DXIL 是字节流）
+/// 模板参数接受任意可迭代容器/数组，内部统一用 begin/end 拷贝，
+/// 调用点无需关心具体类型。
+///
+/// 用法：
+///   auto vs = MakeShaderBytecode(ShaderStage::Vertex, k_Triangle_vert_spv,
+///                                k_Triangle_vert_dxil, "main");
+/// 某套字节码缺失时传 `nullptr`。
+template <class TSpv, class TDxil>
+inline ShaderBytecode MakeShaderBytecode(ShaderStage stage,
+                                         const TSpv& spv,
+                                         const TDxil& dxil,
+                                         const char* entry = kDefaultShaderEntryPoint) {
+    ShaderBytecode bc;
+    bc.stage = stage;
+    bc.spirv.assign(std::begin(spv), std::end(spv));
+    bc.dxil.assign(std::begin(dxil), std::end(dxil));
+    bc.entryPoint = entry ? entry : kDefaultShaderEntryPoint;
+    return bc;
+}
+
+/// 只有一种字节码时的重载（例如光追/网格着色器暂时只有 SPIR-V）
+template <class TSpv>
+inline ShaderBytecode MakeShaderBytecode(ShaderStage stage,
+                                         const TSpv& spv,
+                                         std::nullptr_t,
+                                         const char* entry = kDefaultShaderEntryPoint) {
+    ShaderBytecode bc;
+    bc.stage = stage;
+    bc.spirv.assign(std::begin(spv), std::end(spv));
+    bc.entryPoint = entry ? entry : kDefaultShaderEntryPoint;
+    return bc;
+}
 
 // --- Vertex input layout ---
 enum class VertexFormat {

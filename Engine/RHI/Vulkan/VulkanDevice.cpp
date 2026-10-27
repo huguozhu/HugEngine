@@ -1,4 +1,4 @@
-// A-1：命令流翻译层（ExecuteSubmit 在提交前把纯数据命令流翻译进主列表）
+﻿// A-1：命令流翻译层（ExecuteSubmit 在提交前把纯数据命令流翻译进主列表）
 #include "RHI/RHICommandList.h"
 #include "RHI/RHICommandReplay.h"
 
@@ -9,6 +9,10 @@
 #include "RHI/Shader.h"
 #include "RHI/ThreadAffinity.h"   // T0.1：线程归属断言（RHI 只允许在拥有线程上调用）
 #include "Core/Log.h"
+#if defined(HE_RHI_D3D12)
+// D3D12 后端设备（与 Vulkan 并列的另一个 IRHIDevice 实现）
+#include "D3D12/D3D12Device.h"
+#endif
 
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <vulkan/vulkan.h>
@@ -1642,6 +1646,18 @@ std::unique_ptr<IRHISampler> VulkanDevice::CreateSampler(const SamplerDesc& desc
 // Factory
 // ============================================================
 std::unique_ptr<IRHIDevice> CreateDevice(Backend backend) {
+#if defined(HE_RHI_D3D12)
+    // D3D12 后端：与 Vulkan 并列，接口完全一致（IRHIDevice）
+    if (backend == Backend::D3D12) {
+        auto device = std::make_unique<d3d12::D3D12Device>();
+        if (!device->Initialize()) {
+            HE_CORE_ERROR("CreateDevice: D3D12 设备初始化失败");
+            return nullptr;
+        }
+        GetThreadAffinity().Claim();
+        return device;
+    }
+#endif
     if (backend == Backend::Vulkan) {
         auto device = std::make_unique<VulkanDevice>();
         // T0.1：把**创建设备的线程**记为 RHI 拥有线程（阶段 0 即主线程；阶段 2 起是渲染线程）。

@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "RHI/Types.h"
 #include "RHI/RHIHandles.h"   // A-3：句柄式资源（带代次校验）
@@ -262,5 +262,11 @@ public:
 IRHIDevice*                     GetDevice();
 void                            SetDevice(IRHIDevice* device);
 std::unique_ptr<IRHIDevice>     CreateDevice(Backend backend);
+
+/// 从环境变量 `HE_RHI_BACKEND` 解析要使用的后端（大小写不敏感）。
+/// 取值：`vulkan`（默认）/ `d3d12`。无法识别时回退到 Vulkan 并打印警告。
+/// 用途：让所有样例统一支持 `set HE_RHI_BACKEND=d3d12` 切换后端，
+/// 而不必每个样例各写一份解析逻辑。
+Backend ResolveBackendFromEnv();
 
 } // namespace he::rhi
