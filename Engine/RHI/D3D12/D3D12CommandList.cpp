@@ -265,6 +265,39 @@ void D3D12CommandList::BeginOffscreenPassMRT(void* const* colorImageViews, u32 c
     D3D12_CPU_DESCRIPTOR_HANDLE dsv = ToCpuHandle(depthImageView);
     const bool hasDsv = (depthImageView != nullptr);
 
+    // 【MRT 也必须做状态转换】此前只有单目标路径做了屏障，多目标 pass（GBuffer 等）
+    // 的渲染目标停在 COMMON/PRESENT，被调试层判定非法、绘制被丢弃（id=538）。
+    for (u32 i = 0; i < n; ++i) {
+        if (!colorImageViews[i] || !m_Device) continue;
+        if (ID3D12Resource* res = m_Device->FindViewResource(static_cast<UINT64>(rtvs[i].ptr))) {
+            const auto from = m_Device->GetResourceState(res);
+            if (from != D3D12_RESOURCE_STATE_RENDER_TARGET) {
+                D3D12_RESOURCE_BARRIER tb{};
+                tb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                tb.Transition.pResource = res;
+                tb.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                tb.Transition.StateBefore = from;
+                tb.Transition.StateAfter  = D3D12_RESOURCE_STATE_RENDER_TARGET;
+                m_List->ResourceBarrier(1, &tb);
+                m_Device->SetResourceState(res, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            }
+        }
+    }
+    if (hasDsv && m_Device) {
+        if (ID3D12Resource* dres = m_Device->FindViewResource(static_cast<UINT64>(dsv.ptr))) {
+            const auto from = m_Device->GetResourceState(dres);
+            if (from != D3D12_RESOURCE_STATE_DEPTH_WRITE) {
+                D3D12_RESOURCE_BARRIER tb{};
+                tb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                tb.Transition.pResource = dres;
+                tb.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                tb.Transition.StateBefore = from;
+                tb.Transition.StateAfter  = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+                m_List->ResourceBarrier(1, &tb);
+                m_Device->SetResourceState(dres, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+            }
+        }
+    }
     m_List->OMSetRenderTargets(n, rtvs, FALSE, hasDsv ? &dsv : nullptr);
 
     if (clears) {
