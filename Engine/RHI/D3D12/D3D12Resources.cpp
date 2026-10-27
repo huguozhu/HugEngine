@@ -351,6 +351,11 @@ D3D12_INDEX_BUFFER_VIEW D3D12Buffer::GetIbv() const {
 //  Texture
 // ===========================================================================
 D3D12Texture::~D3D12Texture() {
+    // 【等 GPU 空闲再释放】引擎在运行期高频创建/销毁渲染目标（实测 12 秒 40 张
+    // 1920x1080 的 HDR 目标）。若直接释放，GPU 可能仍在读写它，且它的 RTV 描述符堆
+    // 也被释放 —— 后续帧用同一个地址重建的句柄会指向已释放的堆，表现就是
+    // 「清屏与绘制都合法、但都不生效、画面恒黑」。这里先等队列空闲再释放。
+    if (m_OwnerDevice) m_OwnerDevice->WaitIdle();
     // 注销视图句柄映射，避免地址被复用时查到错误的资源
     if (m_OwnerDevice) {
         if (m_Rtv.ptr) m_OwnerDevice->UnregisterViewResource(static_cast<UINT64>(m_Rtv.ptr));
