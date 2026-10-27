@@ -220,6 +220,64 @@ void D3D12CommandList::BeginOffscreenPass(void* colorImageView, void* depthImage
     }
 
     std::printf("[BOPB] rtv=%p rtvRes=%p dsv=%p\n", (void*)rtv.ptr, (void*)m_Device->FindViewResource(static_cast<UINT64>(rtv.ptr)), (void*)dsv.ptr); std::fflush(stdout);
+    // 【HDR 中间结果转储】进入宽屏离屏 pass 时，把该目标回读并打印首像素。
+    // 此刻里面是**上一帧**完整渲染后的结果，可判断几何是否真的画进了 HDR。
+    if (std::getenv("HE_DUMP_HDR") && hasRtv && m_Device && m_Device->GetDevice() && m_Device->GetQueue()) {
+        if (ID3D12Resource* hres = m_Device->FindViewResource(static_cast<UINT64>(rtv.ptr))) {
+            const D3D12_RESOURCE_DESC hd = hres->GetDesc();
+            if (hd.Width >= 1920) {
+                static ComPtr<ID3D12Resource> s_rb;
+                const u32 rowPitch = static_cast<u32>((hd.Width * 8 + 255) & ~255ull);
+                const u64 need = static_cast<u64>(rowPitch) * hd.Height;
+                if (!s_rb) {
+                    D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_READBACK;
+                    D3D12_RESOURCE_DESC rd{}; rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+                    rd.Width = need; rd.Height = 1; rd.DepthOrArraySize = 1; rd.MipLevels = 1;
+                    rd.Format = DXGI_FORMAT_UNKNOWN; rd.SampleDesc = {1,0};
+                    rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+                    m_Device->GetDevice()->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+                        D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&s_rb));
+                }
+                static int s_pending = 0;
+                if (s_rb && s_pending) {
+                    // 上一帧已录制过拷贝，此刻 GPU 大概率已完成 → 读回并打印首像素
+                    void* mp = nullptr; D3D12_RANGE rr{0,0};
+                    if (SUCCEEDED(s_rb->Map(0, &rr, &mp)) && mp) {
+                        const float* fp = static_cast<const float*>(mp);
+                        HE_CORE_ERROR("[HDR-DUMP] {}x{} fmt={} px0=({:.3f},{:.3f},{:.3f},{:.3f}) px1=({:.3f},{:.3f},{:.3f},{:.3f})",
+                            (u64)hd.Width, (u32)hd.Height, (u32)hd.Format,
+                            fp[0],fp[1],fp[2],fp[3], fp[4],fp[5],fp[6],fp[7]);
+                        s_rb->Unmap(0, nullptr);
+                    }
+                    s_pending = 0;
+                }
+                if (s_rb) {
+                    D3D12_RESOURCE_BARRIER bb{};
+                    bb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION; bb.Transition.pResource = hres;
+                    bb.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                    bb.Transition.StateBefore = m_Device->GetResourceState(hres);
+                    bb.Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_SOURCE;
+                    if (bb.Transition.StateBefore != bb.Transition.StateAfter) m_List->ResourceBarrier(1, &bb);
+                    D3D12_TEXTURE_COPY_LOCATION dst{}; dst.pResource = s_rb.Get();
+                    dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                    dst.PlacedFootprint.Footprint.Format = hd.Format;
+                    dst.PlacedFootprint.Footprint.Width = static_cast<UINT>(hd.Width);
+                    dst.PlacedFootprint.Footprint.Height = hd.Height;
+                    dst.PlacedFootprint.Footprint.Depth = 1;
+                    dst.PlacedFootprint.Footprint.RowPitch = rowPitch;
+                    D3D12_TEXTURE_COPY_LOCATION src{}; src.pResource = hres;
+                    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.SubresourceIndex = 0;
+                    m_List->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+                    D3D12_RESOURCE_BARRIER rb = bb;
+                    rb.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+                    rb.Transition.StateAfter  = m_Device->GetResourceState(hres);
+                    if (rb.Transition.StateBefore != rb.Transition.StateAfter) m_List->ResourceBarrier(1, &rb);
+                    s_pending = 1;
+                }
+            }
+        }
+    }
+
     m_List->OMSetRenderTargets(hasRtv ? 1u : 0u, hasRtv ? &rtv : nullptr, FALSE, hasDsv ? &dsv : nullptr);
     std::printf("[BOPC] after OMSetRT\n"); std::fflush(stdout);
     m_HasRtv = hasRtv;
