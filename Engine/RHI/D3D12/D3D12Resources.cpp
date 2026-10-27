@@ -58,9 +58,16 @@ bool D3D12Buffer::Initialize(D3D12Device* device, const BufferDesc& desc) {
     // 光追缓冲（BLAS/TLAS 的存储、SBT）需要 D3D12_RESOURCE_FLAG_RAYTRACING_ACCELERATION_STRUCTURE，
     // 而本后端的 BLAS/TLAS/SBT 属阶段 4，尚未实现。这里直接拒绝，
     // 避免 CreateCommittedResource 抛 E_INVALIDARG 噪音。
-    if (HasAny(desc.usage, BufferUsage::AccelerationStruct) ||
-        HasAny(desc.usage, BufferUsage::ShaderBindingTable)) {
-                HE_CORE_INFO("D3D12Buffer: 跳过光追缓冲（阶段 4 未实现）size={}", static_cast<u64>(desc.size));
+    // 【只跳过"纯光追"缓冲】引擎给**所有**顶点/索引缓冲都额外带上了
+    // AccelerationStruct 标志（`Vertex | AccelerationStruct`），以便后续建 BLAS。
+    // 之前在此无条件跳过，导致所有网格的顶点/索引缓冲都变成无效句柄 ⇒
+    // 注册表里 mesh 的 buffer 为 null ⇒ 一个网格都画不出来 ⇒ 画面全黑。
+    // 现在只在「除了光追标志之外没有任何可用用途」时才跳过。
+    constexpr u32 kRtOnly = static_cast<u32>(BufferUsage::AccelerationStruct) |
+                            static_cast<u32>(BufferUsage::ShaderBindingTable);
+    const u32 usageBits = static_cast<u32>(desc.usage);
+    if ((usageBits & kRtOnly) != 0 && (usageBits & ~kRtOnly) == 0) {
+        HE_CORE_INFO("D3D12Buffer: 跳过纯光追缓冲（阶段 4 未实现）size={}", static_cast<u64>(desc.size));
         return false;
     }
 
