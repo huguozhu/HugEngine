@@ -14,6 +14,15 @@
 
 namespace he::rhi::d3d12 {
 
+// 设备存活检查（与 D3D12Resources.cpp 里的同名辅助函数用途一致）
+static void CheckDeviceAlive(ID3D12Device* dev, const char* where) {
+    if (!dev) return;
+    const HRESULT r = dev->GetDeviceRemovedReason();
+    if (FAILED(r)) {
+        HE_CORE_ERROR("[设备丢失] 在 {} 之后, reason=0x{:08x}", where, static_cast<u32>(r));
+    }
+}
+
 D3D12Device::~D3D12Device() {
     // 退出前确保 GPU 空闲，否则销毁资源时驱动会报 use-after-free
     if (m_Queue) { m_Queue->Signal(nullptr, 0); }
@@ -695,11 +704,36 @@ void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, Desc
     auto* tex = static_cast<D3D12Texture*>(texture);
     D3D12_CPU_DESCRIPTOR_HANDLE dst = GetSlotCpuHandle(slot);
     D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
-    srv.Format = DXGI_FORMAT_UNKNOWN;
     srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     srv.Texture2D.MipLevels = tex->GetMipLevels();
+
+    // 【深度纹理必须显式给 SRV 格式】D3D 的 DSV 格式（D32_FLOAT 等）**不是**合法的
+    // SRV 格式；用 Format=UNKNOWN 让运行时自己推断时会命中 D32_FLOAT，
+    // CreateShaderResourceView 直接判非法调用并移除设备
+    //（实测 02.Cube 的 2048x2048 阴影贴图在这里让设备丢失，reason=0x887a0001）。
+    // 深度读必须映射到对应的 Rxx 格式。
+    {
+        DXGI_FORMAT resFmt = DXGI_FORMAT_UNKNOWN;
+        if (auto* res = tex->GetResource()) resFmt = res->GetDesc().Format;
+        switch (resFmt) {
+            case DXGI_FORMAT_D32_FLOAT:         srv.Format = DXGI_FORMAT_R32_FLOAT; break;
+            case DXGI_FORMAT_D24_UNORM_S8_UINT: srv.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS; break;
+            case DXGI_FORMAT_D16_UNORM:         srv.Format = DXGI_FORMAT_R16_UNORM; break;
+            default:                            srv.Format = DXGI_FORMAT_UNKNOWN; break;   // 颜色纹理沿用资源格式
+        }
+    }
+    if (auto* res = tex->GetResource()) {
+        const D3D12_RESOURCE_DESC d = res->GetDesc();
+        HE_CORE_INFO("[SRV] res: dim={} {}x{} mip={} arr={} fmt={} flags=0x{:x} | srv: view={} mipLevels={} slot={}",
+                     static_cast<int>(d.Dimension), static_cast<u64>(d.Width),
+                     static_cast<u32>(d.Height), static_cast<u32>(d.MipLevels),
+                     static_cast<u32>(d.DepthOrArraySize), static_cast<u32>(d.Format),
+                     static_cast<u32>(d.Flags), static_cast<int>(srv.ViewDimension),
+                     static_cast<u32>(srv.Texture2D.MipLevels), slot);
+    }
     m_Device->CreateShaderResourceView(tex->GetResource(), &srv, dst);
+    CheckDeviceAlive(m_Device.Get(), "CreateShaderResourceView(texture)");
 
     // StorageImage（RWTexture）需要一个 UAV 视图
     if (type == DescriptorType::StorageImage) {
@@ -718,6 +752,7 @@ void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, Desc
         dstS.ptr += static_cast<SIZE_T>(slot) * m_SetSamplerSize;
         m_Device->CopyDescriptorsSimple(1, dstS, smp->GetDescriptor(),
                                         D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+        CheckDeviceAlive(m_Device.Get(), "CopyDescriptorsSimple(sampler)");
     }
 }
 

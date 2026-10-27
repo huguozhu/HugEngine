@@ -27,7 +27,20 @@ D3D12Buffer::~D3D12Buffer() {
     }
 }
 
+// 【设备丢失即时定位】每次建缓冲后立刻查移除原因 —— 之前都是"事后"才发现设备丢了，
+// 只能靠猜是哪一步。把检查放到每个创建点，就能一次锁定元凶。
+static void CheckDeviceAlive(ID3D12Device* dev, const char* where) {
+    if (!dev) return;
+    const HRESULT r = dev->GetDeviceRemovedReason();
+    if (FAILED(r)) {
+        HE_CORE_ERROR("[设备丢失] 发生在 {} 之后, reason=0x{:08x}", where, static_cast<u32>(r));
+    }
+}
+
 bool D3D12Buffer::Initialize(D3D12Device* device, const BufferDesc& desc) {
+    // 每次建缓冲前先确认设备还活着 —— 之前只在创建后检查，结果发现设备在更早就已被移除
+    if (m_Device && m_Device->GetDevice())
+        CheckDeviceAlive(m_Device->GetDevice(), "进入 D3D12Buffer::Initialize 之前");
     if (!device || !device->GetDevice()) {
         HE_CORE_ERROR("D3D12Buffer: 设备为空");
         return false;
@@ -46,7 +59,7 @@ bool D3D12Buffer::Initialize(D3D12Device* device, const BufferDesc& desc) {
     // 避免 CreateCommittedResource 抛 E_INVALIDARG 噪音。
     if (HasAny(desc.usage, BufferUsage::AccelerationStruct) ||
         HasAny(desc.usage, BufferUsage::ShaderBindingTable)) {
-        HE_CORE_INFO("D3D12Buffer: 跳过光追缓冲（阶段 4 未实现）size={}", static_cast<u64>(desc.size));
+                HE_CORE_INFO("D3D12Buffer: 跳过光追缓冲（阶段 4 未实现）size={}", static_cast<u64>(desc.size));
         return false;
     }
 
@@ -104,6 +117,13 @@ bool D3D12Buffer::Initialize(D3D12Device* device, const BufferDesc& desc) {
         (heapType == D3D12_HEAP_TYPE_UPLOAD) ? D3D12_RESOURCE_STATE_GENERIC_READ
                                              : D3D12_RESOURCE_STATE_COMMON;
     m_State = initState;
+
+    // 【设备丢失定位】每次创建**之前**先确认设备还活着，并打印本次参数。
+    // 这样日志里「最后一次正常打印」与「第一次失败」之间的那一次就是元凶。
+    CheckDeviceAlive(dev, "下一次 CreateCommittedResource 之前");
+    HE_CORE_INFO("[建缓冲] size={} alloc={} usage=0x{:x} heap={} flags=0x{:x} cpuAccess={}",
+                 static_cast<u64>(desc.size), allocSize, static_cast<u32>(desc.usage),
+                 static_cast<int>(heapType), static_cast<u32>(rd.Flags), desc.cpuAccess);
 
     if (!HE_D3D12_CHECK(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, initState,
                                                      nullptr, IID_PPV_ARGS(&m_Resource)),
