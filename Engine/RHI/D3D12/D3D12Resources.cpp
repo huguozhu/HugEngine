@@ -979,6 +979,11 @@ bool D3D12PipelineState::Initialize(D3D12Device* device, const PipelineStateDesc
             (int)pd.PrimitiveTopologyType, (int)pd.RasterizerState.FillMode,
             (int)pd.RasterizerState.CullMode, pd.RasterizerState.DepthClipEnable ? 1 : 0,
             pd.RasterizerState.FrontCounterClockwise ? 1 : 0);
+        HE_CORE_ERROR("[PSO-D2] name={} blend0={} src={} dst={} op={} writeMask={} alphaCov={}",
+            desc.debugName.c_str(), (int)pd.BlendState.RenderTarget[0].BlendEnable,
+            (int)pd.BlendState.RenderTarget[0].SrcBlend, (int)pd.BlendState.RenderTarget[0].DestBlend,
+            (int)pd.BlendState.RenderTarget[0].BlendOp, (u32)pd.BlendState.RenderTarget[0].RenderTargetWriteMask,
+            (int)pd.BlendState.AlphaToCoverageEnable);
     }
     pd.NodeMask = 0;
     pd.CachedPSO = {};
