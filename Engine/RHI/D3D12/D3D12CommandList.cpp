@@ -432,6 +432,7 @@ void D3D12CommandList::SetPipeline(IRHIPipelineState* pso) {
 }
 
 void D3D12CommandList::SetVertexBuffer(IRHIBuffer* buffer, u32 binding) {
+    { static int n4=0; if (n4++ < 30 && buffer) { std::printf("[VBSET] %p\n", (void*)buffer); std::fflush(stdout); } }
     if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] SetVertexBuffer\n"); std::fflush(stdout); }
     if (!m_List || !buffer) return;
     auto* b = static_cast<D3D12Buffer*>(buffer);
@@ -504,6 +505,7 @@ void D3D12CommandList::BindDescriptorSet(u32 setIndex, DescriptorSetHandle set) 
     { static int s=0; if (s<4) { ++s; std::printf("[STP] BindSet %d\n", s); std::fflush(stdout); } }
     if (!m_List || !m_Device || set == kInvalidSet || setIndex >= 8) return;
     if (!m_Device->EnsureDescriptorHeaps()) return;
+    m_Device->FlushPendingBindlessBuffers();   // 补写初始化早期被丢弃的 bindless 缓冲描述符
 
     ID3D12DescriptorHeap* heaps[2] = { m_Device->GetCbvSrvUavHeap(), m_Device->GetSetSamplerHeap() };
     if (!heaps[0] || !heaps[1]) return;
@@ -511,6 +513,8 @@ void D3D12CommandList::BindDescriptorSet(u32 setIndex, DescriptorSetHandle set) 
     std::printf("[BS] heaps ok\n"); std::fflush(stdout);
 
     const u32 baseSlot = m_Device->GetSetBaseSlot(set);
+    m_LastBoundSet = set; m_LastBaseSlot = baseSlot;
+    { static int n8=0; if (++n8 % 60 == 1) { std::printf("[LISTID-B] list=%p set=%llu base=%u\n", (void*)this, (unsigned long long)set, baseSlot); std::fflush(stdout); } }
     std::printf("[BS] base ok\n"); std::fflush(stdout);
     if (baseSlot == 0xFFFFFFFFu) return;
     std::printf("[BS] baseret ok\n"); std::fflush(stdout);
@@ -529,8 +533,40 @@ void D3D12CommandList::BindDescriptorSet(u32 setIndex, DescriptorSetHandle set) 
     // 之前这里用 12/16 是老布局（当时 kSpaceCount=4）的偏移，把 UAV/Sampler
     // 表绑到了 SRV 的槽位上，描述符类型对不上会让 D3D12 直接卡死。
     std::printf("[BS] srv=%llu uav=%llu\n",(unsigned long long)srv.ptr,(unsigned long long)uav.ptr); std::fflush(stdout);
-    m_List->SetGraphicsRootDescriptorTable(8  + setIndex, srv);
-    std::printf("[BS] g-srv ok\n"); std::fflush(stdout);
+    { static int n=0; if (++n <= 8) { const auto h0=m_Device->GetSrvHeapGpuStart();
+        std::printf("[GPUDIFF] setIndex=%u base=%u gpuOff=%llu\n", setIndex, baseSlot,
+            (unsigned long long)(srv.ptr - h0.ptr)); std::fflush(stdout); } }
+    if (std::getenv("HE_COPY0") && setIndex == 0) {
+        // diag: copy this set SRV range to slot 0 and bind heap base
+        m_Device->GetDevice()->CopyDescriptorsSimple(32,
+            m_Device->GetSlotCpuHandle(0), m_Device->GetSlotCpuHandle(baseSlot),
+            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        m_List->SetGraphicsRootDescriptorTable(8, m_Device->GetSrvHeapGpuStart());
+    } else {
+    // object buffer rebind (frame-slot mismatch fix): use the buffer most recently
+    // written by the CPU, otherwise the bound set may point at a never-written slot.
+    if (setIndex == 0u) {
+        { static int n0=0; if (++n0 % 300 == 1) { std::printf("[REBIND] obj=%p set=%llu base=%u\n",
+            (void*)m_Device->GetLastObjectBuffer(), (unsigned long long)set, baseSlot); std::fflush(stdout); } }
+        auto itObj = m_Device->m_ObjectBufferBySet.find(static_cast<UINT64>(set));
+        if (auto* obj = (itObj != m_Device->m_ObjectBufferBySet.end()) ? itObj->second : nullptr) {
+        { static int n2=0; if (++n2 % 100 == 1) { std::printf("[BADDR] set=%llu obj=%p gpu=%llu\n",
+            (unsigned long long)set, (void*)obj, (unsigned long long)obj->GetResource()->GetGPUVirtualAddress()); std::fflush(stdout); } }
+            D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+            sv.Format = DXGI_FORMAT_UNKNOWN;
+            sv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+            sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            sv.Buffer.StructureByteStride = 208u;
+            sv.Buffer.NumElements = 1024u;
+            // 诊断：把物体缓冲铺满 base+0..8，用于确认着色器实际读取的槽位
+            for (u32 k = 0; k <= 8u; ++k) {
+                m_Device->GetDevice()->CreateShaderResourceView(
+                    obj->GetResource(), &sv, m_Device->GetSlotCpuHandle(baseSlot + k));
+            }
+        }
+    }
+        m_List->SetGraphicsRootDescriptorTable(8  + setIndex, srv);
+    }
     m_List->SetGraphicsRootDescriptorTable(16 + setIndex, uav);
     std::printf("[BS] g-uav ok\n"); std::fflush(stdout);
     m_List->SetGraphicsRootDescriptorTable(24 + setIndex, smp);
@@ -547,26 +583,60 @@ void D3D12CommandList::BindDescriptorSet(u32 setIndex, DescriptorSetHandle set) 
 }
 
 void D3D12CommandList::SetPushConstants(u32 offset, u32 size, const void* data) {
-    { static int s=0; if (s<4) { ++s; std::printf("[STP] PushConst %d\n", s); std::fflush(stdout); } }
-    if (!m_List || !m_Device || !data || size == 0) return;
+    if (!m_List || !m_Device || !data) return;
 
-    // 常量：从设备的常量缓冲环取一块 256B，写入数据，然后用
-    // SetGraphicsRootConstantBufferView 直接绑到 b0（根签名参数 0）。
-    // 这样不依赖描述符堆，也不受 cbuffer 寄存器编号影响。
-    // 复用 Begin() 里申请的整帧槽位：多次调用按 offset 累加（Vulkan 语义）
-    if (m_PushGpu == 0 || !m_PushCpu) return;
+    // 【累积式推送】引擎一次"常量集"可能分多次推送：先 offset=0 推相机/帧常量，
+    // 再用 offset>0 补逐物体数据。它们必须落在**同一块**常量缓冲里。
+    // 只有当 offset==0（新的一组常量开始）时才另开槽位；其余情况继续写当前槽位。
+    // 一次绘制的多次推送（相机 offset=0、逐物体 offset=84 等）必须共享同一槽位；
+    // 只有「上一次绘制结束」后才另开槽位，否则后一次推送会覆盖掉前一次写入的字段
+    //（实测：物体索引被相机推送覆盖成 0xCCCCCCCC ⇒ 所有绘制都画同一个物体）。
+    if (m_PushDirty || m_PushGpu == 0 || !m_PushCpu) {
+        D3D12_GPU_VIRTUAL_ADDRESS slot = 0;
+        D3D12_GPU_DESCRIPTOR_HANDLE cbvHandle{};
+        if (!m_Device->AllocateConstants(slot, cbvHandle)) return;
+        void* cpu = m_Device->GetConstantSlotPtr(slot);
+        if (!cpu) return;
+        std::memset(cpu, 0, 256);
+        m_PushGpu = slot;
+        m_PushCpu = cpu;
+        m_PushDirty = false;
+        if (m_IsComputePipeline) {
+            m_List->SetComputeRootConstantBufferView(0, slot);
+        } else {
+            // 生成的 HLSL 里 FrameConstants 在 register(b0)/(b1)，两者都绑同一块
+            m_List->SetGraphicsRootConstantBufferView(0, slot);
+            m_List->SetGraphicsRootConstantBufferView(1, slot);
+        }
+    }
+
+    // 记录本次推常量里的 objectIndex（偏移 84 = 第 21 个 u32），供绘制时核对
+    if (offset <= 84u && offset + size >= 88u && data) {
+        const u8* raw = static_cast<const u8*>(data);
+        m_LastObjIdx = *reinterpret_cast<const u32*>(raw + (84u - offset));
+    }
+    if (size >= 160u && data) {
+        static int n1=0; if (++n1 % 300 == 1) {
+            const u32* w = static_cast<const u32*>(data);
+            std::printf("[PCSET] list=%p light=%u obj=%u useInst=%u w24..31=%u,%u,%u,%u,%u,%u,%u,%u\n",
+                (void*)this, w[20], w[21], w[22],
+                w[24],w[25],w[26],w[27],w[28],w[29],w[30],w[31]);
+            std::fflush(stdout);
+        }
+    }
     if (offset >= 256u) return;
     const u32 copySize = ((offset + size) > 256u) ? (256u - offset) : size;
     std::memcpy(static_cast<unsigned char*>(m_PushCpu) + offset, data, copySize);
-
-    // 参数 0 = b0 的 root CBV；其余 b1..b7 目前也指向同一块（引擎的 push constant
-    // 语义里只有一个块，着色器的其他 cbuffer 由 UpdateDescriptorSet 提供的常量缓冲填充）
-    if (m_IsComputePipeline) {
-        // 计算管线的根签名是独立的一套，绑定计算侧时必须走 Compute 版本；
-        // 图形管线下调用 Compute 版本的任何 Set*Root* 都会让 D3D12 静默卡死。
-        m_List->SetComputeRootConstantBufferView(0, m_PushGpu);
-    } else {
-        m_List->SetGraphicsRootConstantBufferView(0, m_PushGpu);
+    // 【修补未初始化的 objectIndex】引擎在 GPU-driven 路径下不写 objectIndex（保持
+    // 0xCCCCCCCC 未初始化值），由着色器改用 SV_InstanceID 取物体。若直接把 0xCCCCCCCC
+    // 传给着色器，它会越界索引 u_Objects 读到 0 ⇒ 顶点塌缩。这里把它纠正成合法的 0
+    // 并打开 useInstanceID，与引擎的 GPU-driven 语义一致。
+    {
+        auto* w = static_cast<u32*>(m_PushCpu);
+        if (w[21] == 0xCCCCCCCCu || w[21] > 1000000u) {
+            w[21] = 0u;   // objectIndex
+            w[22] = 1u;   // useInstanceID：从 SV_InstanceID 取物体索引
+        }
     }
 }
 
@@ -590,8 +660,69 @@ void D3D12CommandList::Draw(u32 vertexCount, u32 instanceCount, u32 firstVertex,
 
 void D3D12CommandList::DrawIndexed(u32 indexCount, u32 instanceCount, u32 firstIndex,
                                    i32 vertexOffset, u32 firstInstance) {
+    // 【多飞行帧错位修正】引擎写的是某个飞行帧的物体缓冲，而绑定的描述符集
+    // 可能指向另一个从未写入过的缓冲（实测写入 390594560 / 绑定 390070272）。
+    // 这里把「最近上传的物体缓冲」重新写进当前集的 t2 槽位，保证着色器读到有效数据。
+    { static int n7=0; if (++n7 % 200 == 1) {
+        const unsigned k = (m_LastObjIdx < 32u) ? m_LastObjIdx : 0u;
+        std::printf("[OBJIDX] idx=%u scale=(%.2f,%.2f,%.2f) trans=(%.2f,%.2f,%.2f)\n",
+            m_LastObjIdx, m_Device->m_LastObjM[k][0], m_Device->m_LastObjM[k][1], m_Device->m_LastObjM[k][2],
+            m_Device->m_LastObjM[k][3], m_Device->m_LastObjM[k][4], m_Device->m_LastObjM[k][5]);
+        std::fflush(stdout); } }
+    { static int n8=0; if (++n8 % 400 == 1) { std::printf("[OBJFIX] obj=%p base=%u\n",
+        (void*)m_Device->GetLastObjectBuffer(), m_LastBaseSlot); std::fflush(stdout); } }
+    if (auto* obj = m_Device->GetLastObjectBuffer(); obj && m_LastBaseSlot != 0xFFFFFFFFu) {
+        D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+        sv.Format = DXGI_FORMAT_UNKNOWN;
+        sv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sv.Buffer.FirstElement = 0;
+        sv.Buffer.StructureByteStride = 208u;      // sizeof(GPUObjectData)
+        sv.Buffer.NumElements = 1024u;             // MAX_OBJECTS
+        sv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
+        m_Device->GetDevice()->CreateShaderResourceView(
+            obj->GetResource(), &sv, m_Device->GetSlotCpuHandle(m_LastBaseSlot + 2u));
+    }
+
+    // 绘制前重新绑定 space0 的 SRV 表：引擎只在 pass 开始绑一次，若期间有别的
+    // BindDescriptorSet（同样是 setIndex=0）覆盖了同一张表，绘制时就会读到别的 set。
+    if (m_Device && m_LastBaseSlot != 0xFFFFFFFFu) {
+        const D3D12_GPU_DESCRIPTOR_HANDLE s0 = m_Device->GetSetGpuHandle(m_LastBaseSlot);
+        if (s0.ptr) m_List->SetGraphicsRootDescriptorTable(8, s0);
+    }
+    { static int n=0; if (indexCount == 1728 && ++n <= 4) { std::printf("[DRAWSET] set=%llu base=%u idx=%u\n", (unsigned long long)m_LastBoundSet, m_LastBaseSlot, indexCount); std::fflush(stdout); } }
+    // space2 绑定分测：分别用 HE_BIND2_SRV / HE_BIND2_SMP 控制
+    if (m_Device && m_List) {
+        if (true) {   // space2 的 bindless 表必须总是绑定
+            const D3D12_GPU_DESCRIPTOR_HANDLE h1 = m_Device->GetBindlessSrvGpuHandle();
+            if (h1.ptr) m_List->SetGraphicsRootDescriptorTable(10, h1);
+        }
+        if (true) {
+            const D3D12_GPU_DESCRIPTOR_HANDLE h2 = m_Device->GetBindlessSmpGpuHandle();
+            if (h2.ptr) m_List->SetGraphicsRootDescriptorTable(26, h2);
+        }
+    }
     if (std::getenv("HE_D3D12_NO_DRAW")) return;   // 实验开关：跳过实际绘制
     if (!m_List) return;
+    { static int n6=0; if (++n6 % 90 == 1) { std::printf("[DRAWLOG] idx=%u inst=%u\n", indexCount, instanceCount); std::fflush(stdout); } }
+    { static int n2=0; if (++n2 % 150 == 1 && m_PushCpu) {
+        const u32* w = static_cast<const u32*>(m_PushCpu);
+        std::printf("[PCFIELDS] idx=%u light=%u obj=%u useInst=%u ibl=%.2f w24..31=%u,%u,%u,%u,%u,%u,%u,%u\n",
+            indexCount, w[20], w[21], w[22], *reinterpret_cast<const float*>(&w[23]),
+            w[24],w[25],w[26],w[27],w[28],w[29],w[30],w[31]);
+        std::fflush(stdout); } }
+        { static u32* w=nullptr; static int n=0;
+          if (m_PushCpu) w = static_cast<u32*>(m_PushCpu);
+          if (w && w[22] >= 2u && n++ < 3) {
+            std::printf("[INSTH] useInst=%u w24..29=%u,%u,%u,%u,%u,%u\n",
+                w[22], w[24],w[25],w[26],w[27],w[28],w[29]); std::fflush(stdout); } }
+        m_PushDirty = true;   // 下一次推送开始新的常量槽位
+    // rebind space0 SRV table right before the draw: a later BindDescriptorSet
+    // (also setIndex 0) can overwrite the table with a different set.
+    if (m_Device && m_LastBaseSlot != 0xFFFFFFFFu) {
+        const D3D12_GPU_DESCRIPTOR_HANDLE s0 = m_Device->GetSetGpuHandle(m_LastBaseSlot);
+        if (s0.ptr) m_List->SetGraphicsRootDescriptorTable(8, s0);
+    }
     m_List->DrawIndexedInstanced(indexCount, instanceCount, firstIndex,
                                  static_cast<INT>(vertexOffset), firstInstance);
 }

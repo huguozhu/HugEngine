@@ -88,7 +88,7 @@ bool D3D12Buffer::Initialize(D3D12Device* device, const BufferDesc& desc) {
     //   · 之前走 DEFAULT 堆 + 中转缓冲，但**从未执行拷贝** ⇒ 顶点数据全 0
     //     ⇒ 三角形退化 ⇒ 画面全黑（实测就是这个问题）
     if (!isStorage && (HasAny(desc.usage, BufferUsage::TransferDst) || desc.cpuAccess ||
-                       desc.initialData != nullptr)) {
+        desc.initialData != nullptr)) {
         heapType = D3D12_HEAP_TYPE_UPLOAD;
     }
     // UAV 缓冲需要一份等大的 UPLOAD 暂存来承载 CPU 写入
@@ -254,9 +254,40 @@ void* D3D12Buffer::Map() {    std::printf("[BUF] Map enter\n"); std::fflush(stdo
     return p;
 }
 
-void D3D12Buffer::Unmap() {    std::printf("[BUF] Unmap enter\n"); std::fflush(stdout);
+void D3D12Buffer::Unmap() {
+    // 记录最近一次被 CPU 写入的物体缓冲（多飞行帧错位修正用）
+    // 只有「确实写入了有效矩阵」的缓冲才记为当前物体缓冲：
+    // 三缓冲里有些槽本帧没写（全 0），绑到它们会让世界矩阵为 0。
+    { static int n1=0; if (n1++ < 40 && m_Resource) {
+        std::printf("[WADDR] buf=%p gpu=%llu m0=%.2f m15=%.2f\n", (void*)this,
+            (unsigned long long)m_Resource->GetGPUVirtualAddress(),
+            (double)static_cast<const float*>(m_MappedPtr)[0],
+            (double)static_cast<const float*>(m_MappedPtr)[15]);
+        std::fflush(stdout); } }
+    if (m_Size == 212992u && m_Device && m_MappedPtr) {
+        const float* fchk = static_cast<const float*>(m_MappedPtr);
+        if (fchk[15] != 0.0f || fchk[52 * 1 + 15] != 0.0f) {
+            m_Device->SetLastObjectBuffer(this);
+        }
+    }
+    // 保存前 32 个物体矩阵的缩放/平移副本，供绘制时核对 objIdx 是否指到了正确的物体
+    if (m_Size == 212992u && m_Device && m_MappedPtr) {
+        const float* fm = static_cast<const float*>(m_MappedPtr);
+        for (unsigned i = 0; i < 32u; ++i) {
+            const float* e = fm + i * 52u;   // 208 字节 = 52 个 float
+            m_Device->m_LastObjM[i][0] = e[0];
+            m_Device->m_LastObjM[i][1] = e[5];
+            m_Device->m_LastObjM[i][2] = e[10];
+            m_Device->m_LastObjM[i][3] = e[12];
+            m_Device->m_LastObjM[i][4] = e[13];
+            m_Device->m_LastObjM[i][5] = e[14];
+        }
+    }    std::printf("[BUF] Unmap enter\n"); std::fflush(stdout);
 
     if (!m_Resource || !m_MappedPtr) return;
+    if (m_Size == 212992u) { static int n9=0; if (++n9 <= 6) {
+        std::printf("[OBJUP] gpu=%llu\n", (unsigned long long)m_Resource->GetGPUVirtualAddress());
+        std::fflush(stdout); } }
 
     ID3D12Resource* target = m_NeedsStagingCopy ? m_CpuStaging.Get() : m_Resource.Get();
     if (target) {
@@ -271,8 +302,8 @@ void D3D12Buffer::Unmap() {    std::printf("[BUF] Unmap enter\n"); std::fflush(s
     //（实测 02.Cube 初始化阶段出现 0x887a0005）。这里改成只有一个槽，
     // 每次 Reset 前**必须**等上一次的围栏完成，正确性优先。
     HE_CORE_INFO("[Unmap 进入] size={} staging={}", static_cast<u64>(m_Size), m_NeedsStagingCopy ? 1 : 0);
-    if (m_NeedsStagingCopy && m_CpuStaging && m_Device && m_Size > 0 &&
-        std::getenv("HE_D3D12_STAGING_COPY") != nullptr) {
+    // 【必须无条件上传】此前被 HE_D3D12_STAGING_COPY 环境变量门控，默认不执行
+    if (m_NeedsStagingCopy && m_CpuStaging && m_Device && m_Size > 0) {
         const u32 copySize = static_cast<u32>((m_Size + 3) & ~3ull);
 
         ID3D12Device* dev = (m_Device->GetDevice()) ? m_Device->GetDevice() : nullptr;
@@ -301,7 +332,19 @@ void D3D12Buffer::Unmap() {    std::printf("[BUF] Unmap enter\n"); std::fflush(s
                     CloseHandle(ev);
                 }
             }
-            if (SUCCEEDED(s_alloc->Reset()) && SUCCEEDED(s_list->Reset(s_alloc.Get(), nullptr))) {
+            // 【必须等上一次拷贝执行完再 Reset 分配器】否则 D3D12 会在 GPU 还在用这块
+        // 分配器时被重置，拷贝被丢弃（实测物体缓冲一直是 0 ⇒ 世界矩阵为 0 ⇒ 全黑）。
+        if (s_ready && s_fence && s_value > 0) {
+            if (s_fence->GetCompletedValue() < s_value) {
+                HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+                if (ev) {
+                    s_fence->SetEventOnCompletion(s_value, ev);
+                    WaitForSingleObject(ev, 5000);
+                    CloseHandle(ev);
+                }
+            }
+        }
+        if (SUCCEEDED(s_alloc->Reset()) && SUCCEEDED(s_list->Reset(s_alloc.Get(), nullptr))) {
                 // 【必须转成 COPY_DEST】CopyBufferRegion 要求目标资源处于 COPY_DEST
                 // 状态；UAV 缓冲当前是 UNORDERED_ACCESS，直接拷贝会让 D3D12
                 // 判定非法操作并移除设备（实测 0x887a0005 就来自这里）。
@@ -309,7 +352,7 @@ void D3D12Buffer::Unmap() {    std::printf("[BUF] Unmap enter\n"); std::fflush(s
                 b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
                 b.Transition.pResource   = m_Resource.Get();
                 b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-                b.Transition.StateBefore = m_State;
+                b.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
                 b.Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_DEST;
                 s_list->ResourceBarrier(1, &b);
 
@@ -322,6 +365,43 @@ void D3D12Buffer::Unmap() {    std::printf("[BUF] Unmap enter\n"); std::fflush(s
                 ID3D12CommandList* lists[1] = { s_list.Get() };
                 queue->ExecuteCommandLists(1, lists);
                 s_value += 1;
+        // debug readback: verify the object buffer really made it to the GPU
+        {
+            static int s_rb = 0;
+            if (m_Size == 212992u && s_rb < 6 && s_fence) {
+                ++s_rb;
+                ComPtr<ID3D12Resource> rb;
+                D3D12_RESOURCE_DESC rbd{};
+                rbd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+                rbd.Width = 1024; rbd.Height = 1; rbd.DepthOrArraySize = 1; rbd.MipLevels = 1;
+                rbd.Format = DXGI_FORMAT_UNKNOWN; rbd.SampleDesc = { 1, 0 };
+                rbd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+                D3D12_HEAP_PROPERTIES rbp{}; rbp.Type = D3D12_HEAP_TYPE_READBACK;
+                if (SUCCEEDED(dev->CreateCommittedResource(&rbp, D3D12_HEAP_FLAG_NONE, &rbd,
+                        D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&rb)))) {
+                    if (SUCCEEDED(s_alloc->Reset()) && SUCCEEDED(s_list->Reset(s_alloc.Get(), nullptr))) {
+                        s_list->CopyBufferRegion(rb.Get(), 0, m_Resource.Get(), 0, 640);
+                        s_list->Close();
+                        ID3D12CommandList* rl[1] = { s_list.Get() };
+                        queue->ExecuteCommandLists(1, rl);
+                        s_value += 1; queue->Signal(s_fence.Get(), s_value);
+                        HANDLE ev2 = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+                        if (ev2) { s_fence->SetEventOnCompletion(s_value, ev2); WaitForSingleObject(ev2, 5000); CloseHandle(ev2); }
+                        void* p2 = nullptr; D3D12_RANGE rr{ 0, 1024 };
+                        if (SUCCEEDED(rb->Map(0, &rr, &p2)) && p2) {
+                            const float* f2 = static_cast<const float*>(p2);
+                            std::printf("[RB] gpu=%llu baseColor=(%.2f,%.2f,%.2f,%.2f) alphaCutoff=%.2f texMask=%u matID=%u\n",
+                                (unsigned long long)m_Resource->GetGPUVirtualAddress(),
+                                (double)f2[16], (double)f2[17], (double)f2[18], (double)f2[19],
+                                (double)f2[27], *reinterpret_cast<const unsigned*>(&f2[31]),
+                                *reinterpret_cast<const unsigned*>(&f2[29]));
+                            std::fflush(stdout);
+                            rb->Unmap(0, nullptr);
+                        }
+                    }
+                }
+            }
+        }
                 queue->Signal(s_fence.Get(), s_value);
             }
         }
@@ -710,6 +790,7 @@ bool D3D12PipelineState::Initialize(D3D12Device* device, const PipelineStateDesc
 
     // 深度模板
     pd.DepthStencilState.DepthEnable = desc.depthTest ? TRUE : FALSE;
+    if (std::getenv("HE_NO_DEPTH")) pd.DepthStencilState.DepthEnable = FALSE;
     pd.DepthStencilState.DepthWriteMask = desc.depthWrite ? D3D12_DEPTH_WRITE_MASK_ALL
                                                           : D3D12_DEPTH_WRITE_MASK_ZERO;
     pd.DepthStencilState.DepthFunc = ToD3D12CompareFunc(desc.depthCompare);

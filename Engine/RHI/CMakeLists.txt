@@ -143,3 +143,22 @@ endif()
 
         message(STATUS "D3D12 backend: ENABLED")
     endif()
+
+# ---------------------------------------------------------------------------
+# 把 dxcompiler.dll 复制到输出目录：D3D12 后端在运行期用 IDxcUtils::CreateReflection
+# 读取结构化缓冲的元素大小（StructuredBuffer<T> 的 SRV stride 必须等于 sizeof(T)）。
+# 若该 DLL 不在进程可搜索路径里，DxcCreateInstance 会失败，stride 只能退化成 4，
+# 导致着色器按错误步长读取（实测表现为顶点塌缩、画面全黑）。
+# ---------------------------------------------------------------------------
+find_program(HE_DXC_EXE NAMES dxc)
+if(HE_DXC_EXE)
+    get_filename_component(HE_DXC_DIR "${HE_DXC_EXE}" DIRECTORY)
+    if(EXISTS "${HE_DXC_DIR}/dxcompiler.dll")
+        add_custom_command(TARGET HugEngineRHI POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${HE_DXC_DIR}/dxcompiler.dll"
+                    "$<TARGET_FILE_DIR:HugEngineRHI>/dxcompiler.dll"
+            COMMENT "Copy dxcompiler.dll for runtime shader reflection")
+        message(STATUS "dxcompiler.dll for runtime reflection: ${HE_DXC_DIR}")
+    endif()
+endif()

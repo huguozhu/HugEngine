@@ -303,6 +303,7 @@ void D3D12Device::Submit(IRHICommandList* cmdList, RHICommandList* stream) {
     auto* cl = static_cast<D3D12CommandList*>(cmdList);
     ID3D12CommandList* lists[1] = { cl->GetNativeCommandList() };
     if (!lists[0]) return;
+    if (std::getenv("HE_SUBSEQ")) HE_CORE_ERROR("[SUB] list={} draws={}", (void*)cl, cl->GetTotalDraws());
     m_Queue->ExecuteCommandLists(1, lists);
     // 每帧输出一次调试层的 ERROR（VS 的「输出」窗口内容进不了日志，这里补上）
     if (m_InfoQueue) {
@@ -433,6 +434,9 @@ bool D3D12Device::EnsureDescriptorHeaps() {
             return false;
         }
         m_CbvSrvUavSize = m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        // bindless 保留区：放在堆尾，避免与普通描述符集分配冲突（4096 个槽）
+        // 实验：可通过环境变量把 bindless 基址设为 0（绑到堆起点），用于判别是基址越界还是绑定本身
+        m_BindlessSrvBase = std::getenv("HE_BINDLESS_BASE0") ? 0u : (kDescriptorHeapCapacity - 4096u);
     }
     if (!m_SamplerHeap) {
         D3D12_DESCRIPTOR_HEAP_DESC hd{};
@@ -458,6 +462,8 @@ bool D3D12Device::EnsureDescriptorHeaps() {
 
         const UINT samplerInc = m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
         D3D12_CPU_DESCRIPTOR_HANDLE h = m_SamplerHeap->GetCPUDescriptorHandleForHeapStart();
+        // bindless 采样器保留区：堆内后 64 槽
+        m_BindlessSmpBase = std::getenv("HE_BINDLESS_BASE0") ? 0u : 64u;
         for (u32 i = 0; i < 128; ++i) {
             m_Device->CreateSampler(&sd, h);
             h.ptr += samplerInc;
@@ -524,6 +530,340 @@ D3D12_RESOURCE_STATES D3D12Device::GetResourceState(ID3D12Resource* res) const {
 
 void D3D12Device::SetResourceState(ID3D12Resource* res, D3D12_RESOURCE_STATES st) {
     if (res) m_ResStates[res] = st;
+}
+
+
+bool D3D12Device::PassStatsBeginQuery(ID3D12GraphicsCommandList* l, const char* tag) {
+    if (!l || !m_Device) return false;
+    if (!m_StatsHeap) {
+        D3D12_QUERY_HEAP_DESC qh{};
+        qh.Type = D3D12_QUERY_HEAP_TYPE_PIPELINE_STATISTICS;
+        qh.Count = 64;
+        if (FAILED(m_Device->CreateQueryHeap(&qh, IID_PPV_ARGS(&m_StatsHeap)))) return false;
+    }
+    if (!m_StatsBuf) {
+        D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_READBACK;
+        D3D12_RESOURCE_DESC bd{};
+        bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        bd.Width = sizeof(D3D12_QUERY_DATA_PIPELINE_STATISTICS) * 64;
+        bd.Height = 1; bd.DepthOrArraySize = 1; bd.MipLevels = 1;
+        bd.Format = DXGI_FORMAT_UNKNOWN; bd.SampleDesc = {1,0};
+        bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        if (FAILED(m_Device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd,
+                D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&m_StatsBuf)))) return false;
+    }
+    if (m_StatsCount >= 64) { m_StatsOpen = false; return false; }
+    m_StatsSlot = m_StatsCount;
+    m_StatsTags[m_StatsSlot] = tag;
+    l->BeginQuery(m_StatsHeap.Get(), D3D12_QUERY_TYPE_PIPELINE_STATISTICS, static_cast<UINT>(m_StatsSlot));
+    ++m_StatsCount;
+    m_StatsOpen = true;
+    return true;
+}
+
+void D3D12Device::PassStatsEndQuery(ID3D12GraphicsCommandList* l) {
+    if (!l || !m_StatsHeap || !m_StatsOpen || m_StatsCount <= 0) return;
+    m_StatsOpen = false;
+    const int slot = m_StatsCount - 1;
+    l->EndQuery(m_StatsHeap.Get(), D3D12_QUERY_TYPE_PIPELINE_STATISTICS, static_cast<UINT>(slot));
+    l->ResolveQueryData(m_StatsHeap.Get(), D3D12_QUERY_TYPE_PIPELINE_STATISTICS,
+                        static_cast<UINT>(slot), 1, m_StatsBuf.Get(),
+                        static_cast<UINT64>(slot) * sizeof(D3D12_QUERY_DATA_PIPELINE_STATISTICS));
+    m_StatsPending = true;
+}
+
+void D3D12Device::PassStatsRead(const char* tag) {
+    if (!m_StatsPending || !m_StatsBuf || m_StatsCount <= 0) return;
+    m_StatsPending = false;
+    WaitIdle();
+    void* mp = nullptr; D3D12_RANGE rr{0, 0};
+    if (FAILED(m_StatsBuf->Map(0, &rr, &mp)) || !mp) return;
+    const auto* base = static_cast<const D3D12_QUERY_DATA_PIPELINE_STATISTICS*>(mp);
+    HE_CORE_ERROR("[STATS] ===== {} 个 pass（{}）=====", m_StatsCount, tag);
+    for (int k = 0; k < m_StatsCount; ++k) {
+        const auto& s = base[k];
+        HE_CORE_ERROR("[STATS] #{} {} IA={}/{} CInv={} CPrim={} PSInvoc={}",
+            k, m_StatsTags[k] ? m_StatsTags[k] : "?", (u64)s.IAVertices, (u64)s.IAPrimitives,
+            (u64)s.CInvocations, (u64)s.CPrimitives, (u64)s.PSInvocations);
+    }
+    D3D12_RANGE wr{0, 0};
+    m_StatsBuf->Unmap(0, &wr);
+    m_StatsCount = 0;
+}
+
+
+
+namespace {
+// 诊断用：把一张 16F 渲染目标拷到回读缓冲并统计非零像素与最大值
+void ScanOneRt(ID3D12Device* dev, ID3D12CommandQueue* queue, ID3D12Resource* res,
+               D3D12_RESOURCE_STATES before, const char* tag) {
+    if (!dev || !queue || !res) return;
+    const D3D12_RESOURCE_DESC rd = res->GetDesc();
+    const u32 rowPitch = static_cast<u32>((rd.Width * 8 + 255) & ~255ull);
+    const u64 totalSize = static_cast<u64>(rowPitch) * rd.Height;
+    D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_READBACK;
+    D3D12_RESOURCE_DESC bd{};
+    bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    bd.Width = totalSize; bd.Height = 1; bd.DepthOrArraySize = 1; bd.MipLevels = 1;
+    bd.Format = DXGI_FORMAT_UNKNOWN; bd.SampleDesc = {1,0};
+    bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ComPtr<ID3D12Resource> rb;
+    if (FAILED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd,
+            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&rb)))) return;
+    ComPtr<ID3D12CommandAllocator> a; ComPtr<ID3D12GraphicsCommandList> l;
+    if (FAILED(dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&a))) ||
+        FAILED(dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, a.Get(), nullptr, IID_PPV_ARGS(&l)))) return;
+    D3D12_RESOURCE_BARRIER b{};
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION; b.Transition.pResource = res;
+    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    b.Transition.StateBefore = before;
+    b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    if (b.Transition.StateBefore != b.Transition.StateAfter) l->ResourceBarrier(1, &b);
+    D3D12_TEXTURE_COPY_LOCATION dst{}; dst.pResource = rb.Get();
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    dst.PlacedFootprint.Footprint.Format = rd.Format;
+    dst.PlacedFootprint.Footprint.Width = static_cast<UINT>(rd.Width);
+    dst.PlacedFootprint.Footprint.Height = rd.Height;
+    dst.PlacedFootprint.Footprint.Depth = 1;
+    dst.PlacedFootprint.Footprint.RowPitch = rowPitch;
+    D3D12_TEXTURE_COPY_LOCATION src{}; src.pResource = res;
+    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.SubresourceIndex = 0;
+    l->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    b.Transition.StateAfter = before;
+    if (b.Transition.StateBefore != b.Transition.StateAfter) l->ResourceBarrier(1, &b);
+    l->Close();
+    ID3D12CommandList* lists[1] = { l.Get() };
+    queue->ExecuteCommandLists(1, lists);
+    // 等空闲
+    ComPtr<ID3D12Fence> f; if (FAILED(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&f)))) return;
+    HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    queue->Signal(f.Get(), 1);
+    if (ev) { f->SetEventOnCompletion(1, ev); WaitForSingleObject(ev, 5000); CloseHandle(ev); }
+    void* mp = nullptr; D3D12_RANGE rr{0,0};
+    if (FAILED(rb->Map(0, &rr, &mp)) || !mp) return;
+    const unsigned char* raw = static_cast<const unsigned char*>(mp);
+    u64 total = 0, nz = 0; float mx = 0.0f;
+    for (u32 y = 0; y < static_cast<u32>(rd.Height); y += 8) {
+        const float* row = reinterpret_cast<const float*>(raw + static_cast<size_t>(y) * rowPitch);
+        for (u32 x = 0; x < static_cast<u32>(rd.Width); x += 8) {
+            const float r0 = row[x*4+0], g0 = row[x*4+1], b0 = row[x*4+2];
+            ++total;
+            if (r0 != 0.0f || g0 != 0.0f || b0 != 0.0f) ++nz;
+            if (r0 > mx) mx = r0; if (g0 > mx) mx = g0; if (b0 > mx) mx = b0;
+        }
+    }
+    rb->Unmap(0, nullptr);
+    HE_CORE_ERROR("[SCAN-ALL] {} {}x{} 采样={} 非零={} max={}", tag, (u64)rd.Width, (u32)rd.Height,
+        (u64)total, (u64)nz, mx);
+}
+}
+
+void D3D12Device::ScanAllHdrTargets() {
+    int idx = 0;
+    for (auto& kv : m_ViewResources) {
+        ID3D12Resource* r = kv.second;
+        if (!r) continue;
+        const D3D12_RESOURCE_DESC d = r->GetDesc();
+        if (d.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D) continue;
+        if (d.Width != 1920 || d.Height != 1080) continue;
+        if (static_cast<u32>(d.Format) != 10) continue;   // R16G16B16A16_FLOAT
+        char tag[64];
+        std::snprintf(tag, sizeof(tag), "res#%d", idx++);
+        ScanOneRt(m_Device.Get(), m_Queue.Get(), r, D3D12_RESOURCE_STATE_RENDER_TARGET, tag);
+    }
+    HE_CORE_ERROR("[SCAN-ALL] 共扫描 {} 张 1920x1080 RGBA16F", idx);
+}
+
+
+
+
+namespace {
+// 计算 DXIL 反射里一个类型的字节大小（HLSL 打包规则，只处理标量/向量/矩阵/结构体）
+u32 TypeSize(ID3D12ShaderReflectionType* ty) {
+    if (!ty) return 4;
+    D3D12_SHADER_TYPE_DESC td{};
+    if (FAILED(ty->GetDesc(&td))) return 4;
+    { static int n=0; if (++n <= 6) { std::printf("[TYDESC] class=%d rows=%u cols=%u elems=%u members=%u offset=%u\n",
+        (int)td.Class, td.Rows, td.Columns, td.Elements, td.Members, td.Offset); std::fflush(stdout); } }
+    if (td.Class == D3D_SVC_STRUCT) {
+        u32 end = 0;
+        for (UINT m = 0; m < td.Members; ++m) {
+            D3D12_SHADER_TYPE_DESC md{};
+            auto* mt = ty->GetMemberTypeByIndex(m);
+            if (!mt || FAILED(mt->GetDesc(&md))) continue;
+            u32 sz;
+            if (md.Class == D3D_SVC_STRUCT) sz = TypeSize(mt);
+            else sz = 4u * (md.Rows ? md.Rows : 1u) * (md.Columns ? md.Columns : 1u);
+            const u32 elem = md.Elements ? md.Elements : 1u;
+            sz *= elem;
+            end = std::max(end, md.Offset + sz);
+        }
+        return end ? ((end + 3u) & ~3u) : 4u;
+    }
+    const u32 sz = 4u * (td.Rows ? td.Rows : 1u) * (td.Columns ? td.Columns : 1u);
+    return sz ? sz : 4u;
+}
+}
+
+void D3D12Device::NoteStructStrides(ID3D12ShaderReflection* refl) {
+    { static int n=0; if (++n <= 3) { std::printf("[NOTE] called refl=%p\n", (void*)refl); std::fflush(stdout); } }
+    if (!refl) return;
+    D3D12_SHADER_DESC sd{};
+    refl->GetDesc(&sd);
+    for (UINT i = 0; i < sd.BoundResources; ++i) {
+        D3D12_SHADER_INPUT_BIND_DESC bd{};
+        if (FAILED(refl->GetResourceBindingDesc(i, &bd))) continue;
+        if (bd.Type != D3D_SIT_STRUCTURED && bd.Type != D3D_SIT_TBUFFER) continue;
+        auto* var = refl->GetVariableByName(bd.Name);
+        if (!var) continue;
+        const u32 sz = TypeSize(var->GetType());
+        if (sz >= 4 && sz <= 4096) { m_StructStrides[bd.BindPoint] = sz;
+            std::printf("[NOTE] reg=%u stride=%u name=%s\n", bd.BindPoint, sz, bd.Name); std::fflush(stdout); }
+    }
+}
+
+
+void D3D12Device::FlushPendingBindlessBuffers() {
+    if (m_PendingBindlessBufs.empty()) return;
+    if (!m_CbvSrvUavHeap || m_CbvSrvUavSize == 0) return;
+    auto pending = std::move(m_PendingBindlessBufs);
+    m_PendingBindlessBufs.clear();
+    for (auto& [slot, buf] : pending) {
+        if (buf) WriteBindlessBufferSrv(slot, buf);
+    }
+}
+
+u32 D3D12Device::LookupStructStride(u32 registerIndex) const {
+    const auto it = m_StructStrides.find(registerIndex);
+    if (it != m_StructStrides.end() && it->second > 4u) return it->second;
+    // 【兜底表】引擎的 GPU 结构体尺寸有 static_assert 保证（见 Render/Pipeline/Material.h），
+    // 运行期 DXIL 反射拿不到这些大小（GetType()->GetDesc 直接失败），因此这里按寄存器号给出。
+    //   t1 = GPULight(64)  t2 = GPUObjectData(208)  t3 = GPUShadowData(256)
+    //   t7 = LightGridCell(8)  t8 = uint(4)
+    switch (registerIndex) {
+        case 1u: return 64u;
+        case 2u: return 208u;
+        case 3u: return 256u;
+        case 7u: return 8u;
+        case 8u: return 4u;
+        default: return it != m_StructStrides.end() ? it->second : 0u;
+    }
+}
+
+D3D12_GPU_DESCRIPTOR_HANDLE D3D12Device::GetSrvHeapGpuStart() const {
+    D3D12_GPU_DESCRIPTOR_HANDLE h{};
+    if (m_CbvSrvUavHeap) h = m_CbvSrvUavHeap->GetGPUDescriptorHandleForHeapStart();
+    return h;
+}
+
+
+D3D12_GPU_DESCRIPTOR_HANDLE D3D12Device::GetBindlessSmpGpuHandle() const {
+    D3D12_GPU_DESCRIPTOR_HANDLE h{};
+    if (!m_SamplerHeap) return h;
+    h = m_SamplerHeap->GetGPUDescriptorHandleForHeapStart();
+    const UINT inc = m_Device ? m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER) : 0;
+    h.ptr += static_cast<SIZE_T>(m_BindlessSmpBase) * inc;
+    return h;
+}
+
+bool D3D12Device::WriteBindlessSampler(u32 slot, IRHISampler* sampler) {
+    if (!m_Device || !sampler) return false;
+    if (!EnsureDescriptorHeaps()) return false;
+    auto* smp = static_cast<D3D12Sampler*>(sampler);
+    const UINT inc = m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+    D3D12_CPU_DESCRIPTOR_HANDLE dst = m_SamplerHeap->GetCPUDescriptorHandleForHeapStart();
+    dst.ptr += static_cast<SIZE_T>(m_BindlessSmpBase + slot) * inc;
+    m_Device->CopyDescriptorsSimple(1, dst, smp->GetDescriptor(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+    return true;
+}
+
+D3D12_GPU_DESCRIPTOR_HANDLE D3D12Device::GetBindlessSrvGpuHandle() const {
+    D3D12_GPU_DESCRIPTOR_HANDLE h{};
+    if (!m_CbvSrvUavHeap) return h;   // 必须是真正被 SetDescriptorHeaps 绑定的那张堆
+    h = m_CbvSrvUavHeap->GetGPUDescriptorHandleForHeapStart();
+    h.ptr += static_cast<SIZE_T>(m_BindlessSrvBase) * m_CbvSrvUavSize;
+    return h;
+}
+
+
+void D3D12Device::DeferRetire(ComPtr<ID3D12Resource> res, ComPtr<ID3D12DescriptorHeap> heap) {
+    m_Retired.emplace_back(std::move(res), std::move(heap));
+}
+
+void D3D12Device::FlushRetired() {
+    // 只有 GPU 已完成之前所有提交时才算安全
+    if (m_Retired.empty()) return;
+    WaitIdle();
+    m_Retired.clear();
+}
+
+bool D3D12Device::WriteBindlessSrv(u32 slot, IRHITexture* texture) {
+    if (!m_Device || !texture) return false;
+    { static int n4=0; if (n4++ < 40) { std::printf("[BLW] bufWrite heap=%p size=%u base=%u slot=%u\n", (void*)m_CbvSrvUavHeap.Get(), m_CbvSrvUavSize, m_BindlessSrvBase, slot); std::fflush(stdout); } }
+    if (!m_CbvSrvUavHeap || m_CbvSrvUavSize == 0) return false;   // 绑定的堆尚未创建
+    if (!m_BindlessSrvHeap) {
+        D3D12_DESCRIPTOR_HEAP_DESC hd{};
+        hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        hd.NumDescriptors = kDescriptorHeapCapacity;
+        hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        if (FAILED(m_Device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_BindlessSrvHeap)))) return false;
+        m_BindlessDescSize = m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    }
+    auto* tex = static_cast<D3D12Texture*>(texture);
+    D3D12_CPU_DESCRIPTOR_HANDLE dst = m_CbvSrvUavHeap->GetCPUDescriptorHandleForHeapStart();
+    dst.ptr += static_cast<SIZE_T>(m_BindlessSrvBase + slot) * m_CbvSrvUavSize;
+    D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+    // 资源可能是 TYPELESS 格式，SRV 需要具体类型
+    DXGI_FORMAT srvFmt = tex->GetResource()->GetDesc().Format;
+    switch (srvFmt) {
+        case DXGI_FORMAT_R16G16B16A16_TYPELESS: srvFmt = DXGI_FORMAT_R16G16B16A16_FLOAT; break;
+        case DXGI_FORMAT_R8G8B8A8_TYPELESS:     srvFmt = DXGI_FORMAT_R8G8B8A8_UNORM;    break;
+        case DXGI_FORMAT_B8G8R8A8_TYPELESS:     srvFmt = DXGI_FORMAT_B8G8R8A8_UNORM;    break;
+        case DXGI_FORMAT_R32_TYPELESS:          srvFmt = DXGI_FORMAT_R32_FLOAT;         break;
+        case DXGI_FORMAT_D32_FLOAT:             srvFmt = DXGI_FORMAT_R32_FLOAT;         break;
+        case DXGI_FORMAT_D24_UNORM_S8_UINT:     srvFmt = DXGI_FORMAT_R24_UNORM_X8_TYPELESS; break;
+        case DXGI_FORMAT_D16_UNORM:             srvFmt = DXGI_FORMAT_R16_UNORM;         break;
+        default: break;
+    }
+    sd.Format = srvFmt;
+    sd.ViewDimension = (tex->GetArrayLayers() == 6) ? D3D12_SRV_DIMENSION_TEXTURECUBE
+                                                    : D3D12_SRV_DIMENSION_TEXTURE2D;
+    sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    if (sd.ViewDimension == D3D12_SRV_DIMENSION_TEXTURECUBE) sd.TextureCube.MipLevels = tex->GetMipLevels();
+    else sd.Texture2D.MipLevels = tex->GetMipLevels();
+    m_Device->CreateShaderResourceView(tex->GetResource(), &sd, dst);
+    return true;
+}
+
+bool D3D12Device::WriteBindlessBufferSrv(u32 slot, IRHIBuffer* buffer) {
+    if (!m_Device || !buffer) return false;
+    // 堆尚未创建（初始化早期）⇒ 排队，等 BindDescriptorSet 时补写
+    if (!m_CbvSrvUavHeap || m_CbvSrvUavSize == 0) {
+        m_PendingBindlessBufs.emplace_back(slot, buffer);
+        return false;
+    }
+    if (!m_BindlessSrvHeap) {
+        D3D12_DESCRIPTOR_HEAP_DESC hd{};
+        hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        hd.NumDescriptors = kDescriptorHeapCapacity;
+        hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        if (FAILED(m_Device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_BindlessSrvHeap)))) return false;
+        m_BindlessDescSize = m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    }
+    auto* buf = static_cast<D3D12Buffer*>(buffer);
+    D3D12_CPU_DESCRIPTOR_HANDLE dst = m_CbvSrvUavHeap->GetCPUDescriptorHandleForHeapStart();
+    dst.ptr += static_cast<SIZE_T>(m_BindlessSrvBase + slot) * m_CbvSrvUavSize;
+    const u32 stride = buf->GetStride() ? buf->GetStride() : 4u;
+    D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+    sd.Format = DXGI_FORMAT_UNKNOWN;
+    sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sd.Buffer.FirstElement = 0;
+    sd.Buffer.NumElements = static_cast<UINT>(buf->GetSize() / stride);
+    sd.Buffer.StructureByteStride = stride;
+    m_Device->CreateShaderResourceView(buf->GetNativeHandle(), &sd, dst);
+    return true;
 }
 
 D3D12_GPU_DESCRIPTOR_HANDLE D3D12Device::GetSetSamplerGpuHandle(u32 slot) const {
@@ -606,7 +946,7 @@ void* D3D12Device::GetConstantSlotPtr(D3D12_GPU_VIRTUAL_ADDRESS gpuAddr) {
 
 D3D12_GPU_DESCRIPTOR_HANDLE D3D12Device::GetCbvHeapGpuStart() const {
     D3D12_GPU_DESCRIPTOR_HANDLE h{};
-    if (m_CbvHeap) h = m_CbvHeap->GetGPUDescriptorHandleForHeapStart();
+    if (m_CbvSrvUavHeap) h = m_CbvSrvUavHeap->GetGPUDescriptorHandleForHeapStart();
     return h;
 }
 
@@ -618,6 +958,11 @@ u32 D3D12Device::GetSetUavOffset(DescriptorSetHandle set) const {
 }
 
 DescriptorSetLayoutHandle D3D12Device::CreateDescriptorSetLayout(const DescriptorSetLayoutDesc& desc) {
+    { static int n=0; if (++n <= 12) {
+        std::printf("[LAYOUT] #%d bindings=%d:", n, (int)desc.bindings.size()); std::fflush(stdout);
+        for (const auto& b : desc.bindings) { std::printf(" (b=%u t=%d)", b.binding, (int)b.type); }
+        std::printf("\n"); std::fflush(stdout);
+    } }
     D3D12SetLayout layout;
     layout.bindings = desc.bindings;
     // 槽位数 = 最大 binding + 该 binding 的 count（保守做法：每个 binding 按 count 展开）
@@ -655,6 +1000,8 @@ DescriptorSetHandle D3D12Device::AllocateDescriptorSet(DescriptorSetLayoutHandle
     s.slotCount = perSet;
     s.layout    = li;
     m_NextFreeSlot += need;
+    { static int n9=0; if (++n9 % 200 == 1) { std::printf("[SLOTS] sets=%zu nextFree=%u bindlessBase=%u\n",
+        m_DescriptorSets.size(), m_NextFreeSlot, m_BindlessSrvBase); std::fflush(stdout); } }
     m_DescriptorSets.push_back(s);
 
     return static_cast<DescriptorSetHandle>(m_DescriptorSets.size());     // 1-based
@@ -673,11 +1020,15 @@ static D3D12_SRV_DIMENSION SrvDimFor(DescriptorType) { return D3D12_SRV_DIMENSIO
 // ---------------------------------------------------------------------------
 void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, DescriptorType type,
                                       IRHIBuffer* buffer) {
+    { static std::unordered_map<u64,int> seen0; const u64 k0=(u64)set*10000+(u64)binding*100+(u32)type; if (binding==0 && ++seen0[k0]==1) HE_CORE_ERROR("[UDS0] set={} binding=0 type={}", (u64)set, (u32)type); }
     { static int s=0; if (s<12) { ++s; std::printf("[STP] UDS1 n=%d\n", s); std::fflush(stdout); } }
     if (set == kInvalidSet || set > m_DescriptorSets.size() || !buffer) return;
     if (!EnsureDescriptorHeaps()) return;
 
     const auto& s = m_DescriptorSets[static_cast<size_t>(set - 1)];
+    { static int n=0; if (++n <= 12) { auto h=GetSlotCpuHandle(s.baseSlot + binding);
+        std::printf("[UDW] set=%llu binding=%u base=%u cpuOff=%llu\n", (unsigned long long)set, binding, s.baseSlot,
+            (unsigned long long)(h.ptr - m_CbvSrvUavHeap->GetCPUDescriptorHandleForHeapStart().ptr)); std::fflush(stdout); } }
     auto* b = static_cast<D3D12Buffer*>(buffer);
     if (!b || !b->GetResource()) return;
 
@@ -695,10 +1046,36 @@ void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, Desc
         srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
         srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         srv.Buffer.FirstElement = 0;
-        srv.Buffer.NumElements  = static_cast<UINT>(size / 4);
-        srv.Buffer.StructureByteStride = static_cast<UINT>(b->GetStride() ? b->GetStride() : 4);
+        // stride must equal the shader struct size; engine BufferDesc has no SSBO stride
+        u32 stride = static_cast<u32>(b->GetStride());
+        if (!stride) stride = LookupStructStride(binding);
+        if (!stride) stride = 4u;
+        // 元素数必须 ≥1：缓冲比 stride 小时 size/stride=0，CreateShaderResourceView 判非法
+        // 会直接把设备移除（实测 hr=0x887a0005）。
+        UINT nElems = static_cast<UINT>(size / stride);
+        if (nElems == 0) nElems = 1;
+        srv.Buffer.NumElements  = nElems;
+        srv.Buffer.StructureByteStride = stride;
         srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
-        m_Device->CreateShaderResourceView(b->GetResource(), &srv, dst);
+        { static int n=0; if (++n % 200 == 1) { std::printf("[UDSBUF] set=%llu binding=%u stride=%u size=%llu numElems=%u\n",
+        (unsigned long long)set, binding, srv.Buffer.StructureByteStride,
+        (unsigned long long)size, srv.Buffer.NumElements); std::fflush(stdout); } }
+    if (binding == 2u || binding == 1u || binding == 3u) {
+        static int n=0; if (++n <= 8) { std::printf("[OBJBIND] set=%llu binding=%u gpu=%llu stride=%u elems=%u\n",
+            (unsigned long long)set, binding,
+            (unsigned long long)b->GetResource()->GetGPUVirtualAddress(),
+            srv.Buffer.StructureByteStride, srv.Buffer.NumElements); std::fflush(stdout); }
+    }
+    m_Device->CreateShaderResourceView(b->GetResource(), &srv, dst);
+    // 记录引擎为这个集合指定的物体缓冲（绑定时据此重写 t2 槽位）
+    if (binding == 2u) m_ObjectBufferBySet[static_cast<UINT64>(set)] = b;
+    // 诊断：把同一份 SSBO 视图铺满该 set 的前 32 个槽，判断「未绑定」是否是槽位偏移导致
+    if (std::getenv("HE_SPREAD")) {
+        for (u32 k = 0; k < 32u; ++k) {
+            D3D12_CPU_DESCRIPTOR_HANDLE d2 = GetSlotCpuHandle(s.baseSlot + k);
+            m_Device->CreateShaderResourceView(b->GetResource(), &srv, d2);
+        }
+    }
 
         // 【同时写一份 UAV】计算着色器要写同一个 SSBO（引擎用 StorageBuffer
         // 表示只读/读写两用），D3D12 的 UAV 与 SRV 是两种描述符，
@@ -707,8 +1084,10 @@ void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, Desc
         uav.Format = DXGI_FORMAT_UNKNOWN;
         uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
         uav.Buffer.FirstElement = 0;
-        uav.Buffer.NumElements  = static_cast<UINT>(size / 4);
-        uav.Buffer.StructureByteStride = static_cast<UINT>(b->GetStride() ? b->GetStride() : 4);
+        UINT nElemsU = static_cast<UINT>(size / stride);
+        if (nElemsU == 0) nElemsU = 1;
+        uav.Buffer.NumElements  = nElemsU;
+        uav.Buffer.StructureByteStride = stride;
         uav.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_NONE;
         D3D12_CPU_DESCRIPTOR_HANDLE uavDst = GetSlotCpuHandle(s.uavBase + binding);
         m_Device->CreateUnorderedAccessView(b->GetResource(), nullptr, &uav, uavDst);
@@ -717,6 +1096,7 @@ void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, Desc
 
 void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, DescriptorType type,
                                       IRHITexture* texture, IRHISampler* sampler) {
+    { static std::unordered_map<u64,int> seen0; const u64 k0=(u64)set*10000+(u64)binding*100+(u32)type; if (binding==0 && ++seen0[k0]==1) HE_CORE_ERROR("[UDS0] set={} binding=0 type={}", (u64)set, (u32)type); }
     { static int s=0; if (s<12) { ++s; std::printf("[STP] UDS2 n=%d\n", s); std::fflush(stdout); } }
     if (set == kInvalidSet || set > m_DescriptorSets.size()) return;
     if (!EnsureDescriptorHeaps()) return;
@@ -748,7 +1128,9 @@ void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, Desc
 
     if (!texture) return;
     auto* tex = static_cast<D3D12Texture*>(texture);
-    D3D12_CPU_DESCRIPTOR_HANDLE dst = GetSlotCpuHandle(slot);
+    // 描述符写在「该 set 的基址 + binding」：绑定时按 space 绑 set 的区段基址，
+    // 写入与读取用同一套偏移才能对上。
+    D3D12_CPU_DESCRIPTOR_HANDLE dst = GetSlotCpuHandle(s.baseSlot + binding);
     D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
     // 立方体贴图（天空盒/IBL）必须用 TEXTURECUBE 维度建 SRV，否则采样恒为 0
     srv.ViewDimension = (tex->GetArrayLayers() == 6) ? D3D12_SRV_DIMENSION_TEXTURECUBE : D3D12_SRV_DIMENSION_TEXTURE2D;
@@ -806,6 +1188,7 @@ void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, Desc
 
 void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, DescriptorType type,
                                       IRHITexture** textures, IRHISampler** samplers, u32 count) {
+    { static std::unordered_map<u64,int> seen0; const u64 k0=(u64)set*10000+(u64)binding*100+(u32)type; if (binding==0 && ++seen0[k0]==1) HE_CORE_ERROR("[UDS0] set={} binding=0 type={}", (u64)set, (u32)type); }
     { static int s=0; if (s<12) { ++s; std::printf("[STP] UDS3 n=%d\n", s); std::fflush(stdout); } }
     for (u32 i = 0; i < count; ++i) {
         UpdateDescriptorSet(set, binding + i, type,
@@ -816,6 +1199,7 @@ void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, Desc
 
 void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, DescriptorType type,
                                       IRHIBuffer** buffers, u32 count) {
+    { static std::unordered_map<u64,int> seen0; const u64 k0=(u64)set*10000+(u64)binding*100+(u32)type; if (binding==0 && ++seen0[k0]==1) HE_CORE_ERROR("[UDS0] set={} binding=0 type={}", (u64)set, (u32)type); }
     { static int s=0; if (s<12) { ++s; std::printf("[STP] UDS4 n=%d\n", s); std::fflush(stdout); } }
     if (type == DescriptorType::Sampler) {
         // 采样器数组（引擎用 buffers=nullptr, samplers=... 之外的形态很少见）
@@ -827,7 +1211,52 @@ void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, Desc
 }
 
 void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle, u32, DescriptorType, IRHIAccelerationStructure*) {}
-void D3D12Device::UpdateDescriptorSetWithImageView(DescriptorSetHandle, u32, DescriptorType, void*) {}
+// 【关键】引擎用「图像视图句柄」更新描述符（例如把 HDR 纹理绑到 set=0/bind=0
+// 的 u_HDRTexture_0）。此前这里是空实现，导致该槽永远是空描述符 ——
+// 色调映射因此采样到空纹理，输出全黑（RenderDoc 实测 d.resource = ResourceId::0）。
+void D3D12Device::UpdateDescriptorSetWithImageView(DescriptorSetHandle set, u32 binding,
+                                                   DescriptorType type, void* imageView) {
+    { static int n=0; if (++n <= 6) HE_CORE_ERROR("[IV] set={} binding={} view={} res={}", (u64)set, binding, imageView, (void*)FindViewResource(reinterpret_cast<UINT64>(imageView))); }
+    if (!m_Device || !imageView) return;
+    // 引擎给的是「视图句柄」：先反查它对应的资源
+    ID3D12Resource* res = FindViewResource(reinterpret_cast<UINT64>(imageView));
+    if (!res) return;
+
+    const D3D12_RESOURCE_DESC rd = res->GetDesc();
+    if (rd.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D) return;
+
+    // 目标槽位：与 UpdateDescriptorSet(texture) 相同的布局（set 的 baseSlot + binding）
+    if (set == kInvalidSet || set > m_DescriptorSets.size()) return;
+    if (!EnsureDescriptorHeaps()) return;
+    const auto& s = m_DescriptorSets[static_cast<size_t>(set - 1)];
+    const D3D12_CPU_DESCRIPTOR_HANDLE dst = GetSlotCpuHandle(s.baseSlot + binding);
+    if (!dst.ptr) return;
+
+    // TYPELESS / 深度格式需要映射成可采样的具体格式
+    DXGI_FORMAT f = rd.Format;
+    switch (f) {
+        case DXGI_FORMAT_R16G16B16A16_TYPELESS: f = DXGI_FORMAT_R16G16B16A16_FLOAT; break;
+        case DXGI_FORMAT_R8G8B8A8_TYPELESS:     f = DXGI_FORMAT_R8G8B8A8_UNORM;    break;
+        case DXGI_FORMAT_B8G8R8A8_TYPELESS:     f = DXGI_FORMAT_B8G8R8A8_UNORM;    break;
+        case DXGI_FORMAT_R32_TYPELESS:          f = DXGI_FORMAT_R32_FLOAT;         break;
+        case DXGI_FORMAT_D32_FLOAT:             f = DXGI_FORMAT_R32_FLOAT;         break;
+        case DXGI_FORMAT_D24_UNORM_S8_UINT:     f = DXGI_FORMAT_R24_UNORM_X8_TYPELESS; break;
+        case DXGI_FORMAT_D16_UNORM:             f = DXGI_FORMAT_R16_UNORM;         break;
+        default: break;
+    }
+    D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+    sd.Format = f;
+    sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    if (rd.DepthOrArraySize == 6) {
+        sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+        sd.TextureCube.MipLevels = rd.MipLevels;
+    } else {
+        sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        sd.Texture2D.MipLevels = rd.MipLevels;
+    }
+    m_Device->CreateShaderResourceView(res, &sd, dst);
+    (void)type;
+}
 
 } // namespace he::rhi::d3d12
 

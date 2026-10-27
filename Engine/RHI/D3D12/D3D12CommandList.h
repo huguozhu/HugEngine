@@ -123,6 +123,9 @@ private:
         return h;
     }
 
+public:
+    u32 GetTotalDraws() const { return m_TotalDraws; }
+private:
     ComPtr<ID3D12CommandAllocator>    m_Allocator;
     ComPtr<ID3D12GraphicsCommandList> m_List;
     ComPtr<ID3D12RootSignature>       m_PushRootSig;   // 阶段 0 占位，阶段 2 由 PSO 提供
@@ -144,6 +147,16 @@ private:
     /// 诊断用：记录本帧是否绑过 RTV、以及当前视口
     bool            m_HasRtv = false;
     D3D12_VIEWPORT  m_LastVp{};
+    u32             m_PassDraws = 0;
+    bool            m_SkipDraws = false;   // 绕行实验：跳过最终 pass 的绘制
+    u32             m_TotalDraws = 0;
+    u64             m_LastBoundSet = 0;
+    u32             m_LastObjIdx = 0;
+    bool            m_PushDirty = true;
+    u32             m_LastBaseSlot = 0;      // 本列表累计绘制数（诊断用）
+    bool            m_PassHasRtv = false;
+    u32             m_PassW = 0;
+    u32             m_PassH = 0;
 };
 
 } // namespace he::rhi::d3d12

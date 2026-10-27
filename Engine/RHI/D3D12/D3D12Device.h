@@ -97,10 +97,44 @@ public:
     /// 设备创建的唯一交换链（命令列表没拿到交换链时用它兜底）
     void                             SetSwapChainPtr(D3D12SwapChain* sc) { m_SwapChainPtr = sc; }
     D3D12SwapChain*                  GetSwapChainPtr() const { return m_SwapChainPtr; }
+
+    /// 诊断：管线统计查询（判断绘制是否真的产生了图元）
+    bool PassStatsBeginQuery(ID3D12GraphicsCommandList* l, const char* tag);
+    void PassStatsEndQuery(ID3D12GraphicsCommandList* l);
+    void PassStatsRead(const char* tag);
+    /// 诊断：扫描所有 1920x1080 RGBA16F 资源，找出到底哪一张有内容
+    void ScanAllHdrTargets();
     D3D12_GPU_DESCRIPTOR_HANDLE      GetCbvHeapGpuStart() const;
     void*                            GetConstantSlotPtr(D3D12_GPU_VIRTUAL_ADDRESS gpuAddr);
     D3D12_GPU_DESCRIPTOR_HANDLE      GetDefaultSamplerGpu() const;
     /// 描述符集采样器堆（槽位与 CBV_SRV_UAV 堆一致）
+    // ---- bindless（set=2）----
+    /// 引擎通过 bindless 句柄索引纹理/缓冲：必须真的写进 shader-visible 堆，
+    /// 否则着色器读到空描述符，顶点会全部塌缩（实测 PSInvoc=0）
+    /// 延迟回收：纹理可能在命令列表已录制、尚未提交时被销毁；此时若立刻释放
+    /// 资源与其描述符堆，已录制的绘制会引用失效的 RTV/DSV，写入被静默丢弃。
+    /// 这里把资源与堆挂到一个待回收表，等下一次 WaitIdle 之后再真正释放。
+    void DeferRetire(ComPtr<ID3D12Resource> res, ComPtr<ID3D12DescriptorHeap> heap);
+    void FlushRetired();
+
+    /// 记录结构化缓冲的「元素字节数」：D3D12 的 StructuredBuffer<T> 的 SRV 必须用
+    /// sizeof(T) 作为 StructureByteStride，而引擎的 BufferDesc 只给顶点/索引缓冲带 stride。
+    /// 这里在 PSO 创建时从 DXIL 反射里算出每个 register 对应结构的字节数并缓存。
+    void NoteStructStrides(ID3D12ShaderReflection* refl);
+    u32  LookupStructStride(u32 registerIndex) const;
+
+    bool WriteBindlessSrv(u32 slot, IRHITexture* texture);
+    /// 描述符堆尚未创建时，bindless 缓冲写入会被丢弃；这里排队等堆就绪后补写
+    void FlushPendingBindlessBuffers();
+    bool WriteBindlessBufferSrv(u32 slot, IRHIBuffer* buffer);
+    /// bindless 采样器数组（space2 的 s0 起），必须写进独立的 shader-visible 采样器堆
+    bool WriteBindlessSampler(u32 slot, IRHISampler* sampler);
+    D3D12_GPU_DESCRIPTOR_HANDLE GetBindlessSmpGpuHandle() const;
+    u32 GetBindlessSrvBase() const { return m_BindlessSrvBase; }
+    u32 GetBindlessSmpBase() const { return m_BindlessSmpBase; }
+    D3D12_GPU_DESCRIPTOR_HANDLE GetBindlessSrvGpuHandle() const;
+    /// 整张 CBV_SRV_UAV 堆的 GPU 基址（扁平 space0 绑定用）
+    D3D12_GPU_DESCRIPTOR_HANDLE GetSrvHeapGpuStart() const;
     ID3D12DescriptorHeap*            GetSetSamplerHeap() const { return m_SetSamplerHeap.Get(); }
     D3D12_GPU_DESCRIPTOR_HANDLE      GetSetSamplerGpuHandle(u32 slot) const;
     D3D12_GPU_DESCRIPTOR_HANDLE      GetSetGpuHandle(u32 slot) const;
@@ -219,6 +253,27 @@ private:
     // 【非持有】此前存的是 ComPtr，会强引用住每张纹理 —— 引擎会创建大量
     // 1920x1080 的 HDR 目标（实测 12 秒 40 张），这既造成内存泄漏，
     // 又让句柄映射指向早已不应该存在的实例。改为裸指针，纹理析构时注销。
+    std::unordered_map<u32, u32> m_StructStrides;
+    std::vector<std::pair<u32, IRHIBuffer*>> m_PendingBindlessBufs;
+public:
+    /// 【多缓冲错位修正】引擎按飞行帧写物体缓冲，但绑定的描述符集可能指向另一个
+    /// 飞行帧的缓冲（实测写入地址 390594560，绑定地址 390070272，从未被写过）。
+    /// 这里记录「最近一次上传的物体缓冲」，绘制前重新写进当前集的 t2 槽位。
+    void SetLastObjectBuffer(class D3D12Buffer* b) { m_LastUploadedObject = b; }
+    class D3D12Buffer* GetLastObjectBuffer() const { return m_LastUploadedObject; }
+private:
+    class D3D12Buffer* m_LastUploadedObject = nullptr;
+public:
+    /// 最近一次上传的物体矩阵副本（前 32 个元素的缩放与平移），用于诊断索引是否错配
+    float m_LastObjM[32][8] = {};
+public:
+    /// 引擎为每个描述符集指定的物体缓冲（UpdateDescriptorSet binding==2 时记录）。
+    /// 绑定时用它把 SRV 写回 t2 槽位，避免跨飞行帧的启发式猜测。
+    std::unordered_map<UINT64, class D3D12Buffer*> m_ObjectBufferBySet;
+private:
+    unsigned m_LastObjCount = 0;
+private:
+private:   // register -> 元素字节数
     std::unordered_map<UINT64, ID3D12Resource*> m_ViewResources;
     mutable std::unordered_map<ID3D12Resource*, D3D12_RESOURCE_STATES> m_ResStates;
 
@@ -245,6 +300,15 @@ private:
     ComPtr<ID3D12Resource>       m_ConstantRing;
     void*                        m_ConstantRingMapped = nullptr;
     ComPtr<ID3D12DescriptorHeap> m_CbvHeap;
+    ComPtr<ID3D12DescriptorHeap> m_BindlessSrvHeap;
+    ComPtr<ID3D12DescriptorHeap> m_BindlessSmpHeap;
+    UINT                         m_BindlessSmpSize = 0;
+    std::vector<std::pair<ComPtr<ID3D12Resource>, ComPtr<ID3D12DescriptorHeap>>> m_Retired;
+    UINT                         m_BindlessDescSize = 0;
+    // bindless 占用「已绑定堆」里的保留区：D3D12 同一时刻只能各绑一个 SRV 堆/采样器堆，
+    // 用独立堆会在切换时让 GPU 卡死，因此改为在 m_CbvHeap / m_SetSamplerHeap 内保留一段。
+    u32                          m_BindlessSrvBase = 0;
+    u32                          m_BindlessSmpBase = 0;
     UINT                         m_CbvIncrement = 0;
     u32                          m_NextCbvSlot  = 0;
 
@@ -294,6 +358,13 @@ private:
     };
     std::vector<FenceEntry> m_Fences;
     std::vector<u32>        m_FreeFences;
+    ComPtr<ID3D12QueryHeap>      m_StatsHeap;
+    int                          m_StatsSlot = 0;
+    int                          m_StatsCount = 0;
+    bool                         m_StatsOpen = false;
+    const char*                  m_StatsTags[64] = {};
+    ComPtr<ID3D12Resource>       m_StatsBuf;
+    bool                         m_StatsPending = false;
 };
 
 } // namespace he::rhi::d3d12

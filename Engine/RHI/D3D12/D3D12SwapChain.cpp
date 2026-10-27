@@ -158,6 +158,15 @@ void D3D12SwapChain::Present(bool vsync) {
         m_BackBufferState = D3D12_RESOURCE_STATE_PRESENT;
     }
 
+    if (std::getenv("HE_SCAN_ALL") && m_Device) {
+        static int s_n = 0;
+        if (++s_n == 40) m_Device->ScanAllHdrTargets();   // 只扫一次，避免太慢
+    }
+    if (std::getenv("HE_STATS_DRAW") && m_Device) {
+        static int s_n = 0;
+        if (++s_n == 60) m_Device->PassStatsRead("第60帧的全部索引绘制");   // 只读一次
+    }
+    if (m_Device) m_Device->FlushRetired();   // 每帧回收上一帧延迟释放的资源
     const HRESULT hr = m_SwapChain->Present(vsync ? 1u : 0u, flags);
     if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
         m_Device->ReportDeviceRemoved("SwapChain::Present");
