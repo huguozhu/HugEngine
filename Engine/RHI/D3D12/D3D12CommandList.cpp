@@ -596,9 +596,15 @@ void D3D12CommandList::PipelineBarrier(PipelineStage, PipelineStage,
     b.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
     b.Transition.pResource   = t->GetResource();
     b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    b.Transition.StateBefore = from;
+        // 【用我们登记的真实状态做屏障】引擎传的 srcState 未必等于资源的实际状态（它与引擎自己的跟踪有关，D3D12 侧未必一致），直接照用会让 ResourceBarrier 被判非法（调试层 id=527，实测 3600 条），屏障无效。 这里以登记状态为准。
+        ID3D12Resource* bres = t->GetResource();
+        const D3D12_RESOURCE_STATES actualFrom =
+            m_Device ? m_Device->GetResourceState(bres) : from;
+        if (actualFrom == to) return;
+        b.Transition.StateBefore = actualFrom;
     b.Transition.StateAfter  = to;
     m_List->ResourceBarrier(1, &b);
+        if (m_Device) m_Device->SetResourceState(bres, to);
 }
 
 void D3D12CommandList::CopyBuffer(IRHIBuffer* src, IRHIBuffer* dst, u64 size,
