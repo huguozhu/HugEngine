@@ -37,6 +37,10 @@ public:
 
     /// 供命令列表使用：拿到当前后缓冲的 RTV（CPU 句柄）
     D3D12_CPU_DESCRIPTOR_HANDLE GetCurrentRtv() const;
+    /// 当前后缓冲的资源与状态（命令列表做 PRESENT<->RENDER_TARGET 屏障时要用）
+    ID3D12Resource*      GetCurrentBackBufferResource() const;
+    D3D12_RESOURCE_STATES GetBackBufferState() const { return m_BackBufferState; }
+    void                 SetBackBufferState(D3D12_RESOURCE_STATES st) { m_BackBufferState = st; }
 
     /// 标记后缓冲已经被写成 RENDER_TARGET（命令列表 BeginRenderPass 时调用）。
     /// D3D12 的屏障要求 StateBefore 严格等于资源**当前**状态，猜错会让设备挂起

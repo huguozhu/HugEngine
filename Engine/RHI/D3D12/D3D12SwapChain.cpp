@@ -134,6 +134,30 @@ void D3D12SwapChain::Present(bool vsync) {
         HE_CORE_INFO("[D3D12] 已呈现 {} 帧（索引 {}）", s_frames, m_Index);
     }
     const UINT flags = vsync ? 0u : DXGI_PRESENT_ALLOW_TEARING;
+    // 【Present 前必须切回 PRESENT】否则下一次以 RTV 使用同一缓冲会被判非法
+    if (m_BackBufferState != D3D12_RESOURCE_STATE_PRESENT) {
+        ID3D12Resource* bb = GetCurrentBackBufferResource();
+        ID3D12CommandQueue* q = m_Device ? m_Device->GetQueue() : nullptr;
+        if (bb && q && m_Device->GetDevice()) {
+            ComPtr<ID3D12CommandAllocator>    a;
+            ComPtr<ID3D12GraphicsCommandList> l;
+            if (SUCCEEDED(m_Device->GetDevice()->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&a))) &&
+                SUCCEEDED(m_Device->GetDevice()->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, a.Get(), nullptr, IID_PPV_ARGS(&l)))) {
+                D3D12_RESOURCE_BARRIER tb{};
+                tb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                tb.Transition.pResource   = bb;
+                tb.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                tb.Transition.StateBefore = m_BackBufferState;
+                tb.Transition.StateAfter  = D3D12_RESOURCE_STATE_PRESENT;
+                l->ResourceBarrier(1, &tb);
+                l->Close();
+                ID3D12CommandList* lists[1] = { l.Get() };
+                q->ExecuteCommandLists(1, lists);
+            }
+        }
+        m_BackBufferState = D3D12_RESOURCE_STATE_PRESENT;
+    }
+
     const HRESULT hr = m_SwapChain->Present(vsync ? 1u : 0u, flags);
     if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
         m_Device->ReportDeviceRemoved("SwapChain::Present");
@@ -151,6 +175,12 @@ void* D3D12SwapChain::GetCurrentBackBufferView() const {
     D3D12_CPU_DESCRIPTOR_HANDLE h = m_RtvHeap->GetCPUDescriptorHandleForHeapStart();
     h.ptr += static_cast<SIZE_T>(idx) * m_RtvSize;
     return reinterpret_cast<void*>(h.ptr);
+}
+
+ID3D12Resource* D3D12SwapChain::GetCurrentBackBufferResource() const {
+    if (!m_SwapChain) return nullptr;
+    const u32 idx = m_SwapChain->GetCurrentBackBufferIndex();
+    return idx < m_Buffers.size() ? m_Buffers[idx].Get() : nullptr;
 }
 
 D3D12_CPU_DESCRIPTOR_HANDLE D3D12SwapChain::GetCurrentRtv() const {

@@ -113,6 +113,23 @@ void D3D12CommandList::BeginRenderPass(u32 colorCount, Format colorFormat,
         hasRtv = true;
     }
 
+    // 【交换链后缓冲必须显式屏障】D3D12 不会把 PRESENT 隐式提升为 RENDER_TARGET，
+    // 不做转换就以 RTV 使用会被判非法、渲染内容被丢弃（调试层 id=538 实测 1669 条，
+    // 这也是 02.Cube 画面全黑的根因）。
+    if (hasRtv && m_SwapChain) {
+        auto* sc = static_cast<D3D12SwapChain*>(m_SwapChain);
+        ID3D12Resource* bb = sc->GetCurrentBackBufferResource();
+        if (bb && sc->GetBackBufferState() != D3D12_RESOURCE_STATE_RENDER_TARGET) {
+            D3D12_RESOURCE_BARRIER tb{};
+            tb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            tb.Transition.pResource   = bb;
+            tb.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            tb.Transition.StateBefore = sc->GetBackBufferState();
+            tb.Transition.StateAfter  = D3D12_RESOURCE_STATE_RENDER_TARGET;
+            m_List->ResourceBarrier(1, &tb);
+        }
+    }
+
     m_List->OMSetRenderTargets(colorCount, hasRtv ? &rtv : nullptr, FALSE, nullptr);
     m_HasRtv = hasRtv;
     // 告诉交换链：后缓冲现在处于 RENDER_TARGET 状态（截图做屏障时要用真实状态）
@@ -174,9 +191,10 @@ void D3D12CommandList::BeginOffscreenPass(void* colorImageView, void* depthImage
         if (hasRtv) {
             if (auto* res = m_Device->FindViewResource(static_cast<UINT64>(rtv.ptr))) {
                 const auto from = m_Device->GetResourceState(res);
-                const bool needs = (from == D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE ||
-                                     from == D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-                if (needs) {
+                // 【只要不是目标状态就显式转换】此前只在「当前是着色器资源」时才转，
+                // 从 COMMON 依赖所谓隐式提升 —— 但调试层明确判定 COMMON 不能直接当
+                // 渲染目标使用（id=538 实测 1118 条），渲染内容被丢弃。
+                if (from != D3D12_RESOURCE_STATE_RENDER_TARGET) {
                     D3D12_RESOURCE_BARRIER b{};
                     b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
                     b.Transition.pResource = res;
@@ -191,10 +209,7 @@ void D3D12CommandList::BeginOffscreenPass(void* colorImageView, void* depthImage
         if (hasDsv) {
             if (auto* res = m_Device->FindViewResource(static_cast<UINT64>(dsv.ptr))) {
                 const auto from = m_Device->GetResourceState(res);
-                const bool needs = (from == D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE ||
-                                     from == D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE ||
-                                     from == D3D12_RESOURCE_STATE_DEPTH_READ);
-                if (needs) {
+                if (from != D3D12_RESOURCE_STATE_DEPTH_WRITE) {
                     D3D12_RESOURCE_BARRIER b{};
                     b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
                     b.Transition.pResource = res;
