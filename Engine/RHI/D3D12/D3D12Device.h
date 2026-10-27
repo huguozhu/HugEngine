@@ -17,6 +17,8 @@
 
 namespace he::rhi::d3d12 {
 
+class D3D12SwapChain;   // 前置声明（设备要保存它的指针）
+
 class D3D12Device final : public IRHIDevice {
 public:
     D3D12Device() = default;
@@ -91,6 +93,9 @@ public:
                            D3D12_GPU_DESCRIPTOR_HANDLE& outCbvHandle);
 
     ID3D12DescriptorHeap*            GetCbvHeap() const;
+    /// 设备创建的唯一交换链（命令列表没拿到交换链时用它兜底）
+    void                             SetSwapChainPtr(D3D12SwapChain* sc) { m_SwapChainPtr = sc; }
+    D3D12SwapChain*                  GetSwapChainPtr() const { return m_SwapChainPtr; }
     D3D12_GPU_DESCRIPTOR_HANDLE      GetCbvHeapGpuStart() const;
     void*                            GetConstantSlotPtr(D3D12_GPU_VIRTUAL_ADDRESS gpuAddr);
     D3D12_GPU_DESCRIPTOR_HANDLE      GetDefaultSamplerGpu() const;
@@ -212,6 +217,8 @@ private:
     /// 缺一个就会让 CreateGraphicsPipelineState 返回 E_INVALIDARG。
     std::unordered_map<UINT64, ComPtr<ID3D12Resource>> m_ViewResources;
     mutable std::unordered_map<ID3D12Resource*, D3D12_RESOURCE_STATES> m_ResStates;
+
+    D3D12SwapChain*              m_SwapChainPtr = nullptr;
 
     ComPtr<ID3D12DescriptorHeap> m_SamplerHeap;
 

@@ -90,6 +90,12 @@ void D3D12CommandList::BeginRenderPass(u32 colorCount, Format colorFormat,
     // 后缓冲的 RTV：从交换链取（引擎传的 colorFormat 是后缓冲格式）
     D3D12_CPU_DESCRIPTOR_HANDLE rtv{};
     bool hasRtv = false;
+    // 【兜底】渲染线程创建的命令列表未必带 m_SwapChain；此时若不兜底，
+    // hasRtv 会是 false ⇒ 后缓冲根本没被绑定 ⇒ 最终画面永远黑，
+    // 且后缓冲状态停在 PRESENT/COMMON ⇒ 截图时的屏障与拷贝也无效。
+    if (!m_SwapChain && m_Device && m_Device->GetSwapChainPtr()) {
+        m_SwapChain = m_Device->GetSwapChainPtr();
+    }
     if (m_SwapChain) {
         // 引擎的 IRHISwapChain 只有 D3D12 交换链会走到这里；
         // 用 static_cast 而不是 dynamic_cast，避免依赖 RTTI。

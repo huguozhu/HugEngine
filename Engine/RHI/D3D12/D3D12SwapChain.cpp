@@ -15,6 +15,8 @@ namespace he::rhi::d3d12 {
 D3D12SwapChain::~D3D12SwapChain() = default;
 
 bool D3D12SwapChain::Initialize(D3D12Device* device, const SwapChainDesc& desc) {
+    if (device) device->SetSwapChainPtr(this);   // 供命令列表兜底取用
+
     if (!device || !device->GetFactory() || !device->GetQueue()) return false;
     m_Device = device;
     m_Width  = desc.width;
@@ -303,8 +305,25 @@ void D3D12SwapChain::CaptureIfRequested() {
     list->ResourceBarrier(1, &b);
     list->Close();
 
+    {   // 实验：先把回读缓冲填 0x80，用来判断拷贝是否真的生效
+        void* fill = nullptr; D3D12_RANGE r0{0,0};
+        if (SUCCEEDED(readback->Map(0, &r0, &fill)) && fill) { memset(fill, 0x80, static_cast<size_t>(totalSize)); readback->Unmap(0, nullptr); }
+    }
     ID3D12CommandList* lists[1] = { list.Get() };
+    {   // 实验：读回前 8 字节，判断是 0x80（拷贝没生效）还是 0（源是黑的）
+        void* chk = nullptr; D3D12_RANGE r1{0,0};
+        if (SUCCEEDED(readback->Map(0, &r1, &chk)) && chk) {
+            const unsigned char* b = static_cast<const unsigned char*>(chk);
+            HE_CORE_ERROR("[CAP] first bytes = {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+                          b[0],b[1],b[2],b[3],b[4],b[5],b[6],b[7]);
+            readback->Unmap(0, nullptr);
+        }
+    }
     queue->ExecuteCommandLists(1, lists);
+    // 【必须等拷贝真正完成】此前只在自建围栏上等，若围栏/事件异常就会在
+    // GPU 还没执行拷贝时就去 Map，读到的仍是填充值（实测 0x80 原封不动）。
+    // 这里直接等引擎队列空闲，保证拷贝已落地。
+    if (m_Device) m_Device->WaitIdle();
 
     ComPtr<ID3D12Fence> fence;
     if (SUCCEEDED(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)))) {
