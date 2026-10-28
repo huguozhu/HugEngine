@@ -26,8 +26,15 @@ bool D3D12CommandList::Initialize(D3D12Device* device, QueueType queue) {
         (queue == QueueType::Compute) ? D3D12_COMMAND_LIST_TYPE_COMPUTE
                                       : D3D12_COMMAND_LIST_TYPE_DIRECT;
 
-    if (!HE_D3D12_CHECK(dev->CreateCommandAllocator(type, IID_PPV_ARGS(&m_Allocator)),
-                        "CreateCommandAllocator")) {
+    for (auto& alloc : m_Allocators) {
+        if (!HE_D3D12_CHECK(dev->CreateCommandAllocator(type, IID_PPV_ARGS(&alloc)),
+                            "CreateCommandAllocator")) {
+            return false;
+        }
+    }
+    m_Allocator = m_Allocators[0];
+    if (!HE_D3D12_CHECK(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_SlotFence)),
+                        "CreateFence(CommandList)")) {
         return false;
     }
     if (!HE_D3D12_CHECK(dev->CreateCommandList(0, type, m_Allocator.Get(), nullptr,
@@ -44,6 +51,17 @@ void D3D12CommandList::Begin() {
     { static int s=0; if (s<4) { ++s; std::printf("[STP] Begin %d\n", s); std::fflush(stdout); } }
 
     if (!m_List || !m_Allocator) { std::printf("[BGN] no list/alloc\n"); std::fflush(stdout); return; }
+    // 轮换到下一个帧槽位，并等待该槽位上一次提交的命令在 GPU 上执行完，再复用其分配器
+    m_FrameSlot = (m_FrameSlot + 1) % kMaxFramesInFlight;
+    m_Allocator = m_Allocators[m_FrameSlot];
+    if (m_SlotFence && m_SlotFence->GetCompletedValue() < m_SlotFenceValues[m_FrameSlot]) {
+        HANDLE ev = CreateEventEx(nullptr, nullptr, 0, EVENT_ALL_ACCESS);
+        if (ev) {
+            m_SlotFence->SetEventOnCompletion(m_SlotFenceValues[m_FrameSlot], ev);
+            WaitForSingleObject(ev, 8000);   // 有上限：设备挂起时不至于让进程永久卡住
+            CloseHandle(ev);
+        }
+    }
     // 每次录制前必须 Reset 分配器与列表
     std::printf("[BGN] before alloc Reset\n"); std::fflush(stdout);
     if (FAILED(m_Allocator->Reset())) {
@@ -77,6 +95,13 @@ void D3D12CommandList::Begin() {
         m_PushCpu = m_Device->GetConstantSlotPtr(m_PushGpu);
         if (m_PushCpu) std::memset(m_PushCpu, 0, 256);
     }
+}
+
+void D3D12CommandList::OnSubmitted(ID3D12CommandQueue* queue) {
+    if (!queue || !m_SlotFence) return;
+    const u64 v = m_NextFenceValue++;
+    queue->Signal(m_SlotFence.Get(), v);
+    m_SlotFenceValues[m_FrameSlot] = v;
 }
 
 void D3D12CommandList::End() {

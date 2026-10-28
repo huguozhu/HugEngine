@@ -114,6 +114,8 @@ public:
 
     /// 供 Device::Submit 使用
     ID3D12GraphicsCommandList* GetNativeCommandList() const { return m_List.Get(); }
+    /// 提交到队列后调用：在队列上打一个围栏，标记当前帧槽位的分配器何时可以复用
+    void OnSubmitted(ID3D12CommandQueue* queue);
 
 private:
     /// 把引擎传来的 void* 还原成 D3D12 的 CPU 描述符句柄
@@ -132,7 +134,15 @@ private:
     /// 而 Vulkan 切管线时兼容的绑定会保留 —— 引擎按 Vulkan 语义只绑一次，这里负责补齐。
     void FlushRootArgs();
 
-    ComPtr<ID3D12CommandAllocator>    m_Allocator;
+    /// 每个飞行帧槽位一个分配器（同 Vulkan 的逐帧命令缓冲）：分配器在 GPU 执行完之前
+    /// 不能 Reset，样例只建一个命令列表并每帧重录，单分配器会在 GPU 仍在执行上一帧时
+    /// 被重置 ⇒ GPU 读到被覆盖的命令内存 ⇒ 页错误 / 设备挂起（调试层 id=552）。
+    ComPtr<ID3D12CommandAllocator>    m_Allocators[kMaxFramesInFlight];
+    ComPtr<ID3D12CommandAllocator>    m_Allocator;          // 当前槽位的分配器
+    ComPtr<ID3D12Fence>               m_SlotFence;          // 槽位完成围栏
+    u64                               m_SlotFenceValues[kMaxFramesInFlight]{};   // 各槽位最后一次提交的围栏值
+    u64                               m_NextFenceValue = 1;
+    u32                               m_FrameSlot = 0;
     ComPtr<ID3D12GraphicsCommandList> m_List;
     ComPtr<ID3D12RootSignature>       m_PushRootSig;   // 阶段 0 占位，阶段 2 由 PSO 提供
     D3D12Device*      m_Device = nullptr;

@@ -305,6 +305,7 @@ void D3D12Device::Submit(IRHICommandList* cmdList, RHICommandList* stream) {
     if (!lists[0]) return;
     if (std::getenv("HE_SUBSEQ")) HE_CORE_ERROR("[SUB] list={} draws={}", (void*)cl, cl->GetTotalDraws());
     m_Queue->ExecuteCommandLists(1, lists);
+    cl->OnSubmitted(m_Queue.Get());   // 记录该列表当前帧槽位的完成围栏
     // 每帧输出一次调试层的 ERROR（VS 的「输出」窗口内容进不了日志，这里补上）
     if (m_InfoQueue) {
         UINT64 n = m_InfoQueue->GetNumStoredMessages();
