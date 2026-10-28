@@ -17,6 +17,9 @@
 
 namespace he::rhi::d3d12 {
 
+/// 设备丢失时打印 DRED 面包屑与页错误信息（需 HE_D3D12_DRED=1，只打印一次）
+void DumpDeviceRemovedInfo(ID3D12Device* dev);
+
 class D3D12SwapChain;   // 前置声明（设备要保存它的指针）
 
 class D3D12Device final : public IRHIDevice {

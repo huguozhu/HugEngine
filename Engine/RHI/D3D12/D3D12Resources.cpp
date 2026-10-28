@@ -35,6 +35,7 @@ static void CheckDeviceAlive(ID3D12Device* dev, const char* where) {
     const HRESULT r = dev->GetDeviceRemovedReason();
     if (FAILED(r)) {
         HE_CORE_ERROR("[设备丢失] 发生在 {} 之后, reason=0x{:08x}", where, static_cast<u32>(r));
+        DumpDeviceRemovedInfo(dev);
     }
 }
 

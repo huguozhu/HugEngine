@@ -15,11 +15,49 @@
 namespace he::rhi::d3d12 {
 
 // 设备存活检查（与 D3D12Resources.cpp 里的同名辅助函数用途一致）
+// 设备丢失时打印 DRED（需 HE_D3D12_DRED=1 在建设备前开启）：
+// 自动面包屑给出每个命令列表最后完成的操作，页错误给出出错的 GPU 虚拟地址。只打印一次。
+void DumpDeviceRemovedInfo(ID3D12Device* dev) {
+    static bool s_dumped = false;
+    if (s_dumped || !dev) return;
+    s_dumped = true;
+    ComPtr<ID3D12DeviceRemovedExtendedData> dred;
+    if (FAILED(dev->QueryInterface(IID_PPV_ARGS(&dred)))) return;
+    D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT bc{};
+    if (SUCCEEDED(dred->GetAutoBreadcrumbsOutput(&bc))) {
+        for (const D3D12_AUTO_BREADCRUMB_NODE* n = bc.pHeadAutoBreadcrumbNode; n; n = n->pNext) {
+            const UINT done = n->pLastBreadcrumbValue ? *n->pLastBreadcrumbValue : 0;
+            if (done >= n->BreadcrumbCount) continue;   // 已全部完成的列表不是元凶
+            HE_CORE_ERROR("[DRED] 列表={} 完成 {}/{} 个操作", static_cast<const void*>(n->pCommandList),
+                          done, n->BreadcrumbCount);
+            // 打印卡住位置前后的操作（D3D12_AUTO_BREADCRUMB_OP 枚举值）
+            const UINT from = done >= 4 ? done - 4 : 0;
+            const UINT to   = (done + 4 < n->BreadcrumbCount) ? done + 4 : n->BreadcrumbCount;
+            for (UINT i = from; i < to; ++i) {
+                HE_CORE_ERROR("[DRED]   op[{}]={}{}", i, static_cast<int>(n->pCommandHistory[i]),
+                              i == done ? "  <== 未完成" : "");
+            }
+        }
+    }
+    D3D12_DRED_PAGE_FAULT_OUTPUT pf{};
+    if (SUCCEEDED(dred->GetPageFaultAllocationOutput(&pf)) && pf.PageFaultVA) {
+        HE_CORE_ERROR("[DRED] 页错误 VA=0x{:x}", static_cast<u64>(pf.PageFaultVA));
+        // 该地址附近仍存活 / 最近释放的分配（出现在「已释放」里通常意味着 GPU 还在用已销毁的资源）
+        for (const D3D12_DRED_ALLOCATION_NODE* a = pf.pHeadExistingAllocationNode; a; a = a->pNext)
+            HE_CORE_ERROR("[DRED]   存活分配 type={} name={}", static_cast<int>(a->AllocationType),
+                          a->ObjectNameA ? a->ObjectNameA : "-");
+        for (const D3D12_DRED_ALLOCATION_NODE* a = pf.pHeadRecentFreedAllocationNode; a; a = a->pNext)
+            HE_CORE_ERROR("[DRED]   已释放分配 type={} name={}", static_cast<int>(a->AllocationType),
+                          a->ObjectNameA ? a->ObjectNameA : "-");
+    }
+}
+
 static void CheckDeviceAlive(ID3D12Device* dev, const char* where) {
     if (!dev) return;
     const HRESULT r = dev->GetDeviceRemovedReason();
     if (FAILED(r)) {
         HE_CORE_ERROR("[设备丢失] 在 {} 之后, reason=0x{:08x}", where, static_cast<u32>(r));
+        DumpDeviceRemovedInfo(dev);
     }
 }
 
@@ -107,6 +145,16 @@ bool D3D12Device::CreateDeviceAndQueue() {
         HE_CORE_INFO("[D3D12] 使用适配器: {} (显存 {} MB)",
                      std::string(desc.Description, desc.Description + wcslen(desc.Description)).c_str(),
                      static_cast<u32>(desc.DedicatedVideoMemory / (1024 * 1024)));
+    }
+
+    // HE_D3D12_DRED=1：开启 DRED 自动面包屑与页错误记录，设备挂起时能定位到具体命令
+    if (std::getenv("HE_D3D12_DRED")) {
+        ComPtr<ID3D12DeviceRemovedExtendedDataSettings> dredSettings;
+        if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dredSettings)))) {
+            dredSettings->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+            dredSettings->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+            HE_CORE_INFO("[D3D12] DRED 已启用");
+        }
     }
 
     if (!HE_D3D12_CHECK(D3D12CreateDevice(bestAdapter.Get(), D3D_FEATURE_LEVEL_11_0,
