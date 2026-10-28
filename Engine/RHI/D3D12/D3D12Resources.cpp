@@ -89,8 +89,11 @@ bool D3D12Buffer::Initialize(D3D12Device* device, const BufferDesc& desc) {
     //   · UPLOAD 堆可以立即 Map 写入，数据当场就有效
     //   · 之前走 DEFAULT 堆 + 中转缓冲，但**从未执行拷贝** ⇒ 顶点数据全 0
     //     ⇒ 三角形退化 ⇒ 画面全黑（实测就是这个问题）
+    // 常量缓冲（Uniform）一律放 UPLOAD 堆：引擎把它们当 CPU 每帧写入的数据，即使没置
+    // cpuAccess 也会直接 Map（Vulkan 下它们本就在主机可见内存）；DEFAULT 堆不可映射，
+    // Map 会直接失败（调试层 id=822），调用方随后写空指针崩溃（实测 04.Sponza-Deferred）。
     if (!isStorage && (HasAny(desc.usage, BufferUsage::TransferDst) || desc.cpuAccess ||
-        desc.initialData != nullptr)) {
+        desc.initialData != nullptr || HasAny(desc.usage, BufferUsage::Uniform))) {
         heapType = D3D12_HEAP_TYPE_UPLOAD;
     }
     // UAV 缓冲需要一份等大的 UPLOAD 暂存来承载 CPU 写入
@@ -247,8 +250,12 @@ void* D3D12Buffer::Map() {    std::printf("[BUF] Map enter\n"); std::fflush(stdo
     // UAV 缓冲不能直接 Map，用暂存缓冲
     ID3D12Resource* target = m_NeedsStagingCopy ? m_CpuStaging.Get() : m_Resource.Get();
     if (!target) return nullptr;
-    if (FAILED(target->Map(0, &range, &p))) {
-        HE_CORE_ERROR("D3D12Buffer::Map 失败");
+    const HRESULT mhr = target->Map(0, &range, &p);
+    if (FAILED(mhr)) {
+        // 带上 HRESULT 与缓冲信息：映射 UPLOAD/暂存缓冲失败通常意味着设备已被移除
+        HE_CORE_ERROR("D3D12Buffer::Map 失败 hr=0x{:08x} size={} staging={}",
+                      static_cast<u32>(mhr), static_cast<u64>(m_Size), m_NeedsStagingCopy ? 1 : 0);
+        if (m_Device && m_Device->GetDevice()) CheckDeviceAlive(m_Device->GetDevice(), "D3D12Buffer::Map");
         return nullptr;
     }
     m_MappedPtr = p;
