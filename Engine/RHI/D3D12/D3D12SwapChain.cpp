@@ -138,11 +138,31 @@ void D3D12SwapChain::Present(bool vsync) {
     if (m_BackBufferState != D3D12_RESOURCE_STATE_PRESENT) {
         ID3D12Resource* bb = GetCurrentBackBufferResource();
         ID3D12CommandQueue* q = m_Device ? m_Device->GetQueue() : nullptr;
-        if (bb && q && m_Device->GetDevice()) {
-            ComPtr<ID3D12CommandAllocator>    a;
-            ComPtr<ID3D12GraphicsCommandList> l;
-            if (SUCCEEDED(m_Device->GetDevice()->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&a))) &&
-                SUCCEEDED(m_Device->GetDevice()->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, a.Get(), nullptr, IID_PPV_ARGS(&l)))) {
+        ID3D12Device* dev = m_Device ? m_Device->GetDevice() : nullptr;
+        // 首次使用时创建常驻的分配器 / 列表 / 围栏
+        if (dev && !m_PresentList) {
+            bool ok = true;
+            for (auto& a : m_PresentAllocs)
+                ok = ok && SUCCEEDED(dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&a)));
+            ok = ok && SUCCEEDED(dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, m_PresentAllocs[0].Get(),
+                                                        nullptr, IID_PPV_ARGS(&m_PresentList)));
+            ok = ok && SUCCEEDED(m_PresentList->Close());
+            ok = ok && SUCCEEDED(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_PresentFence)));
+            if (!ok) m_PresentList.Reset();
+        }
+        if (bb && q && m_PresentList) {
+            // 轮换槽位；该槽位的分配器必须等 GPU 执行完上一次的屏障后才能 Reset
+            m_PresentSlot = (m_PresentSlot + 1) % kMaxFramesInFlight;
+            if (m_PresentFence->GetCompletedValue() < m_PresentFenceValues[m_PresentSlot]) {
+                if (HANDLE ev = CreateEventEx(nullptr, nullptr, 0, EVENT_ALL_ACCESS)) {
+                    m_PresentFence->SetEventOnCompletion(m_PresentFenceValues[m_PresentSlot], ev);
+                    WaitForSingleObject(ev, 8000);
+                    CloseHandle(ev);
+                }
+            }
+            ID3D12CommandAllocator* a = m_PresentAllocs[m_PresentSlot].Get();
+            ID3D12GraphicsCommandList* l = m_PresentList.Get();
+            if (SUCCEEDED(a->Reset()) && SUCCEEDED(l->Reset(a, nullptr))) {
                 D3D12_RESOURCE_BARRIER tb{};
                 tb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
                 tb.Transition.pResource   = bb;
@@ -151,8 +171,10 @@ void D3D12SwapChain::Present(bool vsync) {
                 tb.Transition.StateAfter  = D3D12_RESOURCE_STATE_PRESENT;
                 l->ResourceBarrier(1, &tb);
                 l->Close();
-                ID3D12CommandList* lists[1] = { l.Get() };
+                ID3D12CommandList* lists[1] = { l };
                 q->ExecuteCommandLists(1, lists);
+                m_PresentFenceValues[m_PresentSlot] = m_PresentNextValue;
+                q->Signal(m_PresentFence.Get(), m_PresentNextValue++);
             }
         }
         m_BackBufferState = D3D12_RESOURCE_STATE_PRESENT;

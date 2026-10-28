@@ -70,6 +70,16 @@ private:
     UINT m_RtvSize = 0;
     Format m_Format = Format::BGRA8_UNORM;
     bool m_Vsync = true;
+
+    /// Present 前「后缓冲 → PRESENT」屏障用的命令列表。必须常驻并按帧槽位轮换：
+    /// 之前每帧临时创建、提交后立即析构，分配器在 GPU 执行完之前就被销毁
+    /// （调试层 id=552 LUCPrepareForDestruction）⇒ GPU 读到已释放的命令内存。
+    ComPtr<ID3D12CommandAllocator>    m_PresentAllocs[kMaxFramesInFlight];
+    ComPtr<ID3D12GraphicsCommandList> m_PresentList;
+    ComPtr<ID3D12Fence>               m_PresentFence;
+    u64                               m_PresentFenceValues[kMaxFramesInFlight]{};
+    u64                               m_PresentNextValue = 1;
+    u32                               m_PresentSlot = 0;
 };
 
 } // namespace he::rhi::d3d12
