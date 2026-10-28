@@ -462,8 +462,6 @@ bool D3D12Device::EnsureDescriptorHeaps() {
 
         const UINT samplerInc = m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
         D3D12_CPU_DESCRIPTOR_HANDLE h = m_SamplerHeap->GetCPUDescriptorHandleForHeapStart();
-        // bindless 采样器保留区：堆内后 64 槽
-        m_BindlessSmpBase = std::getenv("HE_BINDLESS_BASE0") ? 0u : 64u;
         for (u32 i = 0; i < 128; ++i) {
             m_Device->CreateSampler(&sd, h);
             h.ptr += samplerInc;
@@ -498,6 +496,10 @@ bool D3D12Device::EnsureDescriptorHeaps() {
             m_Device->CreateSampler(&sd, h);
             h.ptr += m_SetSamplerSize;
         }
+        // bindless 采样器保留区：放在描述符集采样器堆的尾部 256 槽。
+        // 必须与描述符集共用同一张堆 —— 命令列表只 SetDescriptorHeaps 这一张采样器堆，
+        // 若 bindless 表指向别的堆，每次绘制都会触发 D3D12 错误 708，采样结果未定义甚至导致设备挂起。
+        m_BindlessSmpBase = kSetSamplerCapacity - 256u;
         HE_CORE_INFO("D3D12Device: 描述符集 SAMPLER 堆就绪（{} 槽）", kSetSamplerCapacity);
     }
     return true;
@@ -760,10 +762,9 @@ D3D12_GPU_DESCRIPTOR_HANDLE D3D12Device::GetSrvHeapGpuStart() const {
 
 D3D12_GPU_DESCRIPTOR_HANDLE D3D12Device::GetBindlessSmpGpuHandle() const {
     D3D12_GPU_DESCRIPTOR_HANDLE h{};
-    if (!m_SamplerHeap) return h;
-    h = m_SamplerHeap->GetGPUDescriptorHandleForHeapStart();
-    const UINT inc = m_Device ? m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER) : 0;
-    h.ptr += static_cast<SIZE_T>(m_BindlessSmpBase) * inc;
+    if (!m_SetSamplerHeap) return h;   // 必须是 BindDescriptorSet 里实际绑定的采样器堆
+    h = m_SetSamplerHeap->GetGPUDescriptorHandleForHeapStart();
+    h.ptr += static_cast<SIZE_T>(m_BindlessSmpBase) * m_SetSamplerSize;
     return h;
 }
 
@@ -771,9 +772,10 @@ bool D3D12Device::WriteBindlessSampler(u32 slot, IRHISampler* sampler) {
     if (!m_Device || !sampler) return false;
     if (!EnsureDescriptorHeaps()) return false;
     auto* smp = static_cast<D3D12Sampler*>(sampler);
-    const UINT inc = m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
-    D3D12_CPU_DESCRIPTOR_HANDLE dst = m_SamplerHeap->GetCPUDescriptorHandleForHeapStart();
-    dst.ptr += static_cast<SIZE_T>(m_BindlessSmpBase + slot) * inc;
+    if (m_BindlessSmpBase + slot >= kSetSamplerCapacity) return false;   // 超出 bindless 采样器保留区
+    // 写进描述符集采样器堆的 bindless 保留区（与 GetBindlessSmpGpuHandle 同一张堆）
+    D3D12_CPU_DESCRIPTOR_HANDLE dst = m_SetSamplerHeap->GetCPUDescriptorHandleForHeapStart();
+    dst.ptr += static_cast<SIZE_T>(m_BindlessSmpBase + slot) * m_SetSamplerSize;
     m_Device->CopyDescriptorsSimple(1, dst, smp->GetDescriptor(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
     return true;
 }
