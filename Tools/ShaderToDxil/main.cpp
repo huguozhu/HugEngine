@@ -398,7 +398,7 @@ static std::string PatchRegisters(const std::string& src) {
         // Slang 会把它们各自放进独立的 space，强行按 binding 重排会编译失败
         const bool isUnbounded = (reg != std::string::npos) &&
                                  line.substr(0, reg).find("[]") != std::string::npos;
-        if (reg != std::string::npos && !isCBuffer && !isUnbounded && srcLine > 0 && !curFile.empty()) {
+        if (reg != std::string::npos && !isUnbounded && srcLine > 0 && !curFile.empty()) {
             const size_t clsPos = reg + 11;
             const char cls = (clsPos < line.size()) ? line[clsPos] : 0;
             const size_t close = line.find(')', clsPos);
@@ -428,7 +428,10 @@ static std::string PatchRegisters(const std::string& src) {
             }
             const size_t vb = srcDecl.find("vk::binding(");
             // 源码已显式写 register(...) 的保持原样
-            if ((cls == 't' || cls == 'u' || cls == 's') && close != std::string::npos &&
+            // cbuffer 只处理源码带 vk::binding 的（描述符集里的常量缓冲）；
+            // [[vk::push_constant]] 的 cbuffer 源码里没有 vk::binding，保持自动分配（b0..b7 的 root CBV）
+            const bool clsOk = isCBuffer ? (cls == 'b') : (cls == 't' || cls == 'u' || cls == 's');
+            if (clsOk && close != std::string::npos &&
                 vb != std::string::npos && srcDecl.find("register(") == std::string::npos) {
                 const size_t ab = vb + 12;
                 const size_t ae = srcDecl.find(')', ab);
@@ -437,6 +440,9 @@ static std::string PatchRegisters(const std::string& src) {
                 int binding = 0, space = 0;
                 const bool ok = ResolveInt(args.substr(0, comma), curFile, binding) &&
                     (comma == std::string::npos || ResolveInt(args.substr(comma + 1), curFile, space));
+                // 描述符集 CBV 的寄存器从 b8 起（b0..b7 留给推送常量的 root CBV），
+                // 与根签名里 SRV 表附带的 CBV 范围（BaseShaderRegister=8）一致
+                if (isCBuffer) binding += 8;
                 if (ok) {
                     line = line.substr(0, clsPos) + cls + std::to_string(binding) +
                            ", space" + std::to_string(space) + line.substr(close);

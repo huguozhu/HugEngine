@@ -797,6 +797,16 @@ bool D3D12PipelineState::Initialize(D3D12Device* device, const PipelineStateDesc
         { D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, kSpaceCount * 2,    kRootCbvCount + kSpaceCount * 2  },
     };
 
+    // 【描述符集里的常量缓冲】SRV 表额外带一段 CBV 范围：寄存器 b(kSetCbvRegisterBase + binding)，
+    // 与 SRV 共用同一段描述符（偏移都从表头起），即 b(8+k) 对应「set 基址 + k」——正是
+    // UpdateDescriptorSet(UniformBuffer) 写 CBV 的位置。寄存器从 b8 起是为了避开 b0..b7 的
+    // root CBV（推送常量）；ShaderToDxil 按同一规则给带 vk::binding 的 cbuffer 分配寄存器。
+    // 此前表里只有 SRV 范围，集合里的 CBV 着色器访问不到，而这类 cbuffer 还被 Slang 自动
+    // 分到 b0，与推送常量重叠（实测 PBR 的 GIBlendParams 读到的是推送常量数据）。
+    static constexpr u32 kSetCbvRegisterBase = 8;
+    static constexpr u32 kSetCbvCount        = 64;
+    D3D12_DESCRIPTOR_RANGE srvTableRanges[kSpaceCount][2]{};
+
     for (const auto& spec : tables) {
         for (u32 s = 0; s < kSpaceCount; ++s) {
             const u32 ri = spec.rangeBase + s;
@@ -811,6 +821,19 @@ bool D3D12PipelineState::Initialize(D3D12Device* device, const PipelineStateDesc
             params[pi].DescriptorTable.NumDescriptorRanges = 1;
             params[pi].DescriptorTable.pDescriptorRanges = &ranges[ri];
             params[pi].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+            if (spec.type == D3D12_DESCRIPTOR_RANGE_TYPE_SRV) {
+                // 有界的 CBV 范围在前，无界的 SRV 范围必须放在最后
+                D3D12_DESCRIPTOR_RANGE& cbv = srvTableRanges[s][0];
+                cbv.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
+                cbv.NumDescriptors = kSetCbvCount;
+                cbv.BaseShaderRegister = kSetCbvRegisterBase;
+                cbv.RegisterSpace = s;
+                cbv.OffsetInDescriptorsFromTableStart = 0;
+                srvTableRanges[s][1] = ranges[ri];
+                params[pi].DescriptorTable.NumDescriptorRanges = 2;
+                params[pi].DescriptorTable.pDescriptorRanges = srvTableRanges[s];
+            }
         }
     }
 
