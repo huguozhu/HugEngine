@@ -52,47 +52,19 @@ PBRVSOutput vertexMain(PBRVertexInput vin, uint instanceID : SV_InstanceID) {
     const float3 inPosition = vin.inPosition;
     const float3 inNormal   = vin.inNormal;
     const float2 inUV       = vin.inUV;
-    // engine StaticVertex has no skin attributes; use Vulkan-equivalent defaults
-    const uint4  inJoints  = uint4(0u, 0u, 0u, 0u);
-    const float4 inWeights = float4(0.0, 0.0, 0.0, 1.0);
+    // Engine vertex (StaticVertex) carries only position/normal/uv: no joint or
+    // weight attribute exists, and there is no per-instance transform source.
+    // Hence the only valid transform is the object world matrix.
+    //   useInstanceID==1 (GPU driven) / ==2 (instanced): need per-instance data
+    //     that the engine does not provide yet.
+    //   useInstanceID==3 (skinned): needs bone matrices plus joint/weight
+    //     attributes, also absent.
+    // Restore those paths together with a SkinnedVertex + shader variant, see
+    // docs (D3D12 vertex attribute plan, section 7).
     PBRVSOutput output;
-    // 【objectIndex 兜底】GPU-driven 路径下引擎不写 objectIndex（保持 0xCCCCCCCC 未初始化值），
-    // 此时应改用 SV_InstanceID 作为物体索引；否则会越界索引 u_Objects 读到 0，顶点全部塌缩。
     uint objIdx = (objectIndex > 1000000u) ? instanceID : objectIndex;
     GPUObjectData obj = u_Objects[objIdx];
-#if defined(HE_BYPASS_MATRIX)
-    float4x4 worldMatrix = float4x4(1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1);
-#else
     float4x4 worldMatrix = obj.worldMatrix;
-#endif
-
-    if (false && useInstanceID == 1u) {
-        // GPU Driven：SV_InstanceID → objectIndex
-        objIdx = instanceID;
-        obj = u_Objects[objIdx];
-        worldMatrix = obj.worldMatrix;
-    } else if (false && useInstanceID == 2u) {
-        // 实例化网格（B1）：实例变换 SSBO[句柄][实例下标]，材质取单个对象条目。
-        // 任务 25：若开启了逐实例剔除，SV_InstanceID 先查可见列表（压缩后的下标）——
-        // 于是只有通过视锥测试的实例才会被顶点着色器处理。
-        uint instIdx = instanceID;
-        if (instanceVisibleHandle != 0u)
-            instIdx = u_VisibleInstanceIndices[instanceVisibleHandle][instanceID];
-        worldMatrix = u_InstanceTransforms[instanceSSBOHandle][instIdx];
-    } else if (false && useInstanceID == 3u) {
-        // 骨骼蒙皮（C1b）：4 骨骼矩阵按权重加权；
-        // 再乘实体世界矩阵（glTF 骨骼定义在网格节点局部空间）
-        // Engine vertices carry no skin attributes (StaticVertex = pos/normal/uv),
-        // so joints/weights read as zero. Zero weights would produce a zero
-        // skin matrix and collapse the mesh; fall back to "bone 0, weight 1".
-        float4 wW = inWeights;
-        if (wW.x + wW.y + wW.z + wW.w <= 0.0) wW = float4(0.0, 0.0, 0.0, 1.0);
-        float4x4 skinMat  = u_BoneMatrices[instanceSSBOHandle][inJoints.x] * wW.x;
-        skinMat += u_BoneMatrices[instanceSSBOHandle][inJoints.y] * wW.y;
-        skinMat += u_BoneMatrices[instanceSSBOHandle][inJoints.z] * wW.z;
-        skinMat += u_BoneMatrices[instanceSSBOHandle][inJoints.w] * wW.w;
-        worldMatrix = mul(obj.worldMatrix, skinMat);
-    }
 
     float4 worldPos = mul(worldMatrix, float4(inPosition, 1.0));
 
