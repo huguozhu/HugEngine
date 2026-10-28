@@ -66,16 +66,23 @@ void MovementSystem::Update(World& world, f32 dt) {
         }
 
         // 4. 位置积分
+        const float prevY = xf->position.y;
         xf->position += m.velocity * dt;
 
         // 5. 地面检测：下落/静止时向下射线（排除自身碰撞体），并做坡度过滤（maxSlopeAngle）
+        // 【防穿透】射线从**移动前的高度**出发、覆盖本帧下落的全部距离：只从移动后的位置
+        // 往下探 halfHeight+容差 时，一帧 dt 较大（如首帧 0.7s）会让角色整个越过地板、
+        // 射线落空并一直下落（实测 D3D12 首帧较慢时角色掉出地图，Vulkan 则正常）。
         if (m.velocity.y <= 0.0f) {
             Entity hit;
             float t = 0.0f;
             float3 groundNormal;
-            if (CollisionSystem::Raycast(world, xf->position, float3(0, -1, 0),
-                                         halfHeight + kGroundTolerance,
+            const float drop = std::max(prevY - xf->position.y, 0.0f);   // 本帧下降的距离
+            const float3 rayOrigin(xf->position.x, xf->position.y + drop, xf->position.z);
+            if (CollisionSystem::Raycast(world, rayOrigin, float3(0, -1, 0),
+                                         drop + halfHeight + kGroundTolerance,
                                          hit, t, e.id, &groundNormal)) {
+                t -= drop;   // 换算成「相对移动后位置」的距离，下面的贴地公式保持不变
                 // 坡度过滤：地面法线与 up 的夹角超过 maxSlopeAngle 则视为墙壁/陡坡，不可站立
                 float upDot = glm::clamp(groundNormal.y, -1.0f, 1.0f);
                 float slopeAngle = glm::degrees(std::acos(upDot));
