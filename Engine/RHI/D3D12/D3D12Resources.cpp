@@ -365,43 +365,6 @@ void D3D12Buffer::Unmap() {
                 ID3D12CommandList* lists[1] = { s_list.Get() };
                 queue->ExecuteCommandLists(1, lists);
                 s_value += 1;
-        // debug readback: verify the object buffer really made it to the GPU
-        {
-            static int s_rb = 0;
-            if (m_Size == 212992u && s_rb < 6 && s_fence) {
-                ++s_rb;
-                ComPtr<ID3D12Resource> rb;
-                D3D12_RESOURCE_DESC rbd{};
-                rbd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-                rbd.Width = 1024; rbd.Height = 1; rbd.DepthOrArraySize = 1; rbd.MipLevels = 1;
-                rbd.Format = DXGI_FORMAT_UNKNOWN; rbd.SampleDesc = { 1, 0 };
-                rbd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-                D3D12_HEAP_PROPERTIES rbp{}; rbp.Type = D3D12_HEAP_TYPE_READBACK;
-                if (SUCCEEDED(dev->CreateCommittedResource(&rbp, D3D12_HEAP_FLAG_NONE, &rbd,
-                        D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&rb)))) {
-                    if (SUCCEEDED(s_alloc->Reset()) && SUCCEEDED(s_list->Reset(s_alloc.Get(), nullptr))) {
-                        s_list->CopyBufferRegion(rb.Get(), 0, m_Resource.Get(), 0, 640);
-                        s_list->Close();
-                        ID3D12CommandList* rl[1] = { s_list.Get() };
-                        queue->ExecuteCommandLists(1, rl);
-                        s_value += 1; queue->Signal(s_fence.Get(), s_value);
-                        HANDLE ev2 = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-                        if (ev2) { s_fence->SetEventOnCompletion(s_value, ev2); WaitForSingleObject(ev2, 5000); CloseHandle(ev2); }
-                        void* p2 = nullptr; D3D12_RANGE rr{ 0, 1024 };
-                        if (SUCCEEDED(rb->Map(0, &rr, &p2)) && p2) {
-                            const float* f2 = static_cast<const float*>(p2);
-                            std::printf("[RB] gpu=%llu baseColor=(%.2f,%.2f,%.2f,%.2f) alphaCutoff=%.2f texMask=%u matID=%u\n",
-                                (unsigned long long)m_Resource->GetGPUVirtualAddress(),
-                                (double)f2[16], (double)f2[17], (double)f2[18], (double)f2[19],
-                                (double)f2[27], *reinterpret_cast<const unsigned*>(&f2[31]),
-                                *reinterpret_cast<const unsigned*>(&f2[29]));
-                            std::fflush(stdout);
-                            rb->Unmap(0, nullptr);
-                        }
-                    }
-                }
-            }
-        }
                 queue->Signal(s_fence.Get(), s_value);
             }
         }

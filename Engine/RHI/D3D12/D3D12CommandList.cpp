@@ -575,29 +575,7 @@ void D3D12CommandList::BindDescriptorSet(u32 setIndex, DescriptorSetHandle set) 
             D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         SetRootTable(8, m_Device->GetSrvHeapGpuStart());
     } else {
-    // object buffer rebind (frame-slot mismatch fix): use the buffer most recently
-    // written by the CPU, otherwise the bound set may point at a never-written slot.
-    if (setIndex == 0u) {
-        { static int n0=0; if (++n0 % 300 == 1) { std::printf("[REBIND] obj=%p set=%llu base=%u\n",
-            (void*)m_Device->GetLastObjectBuffer(), (unsigned long long)set, baseSlot); std::fflush(stdout); } }
-        auto itObj = m_Device->m_ObjectBufferBySet.find(static_cast<UINT64>(set));
-        if (auto* obj = (itObj != m_Device->m_ObjectBufferBySet.end()) ? itObj->second : nullptr) {
-        { static int n2=0; if (++n2 % 100 == 1) { std::printf("[BADDR] set=%llu obj=%p gpu=%llu\n",
-            (unsigned long long)set, (void*)obj, (unsigned long long)obj->GetResource()->GetGPUVirtualAddress()); std::fflush(stdout); } }
-            D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
-            sv.Format = DXGI_FORMAT_UNKNOWN;
-            sv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-            sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-            sv.Buffer.StructureByteStride = 208u;
-            sv.Buffer.NumElements = 1024u;
-            // 诊断：把物体缓冲铺满 base+0..8，用于确认着色器实际读取的槽位
-            for (u32 k = 0; k <= 8u; ++k) {
-                m_Device->GetDevice()->CreateShaderResourceView(
-                    obj->GetResource(), &sv, m_Device->GetSlotCpuHandle(baseSlot + k));
-            }
-        }
-    }
-        m_List->SetGraphicsRootDescriptorTable(8  + setIndex, srv);
+        SetRootTable(8  + setIndex, srv);
     }
     // 只记录到缓存，由 FlushRootArgs 在绘制/派发前按当前管线类型（图形/计算）下发，
     // 这样 BindDescriptorSet 与 SetPipeline 的先后顺序不再影响结果
@@ -723,9 +701,6 @@ void D3D12CommandList::Draw(u32 vertexCount, u32 instanceCount, u32 firstVertex,
 
 void D3D12CommandList::DrawIndexed(u32 indexCount, u32 instanceCount, u32 firstIndex,
                                    i32 vertexOffset, u32 firstInstance) {
-    // 【多飞行帧错位修正】引擎写的是某个飞行帧的物体缓冲，而绑定的描述符集
-    // 可能指向另一个从未写入过的缓冲（实测写入 390594560 / 绑定 390070272）。
-    // 这里把「最近上传的物体缓冲」重新写进当前集的 t2 槽位，保证着色器读到有效数据。
     { static int n7=0; if (++n7 % 200 == 1) {
         const unsigned k = (m_LastObjIdx < 32u) ? m_LastObjIdx : 0u;
         std::printf("[OBJIDX] idx=%u scale=(%.2f,%.2f,%.2f) trans=(%.2f,%.2f,%.2f)\n",
@@ -734,19 +709,6 @@ void D3D12CommandList::DrawIndexed(u32 indexCount, u32 instanceCount, u32 firstI
         std::fflush(stdout); } }
     { static int n8=0; if (++n8 % 400 == 1) { std::printf("[OBJFIX] obj=%p base=%u\n",
         (void*)m_Device->GetLastObjectBuffer(), m_LastBaseSlot); std::fflush(stdout); } }
-    if (auto* obj = m_Device->GetLastObjectBuffer(); obj && m_LastBaseSlot != 0xFFFFFFFFu) {
-        D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
-        sv.Format = DXGI_FORMAT_UNKNOWN;
-        sv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-        sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        sv.Buffer.FirstElement = 0;
-        sv.Buffer.StructureByteStride = 208u;      // sizeof(GPUObjectData)
-        sv.Buffer.NumElements = 1024u;             // MAX_OBJECTS
-        sv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
-        m_Device->GetDevice()->CreateShaderResourceView(
-            obj->GetResource(), &sv, m_Device->GetSlotCpuHandle(m_LastBaseSlot + 2u));
-    }
-
     // 绘制前重新绑定 space0 的 SRV 表：引擎只在 pass 开始绑一次，若期间有别的
     // BindDescriptorSet（同样是 setIndex=0）覆盖了同一张表，绘制时就会读到别的 set。
     if (m_Device && m_LastBaseSlot != 0xFFFFFFFFu) {
