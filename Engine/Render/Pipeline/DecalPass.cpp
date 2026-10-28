@@ -113,9 +113,11 @@ bool DecalPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     // ── 4. PSO：8 个 GBuffer 颜色附件（Load 保留 + 只写 MRT0/1）+ **无深度附件** ──
     // 无深度附件是刻意的：本 Pass 要把深度当纹理采样（天空判定），
     // 同一图像既做附件又做采样 = feedback loop（校验层会直接报错）。
-    rhi::ShaderBytecode vs, fs;
-    vs.stage = rhi::ShaderStage::Vertex; vs.spirv = k_DecalProject_vert_spv; vs.entryPoint = "main";
-    fs.stage = rhi::ShaderStage::Pixel;  fs.spirv = k_DecalProject_frag_spv; fs.entryPoint = "main";
+    // 同时带上 SPIR-V 与 DXIL：此前只给了 SPIR-V，D3D12 下 PSO 因缺少着色器而创建失败
+    rhi::ShaderBytecode vs = rhi::MakeShaderBytecode(rhi::ShaderStage::Vertex,
+        k_DecalProject_vert_spv, k_DecalProject_vert_dxil, "main");
+    rhi::ShaderBytecode fs = rhi::MakeShaderBytecode(rhi::ShaderStage::Pixel,
+        k_DecalProject_frag_spv, k_DecalProject_frag_dxil, "main");
 
     rhi::VertexInputLayout vl;
     vl.stride = sizeof(float3);
