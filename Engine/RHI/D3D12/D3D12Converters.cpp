@@ -184,13 +184,17 @@ D3D12_TEXTURE_ADDRESS_MODE ToD3D12AddressMode(AddressMode m) {
     }
 }
 
-D3D12_FILTER ToD3D12Filter(FilterMode m, bool anisotropy) {
-    if (anisotropy) return D3D12_FILTER_ANISOTROPIC;
-    switch (m) {
-        case FilterMode::Nearest: return D3D12_FILTER_MIN_MAG_MIP_POINT;
-        case FilterMode::Linear:  return D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-        default:                  return D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-    }
+D3D12_FILTER ToD3D12Filter(FilterMode minF, FilterMode magF, FilterMode mipF,
+                           bool anisotropy, bool compare) {
+    // 【三种过滤分别组合】此前只看 minFilter：「缩小 Nearest + 放大/mip Linear」这类组合会
+    // 退化成全 Point，既无双线性也无 mip 插值 ⇒ 纹理出现强烈摩尔纹（实测 03.Sponza 的窗帘）。
+    const D3D12_FILTER_REDUCTION_TYPE reduction =
+        compare ? D3D12_FILTER_REDUCTION_TYPE_COMPARISON : D3D12_FILTER_REDUCTION_TYPE_STANDARD;
+    if (anisotropy) return D3D12_ENCODE_ANISOTROPIC_FILTER(reduction);
+    auto t = [](FilterMode f) {
+        return (f == FilterMode::Nearest) ? D3D12_FILTER_TYPE_POINT : D3D12_FILTER_TYPE_LINEAR;
+    };
+    return D3D12_ENCODE_BASIC_FILTER(t(minF), t(magF), t(mipF), reduction);
 }
 
 D3D12_RESOURCE_STATES ToInitialState(bool isDepth, TextureUsage usage) {

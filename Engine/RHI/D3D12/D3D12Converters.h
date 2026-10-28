@@ -59,7 +59,10 @@ D3D12_BLEND_OP       ToD3D12BlendOp(BlendOp op);
 D3D12_TEXTURE_ADDRESS_MODE ToD3D12AddressMode(AddressMode mode);
 
 /// 过滤模式
-D3D12_FILTER         ToD3D12Filter(FilterMode mode, bool anisotropy);
+/// 由缩小 / 放大 / mip 三种过滤分别组合出 D3D12 过滤模式（与 Vulkan 的 min/mag/mipmapMode 对应）；
+/// compare 为真时返回比较类过滤（SampleCmp 要求采样器是比较过滤）
+D3D12_FILTER         ToD3D12Filter(FilterMode minF, FilterMode magF, FilterMode mipF,
+                                   bool anisotropy, bool compare);
 
 /// 资源用途 → 资源的初始状态（D3D12 有状态机，创建时必须给初始状态）
 D3D12_RESOURCE_STATES ToInitialState(bool isDepth, TextureUsage usage);

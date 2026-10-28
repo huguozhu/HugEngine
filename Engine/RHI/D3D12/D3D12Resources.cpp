@@ -776,7 +776,8 @@ bool D3D12Sampler::Initialize(D3D12Device* device, const SamplerDesc& desc) {
     m_Descriptor = m_Heap->GetCPUDescriptorHandleForHeapStart();
 
     D3D12_SAMPLER_DESC sd{};
-    sd.Filter   = ToD3D12Filter(desc.minFilter, desc.maxAnisotropy > 1);
+    sd.Filter   = ToD3D12Filter(desc.minFilter, desc.magFilter, desc.mipFilter,
+                                desc.maxAnisotropy > 1, desc.enableCompare);
     sd.AddressU = ToD3D12AddressMode(desc.addressU);
     sd.AddressV = ToD3D12AddressMode(desc.addressV);
     sd.AddressW = ToD3D12AddressMode(desc.addressW);
