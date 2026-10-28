@@ -11,8 +11,6 @@ struct PBRVertexInput {
     [[vk::location(0)]] float3 inPosition : POSITION0;
     [[vk::location(1)]] float3 inNormal   : NORMAL0;
     [[vk::location(2)]] float2 inUV       : TEXCOORD0;
-    [[vk::location(3)]] uint8_t4 inJoints : BLENDINDICES0;
-    [[vk::location(4)]] float4 inWeights  : BLENDWEIGHT0;
 };
 
 // GPU Object（128 bytes，匹配 CPU GPUObjectData）
@@ -54,8 +52,9 @@ PBRVSOutput vertexMain(PBRVertexInput vin, uint instanceID : SV_InstanceID) {
     const float3 inPosition = vin.inPosition;
     const float3 inNormal   = vin.inNormal;
     const float2 inUV       = vin.inUV;
-    const uint4  inJoints   = vin.inJoints;
-    const float4 inWeights  = vin.inWeights;
+    // engine StaticVertex has no skin attributes; use Vulkan-equivalent defaults
+    const uint4  inJoints  = uint4(0u, 0u, 0u, 0u);
+    const float4 inWeights = float4(0.0, 0.0, 0.0, 1.0);
     PBRVSOutput output;
     // 【objectIndex 兜底】GPU-driven 路径下引擎不写 objectIndex（保持 0xCCCCCCCC 未初始化值），
     // 此时应改用 SV_InstanceID 作为物体索引；否则会越界索引 u_Objects 读到 0，顶点全部塌缩。
@@ -83,10 +82,15 @@ PBRVSOutput vertexMain(PBRVertexInput vin, uint instanceID : SV_InstanceID) {
     } else if (false && useInstanceID == 3u) {
         // 骨骼蒙皮（C1b）：4 骨骼矩阵按权重加权；
         // 再乘实体世界矩阵（glTF 骨骼定义在网格节点局部空间）
-        float4x4 skinMat  = u_BoneMatrices[instanceSSBOHandle][inJoints.x] * inWeights.x;
-        skinMat += u_BoneMatrices[instanceSSBOHandle][inJoints.y] * inWeights.y;
-        skinMat += u_BoneMatrices[instanceSSBOHandle][inJoints.z] * inWeights.z;
-        skinMat += u_BoneMatrices[instanceSSBOHandle][inJoints.w] * inWeights.w;
+        // Engine vertices carry no skin attributes (StaticVertex = pos/normal/uv),
+        // so joints/weights read as zero. Zero weights would produce a zero
+        // skin matrix and collapse the mesh; fall back to "bone 0, weight 1".
+        float4 wW = inWeights;
+        if (wW.x + wW.y + wW.z + wW.w <= 0.0) wW = float4(0.0, 0.0, 0.0, 1.0);
+        float4x4 skinMat  = u_BoneMatrices[instanceSSBOHandle][inJoints.x] * wW.x;
+        skinMat += u_BoneMatrices[instanceSSBOHandle][inJoints.y] * wW.y;
+        skinMat += u_BoneMatrices[instanceSSBOHandle][inJoints.z] * wW.z;
+        skinMat += u_BoneMatrices[instanceSSBOHandle][inJoints.w] * wW.w;
         worldMatrix = mul(obj.worldMatrix, skinMat);
     }
 
