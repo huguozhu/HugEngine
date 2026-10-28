@@ -9,6 +9,7 @@
 #include <dxcapi.h>       // IDxcUtils::CreateReflection（DXIL 反射）
 #include <string>
 #include <algorithm>
+#include <cmath>
 #include <memory>
 #include <cstring>
 #include <cstdlib>
@@ -380,22 +381,75 @@ void D3D12Texture::UploadInitialData(D3D12Device* device, const TextureDesc& des
     ID3D12Device* dev = device->GetDevice();
     ID3D12CommandQueue* q = device->GetQueue();
     if (!dev || !q || !m_Resource) return;
-    if (m_MipLevels > 1) {
-        HE_CORE_WARN("D3D12Texture: 只上传 mip 0，其余 {} 级未生成（{}x{}）", m_MipLevels - 1, m_Width, m_Height);
-    }
-
-    // 每个数组层的 mip 0 是一个子资源：子资源号 = layer * mipLevels
     const D3D12_RESOURCE_DESC rd = m_Resource->GetDesc();
     const u32 layers = static_cast<u32>(rd.DepthOrArraySize);
-    std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> fps(layers);
-    std::vector<UINT> numRows(layers);
-    std::vector<UINT64> rowBytes(layers);
+
+    // 【mip 链】Vulkan 后端上传 mip 0 后用 blit 逐级生成其余 mip；D3D12 没有 blit，
+    // 这里在 CPU 上用 2×2 盒式滤波生成。只传 mip 0 时其余级是未初始化显存，远处/斜视表面
+    // 采样到低级 mip 会发黑（实测 03.Sponza 的墙体、柱子大片发黑）。
+    // 支持 8 位四通道格式；sRGB 格式先转线性空间再平均，与 Vulkan 的线性 blit 一致。
+    const bool isSrgb = rd.Format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || rd.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+    const bool is8x4  = isSrgb || rd.Format == DXGI_FORMAT_R8G8B8A8_UNORM || rd.Format == DXGI_FORMAT_B8G8R8A8_UNORM;
+    const u32 mips = (m_MipLevels > 1 && is8x4) ? m_MipLevels : 1u;
+    if (m_MipLevels > 1 && !is8x4) {
+        HE_CORE_WARN("D3D12Texture: 格式 {} 不支持 CPU 生成 mip，只上传 mip 0（{}x{}）",
+                     static_cast<u32>(rd.Format), m_Width, m_Height);
+    }
+
+    // 各子资源的源数据：mip 0 直接取 initialData（各层紧密排列），其余级在 CPU 上生成
+    const u8* src0 = static_cast<const u8*>(desc.initialData);
+    std::vector<std::vector<u8>> generated(static_cast<size_t>(layers) * mips);   // [layer*mips + mip]，mip>=1 有效
+    if (mips > 1) {
+        float toLinear[256];
+        for (int i = 0; i < 256; ++i) {
+            const float c = i / 255.0f;
+            toLinear[i] = isSrgb ? (c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f)) : c;
+        }
+        auto encode = [isSrgb](float c) -> u8 {
+            c = std::min(std::max(c, 0.0f), 1.0f);
+            if (isSrgb) c = (c <= 0.0031308f) ? c * 12.92f : 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f;
+            return static_cast<u8>(c * 255.0f + 0.5f);
+        };
+        const size_t layerBytes0 = static_cast<size_t>(m_Width) * m_Height * 4;
+        for (u32 layer = 0; layer < layers; ++layer) {
+            const u8* prev = src0 + layerBytes0 * layer;
+            u32 pw = m_Width, ph = m_Height;
+            for (u32 mip = 1; mip < mips; ++mip) {
+                const u32 w = std::max(1u, pw / 2), h = std::max(1u, ph / 2);
+                std::vector<u8>& out = generated[static_cast<size_t>(layer) * mips + mip];
+                out.resize(static_cast<size_t>(w) * h * 4);
+                for (u32 y = 0; y < h; ++y) {
+                    const u32 y0 = std::min(y * 2, ph - 1), y1 = std::min(y * 2 + 1, ph - 1);
+                    for (u32 x = 0; x < w; ++x) {
+                        const u32 x0 = std::min(x * 2, pw - 1), x1 = std::min(x * 2 + 1, pw - 1);
+                        const u8* t[4] = { prev + (static_cast<size_t>(y0) * pw + x0) * 4, prev + (static_cast<size_t>(y0) * pw + x1) * 4,
+                                           prev + (static_cast<size_t>(y1) * pw + x0) * 4, prev + (static_cast<size_t>(y1) * pw + x1) * 4 };
+                        u8* o = &out[(static_cast<size_t>(y) * w + x) * 4];
+                        for (int c = 0; c < 3; ++c)   // 颜色通道（sRGB 时在线性空间平均）
+                            o[c] = encode(0.25f * (toLinear[t[0][c]] + toLinear[t[1][c]] + toLinear[t[2][c]] + toLinear[t[3][c]]));
+                        o[3] = static_cast<u8>((t[0][3] + t[1][3] + t[2][3] + t[3][3] + 2) / 4);   // alpha 线性
+                    }
+                }
+                prev = out.data();
+                pw = w; ph = h;
+            }
+        }
+    }
+
+    // 子资源号 = layer * m_MipLevels + mip
+    const u32 count = layers * mips;
+    std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> fps(count);
+    std::vector<UINT> numRows(count);
+    std::vector<UINT64> rowBytes(count);
     UINT64 total = 0;
-    for (u32 l = 0; l < layers; ++l) {
-        UINT64 sz = 0;
-        dev->GetCopyableFootprints(&rd, l * m_MipLevels, 1, 0, &fps[l], &numRows[l], &rowBytes[l], &sz);
-        fps[l].Offset = total;
-        total = (total + sz + D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1) & ~UINT64(D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1);
+    for (u32 layer = 0; layer < layers; ++layer) {
+        for (u32 mip = 0; mip < mips; ++mip) {
+            const u32 i = layer * mips + mip;
+            UINT64 sz = 0;
+            dev->GetCopyableFootprints(&rd, layer * m_MipLevels + mip, 1, 0, &fps[i], &numRows[i], &rowBytes[i], &sz);
+            fps[i].Offset = total;
+            total = (total + sz + D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1) & ~UINT64(D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1);
+        }
     }
 
     D3D12_HEAP_PROPERTIES uh{};
@@ -416,16 +470,21 @@ void D3D12Texture::UploadInitialData(D3D12Device* device, const TextureDesc& des
         return;
     }
 
-    // 源数据按层紧密排列；目标行距按 D3D12 的 256 字节对齐，逐行拷贝
+    // 源数据行紧密排列；目标行距按 D3D12 的 256 字节对齐，逐行拷贝
     u8* dst = nullptr;
     D3D12_RANGE noRead{ 0, 0 };
     if (FAILED(staging->Map(0, &noRead, reinterpret_cast<void**>(&dst))) || !dst) return;
-    const u8* src = static_cast<const u8*>(desc.initialData);
-    for (u32 l = 0; l < layers; ++l) {
-        for (UINT r = 0; r < numRows[l] * fps[l].Footprint.Depth; ++r) {
-            std::memcpy(dst + fps[l].Offset + static_cast<UINT64>(r) * fps[l].Footprint.RowPitch, src,
-                        static_cast<size_t>(rowBytes[l]));
-            src += rowBytes[l];
+    const u8* layerSrc = src0;   // mip 0 按层顺序连续读取
+    for (u32 layer = 0; layer < layers; ++layer) {
+        for (u32 mip = 0; mip < mips; ++mip) {
+            const u32 i = layer * mips + mip;
+            const u8* src = (mip == 0) ? layerSrc : generated[i].data();
+            const UINT rows = numRows[i] * fps[i].Footprint.Depth;
+            for (UINT r = 0; r < rows; ++r) {
+                std::memcpy(dst + fps[i].Offset + static_cast<UINT64>(r) * fps[i].Footprint.RowPitch,
+                            src + static_cast<size_t>(r) * rowBytes[i], static_cast<size_t>(rowBytes[i]));
+            }
+            if (mip == 0) layerSrc += static_cast<size_t>(rows) * rowBytes[i];
         }
     }
     staging->Unmap(0, nullptr);
@@ -446,15 +505,17 @@ void D3D12Texture::UploadInitialData(D3D12Device* device, const TextureDesc& des
         l->ResourceBarrier(1, &b);
     }
     for (u32 layer = 0; layer < layers; ++layer) {
-        D3D12_TEXTURE_COPY_LOCATION d{};
-        d.pResource = m_Resource.Get();
-        d.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        d.SubresourceIndex = layer * m_MipLevels;
-        D3D12_TEXTURE_COPY_LOCATION s{};
-        s.pResource = staging.Get();
-        s.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-        s.PlacedFootprint = fps[layer];
-        l->CopyTextureRegion(&d, 0, 0, 0, &s, nullptr);
+        for (u32 mip = 0; mip < mips; ++mip) {
+            D3D12_TEXTURE_COPY_LOCATION d{};
+            d.pResource = m_Resource.Get();
+            d.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            d.SubresourceIndex = layer * m_MipLevels + mip;
+            D3D12_TEXTURE_COPY_LOCATION s{};
+            s.pResource = staging.Get();
+            s.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            s.PlacedFootprint = fps[layer * mips + mip];
+            l->CopyTextureRegion(&d, 0, 0, 0, &s, nullptr);
+        }
     }
     // 与 Vulkan 的 UploadInitialData 一致：上传后停在着色器只读状态
     const D3D12_RESOURCE_STATES readState =
