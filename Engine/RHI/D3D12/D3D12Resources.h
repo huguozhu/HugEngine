@@ -106,6 +106,11 @@ public:
     bool IsDepth() const { return m_IsDepth; }
 
 private:
+    /// 上传 TextureDesc::initialData（各数组层的 mip 0，紧密排列，与 Vulkan 后端一致），
+    /// 完成后把资源转成着色器可读状态。同步等待 GPU 拷贝完成。
+    void UploadInitialData(D3D12Device* device, const TextureDesc& desc, D3D12_RESOURCE_STATES curState);
+
+private:
     ComPtr<ID3D12Resource> m_Resource;
     ComPtr<ID3D12Resource> m_UploadStaging;
     D3D12_CPU_DESCRIPTOR_HANDLE m_Rtv{};

@@ -374,6 +374,110 @@ void D3D12Buffer::Unmap() {
     m_PersistentlyMapped = false;
 }
 
+void D3D12Texture::UploadInitialData(D3D12Device* device, const TextureDesc& desc,
+                                     D3D12_RESOURCE_STATES curState) {
+    ID3D12Device* dev = device->GetDevice();
+    ID3D12CommandQueue* q = device->GetQueue();
+    if (!dev || !q || !m_Resource) return;
+    if (m_MipLevels > 1) {
+        HE_CORE_WARN("D3D12Texture: 只上传 mip 0，其余 {} 级未生成（{}x{}）", m_MipLevels - 1, m_Width, m_Height);
+    }
+
+    // 每个数组层的 mip 0 是一个子资源：子资源号 = layer * mipLevels
+    const D3D12_RESOURCE_DESC rd = m_Resource->GetDesc();
+    const u32 layers = static_cast<u32>(rd.DepthOrArraySize);
+    std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> fps(layers);
+    std::vector<UINT> numRows(layers);
+    std::vector<UINT64> rowBytes(layers);
+    UINT64 total = 0;
+    for (u32 l = 0; l < layers; ++l) {
+        UINT64 sz = 0;
+        dev->GetCopyableFootprints(&rd, l * m_MipLevels, 1, 0, &fps[l], &numRows[l], &rowBytes[l], &sz);
+        fps[l].Offset = total;
+        total = (total + sz + D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1) & ~UINT64(D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1);
+    }
+
+    D3D12_HEAP_PROPERTIES uh{};
+    uh.Type = D3D12_HEAP_TYPE_UPLOAD;
+    uh.CreationNodeMask = 1;
+    uh.VisibleNodeMask  = 1;
+    D3D12_RESOURCE_DESC ud{};
+    ud.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    ud.Width = total;
+    ud.Height = 1; ud.DepthOrArraySize = 1; ud.MipLevels = 1;
+    ud.Format = DXGI_FORMAT_UNKNOWN;
+    ud.SampleDesc = { 1, 0 };
+    ud.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ComPtr<ID3D12Resource> staging;
+    if (FAILED(dev->CreateCommittedResource(&uh, D3D12_HEAP_FLAG_NONE, &ud, D3D12_RESOURCE_STATE_GENERIC_READ,
+                                            nullptr, IID_PPV_ARGS(&staging)))) {
+        HE_CORE_ERROR("D3D12Texture: 创建上传缓冲失败（{} 字节）", static_cast<u64>(total));
+        return;
+    }
+
+    // 源数据按层紧密排列；目标行距按 D3D12 的 256 字节对齐，逐行拷贝
+    u8* dst = nullptr;
+    D3D12_RANGE noRead{ 0, 0 };
+    if (FAILED(staging->Map(0, &noRead, reinterpret_cast<void**>(&dst))) || !dst) return;
+    const u8* src = static_cast<const u8*>(desc.initialData);
+    for (u32 l = 0; l < layers; ++l) {
+        for (UINT r = 0; r < numRows[l] * fps[l].Footprint.Depth; ++r) {
+            std::memcpy(dst + fps[l].Offset + static_cast<UINT64>(r) * fps[l].Footprint.RowPitch, src,
+                        static_cast<size_t>(rowBytes[l]));
+            src += rowBytes[l];
+        }
+    }
+    staging->Unmap(0, nullptr);
+
+    ComPtr<ID3D12CommandAllocator>    a;
+    ComPtr<ID3D12GraphicsCommandList> l;
+    if (FAILED(dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&a))) ||
+        FAILED(dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, a.Get(), nullptr, IID_PPV_ARGS(&l)))) {
+        return;
+    }
+    D3D12_RESOURCE_BARRIER b{};
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    b.Transition.pResource   = m_Resource.Get();
+    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    if (curState != D3D12_RESOURCE_STATE_COPY_DEST) {
+        b.Transition.StateBefore = curState;
+        b.Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_DEST;
+        l->ResourceBarrier(1, &b);
+    }
+    for (u32 layer = 0; layer < layers; ++layer) {
+        D3D12_TEXTURE_COPY_LOCATION d{};
+        d.pResource = m_Resource.Get();
+        d.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        d.SubresourceIndex = layer * m_MipLevels;
+        D3D12_TEXTURE_COPY_LOCATION s{};
+        s.pResource = staging.Get();
+        s.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        s.PlacedFootprint = fps[layer];
+        l->CopyTextureRegion(&d, 0, 0, 0, &s, nullptr);
+    }
+    // 与 Vulkan 的 UploadInitialData 一致：上传后停在着色器只读状态
+    const D3D12_RESOURCE_STATES readState =
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    b.Transition.StateAfter  = readState;
+    l->ResourceBarrier(1, &b);
+    l->Close();
+    ID3D12CommandList* lists[1] = { l.Get() };
+    q->ExecuteCommandLists(1, lists);
+
+    // 同步等待：上传缓冲与分配器都是局部对象，必须等 GPU 用完再析构
+    ComPtr<ID3D12Fence> f;
+    if (SUCCEEDED(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&f)))) {
+        if (HANDLE ev = CreateEventEx(nullptr, nullptr, 0, EVENT_ALL_ACCESS)) {
+            q->Signal(f.Get(), 1);
+            f->SetEventOnCompletion(1, ev);
+            WaitForSingleObject(ev, 5000);
+            CloseHandle(ev);
+        }
+    }
+    device->SetResourceState(m_Resource.Get(), readState);
+}
+
 D3D12_VERTEX_BUFFER_VIEW D3D12Buffer::GetVbv(u32 stride) const {
     D3D12_VERTEX_BUFFER_VIEW v{};
     v.BufferLocation = m_GpuAddress;
@@ -531,6 +635,10 @@ bool D3D12Texture::Initialize(D3D12Device* device, const TextureDesc& desc) {
     // 不登记就会默认成 COMMON，从而跳过屏障，导致 OMSetRenderTargets 收到
     // 一个状态不对的资源而让驱动静默卡死。
     device->SetResourceState(m_Resource.Get(), initState);
+
+    // 【初始数据】此前 D3D12 纹理完全忽略 initialData：占位白图、天空盒立方体图等
+    // 内容都是未初始化显存，且一直停在 COPY_DEST（GPU 验证层 id=942）⇒ 采样结果与 Vulkan 不一致。
+    if (desc.initialData) UploadInitialData(device, desc, initState);
 
     if (m_Width >= 1920) HE_CORE_ERROR("[TEX-BIG] res={} {}x{} dxgi={} depth={} rtvPtr={}",
         (void*)m_Resource.Get(), m_Width, m_Height, (u32)rd.Format, m_IsDepth ? 1 : 0, (void*)m_Rtv.ptr);
