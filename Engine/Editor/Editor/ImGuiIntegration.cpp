@@ -15,6 +15,11 @@
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_vulkan.h"
+#if defined(_WIN32)
+#include "D3D12/D3D12Device.h"   // D3D12 原生句柄（imgui_impl_dx12 需要）
+#include "D3D12/D3D12Converters.h"   // ToDxgiFormat
+#include "imgui_impl_dx12.h"
+#endif
 
 namespace he::editor {
 
@@ -26,14 +31,15 @@ void ImGuiIntegration::Initialize(GLFWwindow* window, rhi::IRHIDevice* device,
     m_Window = window;
     m_Device = device;
 
-    // 【多后端】ImGui 的渲染后端实现（imgui_impl_vulkan）只支持 Vulkan，
-    // 且本文件通过 VulkanDeviceAccess 直接取 VkInstance/VkDevice/VkQueue。
-    // 在 D3D12 等其它后端上必须**直接跳过**：
-    //   · 若继续走 Vulkan 路径，会对 D3D12 设备做 static_cast<VulkanDevice*>
-    //     拿到垃圾指针，后续 vkCreate* 收到非法句柄 —— 实测表现为进程死等、不出帧。
-    //   · 调用方（样例）已经用 `if (imgui.IsInitialized())` 守卫所有 UI 代码，
-    //     所以跳过是安全的：只是没有 UI，渲染照常。
-    if (device && device->GetBackend() != rhi::Backend::Vulkan) {
+    // 【多后端】Vulkan 用 imgui_impl_vulkan，D3D12 用 imgui_impl_dx12。
+    // 其它后端直接跳过：调用方（样例）已经用 `if (imgui.IsInitialized())` 守卫所有
+    // UI 代码，跳过只是没有 UI，渲染照常。注意不能对非 Vulkan 设备走 Vulkan 路径——
+    // static_cast<VulkanDevice*> 会拿到垃圾指针，实测表现为进程死等、不出帧。
+    m_IsD3D12 = device && device->GetBackend() == rhi::Backend::D3D12;
+#if !defined(_WIN32)
+    m_IsD3D12 = false;
+#endif
+    if (device && device->GetBackend() != rhi::Backend::Vulkan && !m_IsD3D12) {
         HE_CORE_INFO("ImGui: 当前后端不是 Vulkan（{}），跳过 UI 初始化",
                      static_cast<int>(device->GetBackend()));
         m_Initialized = false;
@@ -69,7 +75,8 @@ void ImGuiIntegration::Initialize(GLFWwindow* window, rhi::IRHIDevice* device,
         }
     }
 
-    ImGui_ImplGlfw_InitForVulkan(window, true);
+    if (m_IsD3D12) ImGui_ImplGlfw_InitForOther(window, true);
+    else           ImGui_ImplGlfw_InitForVulkan(window, true);
     CreateImGuiResources(device, swapchain);
 
     m_Initialized = true;
@@ -78,6 +85,19 @@ void ImGuiIntegration::Initialize(GLFWwindow* window, rhi::IRHIDevice* device,
 
 void ImGuiIntegration::CreateImGuiResources(rhi::IRHIDevice* device,
                                              rhi::IRHISwapChain* swapchain) {
+#if defined(_WIN32)
+    if (m_IsD3D12) {
+        // 字体 SRV 放在主 CBV_SRV_UAV 堆的保留槽位，渲染时与场景共用同一张堆
+        auto* d3d = static_cast<rhi::d3d12::D3D12Device*>(device);
+        m_DescPool = device->CreateImGuiDescriptorPool();
+        const DXGI_FORMAT rtvFormat = rhi::d3d12::ToDxgiFormat(swapchain->GetColorFormat());
+        ImGui_ImplDX12_Init(d3d->GetDevice(), static_cast<int>(rhi::kMaxFramesInFlight), rtvFormat,
+                            static_cast<ID3D12DescriptorHeap*>(m_DescPool),
+                            d3d->GetImGuiFontSrvCpu(), d3d->GetImGuiFontSrvGpu());
+        HE_CORE_INFO("ImGui D3D12 backend initialized");
+        return;
+    }
+#endif
     // 通过 VulkanDeviceAccess 获取后端原生句柄（imgui_impl_vulkan 需要）
     VkInstance       instance       = rhi::VulkanDeviceAccess::GetInstance(device);
     VkPhysicalDevice physicalDevice = rhi::VulkanDeviceAccess::GetPhysical(device);
@@ -115,7 +135,7 @@ void ImGuiIntegration::CreateImGuiResources(rhi::IRHIDevice* device,
 }
 
 void ImGuiIntegration::DestroyImGuiResources(rhi::IRHIDevice* device) {
-    if (device) {
+    if (device && !m_IsD3D12) {
         device->DestroyImGuiRenderPass(m_RenderPass);
         device->DestroyImGuiDescriptorPool(m_DescPool);
     }
@@ -126,6 +146,12 @@ void ImGuiIntegration::DestroyImGuiResources(rhi::IRHIDevice* device) {
 void ImGuiIntegration::Shutdown() {
     if (!m_Initialized) return;
     m_Initialized = false;
+#if defined(_WIN32)
+    if (m_IsD3D12) {
+        if (m_Device) m_Device->WaitIdle();   // ImGui 的顶点/索引缓冲可能仍被在飞帧使用
+        ImGui_ImplDX12_Shutdown();
+    } else
+#endif
     ImGui_ImplVulkan_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext(m_Context);
@@ -137,6 +163,10 @@ void ImGuiIntegration::Shutdown() {
 }
 
 void ImGuiIntegration::BeginFrame() {
+#if defined(_WIN32)
+    if (m_IsD3D12) ImGui_ImplDX12_NewFrame();
+    else
+#endif
     ImGui_ImplVulkan_NewFrame();
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
@@ -144,6 +174,14 @@ void ImGuiIntegration::BeginFrame() {
 
 void ImGuiIntegration::EndFrame(rhi::IRHICommandList* cmd) {
     ImGui::Render();
+#if defined(_WIN32)
+    if (m_IsD3D12) {
+        // 返回原生列表前已绑定引擎的描述符堆（含 ImGui 字体 SRV 槽位）
+        auto* list = static_cast<ID3D12GraphicsCommandList*>(m_Device->GetImGuiCommandBuffer(cmd));
+        if (list) ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), list);
+        return;
+    }
+#endif
     // 通过 RHI 接口获取 VkCommandBuffer，无需 static_cast<VulkanCommandList*>
     auto* vkCmdBuf = static_cast<VkCommandBuffer>(m_Device->GetImGuiCommandBuffer(cmd));
     ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), vkCmdBuf);

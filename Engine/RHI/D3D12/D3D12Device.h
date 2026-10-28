@@ -84,6 +84,19 @@ public:
     /// 确保两个 shader-visible 堆都已创建（懒初始化）
     bool                             EnsureDescriptorHeaps();
 
+    // ---- ImGui（imgui_impl_dx12）----
+    // ImGui 的字体 SRV 放在主 CBV_SRV_UAV 堆的最后一个槽位（描述符集从 0 往上分配、
+    // bindless 区只用到基址后几百个槽，二者都碰不到它），这样 ImGui 与场景共用同一张
+    // 已绑定的堆，不必在帧中途切换描述符堆。
+    static constexpr u32 kImGuiFontSlot = kDescriptorHeapCapacity - 1;
+    /// 返回主 CBV_SRV_UAV 堆（ImGui_ImplDX12_Init 的 cbv_srv_heap 参数）
+    void* CreateImGuiDescriptorPool() override;
+    void  DestroyImGuiDescriptorPool(void*) override {}
+    /// 返回 ID3D12GraphicsCommandList*，并为外部渲染（ImGui）准备好描述符堆
+    void* GetImGuiCommandBuffer(IRHICommandList* cmd) const override;
+    D3D12_CPU_DESCRIPTOR_HANDLE GetImGuiFontSrvCpu() const { return GetSlotCpuHandle(kImGuiFontSlot); }
+    D3D12_GPU_DESCRIPTOR_HANDLE GetImGuiFontSrvGpu() const { return GetSetGpuHandle(kImGuiFontSlot); }
+
     // ---- 视图句柄 -> 资源 的反查 ----
     // 引擎只把 RTV/DSV 的 CPU 句柄（void*）传给命令列表，而 D3D12 做资源屏障
     // 需要 ID3D12Resource*，所以建视图时登记一下，用时反查。

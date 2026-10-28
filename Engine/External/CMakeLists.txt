@@ -52,6 +52,11 @@ add_library(imgui STATIC
 )
 target_include_directories(imgui PUBLIC ${IMGUI_DIR} ${IMGUI_DIR}/backends)
 target_link_libraries(imgui PUBLIC glfw Vulkan::Vulkan)
+# D3D12 后端的 ImGui 渲染（与 imgui.cpp 同版本 v1.91.0 的官方 backends/imgui_impl_dx12）
+if(WIN32)
+    target_sources(imgui PRIVATE ${IMGUI_DIR}/backends/imgui_impl_dx12.cpp)
+    target_link_libraries(imgui PUBLIC d3d12 dxgi d3dcompiler)
+endif()
 
 # --- meshoptimizer v0.22 ---
 add_subdirectory(meshoptimizer)

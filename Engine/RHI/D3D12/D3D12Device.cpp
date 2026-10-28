@@ -802,6 +802,17 @@ u32 D3D12Device::LookupStructStride(u32 registerIndex) const {
     }
 }
 
+void* D3D12Device::CreateImGuiDescriptorPool() {
+    return EnsureDescriptorHeaps() ? static_cast<void*>(m_CbvSrvUavHeap.Get()) : nullptr;
+}
+
+void* D3D12Device::GetImGuiCommandBuffer(IRHICommandList* cmd) const {
+    auto* cl = static_cast<D3D12CommandList*>(cmd);
+    if (!cl) return nullptr;
+    cl->PrepareForExternalRendering();
+    return cl->GetNativeCommandList();
+}
+
 D3D12_GPU_DESCRIPTOR_HANDLE D3D12Device::GetSrvHeapGpuStart() const {
     D3D12_GPU_DESCRIPTOR_HANDLE h{};
     if (m_CbvSrvUavHeap) h = m_CbvSrvUavHeap->GetGPUDescriptorHandleForHeapStart();

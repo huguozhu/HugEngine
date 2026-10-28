@@ -104,6 +104,17 @@ void D3D12CommandList::OnSubmitted(ID3D12CommandQueue* queue) {
     m_SlotFenceValues[m_FrameSlot] = v;
 }
 
+void D3D12CommandList::PrepareForExternalRendering() {
+    if (!m_List || !m_Device || !m_Device->EnsureDescriptorHeaps()) return;
+    ID3D12DescriptorHeap* heaps[2] = { m_Device->GetCbvSrvUavHeap(), m_Device->GetSetSamplerHeap() };
+    if (heaps[0] && heaps[1]) {
+        m_List->SetDescriptorHeaps(2, heaps);
+        m_HeapsSet = true;
+    }
+    m_Pipeline = nullptr;      // 外部会设置自己的 PSO / 根签名
+    m_RootArgsDirty = true;
+}
+
 void D3D12CommandList::End() {
     { static int s=0; if (s<4) { ++s; std::printf("[STP] End %d\n", s); std::fflush(stdout); } }
     if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] End\n"); std::fflush(stdout); }

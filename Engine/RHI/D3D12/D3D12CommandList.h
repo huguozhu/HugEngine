@@ -116,6 +116,9 @@ public:
     ID3D12GraphicsCommandList* GetNativeCommandList() const { return m_List.Get(); }
     /// 提交到队列后调用：在队列上打一个围栏，标记当前帧槽位的分配器何时可以复用
     void OnSubmitted(ID3D12CommandQueue* queue);
+    /// 外部代码（ImGui）直接往原生列表录制前调用：绑定引擎的描述符堆；
+    /// 外部会改根签名与 PSO，因此之后的绘制必须重新 SetPipeline 并下发根参数
+    void PrepareForExternalRendering();
 
 private:
     /// 把引擎传来的 void* 还原成 D3D12 的 CPU 描述符句柄
