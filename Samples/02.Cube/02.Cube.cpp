@@ -201,8 +201,8 @@ int main() {
     // --- 1. 引擎启动 ---
     EngineConfig config;
     config.appName      = "HugEngine — PBR Forward Pipeline";
-    config.windowWidth  = 1920;
-    config.windowHeight = 1080;
+    config.windowWidth  = 960;
+    config.windowHeight = 540;
     config.enableVSync  = true;
 
     Engine engine(config);
