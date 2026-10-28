@@ -469,6 +469,11 @@ void D3D12CommandList::SetPipeline(IRHIPipelineState* pso) {
         m_List->SetGraphicsRootSignature(m_Pipeline->GetRootSignature());
     }
     m_List->IASetPrimitiveTopology(m_Pipeline->GetTopology());
+    // 引擎布局缺失的属性挂在零缓冲槽上，这里把零缓冲绑上
+    if (m_Pipeline->NeedsZeroVertexBuffer() && m_Device) {
+        const D3D12_VERTEX_BUFFER_VIEW zv = m_Device->GetZeroVertexBufferView();
+        if (zv.BufferLocation) m_List->IASetVertexBuffers(D3D12PipelineState::kZeroVertexSlot, 1, &zv);
+    }
     // 设置根签名会清空所有根参数，下一次绘制/派发前需要重新下发
     m_RootArgsDirty = true;
 }

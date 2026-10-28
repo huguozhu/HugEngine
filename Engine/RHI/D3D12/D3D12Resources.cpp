@@ -1086,23 +1086,21 @@ bool D3D12PipelineState::Initialize(D3D12Device* device, const PipelineStateDesc
     // Synthesizing a larger layout from the shader signature makes the IA
     // read past the real stride (e.g. joints/weights at 40/44 of a 48-byte
     // vertex) which yields garbage transform data.
+    // 着色器的真实输入签名（上面从 DXIL 反射得到），下面用来补齐引擎布局缺失的属性
+    const std::vector<D3D12_INPUT_ELEMENT_DESC> shaderInputs = elems;
     if (!desc.vertexLayout.attributes.empty()) {
         elems.clear();
         static std::vector<std::string> s_names;
         s_names.clear(); s_names.reserve(8);
         static const char* kSemByLoc[8] = { "POSITION", "NORMAL", "TEXCOORD",
             "BLENDINDICES", "BLENDWEIGHT", "TANGENT", "COLOR", "TEXCOORD" };
-        static const DXGI_FORMAT kFmtByVertex[6] = {
-            DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32G32_FLOAT, DXGI_FORMAT_R32G32B32_FLOAT,
-            DXGI_FORMAT_R32G32B32A32_FLOAT, DXGI_FORMAT_R8G8B8A8_UINT, DXGI_FORMAT_R16G16_FLOAT };
         for (const auto& a : desc.vertexLayout.attributes) {
             D3D12_INPUT_ELEMENT_DESC e{};
             const u32 loc = a.location;
             s_names.push_back(kSemByLoc[loc < 8u ? loc : 2u]);
             e.SemanticName = s_names.back().c_str();
             e.SemanticIndex = 0;
-            const u32 fi = static_cast<u32>(a.format);
-            e.Format = (fi < 6u) ? kFmtByVertex[fi] : DXGI_FORMAT_R32G32B32A32_FLOAT;
+            e.Format = ToDxgiVertexFormat(a.format);
             e.InputSlot = 0;
             e.AlignedByteOffset = static_cast<UINT>(a.offset);
             e.InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
@@ -1110,6 +1108,25 @@ bool D3D12PipelineState::Initialize(D3D12Device* device, const PipelineStateDesc
             elems.push_back(e);
         }
         if (desc.vertexLayout.stride > 0) m_VertexStride = static_cast<u32>(desc.vertexLayout.stride);
+
+        // 【补齐缺失属性】着色器声明了、引擎布局没提供的输入（如静态 PSO 共用 PBR.vert 时的
+        // 关节索引/权重）：D3D12 要求输入签名的每个元素都在布局里，否则 PSO 创建失败。
+        // 把它们挂到零缓冲槽（步长 0 的全零缓冲），读到的值恒为 0，与 Vulkan 未提供属性时一致。
+        for (const auto& si : shaderInputs) {
+            bool found = false;
+            for (const auto& e : elems) {
+                if (e.SemanticIndex == si.SemanticIndex && std::strcmp(e.SemanticName, si.SemanticName) == 0) {
+                    found = true;
+                    break;
+                }
+            }
+            if (found) continue;
+            D3D12_INPUT_ELEMENT_DESC e = si;
+            e.InputSlot = kZeroVertexSlot;
+            e.AlignedByteOffset = 0;
+            elems.push_back(e);
+            m_NeedsZeroVB = true;
+        }
     }
 
 
@@ -1137,6 +1154,7 @@ bool D3D12PipelineState::Initialize(D3D12Device* device, const PipelineStateDesc
             }
         };
         for (size_t k = 0; k < elems.size(); ++k) {
+            if (elems[k].InputSlot == kZeroVertexSlot) continue;   // 零缓冲槽不受顶点步长约束
             const u32 sz = fmtBytes(elems[k].Format);
             if (m_VertexStride > 0 && elems[k].AlignedByteOffset + sz > m_VertexStride) {
                 HE_CORE_ERROR("vertex layout overflow: pso={} attr[{}] {}{} offset={} size={} stride={}",

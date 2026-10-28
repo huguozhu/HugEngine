@@ -277,8 +277,11 @@ public:
     /// 这里记录「最近一次上传的物体缓冲」，绘制前重新写进当前集的 t2 槽位。
     void SetLastObjectBuffer(class D3D12Buffer* b) { m_LastUploadedObject = b; }
     class D3D12Buffer* GetLastObjectBuffer() const { return m_LastUploadedObject; }
+    /// 全零顶点缓冲视图（步长 0）：供 PSO 中引擎布局未提供的属性读取 0
+    D3D12_VERTEX_BUFFER_VIEW GetZeroVertexBufferView();
 private:
     class D3D12Buffer* m_LastUploadedObject = nullptr;
+    ComPtr<ID3D12Resource> m_ZeroVertexBuffer;   // 懒创建的 64 字节全零缓冲
 public:
     /// 最近一次上传的物体矩阵副本（前 32 个元素的缩放与平移），用于诊断索引是否错配
     float m_LastObjM[32][8] = {};

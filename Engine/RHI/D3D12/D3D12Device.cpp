@@ -8,6 +8,7 @@
 #include "D3D12BindlessHeap.h"
 #include <cstdlib>
 #include <cstdio>
+#include <cstring>
 #include <algorithm>
 
 #if defined(_WIN32)
@@ -802,6 +803,39 @@ u32 D3D12Device::LookupStructStride(u32 registerIndex) const {
     }
 }
 
+D3D12_VERTEX_BUFFER_VIEW D3D12Device::GetZeroVertexBufferView() {
+    D3D12_VERTEX_BUFFER_VIEW v{};
+    if (!m_ZeroVertexBuffer && m_Device) {
+        // UPLOAD 堆即可：只读、体积极小；创建后写一次全零
+        D3D12_HEAP_PROPERTIES hp{};
+        hp.Type = D3D12_HEAP_TYPE_UPLOAD;
+        hp.CreationNodeMask = 1;
+        hp.VisibleNodeMask  = 1;
+        D3D12_RESOURCE_DESC rd{};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        rd.Width = 64;
+        rd.Height = 1; rd.DepthOrArraySize = 1; rd.MipLevels = 1;
+        rd.Format = DXGI_FORMAT_UNKNOWN;
+        rd.SampleDesc = { 1, 0 };
+        rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        if (SUCCEEDED(m_Device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+                D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&m_ZeroVertexBuffer)))) {
+            void* p = nullptr;
+            D3D12_RANGE noRead{ 0, 0 };
+            if (SUCCEEDED(m_ZeroVertexBuffer->Map(0, &noRead, &p)) && p) {
+                std::memset(p, 0, 64);
+                m_ZeroVertexBuffer->Unmap(0, nullptr);
+            }
+        }
+    }
+    if (m_ZeroVertexBuffer) {
+        v.BufferLocation = m_ZeroVertexBuffer->GetGPUVirtualAddress();
+        v.SizeInBytes    = 64;
+        v.StrideInBytes  = 0;   // 每个顶点都读同一份 0
+    }
+    return v;
+}
+
 void* D3D12Device::CreateImGuiDescriptorPool() {
     return EnsureDescriptorHeaps() ? static_cast<void*>(m_CbvSrvUavHeap.Get()) : nullptr;
 }
@@ -916,7 +950,21 @@ bool D3D12Device::WriteBindlessBufferSrv(u32 slot, IRHIBuffer* buffer) {
     auto* buf = static_cast<D3D12Buffer*>(buffer);
     D3D12_CPU_DESCRIPTOR_HANDLE dst = m_CbvSrvUavHeap->GetCPUDescriptorHandleForHeapStart();
     dst.ptr += static_cast<SIZE_T>(m_BindlessSrvBase + slot) * m_CbvSrvUavSize;
-    const u32 stride = buf->GetStride() ? buf->GetStride() : 4u;
+    // 【步长按区间决定】同一个缓冲会被写进四段区间（见 D3D12BindlessHeap::RegisterBuffer），
+    // 每段在着色器里的元素类型不同，StructureByteStride 必须与之一致，否则按句柄取到的
+    // 骨骼矩阵 / 实例变换会整体错位（缓冲本身通常不带 stride，以前一律退回 4 字节）：
+    //   t64..  u_InstanceTransforms   float4x4  64 字节
+    //   t128.. u_VisibleInstanceIndices uint     4 字节
+    //   t192.. u_BoneMatrices         float4x4  64 字节
+    //   t256.. u_Materials            GPUMaterialData 112 字节
+    u32 stride = buf->GetStride() ? static_cast<u32>(buf->GetStride()) : 4u;
+    if      (slot >= 64u  && slot < 128u) stride = 64u;
+    else if (slot >= 128u && slot < 192u) stride = 4u;
+    else if (slot >= 192u && slot < 256u) stride = 64u;
+    else if (slot >= 256u && slot < 320u) stride = 112u;
+    // 缓冲还不到一个元素（如 4 字节计数缓冲落在材质区间）：建出来的视图会越过缓冲末尾，
+    // 属于非法视图，该区间这个句柄本就不会被这样读取，直接跳过
+    if (buf->GetSize() < stride) return false;
     D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
     sd.Format = DXGI_FORMAT_UNKNOWN;
     sd.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;

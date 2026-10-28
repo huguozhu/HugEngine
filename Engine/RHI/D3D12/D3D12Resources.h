@@ -163,6 +163,10 @@ public:
     bool IsCompute() const { return m_IsCompute; }
     bool HasPixelShader() const { return m_HasPs; }
     void SetHasPixelShader(bool v) { m_HasPs = v; }
+    /// 零缓冲所在的输入槽：着色器声明了、但引擎顶点布局未提供的属性都从这里取 0
+    static constexpr u32 kZeroVertexSlot = 15;
+    /// 是否有属性挂在零缓冲槽上（SetPipeline 时需要绑定零缓冲）
+    bool NeedsZeroVertexBuffer() const { return m_NeedsZeroVB; }
 
 private:
     ComPtr<ID3D12RootSignature> m_RootSig;
@@ -173,6 +177,7 @@ private:
     /// 输入布局的总步长（由 DXIL 反射或引擎 attributes 累加得出），
     /// 用于缓冲 stride 为 0 时兜底（D3D12 要求 StrideInBytes 非零）
     u32                         m_VertexStride = 0;
+    bool                        m_NeedsZeroVB = false;
 };
 
 } // namespace he::rhi::d3d12
