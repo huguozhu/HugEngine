@@ -551,10 +551,11 @@ bool D3D12Device::EnsureDescriptorHeaps() {
             m_Device->CreateSampler(&sd, h);
             h.ptr += m_SetSamplerSize;
         }
-        // bindless 采样器保留区：放在描述符集采样器堆的尾部 256 槽。
+        // bindless 采样器保留区：放在描述符集采样器堆的尾部 1024 槽（与着色器 u_Samplers[1024] 对应；
+        // 描述符集实测最多用四百多个槽，前 1024 槽足够）。
         // 必须与描述符集共用同一张堆 —— 命令列表只 SetDescriptorHeaps 这一张采样器堆，
         // 若 bindless 表指向别的堆，每次绘制都会触发 D3D12 错误 708，采样结果未定义甚至导致设备挂起。
-        m_BindlessSmpBase = kSetSamplerCapacity - 256u;
+        m_BindlessSmpBase = kSetSamplerCapacity - 1024u;
         HE_CORE_INFO("D3D12Device: 描述符集 SAMPLER 堆就绪（{} 槽）", kSetSamplerCapacity);
     }
     return true;
@@ -1002,15 +1003,15 @@ bool D3D12Device::WriteBindlessBufferSrv(u32 slot, IRHIBuffer* buffer) {
     // 【步长按区间决定】同一个缓冲会被写进四段区间（见 D3D12BindlessHeap::RegisterBuffer），
     // 每段在着色器里的元素类型不同，StructureByteStride 必须与之一致，否则按句柄取到的
     // 骨骼矩阵 / 实例变换会整体错位（缓冲本身通常不带 stride，以前一律退回 4 字节）：
-    //   t64..  u_InstanceTransforms   float4x4  64 字节
-    //   t128.. u_VisibleInstanceIndices uint     4 字节
-    //   t192.. u_BoneMatrices         float4x4  64 字节
-    //   t256.. u_Materials            GPUMaterialData 112 字节
+    //   t1024.. u_InstanceTransforms   float4x4  64 字节
+    //   t1088.. u_VisibleInstanceIndices uint     4 字节
+    //   t1152.. u_BoneMatrices         float4x4  64 字节
+    //   t1216.. u_Materials            GPUMaterialData 112 字节
     u32 stride = buf->GetStride() ? static_cast<u32>(buf->GetStride()) : 4u;
-    if      (slot >= 64u  && slot < 128u) stride = 64u;
-    else if (slot >= 128u && slot < 192u) stride = 4u;
-    else if (slot >= 192u && slot < 256u) stride = 64u;
-    else if (slot >= 256u && slot < 320u) stride = 112u;
+    if      (slot >= 1024u && slot < 1088u) stride = 64u;
+    else if (slot >= 1088u && slot < 1152u) stride = 4u;
+    else if (slot >= 1152u && slot < 1216u) stride = 64u;
+    else if (slot >= 1216u && slot < 1280u) stride = 112u;
     // 缓冲还不到一个元素（如 4 字节计数缓冲落在材质区间）：建出来的视图会越过缓冲末尾，
     // 属于非法视图，该区间这个句柄本就不会被这样读取，直接跳过
     if (buf->GetSize() < stride) return false;

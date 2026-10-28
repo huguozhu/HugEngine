@@ -25,12 +25,12 @@ struct PBRVertexInput {
 [[vk::binding(kGPUBinding_ObjectData, kGPUDescSet_PerFrame)]] StructuredBuffer<GPUObjectData> u_Objects : register(t2, space0);
 
 // bindless SSBO 数组：实例化网格的实例变换（float4x4 元素缓冲，按句柄索引）
-[[vk::binding(kGPUBinding_BindlessSSBO, kGPUDescSet_PerFrame)]] StructuredBuffer<float4x4> u_InstanceTransforms[64] : register(t64, space2);
+[[vk::binding(kGPUBinding_BindlessSSBO, kGPUDescSet_PerFrame)]] StructuredBuffer<float4x4> u_InstanceTransforms[64] : register(t1024, space2);
 // bindless SSBO 数组：逐实例剔除后的可见实例索引（u32 列表，任务 25）
 // 列表是**压缩**的：列表[i] = 第 i 个可见实例在实例变换数组里的下标
-[[vk::binding(kGPUBinding_BindlessSSBO, kGPUDescSet_PerFrame)]] StructuredBuffer<uint> u_VisibleInstanceIndices[64] : register(t128, space2);
+[[vk::binding(kGPUBinding_BindlessSSBO, kGPUDescSet_PerFrame)]] StructuredBuffer<uint> u_VisibleInstanceIndices[64] : register(t1088, space2);
 // bindless SSBO 数组：骨骼蒙皮矩阵（world × inverseBind，按句柄索引）
-[[vk::binding(kGPUBinding_BindlessSSBO, kGPUDescSet_PerFrame)]] StructuredBuffer<float4x4> u_BoneMatrices[64] : register(t192, space2);
+[[vk::binding(kGPUBinding_BindlessSSBO, kGPUDescSet_PerFrame)]] StructuredBuffer<float4x4> u_BoneMatrices[64] : register(t1152, space2);
 
 // 帧级 Push Constants（Forward+ 扩展，与 FS 对齐）
 [[vk::push_constant]] cbuffer FrameConstants {
