@@ -653,7 +653,10 @@ void D3D12CommandList::SetPushConstants(u32 offset, u32 size, const void* data) 
         if (!m_Device->AllocateConstants(slot, cbvHandle)) return;
         void* cpu = m_Device->GetConstantSlotPtr(slot);
         if (!cpu) return;
-        std::memset(cpu, 0, 256);
+        // 新槽位继承上一槽位的内容：Vulkan 的推送常量在被覆盖前一直有效，
+        // 引擎会依赖这一点（例如只补推逐物体字段）；本次录制的第一个槽位从 0 开始
+        if (m_PushCpu) std::memcpy(cpu, m_PushCpu, 256);
+        else           std::memset(cpu, 0, 256);
         m_PushGpu = slot;
         m_PushCpu = cpu;
         m_PushDirty = false;
@@ -683,17 +686,6 @@ void D3D12CommandList::SetPushConstants(u32 offset, u32 size, const void* data) 
     if (offset >= 256u) return;
     const u32 copySize = ((offset + size) > 256u) ? (256u - offset) : size;
     std::memcpy(static_cast<unsigned char*>(m_PushCpu) + offset, data, copySize);
-    // 【修补未初始化的 objectIndex】引擎在 GPU-driven 路径下不写 objectIndex（保持
-    // 0xCCCCCCCC 未初始化值），由着色器改用 SV_InstanceID 取物体。若直接把 0xCCCCCCCC
-    // 传给着色器，它会越界索引 u_Objects 读到 0 ⇒ 顶点塌缩。这里把它纠正成合法的 0
-    // 并打开 useInstanceID，与引擎的 GPU-driven 语义一致。
-    {
-        auto* w = static_cast<u32*>(m_PushCpu);
-        if (w[21] == 0xCCCCCCCCu || w[21] > 1000000u) {
-            w[21] = 0u;   // objectIndex
-            w[22] = 1u;   // useInstanceID：从 SV_InstanceID 取物体索引
-        }
-    }
 }
 
 void D3D12CommandList::Draw(u32 vertexCount, u32 instanceCount, u32 firstVertex, u32 firstInstance) {
@@ -713,6 +705,9 @@ void D3D12CommandList::Draw(u32 vertexCount, u32 instanceCount, u32 firstVertex,
     if (!m_List) return;
     FlushRootArgs();
     m_List->DrawInstanced(vertexCount, instanceCount, firstVertex, firstInstance);
+    // 本次绘制已消费当前常量槽：之后的推送必须写新槽位，否则 GPU 执行时
+    // 前面的绘制会读到后写入的值（实测天空盒读到后续全屏 pass 的矩阵，天空成纯色）
+    m_PushDirty = true;
 }
 
 void D3D12CommandList::DrawIndexed(u32 indexCount, u32 instanceCount, u32 firstIndex,
@@ -798,6 +793,7 @@ void D3D12CommandList::DrawIndexedIndirect(IRHIBuffer* buffer, u64 offset, u32 d
 
     FlushRootArgs();
     m_List->ExecuteIndirect(sig, drawCount, b->GetResource(), offset, nullptr, 0);
+    m_PushDirty = true;   // 同 Draw：常量槽已被本次绘制消费
 }
 
 void D3D12CommandList::DrawIndexedIndirectCount(IRHIBuffer* buffer, u64 offset,
@@ -823,6 +819,7 @@ void D3D12CommandList::DrawIndexedIndirectCount(IRHIBuffer* buffer, u64 offset,
     FlushRootArgs();
     m_List->ExecuteIndirect(sig.Get(), maxDrawCount, b->GetResource(), offset,
                             cb->GetResource(), countOffset);
+    m_PushDirty = true;   // 同 Draw：常量槽已被本次绘制消费
 }
 
 void D3D12CommandList::Dispatch(u32 x, u32 y, u32 z) {
@@ -830,6 +827,7 @@ void D3D12CommandList::Dispatch(u32 x, u32 y, u32 z) {
     if (!m_List) return;
     FlushRootArgs();
     m_List->Dispatch(x, y, z);
+    m_PushDirty = true;   // 同 Draw：常量槽已被本次派发消费
 }
 
 void D3D12CommandList::DispatchIndirect(IRHIBuffer* buffer, u64 offset) {
@@ -837,6 +835,7 @@ void D3D12CommandList::DispatchIndirect(IRHIBuffer* buffer, u64 offset) {
     auto* b = static_cast<D3D12Buffer*>(buffer);
     FlushRootArgs();
     m_List->ExecuteIndirect(nullptr, 1, b->GetResource(), offset, nullptr, 0);
+    m_PushDirty = true;   // 同 Draw：常量槽已被本次派发消费
 }
 
 void D3D12CommandList::PipelineBarrier(PipelineStage, PipelineStage,
