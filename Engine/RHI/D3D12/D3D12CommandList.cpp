@@ -65,6 +65,10 @@ void D3D12CommandList::Begin() {
         return;
     }
     m_Recording = true;
+    // 新的录制：列表的根参数与描述符堆都已失效，清空缓存
+    for (auto& t : m_RootTables) t.ptr = 0;
+    m_RootArgsDirty = true;
+    m_HeapsSet = false;
     // 为整帧申请一块推送常量槽位，并清零
     m_PushGpu = 0;
     m_PushCpu = nullptr;
@@ -429,6 +433,8 @@ void D3D12CommandList::SetPipeline(IRHIPipelineState* pso) {
         m_List->SetGraphicsRootSignature(m_Pipeline->GetRootSignature());
     }
     m_List->IASetPrimitiveTopology(m_Pipeline->GetTopology());
+    // 设置根签名会清空所有根参数，下一次绘制/派发前需要重新下发
+    m_RootArgsDirty = true;
 }
 
 void D3D12CommandList::SetVertexBuffer(IRHIBuffer* buffer, u32 binding) {
@@ -510,6 +516,7 @@ void D3D12CommandList::BindDescriptorSet(u32 setIndex, DescriptorSetHandle set) 
     ID3D12DescriptorHeap* heaps[2] = { m_Device->GetCbvSrvUavHeap(), m_Device->GetSetSamplerHeap() };
     if (!heaps[0] || !heaps[1]) return;
     m_List->SetDescriptorHeaps(2, heaps);
+    m_HeapsSet = true;
     std::printf("[BS] heaps ok\n"); std::fflush(stdout);
 
     const u32 baseSlot = m_Device->GetSetBaseSlot(set);
@@ -541,7 +548,7 @@ void D3D12CommandList::BindDescriptorSet(u32 setIndex, DescriptorSetHandle set) 
         m_Device->GetDevice()->CopyDescriptorsSimple(32,
             m_Device->GetSlotCpuHandle(0), m_Device->GetSlotCpuHandle(baseSlot),
             D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-        m_List->SetGraphicsRootDescriptorTable(8, m_Device->GetSrvHeapGpuStart());
+        SetRootTable(8, m_Device->GetSrvHeapGpuStart());
     } else {
     // object buffer rebind (frame-slot mismatch fix): use the buffer most recently
     // written by the CPU, otherwise the bound set may point at a never-written slot.
@@ -567,19 +574,49 @@ void D3D12CommandList::BindDescriptorSet(u32 setIndex, DescriptorSetHandle set) 
     }
         m_List->SetGraphicsRootDescriptorTable(8  + setIndex, srv);
     }
-    m_List->SetGraphicsRootDescriptorTable(16 + setIndex, uav);
+    // 只记录到缓存，由 FlushRootArgs 在绘制/派发前按当前管线类型（图形/计算）下发，
+    // 这样 BindDescriptorSet 与 SetPipeline 的先后顺序不再影响结果
+    SetRootTable(16 + setIndex, uav);
     std::printf("[BS] g-uav ok\n"); std::fflush(stdout);
-    m_List->SetGraphicsRootDescriptorTable(24 + setIndex, smp);
+    SetRootTable(24 + setIndex, smp);
     std::printf("[BS] g-smp ok\n"); std::fflush(stdout);
-    // 【只有计算管线才绑计算表】图形管线没有绑定过 SetComputeRootSignature，
-    // 此时调用 SetComputeRootDescriptorTable 会让 D3D12 静默卡死
-    //（实测 02.Cube 第一帧阴影 pass 绑定描述符集时死在这里）。
-    if (m_IsComputePipeline) {
-        m_List->SetComputeRootDescriptorTable(8  + setIndex, srv);
-        m_List->SetComputeRootDescriptorTable(16 + setIndex, uav);
-        m_List->SetComputeRootDescriptorTable(24 + setIndex, smp);
-    }
     std::printf("[BS] tables ok\n"); std::fflush(stdout);
+}
+
+void D3D12CommandList::SetRootTable(u32 param, D3D12_GPU_DESCRIPTOR_HANDLE handle) {
+    if (param >= 32u) return;
+    m_RootTables[param] = handle;
+    m_RootArgsDirty = true;
+}
+
+void D3D12CommandList::FlushRootArgs() {
+    if (!m_List || !m_Pipeline || !m_RootArgsDirty) return;
+    // 描述符表必须在 SetDescriptorHeaps 之后才能设置
+    if (!m_HeapsSet && m_Device && m_Device->EnsureDescriptorHeaps()) {
+        ID3D12DescriptorHeap* heaps[2] = { m_Device->GetCbvSrvUavHeap(), m_Device->GetSetSamplerHeap() };
+        if (heaps[0] && heaps[1]) {
+            m_List->SetDescriptorHeaps(2, heaps);
+            m_HeapsSet = true;
+        }
+    }
+    // 推送常量（root CBV b0/b1）：Begin 已为本次录制分配了槽位，
+    // 即使本次绘制没有推送也要绑上，否则着色器读到未初始化的根参数会让 GPU 挂起
+    if (m_PushGpu) {
+        if (m_IsComputePipeline) {
+            m_List->SetComputeRootConstantBufferView(0, m_PushGpu);
+        } else {
+            m_List->SetGraphicsRootConstantBufferView(0, m_PushGpu);
+            m_List->SetGraphicsRootConstantBufferView(1, m_PushGpu);
+        }
+    }
+    if (m_HeapsSet) {
+        for (u32 i = 8; i < 32u; ++i) {
+            if (!m_RootTables[i].ptr) continue;
+            if (m_IsComputePipeline) m_List->SetComputeRootDescriptorTable(i, m_RootTables[i]);
+            else                     m_List->SetGraphicsRootDescriptorTable(i, m_RootTables[i]);
+        }
+    }
+    m_RootArgsDirty = false;
 }
 
 void D3D12CommandList::SetPushConstants(u32 offset, u32 size, const void* data) {
@@ -655,6 +692,7 @@ void D3D12CommandList::Draw(u32 vertexCount, u32 instanceCount, u32 firstVertex,
         }
     }
     if (!m_List) return;
+    FlushRootArgs();
     m_List->DrawInstanced(vertexCount, instanceCount, firstVertex, firstInstance);
 }
 
@@ -688,18 +726,18 @@ void D3D12CommandList::DrawIndexed(u32 indexCount, u32 instanceCount, u32 firstI
     // BindDescriptorSet（同样是 setIndex=0）覆盖了同一张表，绘制时就会读到别的 set。
     if (m_Device && m_LastBaseSlot != 0xFFFFFFFFu) {
         const D3D12_GPU_DESCRIPTOR_HANDLE s0 = m_Device->GetSetGpuHandle(m_LastBaseSlot);
-        if (s0.ptr) m_List->SetGraphicsRootDescriptorTable(8, s0);
+        if (s0.ptr) SetRootTable(8, s0);
     }
     { static int n=0; if (indexCount == 1728 && ++n <= 4) { std::printf("[DRAWSET] set=%llu base=%u idx=%u\n", (unsigned long long)m_LastBoundSet, m_LastBaseSlot, indexCount); std::fflush(stdout); } }
     // space2 绑定分测：分别用 HE_BIND2_SRV / HE_BIND2_SMP 控制
     if (m_Device && m_List) {
         if (true) {   // space2 的 bindless 表必须总是绑定
             const D3D12_GPU_DESCRIPTOR_HANDLE h1 = m_Device->GetBindlessSrvGpuHandle();
-            if (h1.ptr) m_List->SetGraphicsRootDescriptorTable(10, h1);
+            if (h1.ptr) SetRootTable(10, h1);
         }
         if (true) {
             const D3D12_GPU_DESCRIPTOR_HANDLE h2 = m_Device->GetBindlessSmpGpuHandle();
-            if (h2.ptr) m_List->SetGraphicsRootDescriptorTable(26, h2);
+            if (h2.ptr) SetRootTable(26, h2);
         }
     }
     if (std::getenv("HE_D3D12_NO_DRAW")) return;   // 实验开关：跳过实际绘制
@@ -721,8 +759,9 @@ void D3D12CommandList::DrawIndexed(u32 indexCount, u32 instanceCount, u32 firstI
     // (also setIndex 0) can overwrite the table with a different set.
     if (m_Device && m_LastBaseSlot != 0xFFFFFFFFu) {
         const D3D12_GPU_DESCRIPTOR_HANDLE s0 = m_Device->GetSetGpuHandle(m_LastBaseSlot);
-        if (s0.ptr) m_List->SetGraphicsRootDescriptorTable(8, s0);
+        if (s0.ptr) SetRootTable(8, s0);
     }
+    FlushRootArgs();
     m_List->DrawIndexedInstanced(indexCount, instanceCount, firstIndex,
                                  static_cast<INT>(vertexOffset), firstInstance);
 }
@@ -754,6 +793,7 @@ void D3D12CommandList::DrawIndexedIndirect(IRHIBuffer* buffer, u64 offset, u32 d
         m_CmdSigs[want] = created;
     }
 
+    FlushRootArgs();
     m_List->ExecuteIndirect(sig, drawCount, b->GetResource(), offset, nullptr, 0);
 }
 
@@ -777,6 +817,7 @@ void D3D12CommandList::DrawIndexedIndirectCount(IRHIBuffer* buffer, u64 offset,
         return;
     }
     // D3D12 的 ExecuteIndirect 原生支持「计数缓冲」，等价 Vulkan 的 *IndirectCount
+    FlushRootArgs();
     m_List->ExecuteIndirect(sig.Get(), maxDrawCount, b->GetResource(), offset,
                             cb->GetResource(), countOffset);
 }
@@ -784,12 +825,14 @@ void D3D12CommandList::DrawIndexedIndirectCount(IRHIBuffer* buffer, u64 offset,
 void D3D12CommandList::Dispatch(u32 x, u32 y, u32 z) {
     { static int s=0; if (s<4) { ++s; std::printf("[STP] Dispatch %d\n", s); std::fflush(stdout); } }
     if (!m_List) return;
+    FlushRootArgs();
     m_List->Dispatch(x, y, z);
 }
 
 void D3D12CommandList::DispatchIndirect(IRHIBuffer* buffer, u64 offset) {
     if (!m_List || !buffer) return;
     auto* b = static_cast<D3D12Buffer*>(buffer);
+    FlushRootArgs();
     m_List->ExecuteIndirect(nullptr, 1, b->GetResource(), offset, nullptr, 0);
 }
 

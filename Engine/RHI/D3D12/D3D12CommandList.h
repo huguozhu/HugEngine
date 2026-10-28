@@ -126,6 +126,12 @@ private:
 public:
     u32 GetTotalDraws() const { return m_TotalDraws; }
 private:
+    /// 记录一个描述符表根参数（8..31），实际下发推迟到绘制/派发前的 FlushRootArgs
+    void SetRootTable(u32 param, D3D12_GPU_DESCRIPTOR_HANDLE handle);
+    /// 绘制/派发前把缓存的根参数重新下发。D3D12 的 Set*RootSignature 会清空全部根参数，
+    /// 而 Vulkan 切管线时兼容的绑定会保留 —— 引擎按 Vulkan 语义只绑一次，这里负责补齐。
+    void FlushRootArgs();
+
     ComPtr<ID3D12CommandAllocator>    m_Allocator;
     ComPtr<ID3D12GraphicsCommandList> m_List;
     ComPtr<ID3D12RootSignature>       m_PushRootSig;   // 阶段 0 占位，阶段 2 由 PSO 提供
@@ -153,6 +159,12 @@ private:
     u64             m_LastBoundSet = 0;
     u32             m_LastObjIdx = 0;
     bool            m_PushDirty = true;
+    /// 根参数缓存：下标即根参数索引（0..7 为 root CBV 不用，8..31 为描述符表）
+    D3D12_GPU_DESCRIPTOR_HANDLE m_RootTables[32]{};
+    /// 根参数是否需要重新下发（切换管线 / 改了描述符表后置位）
+    bool            m_RootArgsDirty = true;
+    /// 本次录制中是否已经 SetDescriptorHeaps（描述符表要求先绑堆）
+    bool            m_HeapsSet = false;
     u32             m_LastBaseSlot = 0;      // 本列表累计绘制数（诊断用）
     bool            m_PassHasRtv = false;
     u32             m_PassW = 0;
