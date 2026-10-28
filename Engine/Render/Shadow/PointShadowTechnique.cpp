@@ -140,6 +140,11 @@ void PointShadowTechnique::Render(rhi::IRHICommandList* cmd,const FrameSceneSnap
         float3 lp(sd[li].pointLightData);
         float rng=sd[li].pointLightData.w;
         float4x4 proj=glm::perspectiveRH_ZO(glm::radians(90.f),1.f,.1f,rng);
+        // 【D3D12 复现 Vulkan 正高度视口】下面用正高度视口（不翻转 Y）渲染各面，Vulkan 下
+        // NDC -1 落在第 0 行；D3D12 没有这种视口（高度不能为负，NDC +1 恒在第 0 行），
+        // 各面会上下颠倒，采样时阴影错位（实测地面出现楔形阴影）。在裁剪空间翻转 Y 与
+        // Vulkan 正高度视口完全等价（含屏幕空间绕序），两后端的立方体面内容因此一致。
+        if(m_Device&&m_Device->GetBackend()==rhi::Backend::D3D12) proj[1][1]=-proj[1][1];
         for(u32 face=0;face<6;++face){
             float4x4 view=glm::lookAtRH(lp,lp+kCubeFaces[face].dir,kCubeFaces[face].up);
             void*fv=cube->GetNativeHandle(face);
