@@ -48,7 +48,7 @@ BindlessHandle D3D12BindlessHeap::RegisterBuffer(IRHIBuffer* ssbo) {
         // 这里把第一个注册的缓冲（材质缓冲）同时写到索引 0。
         // 材质缓冲的元素大小是 sizeof(GPUMaterialData)=112，用它唯一识别材质缓冲
         // （实例变换 400000、实例数据 640000、剔除命令 1536 都不能被 112 整除）。
-        if ((ssbo->GetSize() % 112ull) == 0ull && ssbo->GetSize() > 0ull) {
+        if (base == 256u && (ssbo->GetSize() % 112ull) == 0ull && ssbo->GetSize() > 0ull) {
             m_Device->WriteBindlessBufferSrv(base, ssbo);
         }
     }

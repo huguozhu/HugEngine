@@ -1009,18 +1009,72 @@ bool D3D12PipelineState::Initialize(D3D12Device* device, const PipelineStateDesc
                      static_cast<u32>(elems.size()), static_cast<u32>(cursor));
     }
 
-    // ENGINE VERTEX LAYOUT: vectors are 16-byte aligned (stride 64):
-    //   POSITION@0, NORMAL@16, TEXCOORD@32, BLENDINDICES@40 (4x uint8), BLENDWEIGHT@44
-    // Tight packing would shift skinning data and collapse skinned meshes.
-    {
-        static const UINT kOff[5] = { 0u, 16u, 32u, 40u, 44u };
-        static const DXGI_FORMAT kFmt[5] = { DXGI_FORMAT_R32G32B32_FLOAT, DXGI_FORMAT_R32G32B32_FLOAT,
-            DXGI_FORMAT_R32G32_FLOAT, DXGI_FORMAT_R8G8B8A8_UINT, DXGI_FORMAT_R32G32B32A32_FLOAT };
-        for (size_t k = 0; k < elems.size() && k < 5; ++k) {
-            elems[k].AlignedByteOffset = kOff[k];
-            elems[k].Format = kFmt[k];
+    // Prefer the engine-provided vertex layout: it is the authoritative
+    // description of the vertex buffer (StaticVertex = pos/normal/uv).
+    // Synthesizing a larger layout from the shader signature makes the IA
+    // read past the real stride (e.g. joints/weights at 40/44 of a 48-byte
+    // vertex) which yields garbage transform data.
+    if (!desc.vertexLayout.attributes.empty()) {
+        elems.clear();
+        static std::vector<std::string> s_names;
+        s_names.clear(); s_names.reserve(8);
+        static const char* kSemByLoc[8] = { "POSITION", "NORMAL", "TEXCOORD",
+            "BLENDINDICES", "BLENDWEIGHT", "TANGENT", "COLOR", "TEXCOORD" };
+        static const DXGI_FORMAT kFmtByVertex[6] = {
+            DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32G32_FLOAT, DXGI_FORMAT_R32G32B32_FLOAT,
+            DXGI_FORMAT_R32G32B32A32_FLOAT, DXGI_FORMAT_R8G8B8A8_UINT, DXGI_FORMAT_R16G16_FLOAT };
+        for (const auto& a : desc.vertexLayout.attributes) {
+            D3D12_INPUT_ELEMENT_DESC e{};
+            const u32 loc = a.location;
+            s_names.push_back(kSemByLoc[loc < 8u ? loc : 2u]);
+            e.SemanticName = s_names.back().c_str();
+            e.SemanticIndex = 0;
+            const u32 fi = static_cast<u32>(a.format);
+            e.Format = (fi < 6u) ? kFmtByVertex[fi] : DXGI_FORMAT_R32G32B32A32_FLOAT;
+            e.InputSlot = 0;
+            e.AlignedByteOffset = static_cast<UINT>(a.offset);
+            e.InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+            e.InstanceDataStepRate = 0;
+            elems.push_back(e);
         }
-        if (elems.size() == 5) m_VertexStride = 64u;
+        if (desc.vertexLayout.stride > 0) m_VertexStride = static_cast<u32>(desc.vertexLayout.stride);
+    }
+
+
+    if (std::getenv("HE_LAYOUT_DBG")) {
+        std::printf("[LAYOUT] pso=%s engineAttrs=%zu engineStride=%u elems=%zu stride=%u\n",
+            desc.debugName.c_str(), desc.vertexLayout.attributes.size(),
+            static_cast<u32>(desc.vertexLayout.stride), elems.size(), m_VertexStride);
+        for (size_t k = 0; k < elems.size() && k < 6; ++k)
+            std::printf("[LAYOUT]   e%zu sem=%s idx=%u fmt=%d off=%u\n", k, elems[k].SemanticName,
+                elems[k].SemanticIndex, (int)elems[k].Format, elems[k].AlignedByteOffset);
+        std::fflush(stdout); }
+    // Validate the vertex layout: every attribute must fit inside the stride.
+    // Reading past the stride feeds garbage (position/joints/weights) to the shader.
+    {
+        auto fmtBytes = [](DXGI_FORMAT f) -> u32 {
+            switch (f) {
+            case DXGI_FORMAT_R32_FLOAT: case DXGI_FORMAT_R32_UINT: case DXGI_FORMAT_R32_SINT:
+            case DXGI_FORMAT_R8G8B8A8_UINT: case DXGI_FORMAT_R8G8B8A8_UNORM:
+            case DXGI_FORMAT_R16G16_UINT: case DXGI_FORMAT_R16G16_FLOAT: return 4u;
+            case DXGI_FORMAT_R32G32_FLOAT: case DXGI_FORMAT_R16G16B16A16_UINT:
+            case DXGI_FORMAT_R16G16B16A16_FLOAT: return 8u;
+            case DXGI_FORMAT_R32G32B32_FLOAT: return 12u;
+            case DXGI_FORMAT_R32G32B32A32_FLOAT: return 16u;
+            default: return 16u;
+            }
+        };
+        for (size_t k = 0; k < elems.size(); ++k) {
+            const u32 sz = fmtBytes(elems[k].Format);
+            if (m_VertexStride > 0 && elems[k].AlignedByteOffset + sz > m_VertexStride) {
+                HE_CORE_ERROR("vertex layout overflow: pso={} attr[{}] {}{} offset={} size={} stride={}",
+                    desc.debugName.c_str(), static_cast<u32>(k), elems[k].SemanticName,
+                    elems[k].SemanticIndex, elems[k].AlignedByteOffset, sz, m_VertexStride);
+                return false;
+            }
+        }
+        HE_CORE_INFO("vertex layout ok: pso={} attrs={} stride={}",
+            desc.debugName.c_str(), static_cast<u32>(elems.size()), m_VertexStride);
     }
 
     pd.InputLayout.pInputElementDescs = elems.empty() ? nullptr : elems.data();
