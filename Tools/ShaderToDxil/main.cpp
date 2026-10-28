@@ -287,6 +287,171 @@ static void PatchLoops(std::string& s) {
 }
 
 // ---------------------------------------------------------------------------
+//  寄存器重映射：按源码的 [[vk::binding(B, S)]] 生成 register(<t|u|s>B, spaceS)
+//
+//  【为什么必须做】`slangc -target hlsl` 会忽略 vk::binding，按声明顺序自动分配
+//  寄存器（如 PBR.frag 里 u_Lights=t0、u_Objects=t1、u_BRDF_LUT=t13）。而 D3D12
+//  后端把描述符写在「set 基址 + binding」、按 set 号绑定 space 表，即约定
+//  register = binding、space = set。两者不一致时着色器会读到别的资源
+//  （光源读成物体数据、BRDF LUT 读成预滤波立方体图……）⇒ 画面错误甚至设备挂起。
+//  源码里已显式写了 register(...) 的声明（如 bindless 的 space2 数组）保持不动。
+// ---------------------------------------------------------------------------
+
+/// 去掉首尾空白
+static std::string Trim(const std::string& s) {
+    const size_t b = s.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) return {};
+    const size_t e = s.find_last_not_of(" \t\r\n");
+    return s.substr(b, e - b + 1);
+}
+
+/// 读取源码文件并按行切分（带缓存，同一 include 文件只读一次）
+static const std::vector<std::string>& GetSourceLines(const std::string& path) {
+    static std::map<std::string, std::vector<std::string>> s_cache;
+    auto it = s_cache.find(path);
+    if (it != s_cache.end()) return it->second;
+    std::vector<std::string> lines;
+    std::string text;
+    if (ReadFile(path.c_str(), text)) {
+        std::istringstream ss(text);
+        std::string l;
+        while (std::getline(ss, l)) lines.push_back(l);
+    }
+    return s_cache.emplace(path, std::move(lines)).first->second;
+}
+
+/// 从一段源码里收集整数常量：`GPU_CONST(GPU_UINT NAME = N)`、`static const uint NAME = N;`、`#define NAME N`
+static void CollectConstants(const std::vector<std::string>& lines, std::map<std::string, int>& table) {
+    for (const auto& raw : lines) {
+        std::string l = raw;
+        const size_t cm = l.find("//");
+        if (cm != std::string::npos) l.resize(cm);
+        size_t eq = l.find('=');
+        std::string name, value;
+        if (eq != std::string::npos) {
+            // NAME 是 '=' 左侧最后一个标识符
+            size_t ne = eq;
+            while (ne > 0 && isspace(static_cast<unsigned char>(l[ne - 1]))) --ne;
+            size_t nb = ne;
+            while (nb > 0 && (isalnum(static_cast<unsigned char>(l[nb - 1])) || l[nb - 1] == '_')) --nb;
+            name = l.substr(nb, ne - nb);
+            value = l.substr(eq + 1);
+        } else if (l.rfind("#define", 0) == 0) {
+            std::istringstream ss(l.substr(7));
+            ss >> name >> value;
+        }
+        value = Trim(value);
+        if (name.empty() || value.empty() || !isdigit(static_cast<unsigned char>(value[0]))) continue;
+        table[name] = std::atoi(value.c_str());
+    }
+}
+
+/// 常量表：ShaderTypes.slang（从源码目录逐级向上查找）+ 源码文件本身
+static bool ResolveInt(const std::string& token, const std::string& srcPath, int& out) {
+    const std::string t = Trim(token);
+    if (t.empty()) return false;
+    if (isdigit(static_cast<unsigned char>(t[0]))) { out = std::atoi(t.c_str()); return true; }
+
+    static std::map<std::string, std::map<std::string, int>> s_tables;
+    auto it = s_tables.find(srcPath);
+    if (it == s_tables.end()) {
+        std::map<std::string, int> table;
+        std::string dir = srcPath;
+        for (int depth = 0; depth < 4; ++depth) {
+            const size_t slash = dir.find_last_of("/\\");
+            if (slash == std::string::npos) break;
+            dir.resize(slash);
+            const auto& types = GetSourceLines(dir + "/ShaderTypes.slang");
+            if (!types.empty()) { CollectConstants(types, table); break; }
+        }
+        CollectConstants(GetSourceLines(srcPath), table);
+        it = s_tables.emplace(srcPath, std::move(table)).first;
+    }
+    auto c = it->second.find(t);
+    if (c == it->second.end()) return false;
+    out = c->second;
+    return true;
+}
+
+static std::string PatchRegisters(const std::string& src) {
+    std::istringstream in(src);
+    std::string out, line;
+    std::string curFile;
+    int nextLine = 0;   // 下一行 HLSL 对应的源码行号（0 = 未知）
+    while (std::getline(in, line)) {
+        if (line.rfind("#line ", 0) == 0) {
+            // 形如 `#line 38 "path"` 或 `#line 76`（沿用上一个文件）
+            std::istringstream ls(line.substr(6));
+            ls >> nextLine;
+            const size_t q1 = line.find('"');
+            const size_t q2 = (q1 == std::string::npos) ? q1 : line.find('"', q1 + 1);
+            if (q2 != std::string::npos) curFile = line.substr(q1 + 1, q2 - q1 - 1);
+            out += line; out += '\n';
+            continue;
+        }
+        const int srcLine = nextLine;
+        if (nextLine > 0) ++nextLine;
+
+        const size_t reg = line.find(": register(");
+        const bool isCBuffer = line.find("cbuffer") != std::string::npos;
+        // 无界数组（`x[]`）保持 Slang 的自动分配：D3D12 不允许同一 space 内有多个无界数组，
+        // Slang 会把它们各自放进独立的 space，强行按 binding 重排会编译失败
+        const bool isUnbounded = (reg != std::string::npos) &&
+                                 line.substr(0, reg).find("[]") != std::string::npos;
+        if (reg != std::string::npos && !isCBuffer && !isUnbounded && srcLine > 0 && !curFile.empty()) {
+            const size_t clsPos = reg + 11;
+            const char cls = (clsPos < line.size()) ? line[clsPos] : 0;
+            const size_t close = line.find(')', clsPos);
+            // 变量名：register 前最后一个标识符（去掉 Slang 加的 `_0` 后缀和数组维度）
+            std::string decl = line.substr(0, reg);
+            const size_t br = decl.find('[');
+            if (br != std::string::npos) decl.resize(br);
+            decl = Trim(decl);
+            size_t nb = decl.size();
+            while (nb > 0 && (isalnum(static_cast<unsigned char>(decl[nb - 1])) || decl[nb - 1] == '_')) --nb;
+            std::string var = decl.substr(nb);
+            if (var.size() > 2 && var.compare(var.size() - 2, 2, "_0") == 0) var.resize(var.size() - 2);
+
+            const auto& srcLines = GetSourceLines(curFile);
+            // #line 只保证起点，附近几行内找声明了该变量且带 vk::binding 的那一行
+            std::string srcDecl;
+            for (int off : { 0, -1, 1, -2, 2, -3, 3 }) {
+                const int idx = srcLine - 1 + off;
+                if (idx < 0 || idx >= static_cast<int>(srcLines.size())) continue;
+                const std::string& s = srcLines[idx];
+                const size_t vp = s.find(var);
+                if (vp == std::string::npos) continue;
+                const size_t ve = vp + var.size();
+                if (ve < s.size() && (isalnum(static_cast<unsigned char>(s[ve])) || s[ve] == '_')) continue;
+                srcDecl = s;
+                break;
+            }
+            const size_t vb = srcDecl.find("vk::binding(");
+            // 源码已显式写 register(...) 的保持原样
+            if ((cls == 't' || cls == 'u' || cls == 's') && close != std::string::npos &&
+                vb != std::string::npos && srcDecl.find("register(") == std::string::npos) {
+                const size_t ab = vb + 12;
+                const size_t ae = srcDecl.find(')', ab);
+                const std::string args = srcDecl.substr(ab, ae - ab);
+                const size_t comma = args.find(',');
+                int binding = 0, space = 0;
+                const bool ok = ResolveInt(args.substr(0, comma), curFile, binding) &&
+                    (comma == std::string::npos || ResolveInt(args.substr(comma + 1), curFile, space));
+                if (ok) {
+                    line = line.substr(0, clsPos) + cls + std::to_string(binding) +
+                           ", space" + std::to_string(space) + line.substr(close);
+                } else {
+                    std::fprintf(stderr, "ShaderToDxil: 警告：无法解析 %s 的 vk::binding(%s)，保留自动分配的寄存器\n",
+                                 var.c_str(), args.c_str());
+                }
+            }
+        }
+        out += line; out += '\n';
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------------------
 //  生成 C++ 头文件
 // ---------------------------------------------------------------------------
 static std::string MakeHeader(const std::vector<unsigned char>& data, const char* symbol) {
@@ -340,6 +505,8 @@ int main(int argc, char** argv) {
     //（dxc 报 "resource X at register 0 overlaps with resource Y"）。
     // 正确的做法是保留着色器自己的寄存器分配（b0/b1/...），根签名用 root CBV 覆盖 b0..b7。
     PatchLoops(patched);
+    // 寄存器按 vk::binding 重排，与 D3D12 后端的「register = binding、space = set」约定一致
+    patched = PatchRegisters(patched);
 
     // 落一份补丁后的 HLSL 便于排查（设 HE_DUMP_DXIL_HLSL=path 覆盖默认名）
     if (const char* dump = std::getenv("HE_DUMP_DXIL_HLSL")) {
