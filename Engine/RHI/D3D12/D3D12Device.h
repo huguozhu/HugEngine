@@ -162,11 +162,15 @@ public:
     /// UAV 区域相对 baseSlot 的偏移（= 该 set 的 slotCount）
     u32                              GetSetUavOffset(DescriptorSetHandle set) const;
 
-    void* CreateTextureMipStorageView(IRHITexture*, u32) override { return nullptr; }
-    void* CreateTextureMipStorageView(IRHITexture*, u32, u32) override { return nullptr; }
+    /// 指定 mip（+ 数组层）的附件视图。D3D12 下对可作渲染目标的纹理返回该 mip/层的 RTV
+    ///（IBL 预滤波逐 mip 逐面渲染用）；其它纹理（UAV 用途）暂不支持，返回 nullptr
+    void* CreateTextureMipStorageView(IRHITexture* texture, u32 mipLevel) override {
+        return CreateTextureMipStorageView(texture, mipLevel, 0);
+    }
+    void* CreateTextureMipStorageView(IRHITexture* texture, u32 mipLevel, u32 arrayLayer) override;
     void* CreateTextureMipSampledView(IRHITexture*, u32) override { return nullptr; }
     void* CreateTextureMipSampledView(IRHITexture*, u32, u32) override { return nullptr; }
-    void  DestroyTextureMipView(void*) override {}
+    void  DestroyTextureMipView(void* view) override;
 
     float GetTimestampPeriod() override { return 1.0f; }   // D3D12 的 GPU 时间戳单位是 1ns
 
@@ -284,6 +288,12 @@ public:
 private:
     class D3D12Buffer* m_LastUploadedObject = nullptr;
     ComPtr<ID3D12Resource> m_ZeroVertexBuffer;   // 懒创建的 64 字节全零缓冲
+    // 逐 mip RTV 池（CreateTextureMipStorageView 分配、DestroyTextureMipView 回收）
+    static constexpr u32 kMipRtvCapacity = 1024;
+    ComPtr<ID3D12DescriptorHeap> m_MipRtvHeap;
+    UINT                         m_MipRtvInc  = 0;
+    u32                          m_MipRtvNext = 0;
+    std::vector<u32>             m_MipRtvFree;
 public:
     /// 最近一次上传的物体矩阵副本（前 32 个元素的缩放与平移），用于诊断索引是否错配
     float m_LastObjM[32][8] = {};

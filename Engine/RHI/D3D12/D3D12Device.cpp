@@ -841,6 +841,50 @@ D3D12_VERTEX_BUFFER_VIEW D3D12Device::GetZeroVertexBufferView() {
     return v;
 }
 
+void* D3D12Device::CreateTextureMipStorageView(IRHITexture* texture, u32 mipLevel, u32 arrayLayer) {
+    auto* tex = static_cast<D3D12Texture*>(texture);
+    if (!m_Device || !tex || !tex->GetResource()) return nullptr;
+    ID3D12Resource* res = tex->GetResource();
+    const D3D12_RESOURCE_DESC rd = res->GetDesc();
+    if (!(rd.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)) return nullptr;   // 只支持渲染目标用途
+    if (mipLevel >= rd.MipLevels || arrayLayer >= rd.DepthOrArraySize) return nullptr;
+
+    if (!m_MipRtvHeap) {
+        D3D12_DESCRIPTOR_HEAP_DESC hd{};
+        hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+        hd.NumDescriptors = kMipRtvCapacity;
+        if (FAILED(m_Device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_MipRtvHeap)))) return nullptr;
+        m_MipRtvInc = m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    }
+    u32 idx = 0;
+    if (!m_MipRtvFree.empty()) { idx = m_MipRtvFree.back(); m_MipRtvFree.pop_back(); }
+    else if (m_MipRtvNext < kMipRtvCapacity) { idx = m_MipRtvNext++; }
+    else { HE_CORE_ERROR("D3D12Device: 逐 mip RTV 池耗尽（{}）", kMipRtvCapacity); return nullptr; }
+
+    D3D12_CPU_DESCRIPTOR_HANDLE h = m_MipRtvHeap->GetCPUDescriptorHandleForHeapStart();
+    h.ptr += static_cast<SIZE_T>(idx) * m_MipRtvInc;
+    D3D12_RENDER_TARGET_VIEW_DESC vd{};
+    vd.Format = rd.Format;
+    vd.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
+    vd.Texture2DArray.MipSlice = mipLevel;
+    vd.Texture2DArray.FirstArraySlice = arrayLayer;
+    vd.Texture2DArray.ArraySize = 1;
+    m_Device->CreateRenderTargetView(res, &vd, h);
+    // 命令列表靠「视图句柄 → 资源」反查来做屏障
+    RegisterViewResource(static_cast<UINT64>(h.ptr), res);
+    return reinterpret_cast<void*>(h.ptr);
+}
+
+void D3D12Device::DestroyTextureMipView(void* view) {
+    if (!view || !m_MipRtvHeap || m_MipRtvInc == 0) return;
+    const SIZE_T base = m_MipRtvHeap->GetCPUDescriptorHandleForHeapStart().ptr;
+    const SIZE_T p = reinterpret_cast<SIZE_T>(view);
+    if (p < base || p >= base + static_cast<SIZE_T>(kMipRtvCapacity) * m_MipRtvInc) return;   // 不是本池的视图
+    UnregisterViewResource(static_cast<UINT64>(p));
+    // RTV 描述符在 OMSetRenderTargets 录制时就被读取，回收后复用不影响已录制的命令
+    m_MipRtvFree.push_back(static_cast<u32>((p - base) / m_MipRtvInc));
+}
+
 void* D3D12Device::CreateImGuiDescriptorPool() {
     return EnsureDescriptorHeaps() ? static_cast<void*>(m_CbvSrvUavHeap.Get()) : nullptr;
 }

@@ -92,9 +92,11 @@ public:
         if (m_Dsv.ptr)              return reinterpret_cast<void*>(m_Dsv.ptr);
         return nullptr;
     }
+    /// 逐面/逐层视图（与 Vulkan 的逐层 ImageView 对应）：渲染目标返回该层的 RTV，
+    /// 深度返回该层的 DSV（mip 0），供立方体图逐面渲染（IBL 烘焙、点光源阴影）使用
     void*  GetNativeHandle(u32 index) const override {
-        if (m_Srvs.empty() || index >= m_Srvs.size()) return nullptr;
-        return reinterpret_cast<void*>(m_Srvs[index].ptr);
+        if (index >= m_FaceViews.size()) return nullptr;
+        return reinterpret_cast<void*>(m_FaceViews[index].ptr);
     }
 
     ID3D12Resource* GetResource() const { return m_Resource.Get(); }
@@ -121,6 +123,8 @@ private:
     ComPtr<ID3D12DescriptorHeap> m_DsvHeap;
     D3D12_CPU_DESCRIPTOR_HANDLE m_Dsv{};
     std::vector<D3D12_CPU_DESCRIPTOR_HANDLE> m_Srvs;
+    ComPtr<ID3D12DescriptorHeap>             m_FaceViewHeap;   // 逐层 RTV/DSV 的堆
+    std::vector<D3D12_CPU_DESCRIPTOR_HANDLE> m_FaceViews;      // 每个数组层一个视图（mip 0）
     u32    m_Width = 1, m_Height = 1, m_Depth = 1;
     u32    m_MipLevels = 1, m_ArrayLayers = 1;
     Format m_Format = Format::RGBA8_UNORM;

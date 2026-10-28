@@ -509,6 +509,7 @@ D3D12Texture::~D3D12Texture() {
         if (m_Rtv.ptr) m_OwnerDevice->UnregisterViewResource(static_cast<UINT64>(m_Rtv.ptr));
         if (m_Dsv.ptr) m_OwnerDevice->UnregisterViewResource(static_cast<UINT64>(m_Dsv.ptr));
         for (auto& s : m_Srvs) if (s.ptr) m_OwnerDevice->UnregisterViewResource(static_cast<UINT64>(s.ptr));
+        for (auto& v : m_FaceViews) if (v.ptr) m_OwnerDevice->UnregisterViewResource(static_cast<UINT64>(v.ptr));
     }
 }
 
@@ -629,6 +630,45 @@ bool D3D12Texture::Initialize(D3D12Device* device, const TextureDesc& desc) {
             vd.Texture2D.MipSlice = 0;
             dev->CreateDepthStencilView(m_Resource.Get(), &vd, m_Dsv);
     device->RegisterViewResource(static_cast<UINT64>(m_Dsv.ptr), m_Resource.Get());
+        }
+    }
+
+    // ---- 逐层视图（立方体图 / 纹理数组）----
+    // 引擎用 GetNativeHandle(face) 取「某一层」的附件视图，逐面渲染立方体图
+    //（IBL 辐照度烘焙、点光源阴影）。此前 D3D12 从未创建这些视图、一律返回空，
+    // 这些 pass 因此整体被跳过 ⇒ IBL 贴图与点光源阴影都是空的。
+    const u32 layers = desc.arrayLayers * (desc.depth > 1 ? desc.depth : 1);
+    const bool isColorRt = !m_IsDepth && HasAny(desc.usage, TextureUsage::RenderTarget);
+    if (layers > 1 && (isColorRt || m_IsDepth)) {
+        D3D12_DESCRIPTOR_HEAP_DESC hd{};
+        hd.Type = m_IsDepth ? D3D12_DESCRIPTOR_HEAP_TYPE_DSV : D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+        hd.NumDescriptors = layers;
+        if (SUCCEEDED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_FaceViewHeap)))) {
+            const UINT inc = dev->GetDescriptorHandleIncrementSize(hd.Type);
+            D3D12_CPU_DESCRIPTOR_HANDLE h = m_FaceViewHeap->GetCPUDescriptorHandleForHeapStart();
+            m_FaceViews.resize(layers);
+            for (u32 i = 0; i < layers; ++i) {
+                if (m_IsDepth) {
+                    D3D12_DEPTH_STENCIL_VIEW_DESC vd{};
+                    vd.Format = fmt;
+                    vd.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DARRAY;
+                    vd.Texture2DArray.MipSlice = 0;
+                    vd.Texture2DArray.FirstArraySlice = i;
+                    vd.Texture2DArray.ArraySize = 1;
+                    dev->CreateDepthStencilView(m_Resource.Get(), &vd, h);
+                } else {
+                    D3D12_RENDER_TARGET_VIEW_DESC vd{};
+                    vd.Format = fmt;
+                    vd.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
+                    vd.Texture2DArray.MipSlice = 0;
+                    vd.Texture2DArray.FirstArraySlice = i;
+                    vd.Texture2DArray.ArraySize = 1;
+                    dev->CreateRenderTargetView(m_Resource.Get(), &vd, h);
+                }
+                m_FaceViews[i] = h;
+                device->RegisterViewResource(static_cast<UINT64>(h.ptr), m_Resource.Get());
+                h.ptr += inc;
+            }
         }
     }
 
