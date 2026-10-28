@@ -569,8 +569,8 @@ void D3D12CommandList::BindDescriptorSet(u32 setIndex, DescriptorSetHandle set) 
 
     // 根签名：0..7 = root CBV，8..11 = SRV 表(space0..3)，12..15 = Sampler 表(space0..3)
     const D3D12_GPU_DESCRIPTOR_HANDLE srv  = m_Device->GetSetGpuHandle(baseSlot);
-    // 采样器堆只有 2048 槽，统一从槽 0 起绑定（见 UpdateDescriptorSet 的说明）
-    const D3D12_GPU_DESCRIPTOR_HANDLE smp  = m_Device->GetSetSamplerGpuHandle(0);
+    // 采样器表从该 set 自己的采样器基址开始（见 AllocateDescriptorSet）
+    const D3D12_GPU_DESCRIPTOR_HANDLE smp  = m_Device->GetSetSamplerGpuHandle(m_Device->GetSetSamplerBase(set));
 
     // 根签名：0..7 CBV，8..11 SRV，12..15 UAV，16..19 Sampler
     const u32 uavSlot  = baseSlot + m_Device->GetSetUavOffset(set);

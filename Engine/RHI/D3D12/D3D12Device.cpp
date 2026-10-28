@@ -464,6 +464,11 @@ D3D12_GPU_DESCRIPTOR_HANDLE D3D12Device::GetSetGpuHandle(u32 slot) const {
     return h;
 }
 
+u32 D3D12Device::GetSetSamplerBase(DescriptorSetHandle set) const {
+    if (set == kInvalidSet || set > m_DescriptorSets.size()) return 0;
+    return m_DescriptorSets[static_cast<size_t>(set - 1)].samplerBase;
+}
+
 u32 D3D12Device::GetSetBaseSlot(DescriptorSetHandle set) const {
     if (set == kInvalidSet || set > m_DescriptorSets.size()) return 0xFFFFFFFFu;
     return m_DescriptorSets[static_cast<size_t>(set - 1)].baseSlot;
@@ -1081,6 +1086,13 @@ DescriptorSetLayoutHandle D3D12Device::CreateDescriptorSetLayout(const Descripto
         maxSlot = std::max(maxSlot, b.binding + (b.count ? b.count : 1));
     }
     layout.slotCount = maxSlot;
+    // 采样器跨度：只统计采样器 / 组合图像采样器。bindless 采样器数组（count 很大）在 D3D12 下
+    // 走 space2 的独立区间，不占描述符集的采样器范围，按 1 计即可。
+    for (const auto& b : desc.bindings) {
+        if (b.type != DescriptorType::Sampler && b.type != DescriptorType::CombinedImageSampler) continue;
+        const u32 cnt = (b.count > 1 && b.count <= 64) ? b.count : 1u;
+        layout.samplerSpan = std::max(layout.samplerSpan, b.binding + cnt);
+    }
     m_SetLayouts.push_back(layout);
     return static_cast<DescriptorSetLayoutHandle>(m_SetLayouts.size());   // 1-based
 }
@@ -1110,6 +1122,25 @@ DescriptorSetHandle D3D12Device::AllocateDescriptorSet(DescriptorSetLayoutHandle
     s.slotCount = perSet;
     s.layout    = li;
     m_NextFreeSlot += need;
+    // 【采样器按 set 独立分配】此前所有 set 的采样器都按 binding 号写在采样器堆的同一组槽位，
+    // 不同 set 的同号 binding 互相覆盖（如天空盒的 binding 10 被 PBR 的阴影采样器覆盖，
+    // 立方体贴图用错采样器 ⇒ 天空一片灰）。现在每个 set 在采样器堆里占自己的一段。
+    const u32 span = m_SetLayouts[li].samplerSpan;
+    if (span > 0) {
+        if (m_NextSamplerSlot + span <= m_BindlessSmpBase) {
+            s.samplerBase = m_NextSamplerSlot;
+            m_NextSamplerSlot += span;
+        } else {
+            // 采样器堆不够时退回共享槽位（旧行为），并提示一次
+            static bool s_warned = false;
+            if (!s_warned) {
+                s_warned = true;
+                HE_CORE_WARN("D3D12Device: 描述符集采样器槽位耗尽（已用 {} / {}），后续 set 退回共享槽位",
+                             m_NextSamplerSlot, m_BindlessSmpBase);
+            }
+            s.samplerBase = 0;
+        }
+    }
     { static int n9=0; if (++n9 % 200 == 1) { std::printf("[SLOTS] sets=%zu nextFree=%u bindlessBase=%u\n",
         m_DescriptorSets.size(), m_NextFreeSlot, m_BindlessSrvBase); std::fflush(stdout); } }
     m_DescriptorSets.push_back(s);
@@ -1212,15 +1243,14 @@ void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, Desc
     if (!EnsureDescriptorHeaps()) return;
 
     const auto& s = m_DescriptorSets[static_cast<size_t>(set - 1)];
-    // 【采样器堆的槽位不能叠加 baseSlot】CBV_SRV_UAV 堆开了 65536 槽（部分 layout
-    // 的 binding 号达 4000+），而 shader-visible 采样器堆上限只有 4080，
-    // 叠加后 GPU 句柄会越界，SetGraphicsRootDescriptorTable 收到非法句柄会让
-    // D3D12 静默卡死（实测 02.Cube 第一帧阴影 pass 绑定描述符集时卡在这里）。
-    // 采样器改为按 binding 单独编号，并从槽 0 起绑定整张表。
-    const u32 slot = binding;
+    // 【采样器槽位 = 该 set 的采样器基址 + binding】采样器堆与 CBV_SRV_UAV 堆分开编号：
+    // 不能叠加 baseSlot（CBV_SRV_UAV 堆有 65536 槽，叠加后会越过采样器堆上限）。
+    // 每个 set 的采样器基址在 AllocateDescriptorSet 里独立分配，避免不同 set 互相覆盖。
+    const u32 slot = s.samplerBase + binding;
+    const bool samplerSlotOk = slot < m_BindlessSmpBase;   // 不得写进堆尾的 bindless 采样器区
 
     if (type == DescriptorType::Sampler) {
-        if (auto* smp = static_cast<D3D12Sampler*>(sampler)) {
+        if (auto* smp = static_cast<D3D12Sampler*>(sampler); smp && samplerSlotOk) {
             D3D12_CPU_DESCRIPTOR_HANDLE dh = m_SetSamplerHeap->GetCPUDescriptorHandleForHeapStart();
             dh.ptr += static_cast<SIZE_T>(slot) * m_SetSamplerSize;
             dh = smp->GetDescriptor();
@@ -1287,7 +1317,7 @@ void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, Desc
     }
 
     // 同时把采样器写到同一槽位（CombinedImageSampler 语义）
-    if (auto* smp = static_cast<D3D12Sampler*>(sampler)) {
+    if (auto* smp = static_cast<D3D12Sampler*>(sampler); smp && samplerSlotOk) {
         D3D12_CPU_DESCRIPTOR_HANDLE dstS = m_SetSamplerHeap->GetCPUDescriptorHandleForHeapStart();
         dstS.ptr += static_cast<SIZE_T>(slot) * m_SetSamplerSize;
         m_Device->CopyDescriptorsSimple(1, dstS, smp->GetDescriptor(),

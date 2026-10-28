@@ -157,6 +157,8 @@ public:
     D3D12_CPU_DESCRIPTOR_HANDLE      GetSlotCpuHandle(u32 slot) const;
     /// 某个描述符集的堆内起始槽位（0xFFFFFFFF 表示无效句柄）
     u32                              GetSetBaseSlot(DescriptorSetHandle set) const;
+    /// 该 set 在描述符集采样器堆中的起始槽位（采样器槽位 = 该值 + binding）
+    u32                              GetSetSamplerBase(DescriptorSetHandle set) const;
     /// UAV 区域相对 baseSlot 的偏移（= 该 set 的 slotCount）
     u32                              GetSetUavOffset(DescriptorSetHandle set) const;
 
@@ -338,6 +340,7 @@ private:   // register -> 元素字节数
     struct D3D12SetLayout {
         std::vector<DescriptorSetLayoutBinding> bindings;
         u32 slotCount = 0;   // 该布局占用的连续槽位数
+        u32 samplerSpan = 0; // 采样器类 binding 的最大编号 + 1（每个 set 在采样器堆里占这么多槽）
     };
     std::vector<D3D12SetLayout> m_SetLayouts;      // 1-based 句柄
 
@@ -346,7 +349,10 @@ private:   // register -> 元素字节数
         u32 uavBase  = 0;   // UAV 区域起点（= baseSlot + slotCount）
         u32 slotCount = 0;
         u32 layout   = 0;
+        u32 samplerBase = 0; // 采样器堆中的起始槽位（各 set 独立，互不覆盖）
     };
+    /// 采样器堆下一个可分配槽位（描述符集区间从 0 往上，bindless 区在堆尾）
+    u32 m_NextSamplerSlot = 0;
     std::vector<D3D12Set> m_DescriptorSets;        // 1-based 句柄
 
     D3D12BindlessHeap              m_BindlessHeap{ this };   // 引擎会无条件解引用它
