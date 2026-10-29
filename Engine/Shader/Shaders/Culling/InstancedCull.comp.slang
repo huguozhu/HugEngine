@@ -22,10 +22,10 @@
 #if defined(HE_SHADER_D3D12)
 // D3D12：无界数组不写 register 时 dxc 自动分配到 space1/2/3，而那些表从未绑定（GPU 验证 id=935：
 // 读未初始化的根参数）。改为 bindless 区间：只读实例矩阵与 PBR / GBuffer 的 u_InstanceTransforms
-// 同区（t1024，float4x4）；两个可写数组在 space2 的 UAV 区间（u0 可见索引、u64 间接命令，各 64 个）
-[[vk::binding(30, 0)]] StructuredBuffer<float4x4>      u_Instances[64]      : register(t1024, space2);
-[[vk::binding(30, 0)]] RWStructuredBuffer<uint>        u_VisibleIndices[64] : register(u0,    space2);
-[[vk::binding(30, 0)]] RWStructuredBuffer<IndirectCmd> u_Commands[64]       : register(u64,   space2);
+// 同区（t1024，float4x4）；两个可写数组在 space2 的 UAV 区间（u0 可见索引、u256 间接命令，各 256 个）
+[[vk::binding(30, 0)]] StructuredBuffer<float4x4>      u_Instances[256]      : register(t1024, space2);
+[[vk::binding(30, 0)]] RWStructuredBuffer<uint>        u_VisibleIndices[256] : register(u0,    space2);
+[[vk::binding(30, 0)]] RWStructuredBuffer<IndirectCmd> u_Commands[256]       : register(u256,  space2);
 #else
 [[vk::binding(30, 0)]] StructuredBuffer<float4x4>   u_Instances[];
 [[vk::binding(30, 0)]] RWStructuredBuffer<uint>     u_VisibleIndices[];

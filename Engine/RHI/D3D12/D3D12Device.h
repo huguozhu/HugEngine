@@ -196,9 +196,11 @@ public:
     /// 描述符堆尚未创建时，bindless 缓冲写入会被丢弃；这里排队等堆就绪后补写
     void FlushPendingBindlessBuffers();
     bool WriteBindlessBufferSrv(u32 slot, IRHIBuffer* buffer);
-    /// bindless 可写缓冲区间（space2 的 u 寄存器）：u0.. 可见索引（uint）、u64.. 间接命令（IndirectCmd），
-    /// 在 bindless 区里位于 SRV 区间（t0..t1279）之后。slot 为 u 寄存器号
-    static constexpr u32 kBindlessUavBase = 1280;
+    /// bindless 缓冲每段的槽数（SRV 四段 t1024 / t1280 / t1536 / t1792，UAV 两段 u0 / u256；须与着色器一致）
+    static constexpr u32 kBindlessBufferRange = 256;
+    /// bindless 可写缓冲区间（space2 的 u 寄存器）：u0.. 可见索引（uint）、u256.. 间接命令（IndirectCmd），
+    /// 在 bindless 区里位于 SRV 区间（t0..t2047）之后。slot 为 u 寄存器号
+    static constexpr u32 kBindlessUavBase = 2048;
     bool WriteBindlessBufferUav(u32 slot, IRHIBuffer* buffer);
     D3D12_GPU_DESCRIPTOR_HANDLE GetBindlessUavGpuHandle() const;
     /// bindless 采样器数组（space2 的 s0 起），必须写进独立的 shader-visible 采样器堆

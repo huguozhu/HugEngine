@@ -767,7 +767,7 @@ bool D3D12Device::EnsureDescriptorHeaps() {
         m_BindlessSrvBase = std::getenv("HE_BINDLESS_BASE0") ? 0u : (kDescriptorHeapCapacity - 4096u);
         // 【bindless 区预填空描述符】只有注册过的句柄会写入描述符，其余槽位是未定义内容，
         // 着色器读到未注册的槽位（句柄为 0 / 越界）时行为未定义。按区间类型写空视图：
-        //   t0..t1023 纹理（2D SRV）、t1024..t1279 结构化缓冲（缓冲 SRV）、u0..u127 可写缓冲（缓冲 UAV）；
+        //   t0..t1023 纹理（2D SRV）、t1024..t2047 结构化缓冲（缓冲 SRV）、u0..u511 可写缓冲（缓冲 UAV）；
         //   其后直到堆尾（ImGui 字体槽之前）也填空视图：根签名的表是无界的，表的范围一直延伸到堆尾
         {
             D3D12_SHADER_RESOURCE_VIEW_DESC texNull{};
@@ -1421,14 +1421,14 @@ bool D3D12Device::WriteBindlessBufferSrv(u32 slot, IRHIBuffer* buffer) {
     // 每段在着色器里的元素类型不同，StructureByteStride 必须与之一致，否则按句柄取到的
     // 骨骼矩阵 / 实例变换会整体错位（缓冲本身通常不带 stride，以前一律退回 4 字节）：
     //   t1024.. u_InstanceTransforms   float4x4  64 字节
-    //   t1088.. u_VisibleInstanceIndices uint     4 字节
-    //   t1152.. u_BoneMatrices         float4x4  64 字节
-    //   t1216.. u_Materials            GPUMaterialData 112 字节
+    //   t1280.. u_VisibleInstanceIndices uint     4 字节
+    //   t1536.. u_BoneMatrices         float4x4  64 字节
+    //   t1792.. u_Materials            GPUMaterialData 112 字节
     u32 stride = buf->GetStride() ? static_cast<u32>(buf->GetStride()) : 4u;
-    if      (slot >= 1024u && slot < 1088u) stride = 64u;
-    else if (slot >= 1088u && slot < 1152u) stride = 4u;
-    else if (slot >= 1152u && slot < 1216u) stride = 64u;
-    else if (slot >= 1216u && slot < 1280u) stride = 112u;
+    if      (slot >= 1024u && slot < 1280u) stride = 64u;
+    else if (slot >= 1280u && slot < 1536u) stride = 4u;
+    else if (slot >= 1536u && slot < 1792u) stride = 64u;
+    else if (slot >= 1792u && slot < 2048u) stride = 112u;
     // 缓冲还不到一个元素（如 4 字节计数缓冲落在材质区间）：建出来的视图会越过缓冲末尾，
     // 属于非法视图，该区间这个句柄本就不会被这样读取，直接跳过
     if (buf->GetSize() < stride) return false;
@@ -1452,10 +1452,10 @@ bool D3D12Device::WriteBindlessBufferUav(u32 slot, IRHIBuffer* buffer) {
     auto* buf = static_cast<D3D12Buffer*>(buffer);
     ID3D12Resource* res = buf->GetNativeHandle();
     if (!res || !(res->GetDesc().Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)) return false;   // 不可写的缓冲不进 UAV 区间
-    // 步长按区间：u0.. 可见实例索引 uint（4 字节）；u64.. 间接命令 IndirectCmd（5 个 u32 = 20 字节）
+    // 步长按区间：u0.. 可见实例索引 uint（4 字节）；u256.. 间接命令 IndirectCmd（5 个 u32 = 20 字节）
     u32 stride = 0;
-    if      (slot < 64u)  stride = 4u;
-    else if (slot < 128u) stride = 20u;
+    if      (slot < kBindlessBufferRange)      stride = 4u;
+    else if (slot < kBindlessBufferRange * 2u) stride = 20u;
     else return false;
     if (buf->GetSize() < stride) return false;   // 不足一个元素：视图越界，非法
     D3D12_CPU_DESCRIPTOR_HANDLE dst = m_CbvSrvUavHeap->GetCPUDescriptorHandleForHeapStart();

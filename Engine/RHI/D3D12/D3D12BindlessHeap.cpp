@@ -37,12 +37,22 @@ BindlessHandle D3D12BindlessHeap::RegisterBuffer(IRHIBuffer* ssbo) {
     m_Buffers.push_back(ssbo);
     const BindlessHandle h = static_cast<BindlessHandle>(m_Buffers.size() - 1);
     // 【多区间写入】D3D12 不允许同一 space 内多个无界数组，所以着色器里每个 bindless
-    // SSBO 数组各占一段定长区间：u_InstanceTransforms=t1024、u_VisibleInstanceIndices=t1088、
-    // u_BoneMatrices=t1152、u_Materials=t1216（每段 64 个槽；t0..t1023 留给 bindless 纹理）。
+    // SSBO 数组各占一段定长区间：u_InstanceTransforms=t1024、u_VisibleInstanceIndices=t1280、
+    // u_BoneMatrices=t1536、u_Materials=t1792（每段 256 个槽；t0..t1023 留给 bindless 纹理）。
     // 同一个缓冲注册到统一句柄空间，因此要把它的描述符写进全部四段，
     // 这样任何数组按 handle 索引都能取到同一份数据。
     const u32 hIdx = static_cast<u32>(h);
-    for (u32 base : { 1024u, 1088u, 1152u, 1216u }) {
+    // 每段只有 kBindlessBufferRange 个槽：超出就写进相邻区间、覆盖别人的描述符。宁可不写（着色器读到空描述符）
+    if (hIdx >= D3D12Device::kBindlessBufferRange) {
+        static bool s_warned = false;
+        if (!s_warned) {
+            s_warned = true;
+            HE_CORE_ERROR("D3D12BindlessHeap: bindless 缓冲句柄 {} 超过区间容量 {}，超出部分着色器无法访问",
+                          hIdx, D3D12Device::kBindlessBufferRange);
+        }
+        return h;
+    }
+    for (u32 base : { 1024u, 1280u, 1536u, 1792u }) {
         m_Device->WriteBindlessBufferSrv(base + hIdx, ssbo);
         // 【索引 0 也要写】着色器里材质缓冲的用法是 `u_Materials[0][materialID>>2]`
         // —— 数组下标 0 表示"材质缓冲本身"（引擎约定），而堆内 0 号被保留为无效哨兵。
@@ -51,12 +61,12 @@ BindlessHandle D3D12BindlessHeap::RegisterBuffer(IRHIBuffer* ssbo) {
         // 这里把第一个注册的缓冲（材质缓冲）同时写到索引 0。
         // 材质缓冲的元素大小是 sizeof(GPUMaterialData)=112，用它唯一识别材质缓冲
         // （实例变换 400000、实例数据 640000、剔除命令 1536 都不能被 112 整除）。
-        if (base == 1216u && (ssbo->GetSize() % 112ull) == 0ull && ssbo->GetSize() > 0ull) {
+        if (base == 1792u && (ssbo->GetSize() % 112ull) == 0ull && ssbo->GetSize() > 0ull) {
             m_Device->WriteBindlessBufferSrv(base, ssbo);
         }
     }
     // 可写区间（u0 可见索引、u64 间接命令）：同一句柄同样写进两段，供 compute 按句柄写入
-    for (u32 base : { 0u, 64u }) m_Device->WriteBindlessBufferUav(base + hIdx, ssbo);
+    for (u32 base : { 0u, D3D12Device::kBindlessBufferRange }) m_Device->WriteBindlessBufferUav(base + hIdx, ssbo);
     return h;
 }
 
