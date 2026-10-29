@@ -339,11 +339,18 @@ void D3D12CommandList::BeginOffscreenPass(void* colorImageView, void* depthImage
     std::printf("[BOPC] after OMSetRT\n"); std::fflush(stdout);
     m_HasRtv = hasRtv;
 
-    if (hasRtv && clear) {
-        m_List->ClearRenderTargetView(rtv, clear->color, 0, nullptr);
+    // 【是否清空附件由 PSO 的 loadOp 决定】与 Vulkan 一致：离屏 pass 用当前 PSO 的 render pass，
+    // Clear 才清空、Load 保留；clear 只提供清屏值（为空时颜色 0、深度 1.0）。此前深度无条件清空，
+    // 延迟管线的天空盒 pass（depthLoadOp=Load）因此丢掉 GBuffer 深度、覆盖整张光照结果。
+    const bool gfxPso     = m_Pipeline && !m_IsComputePipeline;
+    const bool clearColor = gfxPso ? (m_Pipeline->GetColorLoadOp() == LoadOp::Clear) : (clear != nullptr);
+    const bool clearDepth = gfxPso ? (m_Pipeline->GetDepthLoadOp() == LoadOp::Clear) : (clear != nullptr);
+    static const float kZeroColor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    if (hasRtv && clearColor) {
+        m_List->ClearRenderTargetView(rtv, clear ? clear->color : kZeroColor, 0, nullptr);
         std::printf("[BOPD] after ClearRTV\n"); std::fflush(stdout);
     }
-    if (hasDsv) {
+    if (hasDsv && clearDepth) {
         // 【只有带模板的格式才能传 STENCIL 标志】D32_FLOAT 没有模板位，
         // 同时传 DEPTH|STENCIL 会让整个 ClearDepthStencilView 被拒，
         // 深度缓冲留在未初始化状态 ⇒ 所有物体（含天空盒）都过不了深度测试 ⇒ 画面全黑。
@@ -422,12 +429,17 @@ void D3D12CommandList::BeginOffscreenPassMRT(void* const* colorImageViews, u32 c
     }
     m_List->OMSetRenderTargets(n, rtvs, FALSE, hasDsv ? &dsv : nullptr);
 
-    if (clears) {
+    // 是否清空由 PSO 的 loadOp 决定（同 BeginOffscreenPass）
+    const bool gfxPso     = m_Pipeline && !m_IsComputePipeline;
+    const bool clearColor = gfxPso ? (m_Pipeline->GetColorLoadOp() == LoadOp::Clear) : (clears != nullptr);
+    const bool clearDepth = gfxPso ? (m_Pipeline->GetDepthLoadOp() == LoadOp::Clear) : (clears != nullptr);
+    static const float kZeroColor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    if (clearColor) {
         for (u32 i = 0; i < n; ++i) {
-            if (colorImageViews[i]) m_List->ClearRenderTargetView(rtvs[i], clears[i].color, 0, nullptr);
+            if (colorImageViews[i]) m_List->ClearRenderTargetView(rtvs[i], clears ? clears[i].color : kZeroColor, 0, nullptr);
         }
     }
-    if (hasDsv) {
+    if (hasDsv && clearDepth) {
         // 【只有带模板的格式才能传 STENCIL 标志】D32_FLOAT 没有模板位，
         // 同时传 DEPTH|STENCIL 会让整个 ClearDepthStencilView 被拒，
         // 深度缓冲留在未初始化状态 ⇒ 所有物体（含天空盒）都过不了深度测试 ⇒ 画面全黑。

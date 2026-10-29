@@ -171,6 +171,10 @@ public:
     static constexpr u32 kZeroVertexSlot = 15;
     /// 是否有属性挂在零缓冲槽上（SetPipeline 时需要绑定零缓冲）
     bool NeedsZeroVertexBuffer() const { return m_NeedsZeroVB; }
+    /// 附件加载操作（与 Vulkan 的 render pass loadOp 对应）：离屏 pass 据此决定是否清空附件
+    LoadOp GetColorLoadOp() const { return m_ColorLoadOp; }
+    LoadOp GetDepthLoadOp() const { return m_DepthLoadOp; }
+
 
 private:
     ComPtr<ID3D12RootSignature> m_RootSig;
@@ -182,6 +186,8 @@ private:
     /// 用于缓冲 stride 为 0 时兜底（D3D12 要求 StrideInBytes 非零）
     u32                         m_VertexStride = 0;
     bool                        m_NeedsZeroVB = false;
+    LoadOp                      m_ColorLoadOp = LoadOp::Clear;
+    LoadOp                      m_DepthLoadOp = LoadOp::Clear;
 };
 
 } // namespace he::rhi::d3d12

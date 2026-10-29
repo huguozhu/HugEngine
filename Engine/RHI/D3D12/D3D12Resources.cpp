@@ -930,6 +930,9 @@ bool D3D12PipelineState::Initialize(D3D12Device* device, const PipelineStateDesc
         return false;
     }
 
+    m_ColorLoadOp = desc.colorLoadOp;
+    m_DepthLoadOp = desc.depthLoadOp;
+
     // ---- 计算管线 ----
     //
     // D3D12 的计算 PSO 与图形 PSO 是**两套完全不同的描述结构**，
