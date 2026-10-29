@@ -646,7 +646,18 @@ D3D12_GPU_DESCRIPTOR_HANDLE D3D12Device::GetSetGpuHandle(u32 slot) const {
 D3D12_CPU_DESCRIPTOR_HANDLE D3D12Device::SetWriteHandle(D3D12Set& s, u32 slot) {
     ++s.version;   // 内容即将改变：已有快照全部过期
     D3D12_CPU_DESCRIPTOR_HANDLE h{};
-    if (!m_SetStagingHeap || slot >= kSetRegionCapacity) return h;
+    if (!m_SetStagingHeap) return h;
+    // 越出本集范围（binding 超过布局声明，或往按 1 计的 bindless 数组写了多个元素）：改写到丢弃槽，
+    // 不覆盖相邻集的描述符，调用方也无需逐个判空
+    if (slot < s.baseSlot || slot >= s.baseSlot + s.slotCount * 2u) {
+        static bool s_warned = false;
+        if (!s_warned) {
+            s_warned = true;
+            HE_CORE_ERROR("D3D12Device: 描述符写入越出描述符集范围（槽位 {}，集起点 {}，槽数 {}），已丢弃",
+                          slot, s.baseSlot, s.slotCount * 2u);
+        }
+        slot = kSetRegionCapacity - 1u;
+    }
     h = m_SetStagingHeap->GetCPUDescriptorHandleForHeapStart();
     h.ptr += static_cast<SIZE_T>(slot) * m_CbvSrvUavSize;
     return h;
@@ -1572,10 +1583,13 @@ u32 D3D12Device::GetSetUavOffset(DescriptorSetHandle set) const {
 DescriptorSetLayoutHandle D3D12Device::CreateDescriptorSetLayout(const DescriptorSetLayoutDesc& desc) {
     D3D12SetLayout layout;
     layout.bindings = desc.bindings;
-    // 槽位数 = 最大 binding + 该 binding 的 count（保守做法：每个 binding 按 count 展开）
+    // 槽位数 = 最大 binding + 该 binding 的 count。bindless 数组（count 很大，如 4096）在 D3D12 下
+    // 由着色器经 space2 的独立区间访问，描述符集里对应的槽位从不写入，按 1 计（与下方采样器跨度同一规则）。
+    // 此前按 count 展开：带 bindless 数组的布局每个集要占 8000+ 槽，启动即用掉近一半的集区间
     u32 maxSlot = 0;
     for (const auto& b : desc.bindings) {
-        maxSlot = std::max(maxSlot, b.binding + (b.count ? b.count : 1));
+        const u32 cnt = (b.count > 64u) ? 1u : (b.count ? b.count : 1u);
+        maxSlot = std::max(maxSlot, b.binding + cnt);
     }
     layout.slotCount = maxSlot;
     // 采样器跨度：只统计采样器 / 组合图像采样器。bindless 采样器数组（count 很大）在 D3D12 下
@@ -1608,9 +1622,10 @@ DescriptorSetHandle D3D12Device::AllocateDescriptorSet(DescriptorSetLayoutHandle
         HE_CORE_ERROR("D3D12Device: 描述符集过大（{} 槽，快照块只有 {} 槽）", need, kSetRingChunkSize);
         return {};
     }
-    if (m_NextFreeSlot + need > kSetRegionCapacity) {
+    // 最后一个槽留作越界写入的丢弃槽（见 SetWriteHandle）
+    if (m_NextFreeSlot + need > kSetRegionCapacity - 1u) {
         HE_CORE_ERROR("D3D12Device: 描述符堆耗尽（需要 {}，剩余 {}）", need,
-                      kSetRegionCapacity - m_NextFreeSlot);
+                      kSetRegionCapacity - 1u - m_NextFreeSlot);
         return {};
     }
     D3D12Set s;
