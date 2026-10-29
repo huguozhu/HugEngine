@@ -909,7 +909,42 @@ bool D3D12Sampler::Initialize(D3D12Device* device, const SamplerDesc& desc) {
 // ===========================================================================
 D3D12PipelineState::~D3D12PipelineState() = default;
 
+// PSO 描述哈希（FNV-1a）：键 PSO 缓存块。与 Vulkan 的 HashPipelineStateDesc 同口径，但着色器取 DXIL，
+// 并纳入 D3D12 PSO 实际用到的光栅 / 混合状态（同一着色器不同混合状态是不同的 PSO）
+static u64 HashPipelineStateDescDxil(const PipelineStateDesc& desc) {
+    u64 h = 0xcbf29ce484222325ULL;
+    auto bytes = [&h](const void* data, size_t size) {
+        const u8* b = static_cast<const u8*>(data);
+        for (size_t i = 0; i < size; ++i) { h ^= b[i]; h *= 0x100000001b3ULL; }
+    };
+    auto u = [&bytes](u32 v) { bytes(&v, sizeof(v)); };
+    u(static_cast<u32>(desc.bindPoint));
+    for (const ShaderBytecode* bc : { desc.vertexShader, desc.pixelShader, desc.computeShader,
+                                      desc.meshShader, desc.amplificationShader }) {
+        u(bc ? static_cast<u32>(bc->dxil.size()) : 0u);
+        if (bc && !bc->dxil.empty()) bytes(bc->dxil.data(), bc->dxil.size());
+    }
+    u(desc.vertexLayout.stride);
+    for (const auto& a : desc.vertexLayout.attributes) { u(a.location); u(a.binding); u(static_cast<u32>(a.format)); u(a.offset); }
+    u(static_cast<u32>(desc.topology)); u(static_cast<u32>(desc.cullMode)); u(static_cast<u32>(desc.frontFace));
+    u(static_cast<u32>(desc.fillMode)); u(desc.depthTest ? 1u : 0u); u(desc.depthWrite ? 1u : 0u);
+    u(static_cast<u32>(desc.depthCompare)); u(desc.colorAttachmentCount);
+    for (u32 i = 0; i < desc.colorAttachmentCount && i < kMaxColorAttachments; ++i) {
+        u(static_cast<u32>(desc.colorFormats[i]));
+        const ColorBlendDesc& b = desc.colorBlend[i];
+        u(b.blendEnable ? 1u : 0u); u(static_cast<u32>(b.srcColorBlendFactor)); u(static_cast<u32>(b.dstColorBlendFactor));
+        u(static_cast<u32>(b.colorBlendOp)); u(static_cast<u32>(b.srcAlphaBlendFactor));
+        u(static_cast<u32>(b.dstAlphaBlendFactor)); u(static_cast<u32>(b.alphaBlendOp)); u(static_cast<u32>(b.writeMask));
+    }
+    u(static_cast<u32>(desc.depthFormat)); u(desc.sampleCount);
+    return h;
+}
+
 bool D3D12PipelineState::Initialize(D3D12Device* device, const PipelineStateDesc& desc) {
+    // PSO 预编译的缓存块：描述相同则作为 CachedPSO 传入（驱动直接取编译结果）
+    const u64 psoHash = HashPipelineStateDescDxil(desc);
+    std::vector<u8> cachedBlob;
+    const bool haveBlob = device && device->FindPsoBlob(psoHash, cachedBlob);
     if (!device || !device->GetDevice()) return false;
 
     // 入口诊断：一次看清 VS/PS 字节码来自哪、dxil 是否非空、attributes 是否为空
@@ -1101,9 +1136,15 @@ bool D3D12PipelineState::Initialize(D3D12Device* device, const PipelineStateDesc
         cd.CS = { cs->dxil.data(), cs->dxil.size() };
         cd.NodeMask = 0;
         cd.CachedPSO = {};
+        if (haveBlob) cd.CachedPSO = { cachedBlob.data(), cachedBlob.size() };
         cd.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
 
         HRESULT chr = dev->CreateComputePipelineState(&cd, IID_PPV_ARGS(&m_Pso));
+        if (FAILED(chr) && haveBlob) {   // 缓存块与驱动 / 设备不匹配：不用缓存重建
+            cd.CachedPSO = {};
+            chr = dev->CreateComputePipelineState(&cd, IID_PPV_ARGS(&m_Pso));
+        }
+        if (SUCCEEDED(chr) && !haveBlob) device->StorePsoBlob(psoHash, m_Pso.Get());
         if (FAILED(chr)) {
             HE_CORE_ERROR("D3D12PipelineState: 计算 PSO 创建失败 name={} hr=0x{:08x} CS={}B",
                           desc.debugName.c_str(), static_cast<u32>(chr),
@@ -1216,6 +1257,8 @@ bool D3D12PipelineState::Initialize(D3D12Device* device, const PipelineStateDesc
             //（实测日志里语义名显示成「葺葺葺…」的乱码就是这个原因）。
             // 改用「固定容量的字符串数组」，指针永久稳定。
             static std::vector<std::unique_ptr<char[]>> s_semanticPool;
+            static std::mutex s_semanticPoolMutex;   // PSO 可能在预编译线程上并行创建
+            std::lock_guard<std::mutex> poolLock(s_semanticPoolMutex);
             s_semanticPool.reserve(256);
 
             uint32_t offset = 0;
@@ -1380,10 +1423,12 @@ bool D3D12PipelineState::Initialize(D3D12Device* device, const PipelineStateDesc
     // vertex) which yields garbage transform data.
     // 着色器的真实输入签名（上面从 DXIL 反射得到），下面用来补齐引擎布局缺失的属性
     const std::vector<D3D12_INPUT_ELEMENT_DESC> shaderInputs = elems;
+    // 引擎布局的语义名：输入布局在本函数末尾创建 PSO 时才被读取，必须活到函数结束。用函数局部数组
+    // （预编译线程并行创建 PSO 时静态数组会互相覆盖），按属性数预留，保证 c_str() 指针不因扩容失效
+    std::vector<std::string> s_names;
     if (!desc.vertexLayout.attributes.empty()) {
         elems.clear();
-        static std::vector<std::string> s_names;
-        s_names.clear(); s_names.reserve(8);
+        s_names.reserve(desc.vertexLayout.attributes.size());
         static const char* kSemByLoc[8] = { "POSITION", "NORMAL", "TEXCOORD",
             "BLENDINDICES", "BLENDWEIGHT", "TANGENT", "COLOR", "TEXCOORD" };
         for (const auto& a : desc.vertexLayout.attributes) {
@@ -1531,6 +1576,7 @@ bool D3D12PipelineState::Initialize(D3D12Device* device, const PipelineStateDesc
     }
     pd.NodeMask = 0;
     pd.CachedPSO = {};
+    if (haveBlob) pd.CachedPSO = { cachedBlob.data(), cachedBlob.size() };
     pd.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
 
     // 诊断：把 PSO 的关键参数打出来（E_INVALIDARG 最常见的原因是格式非法/采样数非法）
@@ -1545,6 +1591,11 @@ bool D3D12PipelineState::Initialize(D3D12Device* device, const PipelineStateDesc
     if (pd.SampleDesc.Count == 0) pd.SampleDesc.Count = 1;
 
     HRESULT psoHr = dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&m_Pso));
+    if (FAILED(psoHr) && haveBlob) {   // 缓存块与驱动 / 设备不匹配：不用缓存重建
+        pd.CachedPSO = {};
+        psoHr = dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&m_Pso));
+    }
+    if (SUCCEEDED(psoHr) && !haveBlob) device->StorePsoBlob(psoHash, m_Pso.Get());
     if (FAILED(psoHr)) {
         HE_CORE_ERROR("D3D12PipelineState: PSO 创建失败 name={} hr=0x{:08x}",
                       desc.debugName.c_str(), static_cast<u32>(psoHr));

@@ -13,6 +13,9 @@
 #include "D3D12BindlessHeap.h"
 #include <vector>
 #include <mutex>   // 多线程录制：设备分配加锁
+#include <thread>  // PSO 后台预编译线程
+#include <atomic>
+#include <unordered_map>
 #include <unordered_map>
 #include <memory>
 
@@ -377,6 +380,17 @@ public:
     class D3D12Buffer* GetLastObjectBuffer() const { return m_LastUploadedObject; }
     /// 全零顶点缓冲视图（步长 0）：供 PSO 中引擎布局未提供的属性读取 0
     D3D12_VERTEX_BUFFER_VIEW GetZeroVertexBufferView();
+
+    // ---- PSO 后台预编译（IRHIDevice 接口）----
+    /// 登记一个 PSO 到预编译队列（深拷贝着色器字节码，线程安全）
+    void  PrecompileQueuePSO(const PipelineStateDesc& desc) override;
+    /// 启动后台线程逐个创建队列中的 PSO，保存驱动的缓存块
+    void  StartPSOPrecompile() override;
+    /// 预编译进度（0 ~ 1）
+    float GetPSOPrecompileProgress() const override;
+    /// 取 / 存 PSO 缓存块（PSO 创建时调用；线程安全）
+    bool  FindPsoBlob(u64 hash, std::vector<u8>& out) const;
+    void  StorePsoBlob(u64 hash, ID3D12PipelineState* pso);
     /// 实例序号缓冲（懒创建）：第 i 个 u32 为 i，供顶点着色器取含起始实例的实例号
     D3D12_VERTEX_BUFFER_VIEW GetInstanceIndexBufferView();
     /// 序号缓冲容量（实例号上限）：覆盖对象号（kGPUMaxObjects）、Nanite 簇号（kNaniteMaxBVHClusters）
@@ -390,6 +404,22 @@ private:
         std::vector<ComPtr<IUnknown>> objects;
     };
     std::vector<DeferredRelease> m_DeferredReleases;
+
+    // ---- PSO 后台预编译 ----
+    /// 一项预编译：描述的着色器指针改指向本项自有的字节码副本（调用方的字节码可能在编译前就释放）
+    struct PrecompileItem {
+        PipelineStateDesc desc;
+        std::vector<std::unique_ptr<ShaderBytecode>> shaders;
+    };
+    std::vector<std::unique_ptr<PrecompileItem>> m_PrecompileQueue;
+    std::mutex                 m_PrecompileMutex;
+    std::thread                m_PrecompileThread;
+    std::atomic<u32>           m_PrecompileDone{ 0 };
+    std::atomic<u32>           m_PrecompileTotal{ 0 };
+    std::atomic<bool>          m_PrecompileStop{ false };
+    /// 预编译得到的 PSO 缓存块（键 = 描述哈希）：之后创建同一 PSO 时作为 CachedPSO 传入，跳过着色器编译
+    mutable std::mutex                          m_PsoBlobMutex;
+    std::unordered_map<u64, std::vector<u8>>    m_PsoBlobs;
     /// 多线程录制（二级列表并行录制）时录制路径会调用的设备分配：常量环、描述符快照环、懒创建的缓冲等
     std::recursive_mutex m_RecordMutex;
     class D3D12Buffer* m_LastUploadedObject = nullptr;

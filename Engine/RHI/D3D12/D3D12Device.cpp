@@ -218,6 +218,9 @@ static void CheckDeviceAlive(ID3D12Device* dev, const char* where) {
 }
 
 D3D12Device::~D3D12Device() {
+    // 先停下 PSO 预编译线程（它在用设备创建 PSO）
+    m_PrecompileStop.store(true, std::memory_order_release);
+    if (m_PrecompileThread.joinable()) m_PrecompileThread.join();
     // 退出前确保 GPU 空闲，否则销毁资源时驱动会报 use-after-free
     if (m_Queue) { m_Queue->Signal(nullptr, 0); }
     WaitIdle();
@@ -419,6 +422,70 @@ std::unique_ptr<IRHICommandList> D3D12Device::CreateCommandList(QueueType queue)
     auto cl = std::make_unique<D3D12CommandList>();
     if (!cl->Initialize(this, queue)) return nullptr;
     return cl;
+}
+
+void D3D12Device::PrecompileQueuePSO(const PipelineStateDesc& desc) {
+    auto item = std::make_unique<PrecompileItem>();
+    item->desc = desc;
+    // 着色器字节码深拷贝：调用方传的往往是栈上 / 临时对象，后台编译时早已失效
+    ShaderBytecode** slots[] = { &item->desc.vertexShader, &item->desc.pixelShader, &item->desc.computeShader,
+                                 &item->desc.meshShader, &item->desc.amplificationShader };
+    for (ShaderBytecode** slot : slots) {
+        if (!*slot) continue;
+        item->shaders.push_back(std::make_unique<ShaderBytecode>(**slot));
+        *slot = item->shaders.back().get();
+    }
+    std::lock_guard<std::mutex> lock(m_PrecompileMutex);
+    m_PrecompileQueue.push_back(std::move(item));
+    m_PrecompileTotal.store(static_cast<u32>(m_PrecompileQueue.size()), std::memory_order_release);
+}
+
+void D3D12Device::StartPSOPrecompile() {
+    if (m_PrecompileThread.joinable()) return;   // 已在运行 / 已跑完
+    {
+        std::lock_guard<std::mutex> lock(m_PrecompileMutex);
+        if (m_PrecompileQueue.empty()) return;
+    }
+    // ID3D12Device 的创建接口是线程安全的：后台线程逐个创建 PSO，取出驱动的缓存块后丢弃 PSO 对象。
+    // 主线程之后创建同一 PSO 时用缓存块作 CachedPSO，跳过 DXIL → 机器码的编译
+    m_PrecompileThread = std::thread([this]() {
+        size_t i = 0;
+        while (!m_PrecompileStop.load(std::memory_order_acquire)) {
+            PrecompileItem* item = nullptr;
+            {
+                std::lock_guard<std::mutex> lock(m_PrecompileMutex);
+                if (i >= m_PrecompileQueue.size()) break;
+                item = m_PrecompileQueue[i++].get();
+            }
+            D3D12PipelineState pso;
+            pso.Initialize(this, item->desc);   // 成功时 Initialize 内部把缓存块存进 m_PsoBlobs
+            m_PrecompileDone.fetch_add(1, std::memory_order_acq_rel);
+        }
+        HE_CORE_INFO("[D3D12] PSO 预编译完成：{} / {}", m_PrecompileDone.load(), m_PrecompileTotal.load());
+    });
+}
+
+float D3D12Device::GetPSOPrecompileProgress() const {
+    const u32 total = m_PrecompileTotal.load(std::memory_order_acquire);
+    if (total == 0) return 1.0f;
+    return static_cast<float>(m_PrecompileDone.load(std::memory_order_acquire)) / static_cast<float>(total);
+}
+
+bool D3D12Device::FindPsoBlob(u64 hash, std::vector<u8>& out) const {
+    std::lock_guard<std::mutex> lock(m_PsoBlobMutex);
+    auto it = m_PsoBlobs.find(hash);
+    if (it == m_PsoBlobs.end()) return false;
+    out = it->second;
+    return true;
+}
+
+void D3D12Device::StorePsoBlob(u64 hash, ID3D12PipelineState* pso) {
+    if (!pso) return;
+    ComPtr<ID3DBlob> blob;
+    if (FAILED(pso->GetCachedBlob(&blob)) || !blob || blob->GetBufferSize() == 0) return;
+    const auto* p = static_cast<const u8*>(blob->GetBufferPointer());
+    std::lock_guard<std::mutex> lock(m_PsoBlobMutex);
+    m_PsoBlobs[hash].assign(p, p + blob->GetBufferSize());
 }
 
 std::unique_ptr<IRHICommandList> D3D12Device::CreateSecondaryCommandList() {
