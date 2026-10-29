@@ -5,6 +5,8 @@
 // ============================================================
 
 #include "Pipeline/InstanceCuller.h"
+#include "Threading/MeshRegistry.h"          // PrepareInstances：按 meshIndex 取索引数
+#include "Threading/FrameSceneSnapshot.h"    // PrepareInstances：快照里的实例条目
 #include <iterator>
 #include "Math/Geometry.h"   // Frustum::FromViewProj（六平面提取）
 #include "Core/Log.h"
@@ -134,7 +136,9 @@ std::unique_ptr<rhi::IRHIBuffer> InstanceCuller::CreateCommandBuffer(u32 indexCo
     if (!m_Device) return nullptr;
     rhi::BufferDesc desc;
     desc.size      = sizeof(InstanceIndirectCommand);
-    desc.usage     = rhi::BufferUsage::Storage;
+    // Storage：剔除着色器原子累加实例数；Indirect：作为 DrawIndexedIndirect 的参数缓冲。
+    // 此前缺 Indirect，Vulkan 下缓冲没有 INDIRECT_BUFFER 用途却被用作间接参数（未定义行为，实测之后的绘制全部错乱）
+    desc.usage     = rhi::BufferUsage::Storage | rhi::BufferUsage::Indirect;
     desc.cpuAccess = true;               // CPU 填命令头 + 读回可见实例数
     auto buf = m_Device->CreateBuffer(desc);
     if (!buf) return nullptr;
@@ -179,7 +183,45 @@ void InstanceCuller::BeginInstancesFrame(rhi::IRHIDevice* device) {
         st.retired.Advance();
         st.seenLastFrame = st.seenThisFrame;
         st.seenThisFrame = false;
+        st.culledThisFrame = false;   // 本帧的剔除由 PrepareInstances 重新派发
         ++it;
+    }
+}
+
+void InstanceCuller::PrepareInstances(rhi::IRHICommandList* cmd, rhi::IRHIDevice* device,
+                                      const MeshRegistry* meshRegistry, const FrameSceneSnapshot& snapshot,
+                                      u32 frameSlot, const float4x4& viewProj) {
+    BeginInstancesFrame(device);   // 帧边界：推进退役队列 + 回收上帧未见的条目
+    if (!cmd || !device || !meshRegistry) return;
+    const u32 slot = frameSlot % rhi::kMaxFramesInFlight;
+    for (const SnapshotInstance& si : snapshot.instances) {
+        if (si.transformCount == 0u) continue;   // 无实例：跳过
+        // 变换切片越界保护：快照损坏时宁可少画，也不要读越界内存
+        if (static_cast<usize>(si.transformOffset) + si.transformCount >
+            snapshot.instanceTransforms.size()) continue;
+        const MeshRegistryEntry* me = meshRegistry->Find(si.meshIndex);
+        if (!me || !me->vertexBuffer || !me->indexBuffer) continue;
+
+        // 实例变换上传（版本未变则直接复用；通道内的绘制再调用时同样直接返回句柄）
+        const u32 instHandle = UploadInstanceTransforms(
+            device, si.meshIndex, snapshot.instanceTransforms.data() + si.transformOffset,
+            si.transformCount, si.transformVersion, si.sourceEntity);
+        if (instHandle == 0) continue;
+        InstanceState* st = FindInstanceState(si.meshIndex);
+        if (!st || !si.enableFrustumCull || !GetPSO()) continue;
+
+        // 命令缓冲按飞行帧存活（本帧 CPU 清零命令时，上帧的间接绘制可能还在读另一份）
+        if (!st->cullCmd[slot]) {
+            st->cullCmd[slot] = CreateCommandBuffer(me->indexCount, 0, 0);
+            if (st->cullCmd[slot])
+                st->cullCmdHandle[slot] = device->GetBindlessHeap()->RegisterBuffer(st->cullCmd[slot].get());
+        }
+        if (!st->cullCmd[slot] || st->cullCmdHandle[slot] == 0) continue;   // 创建失败：通道内整批绘制
+
+        st->visibleInstanceCount = Cull(cmd, st->buffer.get(), st->ssboHandle,
+                                        st->cullCmd[slot].get(), st->cullCmdHandle[slot],
+                                        si.transformCount, slot, si.localBoundsMin, si.localBoundsMax, viewProj);
+        st->culledThisFrame = true;
     }
 }
 

@@ -983,6 +983,9 @@ void ForwardPipeline::Render(rhi::IRHICommandList* cmd, const FrameSceneSnapshot
     PrepareGI(cmd);
     // GPU 视锥剔除：必须在 render pass 之外（BeginHDRPass 会 Begin 本帧的 HDR pass）
     RunGPUCulling(cmd, camera);
+    // 逐实例剔除同理：在通道外上传实例变换并派发，通道内的实例化绘制只读结果
+    m_InstanceCuller.PrepareInstances(cmd, m_Device, &m_MeshRegistry, FrameSnap(),
+                                      RenderFrameSlot(), camera.GetViewProjMatrix());
     BeginHDRPass(cmd, m_HDRWidth, m_HDRHeight);
     BeginFrame(cmd, m_HDRWidth, m_HDRHeight);
     RenderScene(cmd, camera);
@@ -1124,7 +1127,7 @@ void ForwardPipeline::RenderScene(rhi::IRHICommandList* cmd, const CameraData& c
     // 顶点索引缓冲按 `meshIndex` 去注册表取，逐网格缓冲状态在 `InstanceCuller` 的实例状态表里
     // ——渲染期因此不再遍历世界、也不再读 `InstancedMeshComponent`。
     // ============================================================
-    m_InstanceCuller.BeginInstancesFrame(m_Device);   // 帧边界：推进退役队列 + 回收上帧未见的条目
+    // 帧边界与逐实例剔除已在通道开始前由 PrepareInstances 完成
     {
         const u32 frameSlot = RenderFrameSlot() % rhi::kMaxFramesInFlight;
         for (const SnapshotInstance& si : FrameSnap().instances) {
@@ -1165,27 +1168,9 @@ void ForwardPipeline::RenderScene(rhi::IRHICommandList* cmd, const CameraData& c
             // 通过者压缩进可见列表，命令里的 instanceCount 由 GPU 原子累加；
             // 绘制改成 DrawIndexedIndirect，顶点着色器按可见列表取实例变换。
             // 关掉时保持原路径（整批实例一次 DrawIndexed），便于 A/B 对比。
-            bool useCull = si.enableFrustumCull && m_InstanceCuller.GetPSO() != nullptr;
-            if (useCull) {
-                if (!st->cullCmd[frameSlot]) {   // 命令缓冲按飞行帧存活（每帧都要一份）
-                    st->cullCmd[frameSlot] = m_InstanceCuller.CreateCommandBuffer(me->indexCount, 0, 0);
-                    if (st->cullCmd[frameSlot]) {
-                        st->cullCmdHandle[frameSlot] =
-                            m_Device->GetBindlessHeap()->RegisterBuffer(st->cullCmd[frameSlot].get());
-                    }
-                }
-                if (!st->cullCmd[frameSlot] || st->cullCmdHandle[frameSlot] == 0) {
-                    useCull = false;   // 命令缓冲创建失败：安全回退整批绘制
-                }
-            }
-
-            if (useCull) {
-                // 实例网格的局部包围盒（快照按网格烤好：内置立方体 = ±0.5；glTF 资产走组件包围盒）
-                const u32 prevVisible = m_InstanceCuller.Cull(
-                    cmd, st->buffer.get(), st->ssboHandle,
-                    st->cullCmd[frameSlot].get(), st->cullCmdHandle[frameSlot],
-                    count, frameSlot, si.localBoundsMin, si.localBoundsMax, framePC.viewProjMatrix);
-
+            // 剔除已在通道开始前派发（PrepareInstances）；未派发（关闭或命令缓冲创建失败）则整批绘制
+            if (st->culledThisFrame) {
+                const u32 prevVisible = st->visibleInstanceCount;   // 上一轮 GPU 写入的可见数（统计用）
                 pc.instanceVisibleHandle = m_InstanceCuller.GetVisibleIndicesHandle(frameSlot);
                 cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSets[RenderFrameSlot()]);
                 cmd->SetDrawDebugLabel("Forward InstancedMesh (逐实例剔除)");
@@ -1195,8 +1180,6 @@ void ForwardPipeline::RenderScene(rhi::IRHICommandList* cmd, const CameraData& c
                 // 一条命令、stride 20（VkDrawIndexedIndirectCommand）：instanceCount 由 cull 写入
                 cmd->DrawIndexedIndirect(st->cullCmd[frameSlot].get(), 0, 1,
                                          sizeof(InstanceIndirectCommand));
-                // 读回统计（上一帧 GPU 写入的值；仅用于面板/日志）
-                st->visibleInstanceCount = prevVisible;
                 drawCount += prevVisible;
                 ++culledInstanceMeshes;
                 culledInstances += prevVisible;

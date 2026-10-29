@@ -36,6 +36,10 @@ void GBufferRenderer_GPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
     // 绑定 set=0
     ctx.device->UpdateDescriptorSet(ctx.descSet, rhi::kBindingObjectData, rhi::DescriptorType::StorageBuffer,
                                      ctx.objectBuffer);
+    // 逐实例剔除必须在渲染通道外派发（Vulkan 限制）：先上传实例变换并剔除，通道内（CPU 回退段）只做间接绘制
+    if (ctx.instanceCuller)
+        ctx.instanceCuller->PrepareInstances(cmd, ctx.device, ctx.meshRegistry, snapshot,
+                                             ctx.frameSlot, camera.GetViewProjMatrix());
     cmd->SetPipeline(ctx.pso);
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, ctx.descSet);
 
@@ -149,7 +153,7 @@ void GBufferRenderer_GPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
         // 【阶段 1 第①段 / §15.1】数据来源改为**快照**（实例变换/开关/版本号按值带走），
         // 顶点/索引缓冲按 `meshIndex` 去注册表取，缓冲状态在 `InstanceCuller` 的实例状态表里。
         if (ctx.instanceCuller) {
-            ctx.instanceCuller->BeginInstancesFrame(ctx.device);
+            // 帧边界与逐实例剔除已在通道开始前由 PrepareInstances 完成
             const u32 slot = ctx.frameSlot % rhi::kMaxFramesInFlight;
             for (const SnapshotInstance& si : snapshot.instances) {
                 if (si.transformCount == 0u) continue;
@@ -186,22 +190,8 @@ void GBufferRenderer_GPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
                 pc.inst = instHandle;
                 pc.vis  = 0;
 
-                bool useCull = si.enableFrustumCull && ctx.instanceCuller->GetPSO();
-                if (useCull) {
-                    if (!st->cullCmd[slot]) {
-                        st->cullCmd[slot] = ctx.instanceCuller->CreateCommandBuffer(me->indexCount, 0, 0);
-                        if (st->cullCmd[slot]) {
-                            st->cullCmdHandle[slot] =
-                                ctx.device->GetBindlessHeap()->RegisterBuffer(st->cullCmd[slot].get());
-                        }
-                    }
-                    if (!st->cullCmd[slot] || st->cullCmdHandle[slot] == 0) useCull = false;
-                }
-                if (useCull) {
-                    const u32 prevVisible = ctx.instanceCuller->Cull(
-                        cmd, st->buffer.get(), st->ssboHandle,
-                        st->cullCmd[slot].get(), st->cullCmdHandle[slot],
-                        count, slot, si.localBoundsMin, si.localBoundsMax, jvp);
+                // 剔除已在通道开始前派发（PrepareInstances）；未派发则整批绘制
+                if (st->culledThisFrame) {
                     pc.vis = ctx.instanceCuller->GetVisibleIndicesHandle(slot);
                     cmd->SetDrawDebugLabel("GBuffer InstancedMesh (逐实例剔除)");
                     cmd->SetPushConstants(0, sizeof(pc), &pc);
@@ -209,7 +199,6 @@ void GBufferRenderer_GPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
                     cmd->SetIndexBuffer(me->indexBuffer);
                     cmd->DrawIndexedIndirect(st->cullCmd[slot].get(), 0, 1,
                                              sizeof(InstanceIndirectCommand));
-                    st->visibleInstanceCount = prevVisible;
                     continue;
                 }
 
