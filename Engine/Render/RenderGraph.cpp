@@ -545,6 +545,13 @@ void RenderGraph::ExecuteWithAsyncCompute(rhi::IRHICommandList* mainCmd,
     auto computeCmd = device->CreateCommandList(rhi::QueueType::Compute);
     computeCmd->BeginLightweight();  // 轻量 Begin：不推进帧计数器，避免延迟销毁提前触发
 
+    // 【Profiler 帧开始放在计算列表上】BeginFrame 会重置本帧查询池。此前它在主列表上调用，而计算列表
+    // 先提交、先写入异步计算 pass 的时间戳，主列表随后的重置把这些时间戳清掉（异步 pass 的耗时恒为 0/无效）。
+    // 有异步 pass 时改在计算列表开头重置：主列表经时间线等待排在计算列表之后，写入顺序成立；
+    // 没有异步 pass 时两条列表之间没有同步，仍在主列表上重置
+    const bool profilerOnCompute = !asyncComputePasses.empty();
+    if (m_Profiler && profilerOnCompute) m_Profiler->BeginFrame(computeCmd.get());
+
     u32 passIdx = 0;
     for (auto* pass : asyncComputePasses) {
         computeCmd->BeginDebugLabel(pass->name.c_str());
@@ -595,7 +602,7 @@ void RenderGraph::ExecuteWithAsyncCompute(rhi::IRHICommandList* mainCmd,
     // ============================================================
     // 所有主 Pass 录制在 mainCmd 上（与单队列路径完全一致）
     // ============================================================
-    if (m_Profiler) m_Profiler->BeginFrame(mainCmd);
+    if (m_Profiler && !profilerOnCompute) m_Profiler->BeginFrame(mainCmd);
 
     // 【步骤 37】逐 pass 的 **CPU 录制耗时**（与 GPU 耗时无关）：1080p 实测"执行(录制+提交)"一帧要
     // 34~48 ms，而 GPU 各 pass 合计只有 14 ms ⇒ 瓶颈在 CPU 录制这一侧，而"整帧 CPU 时长"定位不到
