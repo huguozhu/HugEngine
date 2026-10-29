@@ -22,7 +22,8 @@ struct RSMVertexInput {
     float4x4 lightViewProj;
     uint     objectIndex;
     uint     lightIndex;   // Fragment 侧用（光源颜色/强度），VS 不读但必须保持布局一致
-    uint     _pad[2];
+    uint     _pad0;        // 显式填充用标量（同 RSM_Generate.frag：HLSL 数组元素按 16 字节对齐）
+    uint     _pad1;
     float4   vplAlbedo;    // Fragment 侧用（VPL 漫反射率），同样只为布局一致
 };
 
