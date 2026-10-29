@@ -13,10 +13,12 @@
 #include <algorithm>
 #include <unordered_set>
 
+// 【日志级别】RenderGraph 每帧都会重建（创建 → 声明资源/pass → Compile → 屏障推导 → 别名 → 执行），
+// 这些过程日志此前用 INFO，每帧刷约 70 行，淹没其它日志且拖慢帧率；改为 TRACE，排查时把日志级别调到 Trace 即可看到
 namespace he::render {
 
 RenderGraph::RenderGraph() {
-    HE_CORE_INFO("RenderGraph v2 created (auto-barrier + aliasing)");
+    HE_CORE_TRACE("RenderGraph v2 created (auto-barrier + aliasing)");
 }
 
 RenderGraph::~RenderGraph() {
@@ -35,7 +37,7 @@ ResourceHandle RenderGraph::CreateTexture(StringView name, const rhi::TextureDes
     m_Resources.push_back(rd);
     m_ResourceStates.push_back({rhi::ResourceState::Undefined, false});
     m_AliasInfo.push_back({});
-    HE_CORE_INFO("  RG tex #{}: {} ({}x{})", h, name, desc.width, desc.height);
+    HE_CORE_TRACE("  RG tex #{}: {} ({}x{})", h, name, desc.width, desc.height);
     return h;
 }
 
@@ -49,7 +51,7 @@ ResourceHandle RenderGraph::CreateBuffer(StringView name, const rhi::BufferDesc&
     m_Resources.push_back(rd);
     m_ResourceStates.push_back({rhi::ResourceState::Undefined, false});
     m_AliasInfo.push_back({});
-    HE_CORE_INFO("  RG buf #{}: {} ({} bytes)", h, name, desc.size);
+    HE_CORE_TRACE("  RG buf #{}: {} ({} bytes)", h, name, desc.size);
     return h;
 }
 
@@ -65,7 +67,7 @@ ResourceHandle RenderGraph::ImportTexture(StringView name, rhi::IRHITexture* ext
     m_ResourceStates.push_back({rhi::ResourceState::Undefined, false});
     m_AliasInfo.push_back({});
     m_ImportedTextures[h] = external;
-    HE_CORE_INFO("  RG import #{}: {}", h, name);
+    HE_CORE_TRACE("  RG import #{}: {}", h, name);
     return h;
 }
 
@@ -105,7 +107,7 @@ PassNode* RenderGraph::AddPass(StringView name,
     pass.queueHint = queueHint;
     m_Passes.push_back(std::move(pass));
     m_Compiled = false;
-    HE_CORE_INFO("  RG pass: {} [{}]", name,
+    HE_CORE_TRACE("  RG pass: {} [{}]", name,
                  queueHint == RGPassQueue::Compute ? "Compute" :
                  queueHint == RGPassQueue::Graphics ? "Graphics" : "Default");
     return &m_Passes.back();
@@ -131,7 +133,7 @@ rhi::ResourceState RenderGraph::AccessToState(ResourceAccess access, bool isDept
 // ============================================================
 
 void RenderGraph::Compile() {
-    HE_CORE_INFO("RenderGraph::Compile — {} passes, {} resources", m_Passes.size(), m_Resources.size());
+    HE_CORE_TRACE("RenderGraph::Compile — {} passes, {} resources", m_Passes.size(), m_Resources.size());
 
     BuildDependencies();
     TopologicalSort();
@@ -202,7 +204,7 @@ void RenderGraph::TopologicalSort() {
 }
 
 void RenderGraph::DeriveBarriers() {
-    HE_CORE_INFO("RenderGraph::DeriveBarriers — {} passes in order", m_PassOrder.size());
+    HE_CORE_TRACE("RenderGraph::DeriveBarriers — {} passes in order", m_PassOrder.size());
 
     // 初始化所有资源状态为 Undefined
     for (auto& s : m_ResourceStates)
@@ -323,13 +325,13 @@ void RenderGraph::CullDeadPasses() {
         if (hasOutput || pass->writes.empty())
             alive.push_back(pass);
         else
-            HE_CORE_INFO("  RG cull dead pass: {}", pass->name);
+            HE_CORE_TRACE("  RG cull dead pass: {}", pass->name);
     }
     m_PassOrder = std::move(alive);
 }
 
 void RenderGraph::ApplyAliasing() {
-    HE_CORE_INFO("RenderGraph::ApplyAliasing — {} resources", m_Resources.size());
+    HE_CORE_TRACE("RenderGraph::ApplyAliasing — {} resources", m_Resources.size());
 
     // 简化版贪心别名：计算每个资源的首/末使用 pass
     struct Lifetime { u32 first = ~0u; u32 last = 0; };
@@ -390,7 +392,7 @@ void RenderGraph::ApplyAliasing() {
         }
     }
     for (auto& p : pools) totalAliased += p.size;
-    HE_CORE_INFO("  RG alias: {} pools, {}→{} bytes saved ({:.0f}%)",
+    HE_CORE_TRACE("  RG alias: {} pools, {}→{} bytes saved ({:.0f}%)",
                  pools.size(), totalNaive, totalAliased,
                  totalNaive > 0 ? (1.0 - double(totalAliased)/totalNaive) * 100 : 0.0);
 }
@@ -402,7 +404,7 @@ void RenderGraph::ApplyAliasing() {
 void RenderGraph::Execute(rhi::IRHICommandList* cmdList, rhi::IRHIDevice* device) {
     if (!m_Compiled) Compile();
 
-    HE_CORE_INFO("RenderGraph::Execute — {} passes", m_PassOrder.size());
+    HE_CORE_TRACE("RenderGraph::Execute — {} passes", m_PassOrder.size());
 
     // 帧首：推进瞬态资源分配器（切换 Heap，回收上上帧内存）
     device->AdvanceTransientResources();
@@ -507,7 +509,7 @@ void RenderGraph::ExecuteWithAsyncCompute(rhi::IRHICommandList* mainCmd,
     const TArray<std::unique_ptr<rhi::IRHITexture>>& textures,
     const TArray<std::unique_ptr<rhi::IRHIBuffer>>& /*buffers*/) {
 
-    HE_CORE_INFO("RenderGraph::ExecuteWithAsyncCompute — {} passes", m_PassOrder.size());
+    HE_CORE_TRACE("RenderGraph::ExecuteWithAsyncCompute — {} passes", m_PassOrder.size());
 
     // 辅助: 根据资源 handle 获取纹理指针
     auto getTexture = [&](ResourceHandle h) -> rhi::IRHITexture* {
@@ -665,7 +667,7 @@ void RenderGraph::ExecuteWithAsyncCompute(rhi::IRHICommandList* mainCmd,
 // ============================================================
 
 void RenderGraph::ScheduleAsyncPasses() {
-    HE_CORE_INFO("RenderGraph::ScheduleAsyncPasses — analyzing async compute candidates");
+    HE_CORE_TRACE("RenderGraph::ScheduleAsyncPasses — analyzing async compute candidates");
 
     for (auto* pass : m_PassOrder) {
         if (pass->queueHint != RGPassQueue::Compute) continue;
@@ -690,10 +692,10 @@ void RenderGraph::ScheduleAsyncPasses() {
             // 自动插入跨队列 Barrier
             InsertCrossQueueBarrier(pass,
                 rhi::QueueType::Graphics, rhi::QueueType::Compute);
-            HE_CORE_INFO("  Async pass '{}': 可并行", pass->name);
+            HE_CORE_TRACE("  Async pass '{}': 可并行", pass->name);
         } else {
             pass->requiresSync = true;
-            HE_CORE_INFO("  Async pass '{}': 存在依赖，需同步点", pass->name);
+            HE_CORE_TRACE("  Async pass '{}': 存在依赖，需同步点", pass->name);
         }
     }
 }
@@ -757,7 +759,7 @@ void RenderGraph::Reset() {
     m_BackBufferHandle = kInvalidHandle;
     m_Compiled = false;
     m_AsyncComputeEnabled = false;
-    HE_CORE_INFO("RenderGraph cleared");
+    HE_CORE_TRACE("RenderGraph cleared");
 }
 
 } // namespace he::render
