@@ -661,10 +661,17 @@ void D3D12CommandList::SetPipeline(IRHIPipelineState* pso) {
 
     m_Pipeline = static_cast<D3D12PipelineState*>(pso);
     if (!m_List || !m_Pipeline) return;
+    m_IsComputePipeline = m_Pipeline->IsCompute();
+    // 【未在录制时只记状态】各样例初始化时会在命令列表 Begin 之前调一次 SetPipeline，
+    // 而 D3D12 的列表创建后处于关闭状态：原生调用全部被拒绝（调试层 id=547），本就不生效。
+    // 录制开始后每次绘制前都会重新 SetPipeline，这里跳过原生调用即可
+    if (!m_Recording) {
+        m_RootArgsDirty = true;
+        return;
+    }
     m_List->SetPipelineState(m_Pipeline->GetPso());
     // 【图形/计算根签名是两套独立绑定】计算管线必须用 SetComputeRootSignature，
     // 否则后面 SetComputeRootDescriptorTable 没有根签名可用，D3D12 会静默卡死。
-    m_IsComputePipeline = m_Pipeline->IsCompute();
     if (m_IsComputePipeline) {
         m_List->SetComputeRootSignature(m_Pipeline->GetRootSignature());
     } else {
