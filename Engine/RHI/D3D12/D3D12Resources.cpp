@@ -559,6 +559,73 @@ void D3D12Texture::UploadInitialData(D3D12Device* device, const TextureDesc& des
     device->SetResourceState(m_Resource.Get(), readState);
 }
 
+// ===========================================================================
+//  QueryPool
+// ===========================================================================
+bool D3D12QueryPool::Initialize(D3D12Device* device, u32 queryCount, QueryType type) {
+    if (!device || !device->GetDevice() || queryCount == 0) return false;
+    ID3D12Device* dev = device->GetDevice();
+    m_Count  = queryCount;
+    m_Type   = type;
+    m_Stride = (type == QueryType::PipelineStatistics)
+             ? static_cast<u32>(sizeof(D3D12_QUERY_DATA_PIPELINE_STATISTICS)) : 8u;
+
+    D3D12_QUERY_HEAP_DESC hd{};
+    hd.Type  = (type == QueryType::PipelineStatistics) ? D3D12_QUERY_HEAP_TYPE_PIPELINE_STATISTICS
+                                                       : D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+    hd.Count = queryCount;
+    if (!HE_D3D12_CHECK(dev->CreateQueryHeap(&hd, IID_PPV_ARGS(&m_Heap)), "CreateQueryHeap")) return false;
+
+    // 回读缓冲：READBACK 堆资源必须一直处于 COPY_DEST（正好是 ResolveQueryData 的目标状态）
+    D3D12_HEAP_PROPERTIES hp{};
+    hp.Type             = D3D12_HEAP_TYPE_READBACK;
+    hp.CreationNodeMask = 1;
+    hp.VisibleNodeMask  = 1;
+    D3D12_RESOURCE_DESC rd{};
+    rd.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
+    rd.Width            = static_cast<UINT64>(queryCount) * m_Stride;
+    rd.Height           = 1;
+    rd.DepthOrArraySize = 1;
+    rd.MipLevels        = 1;
+    rd.Format           = DXGI_FORMAT_UNKNOWN;
+    rd.SampleDesc       = { 1, 0 };
+    rd.Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    if (!HE_D3D12_CHECK(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&m_Readback)),
+            "CreateCommittedResource(QueryReadback)")) {
+        return false;
+    }
+    // 持久映射：只在围栏确认 GPU 写完之后才读取
+    void* p = nullptr;
+    if (FAILED(m_Readback->Map(0, nullptr, &p)) || !p) return false;
+    m_Mapped = static_cast<const u8*>(p);
+    m_Avail.resize(queryCount);
+    return true;
+}
+
+void D3D12QueryPool::MarkSubmitted(u32 index, ID3D12Fence* fence, u64 value) {
+    if (index >= m_Count) return;
+    m_Avail[index].fence = fence;
+    m_Avail[index].value = value;
+}
+
+void D3D12QueryPool::ResetAll() {
+    for (auto& a : m_Avail) { a.fence.Reset(); a.value = 0; }
+}
+
+bool D3D12QueryPool::IsAvailable(u32 index, bool wait, u32 timeoutMs) const {
+    if (index >= m_Count || !m_Avail[index].fence) return false;   // 尚未写入并提交
+    ID3D12Fence* f = m_Avail[index].fence.Get();
+    const u64    v = m_Avail[index].value;
+    if (f->GetCompletedValue() >= v) return true;
+    if (!wait) return false;
+    HANDLE ev = CreateEventEx(nullptr, nullptr, 0, EVENT_ALL_ACCESS);
+    if (!ev) return false;
+    if (SUCCEEDED(f->SetEventOnCompletion(v, ev))) WaitForSingleObject(ev, timeoutMs);
+    CloseHandle(ev);
+    return f->GetCompletedValue() >= v;
+}
+
 D3D12_VERTEX_BUFFER_VIEW D3D12Buffer::GetVbv(u32 stride) const {
     D3D12_VERTEX_BUFFER_VIEW v{};
     v.BufferLocation = m_GpuAddress;

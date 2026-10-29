@@ -105,10 +105,13 @@ public:
     // ---- 时间线与查询 ----
     void SetTimelineSignal(RHIFenceHandle fence, u64 value) override;
     void SetTimelineWait(RHIFenceHandle fence, u64 value) override;
-    void WriteTimestamp(IRHIQueryPool*, u32) override {}
-    void ResetQueryPool(IRHIQueryPool*) override {}
-    void GetQueryResults(IRHIQueryPool*, u32, u32, u64*) override {}
-    bool TryGetQueryResults(IRHIQueryPool*, u32, u32, u64*) override { return false; }
+    // GPU 查询：EndQuery 后立即 Resolve 到回读缓冲，提交时打围栏，读取时按围栏判断可用
+    void WriteTimestamp(IRHIQueryPool* pool, u32 queryIndex) override;
+    void ResetQueryPool(IRHIQueryPool* pool) override;
+    void GetQueryResults(IRHIQueryPool* pool, u32 first, u32 count, u64* data) override;
+    bool TryGetQueryResults(IRHIQueryPool* pool, u32 first, u32 count, u64* data) override;
+    void BeginQuery(IRHIQueryPool* pool, u32 queryIndex) override;
+    void EndQuery(IRHIQueryPool* pool, u32 queryIndex) override;
 
     void Submit() override;
 
@@ -203,6 +206,10 @@ private:
     /// 所以每个列表开始录制时所有缓冲都是 COMMON（Begin 时清空）。用设备级的全局记录会被
     /// 其他命令列表的转换干扰，屏障的 StateBefore 与实际不符（GPU 验证 id=942）。
     std::unordered_map<ID3D12Resource*, D3D12_RESOURCE_STATES> m_BufferStates;
+    /// 本次录制写过的查询：提交时（OnSubmitted）打上围栏值，之后才算可读
+    std::vector<std::pair<class D3D12QueryPool*, u32>> m_PendingQueries;
+    /// 读取查询结果（wait 为真时阻塞等待），返回是否全部可用
+    bool ReadQueryResults(IRHIQueryPool* pool, u32 first, u32 count, u64* data, bool wait);
     D3D12_RESOURCE_STATES GetBufferState(ID3D12Resource* res) const {
         auto it = m_BufferStates.find(res);
         return it != m_BufferStates.end() ? it->second : D3D12_RESOURCE_STATE_COMMON;

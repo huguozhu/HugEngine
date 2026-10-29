@@ -107,6 +107,85 @@ void D3D12CommandList::OnSubmitted(ID3D12CommandQueue* queue) {
     const u64 v = m_NextFenceValue++;
     queue->Signal(m_SlotFence.Get(), v);
     m_SlotFenceValues[m_FrameSlot] = v;
+    // 本次提交写过的查询：围栏到达 v 后结果可读
+    for (const auto& [pool, idx] : m_PendingQueries) pool->MarkSubmitted(idx, m_SlotFence.Get(), v);
+    m_PendingQueries.clear();
+}
+
+// ── GPU 查询（时间戳 / 管线统计）──
+void D3D12CommandList::WriteTimestamp(IRHIQueryPool* pool, u32 queryIndex) {
+    auto* qp = static_cast<D3D12QueryPool*>(pool);
+    if (!m_List || !qp || queryIndex >= qp->GetQueryCount() || qp->GetQueryType() != QueryType::Timestamp) return;
+    m_List->EndQuery(qp->GetHeap(), D3D12_QUERY_TYPE_TIMESTAMP, queryIndex);
+    // 写完立刻解析到回读缓冲（READBACK 堆一直处于 COPY_DEST，无需屏障）
+    m_List->ResolveQueryData(qp->GetHeap(), D3D12_QUERY_TYPE_TIMESTAMP, queryIndex, 1,
+                             qp->GetReadback(), static_cast<UINT64>(queryIndex) * qp->GetResultStride());
+    m_PendingQueries.emplace_back(qp, queryIndex);
+}
+
+void D3D12CommandList::BeginQuery(IRHIQueryPool* pool, u32 queryIndex) {
+    auto* qp = static_cast<D3D12QueryPool*>(pool);
+    if (!m_List || !qp || queryIndex >= qp->GetQueryCount() ||
+        qp->GetQueryType() != QueryType::PipelineStatistics) return;
+    m_List->BeginQuery(qp->GetHeap(), D3D12_QUERY_TYPE_PIPELINE_STATISTICS, queryIndex);
+}
+
+void D3D12CommandList::EndQuery(IRHIQueryPool* pool, u32 queryIndex) {
+    auto* qp = static_cast<D3D12QueryPool*>(pool);
+    if (!m_List || !qp || queryIndex >= qp->GetQueryCount() ||
+        qp->GetQueryType() != QueryType::PipelineStatistics) return;
+    m_List->EndQuery(qp->GetHeap(), D3D12_QUERY_TYPE_PIPELINE_STATISTICS, queryIndex);
+    m_List->ResolveQueryData(qp->GetHeap(), D3D12_QUERY_TYPE_PIPELINE_STATISTICS, queryIndex, 1,
+                             qp->GetReadback(), static_cast<UINT64>(queryIndex) * qp->GetResultStride());
+    m_PendingQueries.emplace_back(qp, queryIndex);
+}
+
+void D3D12CommandList::ResetQueryPool(IRHIQueryPool* pool) {
+    // D3D12 的查询不需要 GPU 端重置；只清 CPU 侧可用标记（对应 vkCmdResetQueryPool 后结果不可用）
+    if (auto* qp = static_cast<D3D12QueryPool*>(pool)) qp->ResetAll();
+}
+
+void D3D12CommandList::GetQueryResults(IRHIQueryPool* pool, u32 first, u32 count, u64* data) {
+    ReadQueryResults(pool, first, count, data, true);    // 对应 VK_QUERY_RESULT_WAIT_BIT
+}
+
+bool D3D12CommandList::TryGetQueryResults(IRHIQueryPool* pool, u32 first, u32 count, u64* data) {
+    return ReadQueryResults(pool, first, count, data, false);   // 不等待，未就绪返回 false
+}
+
+bool D3D12CommandList::ReadQueryResults(IRHIQueryPool* pool, u32 first, u32 count, u64* data, bool wait) {
+    auto* qp = static_cast<D3D12QueryPool*>(pool);
+    if (!qp || !data || count == 0) return false;
+    bool all = true;
+    if (qp->GetQueryType() != QueryType::PipelineStatistics) {
+        for (u32 i = 0; i < count; ++i) {
+            const u32  q  = first + i;
+            const bool ok = qp->IsAvailable(q, wait);
+            u64 v = 0;
+            if (ok) std::memcpy(&v, qp->ResultPtr(q), sizeof(v));
+            data[i] = v;
+            all = all && ok;
+        }
+        return all;
+    }
+    // 管线统计：与 Vulkan 查询池选的统计项同序，每个查询输出 6 个 u64：
+    // IA 顶点、IA 图元、VS 调用、裁剪调用、裁剪图元、PS 调用。count 按 u64 个数计（ProfilerManager 的口径）
+    constexpr u32 kPerQuery = 6;
+    const u32 queries = (count + kPerQuery - 1) / kPerQuery;
+    for (u32 k = 0; k < queries; ++k) {
+        const u32  q  = first + k;
+        const bool ok = qp->IsAvailable(q, wait);
+        u64 vals[kPerQuery] = {};
+        if (ok) {
+            D3D12_QUERY_DATA_PIPELINE_STATISTICS st{};
+            std::memcpy(&st, qp->ResultPtr(q), sizeof(st));
+            vals[0] = st.IAVertices;   vals[1] = st.IAPrimitives; vals[2] = st.VSInvocations;
+            vals[3] = st.CInvocations; vals[4] = st.CPrimitives;  vals[5] = st.PSInvocations;
+        }
+        all = all && ok;
+        for (u32 j = 0; j < kPerQuery && k * kPerQuery + j < count; ++j) data[k * kPerQuery + j] = vals[j];
+    }
+    return all;
 }
 
 void D3D12CommandList::PrepareForExternalRendering() {

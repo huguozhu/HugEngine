@@ -944,6 +944,21 @@ void D3D12Device::DestroyTextureMipView(void* view) {
     m_MipRtvFree.push_back(static_cast<u32>((p - base) / m_MipRtvInc));
 }
 
+float D3D12Device::GetTimestampPeriod() {
+    UINT64 freq = 0;
+    if (!m_Queue || FAILED(m_Queue->GetTimestampFrequency(&freq)) || freq == 0) return 1.0f;
+    return static_cast<float>(1.0e9 / static_cast<double>(freq));
+}
+
+std::unique_ptr<IRHIQueryPool> D3D12Device::CreateQueryPool(u32 queryCount, QueryType type) {
+    auto pool = std::make_unique<D3D12QueryPool>();
+    if (!pool->Initialize(this, queryCount, type)) {
+        HE_CORE_ERROR("D3D12Device: 查询池创建失败（{} 个，类型 {}）", queryCount, static_cast<int>(type));
+        return nullptr;
+    }
+    return pool;
+}
+
 void* D3D12Device::CreateImGuiDescriptorPool() {
     return EnsureDescriptorHeaps() ? static_cast<void*>(m_CbvSrvUavHeap.Get()) : nullptr;
 }

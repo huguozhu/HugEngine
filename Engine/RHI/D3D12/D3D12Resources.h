@@ -16,6 +16,7 @@
 
 #include "D3D12Common.h"
 #include "RHI/Shader.h"
+#include "RHI/QueryPool.h"
 #include <vector>
 
 namespace he::rhi::d3d12 {
@@ -131,6 +132,48 @@ private:
     Format m_Format = Format::RGBA8_UNORM;
     bool   m_IsDepth = false;
     D3D12Device* m_OwnerDevice = nullptr;   // 析构时注销视图映射用
+};
+
+// ---------------------------------------------------------------------------
+//  QueryPool —— GPU 查询（时间戳 / 管线统计）
+//
+//  · ID3D12QueryHeap 存查询，写完立刻 ResolveQueryData 到持久映射的 READBACK 缓冲
+//  · 可用性：命令列表提交时给本次写过的查询打上「围栏 + 值」，围栏到达即可读取
+//   （对应 Vulkan 的 VK_QUERY_RESULT_WAIT / WITH_AVAILABILITY 语义）
+// ---------------------------------------------------------------------------
+class D3D12QueryPool final : public IRHIQueryPool {
+public:
+    bool Initialize(D3D12Device* device, u32 queryCount, QueryType type);
+
+    u32       GetQueryCount() const override { return m_Count; }
+    QueryType GetQueryType()  const override { return m_Type; }
+
+    ID3D12QueryHeap* GetHeap() const { return m_Heap.Get(); }
+    ID3D12Resource*  GetReadback() const { return m_Readback.Get(); }
+    /// 每个查询在回读缓冲中的字节数
+    u32              GetResultStride() const { return m_Stride; }
+
+    /// 提交时调用：查询 index 的结果在 fence 到达 value 后可读
+    void MarkSubmitted(u32 index, ID3D12Fence* fence, u64 value);
+    /// 重置：全部查询变为「不可用」
+    void ResetAll();
+    /// 查询是否已可读；wait 为真时最多等待 timeoutMs 毫秒（设备挂起时不至于永久阻塞）
+    bool IsAvailable(u32 index, bool wait, u32 timeoutMs = 2000) const;
+    /// 原始结果指针（指向已映射的回读缓冲）
+    const u8* ResultPtr(u32 index) const {
+        return m_Mapped ? m_Mapped + static_cast<size_t>(index) * m_Stride : nullptr;
+    }
+
+private:
+    ComPtr<ID3D12QueryHeap> m_Heap;
+    ComPtr<ID3D12Resource>  m_Readback;
+    const u8*               m_Mapped = nullptr;
+    u32                     m_Count  = 0;
+    u32                     m_Stride = 8;
+    QueryType               m_Type   = QueryType::Timestamp;
+    /// 每个查询的可用条件；fence 为空表示尚未写入（或已重置）
+    struct Avail { ComPtr<ID3D12Fence> fence; u64 value = 0; };
+    std::vector<Avail>      m_Avail;
 };
 
 // ---------------------------------------------------------------------------

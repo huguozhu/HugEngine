@@ -181,14 +181,12 @@ public:
     void* CreateTextureMipSampledView(IRHITexture*, u32, u32) override { return nullptr; }
     void  DestroyTextureMipView(void* view) override;
 
-    float GetTimestampPeriod() override { return 1.0f; }   // D3D12 的 GPU 时间戳单位是 1ns
+    /// 每个时间戳 tick 的纳秒数：D3D12 时间戳以 tick 计，频率由队列给出（此前误按 1ns 返回 1.0）
+    float GetTimestampPeriod() override;
 
-    // 查询池（时间戳/遮挡）：阶段 3 实现真正的 ID3D12QueryHeap，当前返回空
+    /// 查询池（时间戳 / 管线统计）：ID3D12QueryHeap + 持久映射的回读缓冲
     std::unique_ptr<IRHIQueryPool> CreateQueryPool(u32 queryCount,
-                                                   QueryType type = QueryType::Timestamp) override {
-        (void)queryCount; (void)type;
-        return nullptr;
-    }
+                                                   QueryType type = QueryType::Timestamp) override;
 
     void WaitIdle() override;
     bool HasAsyncComputeQueue() const override { return false; }
