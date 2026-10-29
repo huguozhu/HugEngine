@@ -19,6 +19,9 @@ namespace he::rhi::d3d12 {
 
 /// 设备丢失时打印 DRED 面包屑与页错误信息（需 HE_D3D12_DRED=1，只打印一次）
 void DumpDeviceRemovedInfo(ID3D12Device* dev);
+/// 按资源描述与子资源范围构造纹理的 SRV / UAV 描述（3D / 立方体 / 数组层 / 深度格式映射）
+void BuildTextureViewDescs(const D3D12_RESOURCE_DESC& rd, u32 mip, u32 layer, bool single,
+                           D3D12_SHADER_RESOURCE_VIEW_DESC& srv, D3D12_UNORDERED_ACCESS_VIEW_DESC& uav);
 
 class D3D12SwapChain;   // 前置声明（设备要保存它的指针）
 
@@ -123,8 +126,18 @@ public:
     // 引擎只把 RTV/DSV 的 CPU 句柄（void*）传给命令列表，而 D3D12 做资源屏障
     // 需要 ID3D12Resource*，所以建视图时登记一下，用时反查。
     void RegisterViewResource(UINT64 handle, ID3D12Resource* res);
+    /// 登记「只指向某个子资源（mip / 数组层）」的视图句柄，对应 Vulkan 带 subresourceRange 的 ImageView
+    void RegisterSubresourceView(UINT64 handle, ID3D12Resource* res, u32 mip, u32 layer);
     void UnregisterViewResource(UINT64 handle);
     ID3D12Resource* FindViewResource(UINT64 handle) const;
+    /// 视图句柄 → 资源与子资源范围（UpdateDescriptorSetWithImageView 据此现建 SRV / UAV）
+    struct ViewInfo {
+        ID3D12Resource* res = nullptr;
+        u32  mip   = 0;
+        u32  layer = 0;
+        bool subresource = false;   // true：只覆盖 (mip, layer) 这一个子资源
+    };
+    const ViewInfo* FindViewInfo(UINT64 handle) const;
     /// 深度纹理的只读 DSV（READ_ONLY_DEPTH）：同一张深度图需要同时作附件与 SRV 时使用
     void RegisterReadOnlyDsv(UINT64 dsv, UINT64 readOnlyDsv) { if (dsv && readOnlyDsv) m_ReadOnlyDsv[dsv] = readOnlyDsv; }
     void UnregisterReadOnlyDsv(UINT64 dsv) { m_ReadOnlyDsv.erase(dsv); }
@@ -207,8 +220,10 @@ public:
         return CreateTextureMipStorageView(texture, mipLevel, 0);
     }
     void* CreateTextureMipStorageView(IRHITexture* texture, u32 mipLevel, u32 arrayLayer) override;
-    void* CreateTextureMipSampledView(IRHITexture*, u32) override { return nullptr; }
-    void* CreateTextureMipSampledView(IRHITexture*, u32, u32) override { return nullptr; }
+    void* CreateTextureMipSampledView(IRHITexture* texture, u32 mipLevel) override {
+        return CreateTextureMipSampledView(texture, mipLevel, 0);
+    }
+    void* CreateTextureMipSampledView(IRHITexture* texture, u32 mipLevel, u32 arrayLayer) override;
     void  DestroyTextureMipView(void* view) override;
 
     /// 每个时间戳 tick 的纳秒数：D3D12 时间戳以 tick 计，频率由队列给出（此前误按 1ns 返回 1.0）
@@ -338,6 +353,14 @@ private:
     UINT                         m_MipRtvInc  = 0;
     u32                          m_MipRtvNext = 0;
     std::vector<u32>             m_MipRtvFree;
+    /// 非渲染目标纹理的逐 mip 视图池（CPU 侧 CBV_SRV_UAV 堆）：句柄只作「视图 → 子资源」的键，
+    /// 真正绑定时由 UpdateDescriptorSetWithImageView 按子资源现建 SRV / UAV
+    ComPtr<ID3D12DescriptorHeap> m_MipViewHeap;
+    UINT                         m_MipViewInc  = 0;
+    u32                          m_MipViewNext = 0;
+    std::vector<u32>             m_MipViewFree;
+    /// 从逐 mip 视图池分配一个子资源视图句柄（SRV 或 UAV），失败返回 nullptr
+    void* CreateMipViewKey(ID3D12Resource* res, u32 mipLevel, u32 arrayLayer, bool uav);
 public:
     /// 最近一次上传的物体矩阵副本（前 32 个元素的缩放与平移），用于诊断索引是否错配
     float m_LastObjM[32][8] = {};
@@ -349,7 +372,7 @@ private:
     unsigned m_LastObjCount = 0;
 private:
 private:   // register -> 元素字节数
-    std::unordered_map<UINT64, ID3D12Resource*> m_ViewResources;
+    std::unordered_map<UINT64, ViewInfo> m_ViewResources;
     std::unordered_map<UINT64, UINT64>          m_ReadOnlyDsv;   // 普通 DSV → 只读 DSV
     mutable std::unordered_map<ID3D12Resource*, D3D12_RESOURCE_STATES> m_ResStates;
 

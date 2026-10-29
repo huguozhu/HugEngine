@@ -648,6 +648,7 @@ D3D12Texture::~D3D12Texture() {
         if (m_Dsv.ptr) m_OwnerDevice->UnregisterReadOnlyDsv(static_cast<UINT64>(m_Dsv.ptr));
         for (auto& s : m_Srvs) if (s.ptr) m_OwnerDevice->UnregisterViewResource(static_cast<UINT64>(s.ptr));
         for (auto& v : m_FaceViews) if (v.ptr) m_OwnerDevice->UnregisterViewResource(static_cast<UINT64>(v.ptr));
+        if (m_ViewKey.ptr) m_OwnerDevice->UnregisterViewResource(static_cast<UINT64>(m_ViewKey.ptr));
     }
 }
 
@@ -678,13 +679,15 @@ bool D3D12Texture::Initialize(D3D12Device* device, const TextureDesc& desc) {
         return false;
     }
 
+    // 深度 > 1 的非立方体纹理是真正的 3D 纹理（Lumen SDF 等，着色器里是 Texture3D / RWTexture3D）。
+    // 此前两个分支都建成 2D（深度被当成数组层），3D 视图与着色器声明对不上
+    const bool is3D = desc.depth > 1 && !HasAny(desc.usage, TextureUsage::Cubemap);
     D3D12_RESOURCE_DESC rd{};
-    rd.Dimension        = (desc.depth > 1 || HasAny(desc.usage, TextureUsage::Cubemap))
-                          ? D3D12_RESOURCE_DIMENSION_TEXTURE2D : D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    rd.Dimension        = is3D ? D3D12_RESOURCE_DIMENSION_TEXTURE3D : D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     rd.Alignment        = 0;
     rd.Width            = desc.width;
     rd.Height           = desc.height;
-    rd.DepthOrArraySize = static_cast<UINT16>(desc.arrayLayers * desc.depth);
+    rd.DepthOrArraySize = static_cast<UINT16>(is3D ? desc.depth : desc.arrayLayers * desc.depth);
     rd.MipLevels        = static_cast<UINT16>(desc.mipLevels);
     rd.Format           = fmt;
     rd.SampleDesc       = { desc.sampleCount, 0 };
@@ -746,9 +749,16 @@ bool D3D12Texture::Initialize(D3D12Device* device, const TextureDesc& desc) {
             m_Rtv = m_RtvHeap->GetCPUDescriptorHandleForHeapStart();
             D3D12_RENDER_TARGET_VIEW_DESC vd{};
             vd.Format = fmt;
-            vd.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
-            vd.Texture2D.MipSlice = 0;
-            vd.Texture2D.PlaneSlice = 0;
+            if (is3D) {   // 3D 渲染目标：整个 mip 0 的全部深度切片
+                vd.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE3D;
+                vd.Texture3D.MipSlice = 0;
+                vd.Texture3D.FirstWSlice = 0;
+                vd.Texture3D.WSize = static_cast<UINT>(-1);
+            } else {
+                vd.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+                vd.Texture2D.MipSlice = 0;
+                vd.Texture2D.PlaneSlice = 0;
+            }
             dev->CreateRenderTargetView(m_Resource.Get(), &vd, m_Rtv);
     device->RegisterViewResource(static_cast<UINT64>(m_Rtv.ptr), m_Resource.Get());
 
@@ -786,7 +796,7 @@ bool D3D12Texture::Initialize(D3D12Device* device, const TextureDesc& desc) {
     // 这些 pass 因此整体被跳过 ⇒ IBL 贴图与点光源阴影都是空的。
     const u32 layers = desc.arrayLayers * (desc.depth > 1 ? desc.depth : 1);
     const bool isColorRt = !m_IsDepth && HasAny(desc.usage, TextureUsage::RenderTarget);
-    if (layers > 1 && (isColorRt || m_IsDepth)) {
+    if (!is3D && layers > 1 && (isColorRt || m_IsDepth)) {
         D3D12_DESCRIPTOR_HEAP_DESC hd{};
         hd.Type = m_IsDepth ? D3D12_DESCRIPTOR_HEAP_TYPE_DSV : D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
         hd.NumDescriptors = layers;
@@ -824,9 +834,33 @@ bool D3D12Texture::Initialize(D3D12Device* device, const TextureDesc& desc) {
     // 一个状态不对的资源而让驱动静默卡死。
     device->SetResourceState(m_Resource.Get(), initState);
 
+    // 【无 RTV/DSV 的纹理也要有视图句柄】引擎用 GetNativeHandle() 当整图 ImageView 交给
+    // UpdateDescriptorSetWithImageView（Lumen 图集 / 辐照度等只做 UAV 的 compute 目标）。
+    // 此前这类纹理返回空，描述符从未写入。这里放一个 CPU 侧的 SRV 作句柄键并登记到视图表。
+    if (!m_Rtv.ptr && !m_Dsv.ptr) {
+        D3D12_DESCRIPTOR_HEAP_DESC hd{};
+        hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        hd.NumDescriptors = 1;
+        hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+        if (SUCCEEDED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_ViewKeyHeap)))) {
+            m_ViewKey = m_ViewKeyHeap->GetCPUDescriptorHandleForHeapStart();
+            D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+            D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
+            BuildTextureViewDescs(m_Resource->GetDesc(), 0, 0, false, sd, ud);
+            dev->CreateShaderResourceView(m_Resource.Get(), &sd, m_ViewKey);
+            device->RegisterViewResource(static_cast<UINT64>(m_ViewKey.ptr), m_Resource.Get());
+        }
+    }
+
     // 【初始数据】此前 D3D12 纹理完全忽略 initialData：占位白图、天空盒立方体图等
     // 内容都是未初始化显存，且一直停在 COPY_DEST（GPU 验证层 id=942）⇒ 采样结果与 Vulkan 不一致。
-    if (desc.initialData) UploadInitialData(device, desc, initState);
+    // 3D 纹理的子资源按 mip 划分（深度切片不是独立子资源），现有上传按数组层逐层写会写坏数据：明确拒绝
+    if (desc.initialData && is3D) {
+        HE_CORE_ERROR("D3D12Texture: 3D 纹理的初始数据上传尚未实现（{}x{}x{}），内容未初始化",
+                      desc.width, desc.height, desc.depth);
+    } else if (desc.initialData) {
+        UploadInitialData(device, desc, initState);
+    }
 
     if (m_Width >= 1920) HE_CORE_ERROR("[TEX-BIG] res={} {}x{} dxgi={} depth={} rtvPtr={}",
         (void*)m_Resource.Get(), m_Width, m_Height, (u32)rd.Format, m_IsDepth ? 1 : 0, (void*)m_Rtv.ptr);

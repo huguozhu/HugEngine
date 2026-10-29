@@ -91,6 +91,9 @@ public:
         if (m_IsDepth && m_Dsv.ptr) return reinterpret_cast<void*>(m_Dsv.ptr);
         if (m_Rtv.ptr)              return reinterpret_cast<void*>(m_Rtv.ptr);
         if (m_Dsv.ptr)              return reinterpret_cast<void*>(m_Dsv.ptr);
+        // 既非渲染目标也非深度（如只做 UAV 的 compute 目标）：返回整资源视图键，
+        // 引擎把它交给 UpdateDescriptorSetWithImageView 绑定（Vulkan 侧是整图 ImageView）
+        if (m_ViewKey.ptr)          return reinterpret_cast<void*>(m_ViewKey.ptr);
         return nullptr;
     }
     /// 逐面/逐层视图（与 Vulkan 的逐层 ImageView 对应）：渲染目标返回该层的 RTV，
@@ -127,6 +130,9 @@ private:
     std::vector<D3D12_CPU_DESCRIPTOR_HANDLE> m_Srvs;
     ComPtr<ID3D12DescriptorHeap>             m_FaceViewHeap;   // 逐层 RTV/DSV 的堆
     std::vector<D3D12_CPU_DESCRIPTOR_HANDLE> m_FaceViews;      // 每个数组层一个视图（mip 0）
+    /// 无 RTV/DSV 的纹理的整资源视图键（CPU 侧堆里的一个 SRV），见 GetNativeHandle
+    ComPtr<ID3D12DescriptorHeap>             m_ViewKeyHeap;
+    D3D12_CPU_DESCRIPTOR_HANDLE              m_ViewKey{};
     u32    m_Width = 1, m_Height = 1, m_Depth = 1;
     u32    m_MipLevels = 1, m_ArrayLayers = 1;
     Format m_Format = Format::RGBA8_UNORM;

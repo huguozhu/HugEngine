@@ -18,6 +18,71 @@ namespace he::rhi::d3d12 {
 // 设备存活检查（与 D3D12Resources.cpp 里的同名辅助函数用途一致）
 // 设备丢失时打印 DRED（需 HE_D3D12_DRED=1 在建设备前开启）：
 // 自动面包屑给出每个命令列表最后完成的操作，页错误给出出错的 GPU 虚拟地址。只打印一次。
+/// 按资源描述与子资源范围构造纹理的 SRV / UAV 描述。
+/// · 3D 纹理用 TEXTURE3D；立方体图整体视图用 TEXTURECUBE；指定了数组层的子资源视图用 TEXTURE2DARRAY
+/// · 子资源视图（single）只暴露 (mip, layer) 一级；整体视图从 mip 0 起覆盖全部级
+/// · 深度 / TYPELESS 格式映射到可读写的具体格式（DSV 格式不是合法的 SRV 格式，直接用会移除设备）
+void BuildTextureViewDescs(const D3D12_RESOURCE_DESC& rd, u32 mip, u32 layer, bool single,
+                           D3D12_SHADER_RESOURCE_VIEW_DESC& srv, D3D12_UNORDERED_ACCESS_VIEW_DESC& uav) {
+    DXGI_FORMAT f = DXGI_FORMAT_UNKNOWN;   // UNKNOWN：沿用资源格式
+    switch (rd.Format) {
+        case DXGI_FORMAT_R16G16B16A16_TYPELESS: f = DXGI_FORMAT_R16G16B16A16_FLOAT;    break;
+        case DXGI_FORMAT_R8G8B8A8_TYPELESS:     f = DXGI_FORMAT_R8G8B8A8_UNORM;        break;
+        case DXGI_FORMAT_B8G8R8A8_TYPELESS:     f = DXGI_FORMAT_B8G8R8A8_UNORM;        break;
+        case DXGI_FORMAT_R32_TYPELESS:          f = DXGI_FORMAT_R32_FLOAT;             break;
+        case DXGI_FORMAT_D32_FLOAT:             f = DXGI_FORMAT_R32_FLOAT;             break;
+        case DXGI_FORMAT_D24_UNORM_S8_UINT:     f = DXGI_FORMAT_R24_UNORM_X8_TYPELESS; break;
+        case DXGI_FORMAT_D16_UNORM:             f = DXGI_FORMAT_R16_UNORM;             break;
+        default: break;
+    }
+    const UINT mips   = rd.MipLevels;
+    const UINT layers = rd.DepthOrArraySize;
+    srv = {};
+    srv.Format = f;
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    uav = {};
+    uav.Format = f;
+    if (rd.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D) {
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
+        srv.Texture3D.MostDetailedMip = single ? mip : 0;
+        srv.Texture3D.MipLevels       = single ? 1 : mips;
+        uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D;
+        uav.Texture3D.MipSlice    = mip;
+        uav.Texture3D.FirstWSlice = 0;
+        uav.Texture3D.WSize       = static_cast<UINT>(-1);   // 该级的全部深度切片
+        return;
+    }
+    if (single && layers > 1) {
+        // 某一层某一级（立方体图逐面、数组逐层）
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+        srv.Texture2DArray.MostDetailedMip = mip;
+        srv.Texture2DArray.MipLevels       = 1;
+        srv.Texture2DArray.FirstArraySlice = layer;
+        srv.Texture2DArray.ArraySize       = 1;
+        uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
+        uav.Texture2DArray.MipSlice        = mip;
+        uav.Texture2DArray.FirstArraySlice = layer;
+        uav.Texture2DArray.ArraySize       = 1;
+        return;
+    }
+    if (!single && layers == 6) {
+        // 立方体贴图（天空盒/IBL）必须用 TEXTURECUBE 维度建 SRV，否则采样恒为 0
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+        srv.TextureCube.MostDetailedMip = 0;
+        srv.TextureCube.MipLevels       = mips;
+        uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
+        uav.Texture2DArray.MipSlice        = mip;
+        uav.Texture2DArray.FirstArraySlice = 0;
+        uav.Texture2DArray.ArraySize       = layers;
+        return;
+    }
+    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srv.Texture2D.MostDetailedMip = single ? mip : 0;
+    srv.Texture2D.MipLevels       = single ? 1 : mips;
+    uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+    uav.Texture2D.MipSlice = mip;
+}
+
 void DumpDeviceRemovedInfo(ID3D12Device* dev) {
     static bool s_dumped = false;
     if (s_dumped || !dev) return;
@@ -682,7 +747,14 @@ bool D3D12Device::EnsureDescriptorHeaps() {
 
 void D3D12Device::RegisterViewResource(UINT64 handle, ID3D12Resource* res) {
     if (!handle || !res) return;
-    m_ViewResources[handle] = res;
+    m_ViewResources[handle] = ViewInfo{ res, 0, 0, false };
+    if (m_ResStates.find(res) == m_ResStates.end())
+        m_ResStates[res] = D3D12_RESOURCE_STATE_COMMON;
+}
+
+void D3D12Device::RegisterSubresourceView(UINT64 handle, ID3D12Resource* res, u32 mip, u32 layer) {
+    if (!handle || !res) return;
+    m_ViewResources[handle] = ViewInfo{ res, mip, layer, true };
     if (m_ResStates.find(res) == m_ResStates.end())
         m_ResStates[res] = D3D12_RESOURCE_STATE_COMMON;
 }
@@ -691,13 +763,21 @@ void D3D12Device::UnregisterViewResource(UINT64 handle) {
     if (!handle) return;
     const auto it = m_ViewResources.find(handle);
     if (it == m_ViewResources.end()) return;
-    m_ResStates.erase(it->second);
+    // 只有「整资源」视图随纹理一起注销时才清掉状态记录；子资源视图（逐 mip / 逐层）可能在
+    // 纹理存活期间被单独销毁重建（Hi-Z 随尺寸重建、IBL 缓存的逐 mip 视图），此时清掉会让
+    // 下一次屏障的 StateBefore 退回 COMMON 而与实际不符
+    if (!it->second.subresource) m_ResStates.erase(it->second.res);
     m_ViewResources.erase(it);
 }
 
 ID3D12Resource* D3D12Device::FindViewResource(UINT64 handle) const {
     const auto it = m_ViewResources.find(handle);
-    return it == m_ViewResources.end() ? nullptr : it->second;
+    return it == m_ViewResources.end() ? nullptr : it->second.res;
+}
+
+const D3D12Device::ViewInfo* D3D12Device::FindViewInfo(UINT64 handle) const {
+    const auto it = m_ViewResources.find(handle);
+    return it == m_ViewResources.end() ? nullptr : &it->second;
 }
 
 D3D12_RESOURCE_STATES D3D12Device::GetResourceState(ID3D12Resource* res) const {
@@ -839,7 +919,7 @@ void ScanOneRt(ID3D12Device* dev, ID3D12CommandQueue* queue, ID3D12Resource* res
 void D3D12Device::ScanAllHdrTargets() {
     int idx = 0;
     for (auto& kv : m_ViewResources) {
-        ID3D12Resource* r = kv.second;
+        ID3D12Resource* r = kv.second.res;
         if (!r) continue;
         const D3D12_RESOURCE_DESC d = r->GetDesc();
         if (d.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D) continue;
@@ -979,7 +1059,10 @@ void* D3D12Device::CreateTextureMipStorageView(IRHITexture* texture, u32 mipLeve
     if (!m_Device || !tex || !tex->GetResource()) return nullptr;
     ID3D12Resource* res = tex->GetResource();
     const D3D12_RESOURCE_DESC rd = res->GetDesc();
-    if (!(rd.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)) return nullptr;   // 只支持渲染目标用途
+    // 非渲染目标：compute 逐 mip 写入（Hi-Z 金字塔等），返回该子资源的 UAV 视图键；
+    // 渲染目标仍返回 RTV（IBL 预过滤等逐 mip 渲染直接拿它当附件）
+    if (!(rd.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET))
+        return CreateMipViewKey(res, mipLevel, arrayLayer, true);
     if (mipLevel >= rd.MipLevels || arrayLayer >= rd.DepthOrArraySize) return nullptr;
 
     if (!m_MipRtvHeap) {
@@ -1003,15 +1086,62 @@ void* D3D12Device::CreateTextureMipStorageView(IRHITexture* texture, u32 mipLeve
     vd.Texture2DArray.FirstArraySlice = arrayLayer;
     vd.Texture2DArray.ArraySize = 1;
     m_Device->CreateRenderTargetView(res, &vd, h);
-    // 命令列表靠「视图句柄 → 资源」反查来做屏障
-    RegisterViewResource(static_cast<UINT64>(h.ptr), res);
+    // 命令列表靠「视图句柄 → 资源」反查来做屏障；同时记下子资源，供按视图写描述符
+    RegisterSubresourceView(static_cast<UINT64>(h.ptr), res, mipLevel, arrayLayer);
     return reinterpret_cast<void*>(h.ptr);
 }
 
+void* D3D12Device::CreateMipViewKey(ID3D12Resource* res, u32 mipLevel, u32 arrayLayer, bool uav) {
+    if (!m_Device || !res) return nullptr;
+    const D3D12_RESOURCE_DESC rd = res->GetDesc();
+    const bool is3D = rd.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+    if (mipLevel >= rd.MipLevels || (!is3D && arrayLayer >= rd.DepthOrArraySize)) return nullptr;
+    if (uav && !(rd.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)) return nullptr;
+    if (!m_MipViewHeap) {
+        D3D12_DESCRIPTOR_HEAP_DESC hd{};
+        hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        hd.NumDescriptors = kMipRtvCapacity;
+        hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;   // CPU 侧：只作句柄键，不被着色器访问
+        if (FAILED(m_Device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_MipViewHeap)))) return nullptr;
+        m_MipViewInc = m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    }
+    u32 idx = 0;
+    if (!m_MipViewFree.empty()) { idx = m_MipViewFree.back(); m_MipViewFree.pop_back(); }
+    else if (m_MipViewNext < kMipRtvCapacity) { idx = m_MipViewNext++; }
+    else { HE_CORE_ERROR("D3D12Device: 逐 mip 视图池耗尽（{}）", kMipRtvCapacity); return nullptr; }
+
+    D3D12_CPU_DESCRIPTOR_HANDLE h = m_MipViewHeap->GetCPUDescriptorHandleForHeapStart();
+    h.ptr += static_cast<SIZE_T>(idx) * m_MipViewInc;
+    // 句柄位置上放一个合法的视图（内容不被使用，只保证句柄指向有效描述符）
+    D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+    D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
+    BuildTextureViewDescs(rd, mipLevel, arrayLayer, true, sd, ud);
+    if (uav) m_Device->CreateUnorderedAccessView(res, nullptr, &ud, h);
+    else     m_Device->CreateShaderResourceView(res, &sd, h);
+    RegisterSubresourceView(static_cast<UINT64>(h.ptr), res, mipLevel, arrayLayer);
+    return reinterpret_cast<void*>(h.ptr);
+}
+
+void* D3D12Device::CreateTextureMipSampledView(IRHITexture* texture, u32 mipLevel, u32 arrayLayer) {
+    auto* tex = static_cast<D3D12Texture*>(texture);
+    if (!tex || !tex->GetResource()) return nullptr;
+    return CreateMipViewKey(tex->GetResource(), mipLevel, arrayLayer, false);
+}
+
 void D3D12Device::DestroyTextureMipView(void* view) {
-    if (!view || !m_MipRtvHeap || m_MipRtvInc == 0) return;
-    const SIZE_T base = m_MipRtvHeap->GetCPUDescriptorHandleForHeapStart().ptr;
+    if (!view) return;
     const SIZE_T p = reinterpret_cast<SIZE_T>(view);
+    // 逐 mip 视图池（非渲染目标的 SRV / UAV 视图键）
+    if (m_MipViewHeap && m_MipViewInc) {
+        const SIZE_T vb = m_MipViewHeap->GetCPUDescriptorHandleForHeapStart().ptr;
+        if (p >= vb && p < vb + static_cast<SIZE_T>(kMipRtvCapacity) * m_MipViewInc) {
+            UnregisterViewResource(static_cast<UINT64>(p));
+            m_MipViewFree.push_back(static_cast<u32>((p - vb) / m_MipViewInc));
+            return;
+        }
+    }
+    if (!m_MipRtvHeap || m_MipRtvInc == 0) return;
+    const SIZE_T base = m_MipRtvHeap->GetCPUDescriptorHandleForHeapStart().ptr;
     if (p < base || p >= base + static_cast<SIZE_T>(kMipRtvCapacity) * m_MipRtvInc) return;   // 不是本池的视图
     UnregisterViewResource(static_cast<UINT64>(p));
     // RTV 描述符在 OMSetRenderTargets 录制时就被读取，回收后复用不影响已录制的命令
@@ -1462,38 +1592,15 @@ void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, Desc
     // 描述符写在「该 set 的基址 + binding」：绑定时按 space 绑 set 的区段基址，
     // 写入与读取用同一套偏移才能对上。
     D3D12_CPU_DESCRIPTOR_HANDLE dst = SetWriteHandle(s, s.baseSlot + binding);
+    // 整资源视图（立方体 / 3D / 2D 维度与深度格式映射见 BuildTextureViewDescs）
     D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
-    // 立方体贴图（天空盒/IBL）必须用 TEXTURECUBE 维度建 SRV，否则采样恒为 0
-    srv.ViewDimension = (tex->GetArrayLayers() == 6) ? D3D12_SRV_DIMENSION_TEXTURECUBE : D3D12_SRV_DIMENSION_TEXTURE2D;
-    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    if (srv.ViewDimension == D3D12_SRV_DIMENSION_TEXTURECUBE) srv.TextureCube.MipLevels = tex->GetMipLevels();
-    else srv.Texture2D.MipLevels = tex->GetMipLevels();
-
-    // 【深度纹理必须显式给 SRV 格式】D3D 的 DSV 格式（D32_FLOAT 等）**不是**合法的
-    // SRV 格式；用 Format=UNKNOWN 让运行时自己推断时会命中 D32_FLOAT，
-    // CreateShaderResourceView 直接判非法调用并移除设备
-    //（实测 02.Cube 的 2048x2048 阴影贴图在这里让设备丢失，reason=0x887a0001）。
-    // 深度读必须映射到对应的 Rxx 格式。
-    {
-        DXGI_FORMAT resFmt = DXGI_FORMAT_UNKNOWN;
-        if (auto* res = tex->GetResource()) resFmt = res->GetDesc().Format;
-        switch (resFmt) {
-            case DXGI_FORMAT_D32_FLOAT:         srv.Format = DXGI_FORMAT_R32_FLOAT; break;
-            case DXGI_FORMAT_D24_UNORM_S8_UINT: srv.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS; break;
-            case DXGI_FORMAT_D16_UNORM:         srv.Format = DXGI_FORMAT_R16_UNORM; break;
-            default:                            srv.Format = DXGI_FORMAT_UNKNOWN; break;   // 颜色纹理沿用资源格式
-        }
-    }
+    D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+    BuildTextureViewDescs(tex->GetResource()->GetDesc(), 0, 0, false, srv, uav);
     m_Device->CreateShaderResourceView(tex->GetResource(), &srv, dst);
     CheckDeviceAlive(m_Device.Get(), "CreateShaderResourceView(texture)");
 
     // StorageImage（RWTexture）需要一个 UAV 视图
     if (type == DescriptorType::StorageImage) {
-        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
-        uav.Format = DXGI_FORMAT_UNKNOWN;
-        uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-        uav.Texture2D.MipSlice = 0;
-        uav.Texture2D.PlaneSlice = 0;
         m_Device->CreateUnorderedAccessView(tex->GetResource(), nullptr, &uav,
                                             SetWriteHandle(s, s.uavBase + binding));
     }
@@ -1534,47 +1641,33 @@ void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle, u32, DescriptorType, 
 // 色调映射因此采样到空纹理，输出全黑（RenderDoc 实测 d.resource = ResourceId::0）。
 void D3D12Device::UpdateDescriptorSetWithImageView(DescriptorSetHandle set, u32 binding,
                                                    DescriptorType type, void* imageView) {
-    { static int n=0; if (++n <= 6) HE_CORE_ERROR("[IV] set={} binding={} view={} res={}", (u64)set, binding, imageView, (void*)FindViewResource(reinterpret_cast<UINT64>(imageView))); }
     if (!m_Device || !imageView) return;
-    // 引擎给的是「视图句柄」：先反查它对应的资源
-    ID3D12Resource* res = FindViewResource(reinterpret_cast<UINT64>(imageView));
-    if (!res) return;
-
+    // 引擎给的是「视图句柄」：反查它对应的资源与子资源范围（逐 mip / 逐层视图只覆盖一个子资源）
+    const ViewInfo* vi = FindViewInfo(reinterpret_cast<UINT64>(imageView));
+    if (!vi || !vi->res) return;
+    ID3D12Resource* res = vi->res;
     const D3D12_RESOURCE_DESC rd = res->GetDesc();
-    if (rd.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D) return;
+    if (rd.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D &&
+        rd.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE3D) return;
 
-    // 目标槽位：与 UpdateDescriptorSet(texture) 相同的布局（set 的 baseSlot + binding）
+    // 目标槽位：与 UpdateDescriptorSet(texture) 相同的布局（set 的 baseSlot / uavBase + binding）
     if (set == kInvalidSet || set > m_DescriptorSets.size()) return;
     if (!EnsureDescriptorHeaps()) return;
     auto& s = m_DescriptorSets[static_cast<size_t>(set - 1)];
     s.textures[binding] = res;   // 同上：供绘制前补状态转换
+    s.buffers.erase(binding);
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC  sd{};
+    D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
+    BuildTextureViewDescs(rd, vi->mip, vi->layer, vi->subresource, sd, ud);
     const D3D12_CPU_DESCRIPTOR_HANDLE dst = SetWriteHandle(s, s.baseSlot + binding);
     if (!dst.ptr) return;
-
-    // TYPELESS / 深度格式需要映射成可采样的具体格式
-    DXGI_FORMAT f = rd.Format;
-    switch (f) {
-        case DXGI_FORMAT_R16G16B16A16_TYPELESS: f = DXGI_FORMAT_R16G16B16A16_FLOAT; break;
-        case DXGI_FORMAT_R8G8B8A8_TYPELESS:     f = DXGI_FORMAT_R8G8B8A8_UNORM;    break;
-        case DXGI_FORMAT_B8G8R8A8_TYPELESS:     f = DXGI_FORMAT_B8G8R8A8_UNORM;    break;
-        case DXGI_FORMAT_R32_TYPELESS:          f = DXGI_FORMAT_R32_FLOAT;         break;
-        case DXGI_FORMAT_D32_FLOAT:             f = DXGI_FORMAT_R32_FLOAT;         break;
-        case DXGI_FORMAT_D24_UNORM_S8_UINT:     f = DXGI_FORMAT_R24_UNORM_X8_TYPELESS; break;
-        case DXGI_FORMAT_D16_UNORM:             f = DXGI_FORMAT_R16_UNORM;         break;
-        default: break;
-    }
-    D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
-    sd.Format = f;
-    sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    if (rd.DepthOrArraySize == 6) {
-        sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
-        sd.TextureCube.MipLevels = rd.MipLevels;
-    } else {
-        sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-        sd.Texture2D.MipLevels = rd.MipLevels;
-    }
     m_Device->CreateShaderResourceView(res, &sd, dst);
-    (void)type;
+    // StorageImage（RWTexture）由着色器的 u 寄存器读写：必须在 UAV 区写一个 UAV。
+    // 此前这里只写 SRV、忽略了 type ⇒ compute 写入目标（Lumen 图集、Hi-Z 逐级）全部无效
+    if (type == DescriptorType::StorageImage && (rd.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)) {
+        m_Device->CreateUnorderedAccessView(res, nullptr, &ud, SetWriteHandle(s, s.uavBase + binding));
+    }
 }
 
 } // namespace he::rhi::d3d12
