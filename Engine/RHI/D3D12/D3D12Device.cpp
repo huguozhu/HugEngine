@@ -348,6 +348,23 @@ bool D3D12Device::CreateDeviceAndQueue() {
     if (!HE_D3D12_CHECK(m_Device->CreateCommandQueue(&qd, IID_PPV_ARGS(&m_Queue)), "CreateCommandQueue")) {
         return false;
     }
+    m_Queue->SetName(L"HugEngine 图形队列");
+
+    // 异步计算队列：COMPUTE 类型的列表只能提交到 COMPUTE 队列（提交到图形队列会被调试层判为类型不匹配
+    // 并移除设备）。RenderGraph 据 HasAsyncComputeQueue 把可异步的计算 pass 录到计算列表、经时间线围栏
+    // 与图形队列同步。创建失败不影响启动：此时 HasAsyncComputeQueue 为假，引擎走单队列路径
+    static const bool s_NoAsync = (std::getenv("HE_D3D12_NO_ASYNC_COMPUTE") != nullptr);
+    if (!s_NoAsync) {
+        D3D12_COMMAND_QUEUE_DESC cqd{};
+        cqd.Type  = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+        cqd.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
+        if (SUCCEEDED(m_Device->CreateCommandQueue(&cqd, IID_PPV_ARGS(&m_ComputeQueue)))) {
+            m_ComputeQueue->SetName(L"HugEngine 计算队列");
+        } else {
+            m_ComputeQueue.Reset();
+            HE_CORE_WARN("[D3D12] 计算队列创建失败，异步计算不可用");
+        }
+    }
 
     // 能力查询
     m_Caps.maxBindlessResources = 65536;
@@ -440,9 +457,16 @@ void D3D12Device::WaitIdle() {
     HANDLE ev = CreateEventEx(nullptr, nullptr, 0, EVENT_ALL_ACCESS);
     if (!ev) return;
     HE_CORE_INFO("[WaitIdle 进入]");
-    m_Queue->Signal(fence.Get(), 1);
-    if (fence->GetCompletedValue() < 1) {
-        fence->SetEventOnCompletion(1, ev);
+    // 计算队列先发 1，图形队列等它之后再发 2：围栏到达 target 即两条队列此前提交的工作都已完成
+    UINT64 target = 1;
+    if (m_ComputeQueue) {
+        m_ComputeQueue->Signal(fence.Get(), 1);
+        m_Queue->Wait(fence.Get(), 1);
+        target = 2;
+    }
+    m_Queue->Signal(fence.Get(), target);
+    if (fence->GetCompletedValue() < target) {
+        fence->SetEventOnCompletion(target, ev);
         // 【不能无限等待】若 GPU 侧有未完成的非法操作，INFINITE 会让进程永久挂起、
         // 且不产生任何日志（实测 02.Cube 初始化末尾就是这样停住的）。
         // 改成有上限的等待，超时就明确报出来。
@@ -505,16 +529,16 @@ u64 D3D12Device::GetFenceValue(RHIFenceHandle fence) const {
     return e.fence ? e.fence->GetCompletedValue() : 0;
 }
 
-void D3D12Device::SignalFenceOnQueue(QueueType, RHIFenceHandle fence, u64 value) {
+void D3D12Device::SignalFenceOnQueue(QueueType queue, RHIFenceHandle fence, u64 value) {
     if (fence == kInvalidFence || fence > m_Fences.size() || !m_Queue) return;
     auto& e = m_Fences[static_cast<size_t>(fence - 1)];
-    if (e.fence) m_Queue->Signal(e.fence.Get(), value);
+    if (e.fence) GetQueue(queue)->Signal(e.fence.Get(), value);   // 在指定队列上发信号（计算 / 图形）
 }
 
-void D3D12Device::WaitFenceOnQueue(QueueType, RHIFenceHandle fence, u64 value) {
+void D3D12Device::WaitFenceOnQueue(QueueType queue, RHIFenceHandle fence, u64 value) {
     if (fence == kInvalidFence || fence > m_Fences.size() || !m_Queue) return;
     auto& e = m_Fences[static_cast<size_t>(fence - 1)];
-    if (e.fence) m_Queue->Wait(e.fence.Get(), value);
+    if (e.fence) GetQueue(queue)->Wait(e.fence.Get(), value);   // 指定队列在 GPU 侧等待
 }
 
 void D3D12Device::Submit(IRHICommandList* cmdList, RHICommandList* stream) {
@@ -527,9 +551,11 @@ void D3D12Device::Submit(IRHICommandList* cmdList, RHICommandList* stream) {
     if (!lists[0]) return;
     static const bool s_LogSubmit = (std::getenv("HE_SUBSEQ") != nullptr);   // 每帧调用，只读一次环境变量
     if (s_LogSubmit) HE_CORE_ERROR("[SUB] list={} draws={}", (void*)cl, cl->GetTotalDraws());
+    // 按列表类型选队列：计算列表进计算队列（与图形队列并行），其余进图形队列
+    ID3D12CommandQueue* queue = GetQueue(cl->GetQueueType());
     cl->ApplyTimelineWaits();         // 本次提交要等的时间线值：先于命令执行
-    m_Queue->ExecuteCommandLists(1, lists);
-    cl->OnSubmitted(m_Queue.Get());   // 记录该列表当前帧槽位的完成围栏
+    queue->ExecuteCommandLists(1, lists);
+    cl->OnSubmitted(queue);           // 记录该列表当前帧槽位的完成围栏
     cl->ApplyTimelineSignals();       // 本次提交的时间线信号：命令执行完之后才到达
     // 每帧输出一次调试层的 ERROR（VS 的「输出」窗口内容进不了日志，这里补上）
     if (m_InfoQueue) {

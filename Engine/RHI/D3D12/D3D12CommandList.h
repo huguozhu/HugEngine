@@ -28,6 +28,8 @@ public:
     ~D3D12CommandList() override;
 
     bool Initialize(D3D12Device* device, QueueType queue);
+    /// 本列表提交到的队列类型（计算列表进计算队列）
+    QueueType GetQueueType() const { return m_QueueType; }
 
     // ---- 生命周期 ----
     void Begin() override;
@@ -179,6 +181,7 @@ private:
     IRHISwapChain*    m_SwapChain = nullptr;
     D3D12PipelineState* m_Pipeline = nullptr;
     bool m_Recording = false;
+    QueueType m_QueueType = QueueType::Graphics;   // 创建时确定的队列类型
     /// 当前管线是否为计算管线（决定绑定哪一套根签名与描述符表）
     bool m_IsComputePipeline = false;
     /// 间接绘制的命令签名缓存。**必须活到 GPU 执行完**：此前每次调用都建局部

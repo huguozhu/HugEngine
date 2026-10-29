@@ -261,7 +261,8 @@ public:
                                                    QueryType type = QueryType::Timestamp) override;
 
     void WaitIdle() override;
-    bool HasAsyncComputeQueue() const override { return false; }
+    /// 是否有独立的计算队列（异步计算）：创建成功即为真，HE_D3D12_NO_ASYNC_COMPUTE=1 时不创建
+    bool HasAsyncComputeQueue() const override { return m_ComputeQueue != nullptr; }
     u32  GetQueueFamily(QueueType) const override { return 0; }
 
     RHIFenceHandle CreateFence() override;
@@ -277,6 +278,10 @@ public:
     // ---- 内部访问（供 CommandList / SwapChain 使用，非 RHI 接口）----
     ID3D12Device*                GetDevice()  const { return m_Device.Get(); }
     ID3D12CommandQueue*          GetQueue()   const { return m_Queue.Get(); }
+    /// 按队列类型取原生队列：计算队列不存在时退回图形队列
+    ID3D12CommandQueue*          GetQueue(QueueType type) const {
+        return (type == QueueType::Compute && m_ComputeQueue) ? m_ComputeQueue.Get() : m_Queue.Get();
+    }
     UINT                         GetRtvIncrement() const { return m_RtvDescSize; }
     UINT                         GetDsvIncrement() const { return m_DsvDescSize; }
     IDXGIFactory4*               GetFactory() const { return m_Factory.Get(); }
@@ -518,6 +523,7 @@ private:   // register -> 元素字节数
     ComPtr<IDXGIFactory4>       m_Factory;
     ComPtr<ID3D12Device>        m_Device;
     ComPtr<ID3D12CommandQueue>  m_Queue;
+    ComPtr<ID3D12CommandQueue>  m_ComputeQueue;   // 异步计算队列（COMPUTE 类型，与图形队列并行执行）
     ComPtr<ID3D12Debug>         m_Debug;
     ComPtr<ID3D12InfoQueue>     m_InfoQueue;
 

@@ -37,10 +37,13 @@ bool D3D12CommandList::Initialize(D3D12Device* device, QueueType queue) {
     if (!device || !device->GetDevice()) return false;
     m_Device = device;
     ID3D12Device* dev = device->GetDevice();
+    // 没有独立计算队列时计算列表按图形列表创建（COMPUTE 列表不能提交到图形队列）
+    m_QueueType = (queue == QueueType::Compute && device->HasAsyncComputeQueue()) ? QueueType::Compute
+                                                                                  : QueueType::Graphics;
 
     // 图形的 DIRECT 队列 / 计算的 COMPUTE 队列
     const D3D12_COMMAND_LIST_TYPE type =
-        (queue == QueueType::Compute) ? D3D12_COMMAND_LIST_TYPE_COMPUTE
+        (m_QueueType == QueueType::Compute) ? D3D12_COMMAND_LIST_TYPE_COMPUTE
                                       : D3D12_COMMAND_LIST_TYPE_DIRECT;
 
     for (auto& alloc : m_Allocators) {
@@ -61,7 +64,7 @@ bool D3D12CommandList::Initialize(D3D12Device* device, QueueType queue) {
     }
     m_Device->RegisterCommandList(this);   // DRED 报告据此把面包屑对应回事件名
     // 命名：DRED 报告与 RenderDoc 里据此区分图形 / 计算列表
-    m_List->SetName(queue == QueueType::Compute ? L"HugEngine 计算命令列表" : L"HugEngine 图形命令列表");
+    m_List->SetName(m_QueueType == QueueType::Compute ? L"HugEngine 计算命令列表" : L"HugEngine 图形命令列表");
     // 创建后默认是开着的，先关掉，等 Begin() 再 Reset
     m_List->Close();
     return true;
@@ -1396,12 +1399,12 @@ void D3D12CommandList::SetTimelineWait(RHIFenceHandle fence, u64 value) {
 }
 
 void D3D12CommandList::ApplyTimelineWaits() {
-    if (m_Device) for (const auto& [f, v] : m_PendingWaits) m_Device->WaitFenceOnQueue(QueueType::Graphics, f, v);
+    if (m_Device) for (const auto& [f, v] : m_PendingWaits) m_Device->WaitFenceOnQueue(m_QueueType, f, v);   // 在本列表所在队列上等待
     m_PendingWaits.clear();
 }
 
 void D3D12CommandList::ApplyTimelineSignals() {
-    if (m_Device) for (const auto& [f, v] : m_PendingSignals) m_Device->SignalFenceOnQueue(QueueType::Graphics, f, v);
+    if (m_Device) for (const auto& [f, v] : m_PendingSignals) m_Device->SignalFenceOnQueue(m_QueueType, f, v);   // 在本列表所在队列上发信号
     m_PendingSignals.clear();
 }
 
