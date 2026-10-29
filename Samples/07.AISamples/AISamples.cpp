@@ -52,8 +52,8 @@ int main() {
     // --- 1. 引擎 + RHI + SwapChain ---
     EngineConfig config;
     config.appName       = "HugEngine — AI Samples";
-    config.windowWidth   = 1280;
-    config.windowHeight  = 720;
+    config.windowWidth   = 960;    // 与 02.Cube 一致
+    config.windowHeight  = 540;
     Engine engine(config);
     engine.Initialize();
 
