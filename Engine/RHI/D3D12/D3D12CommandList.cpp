@@ -1153,7 +1153,32 @@ void D3D12CommandList::CopyTextureToTexture(IRHITexture* src, IRHITexture* dst) 
     if (!m_List || !src || !dst) return;
     auto* s = static_cast<D3D12Texture*>(src);
     auto* d = static_cast<D3D12Texture*>(dst);
-    m_List->CopyResource(d->GetResource(), s->GetResource());
+    ID3D12Resource* sr = s->GetResource();
+    ID3D12Resource* dr = d->GetResource();
+    if (!sr || !dr || sr == dr || !m_Device) return;
+    // CopyResource 要求源 / 目标分别处于 COPY_SOURCE / COPY_DEST：临时转过去，拷完转回原状态
+    //（设备级状态记录不变）。此前不做转换，渲染目标等状态下直接拷贝属非法调用
+    const D3D12_RESOURCE_STATES ss = m_Device->GetResourceState(sr);
+    const D3D12_RESOURCE_STATES ds = m_Device->GetResourceState(dr);
+    D3D12_RESOURCE_BARRIER b[2]{};
+    UINT nb = 0;
+    auto add = [&](ID3D12Resource* r, D3D12_RESOURCE_STATES from, D3D12_RESOURCE_STATES to) {
+        if (from == to) return;
+        b[nb].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b[nb].Transition.pResource   = r;
+        b[nb].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b[nb].Transition.StateBefore = from;
+        b[nb].Transition.StateAfter  = to;
+        ++nb;
+    };
+    add(sr, ss, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    add(dr, ds, D3D12_RESOURCE_STATE_COPY_DEST);
+    if (nb) m_List->ResourceBarrier(nb, b);
+    m_List->CopyResource(dr, sr);
+    nb = 0;
+    add(sr, D3D12_RESOURCE_STATE_COPY_SOURCE, ss);
+    add(dr, D3D12_RESOURCE_STATE_COPY_DEST, ds);
+    if (nb) m_List->ResourceBarrier(nb, b);
 }
 
 void D3D12CommandList::CopyTextureToBuffer(IRHITexture* src, IRHIBuffer* dst, u32 x, u32 y,
