@@ -56,6 +56,10 @@ private:
         std::unique_ptr<rhi::IRHIBuffer> particleBuf;
         std::unique_ptr<rhi::IRHIBuffer> deadList, alivePre, alivePost;
         std::unique_ptr<rhi::IRHIBuffer> counters, randomFloats;
+        /// 计数器重置值的暂存缓冲（按飞行帧轮换）：每帧的重置通过 CopyBuffer 在 GPU 时间线上执行，
+        /// 避免 CPU 在录制时直接改写仍被在飞帧使用的计数器
+        std::unique_ptr<rhi::IRHIBuffer> counterReset[rhi::kMaxFramesInFlight];
+        u32 counterResetSlot = 0;
         std::unique_ptr<rhi::IRHIBuffer> sortIndices;
         std::unique_ptr<rhi::IRHIBuffer> emitUB, simUB, cullingUB, renderUB;
         std::unique_ptr<rhi::IRHIBuffer> drawIndirectArgs, emitIndirectArgs, simIndirectArgs;
