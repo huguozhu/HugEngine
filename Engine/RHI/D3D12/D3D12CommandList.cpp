@@ -17,7 +17,20 @@
 namespace he::rhi::d3d12 {
 
 D3D12CommandList::~D3D12CommandList() {
-    if (m_Device) m_Device->UnregisterCommandList(this);
+    if (!m_Device) return;
+    m_Device->UnregisterCommandList(this);
+    // 【GPU 可能仍在执行】RenderGraph 每帧新建异步计算列表，提交后函数返回即析构：此前原生列表、
+    // 分配器、命令签名、临时资源随之立即释放，GPU 还在读它们（命令内存被回收 ⇒ 页错误 / 设备移除）。
+    // 取各槽位最后一次提交的围栏值，未完成就交给设备延迟到围栏到达后再释放
+    u64 last = 0;
+    for (u64 v : m_SlotFenceValues) last = std::max(last, v);
+    if (!m_SlotFence || last == 0 || m_SlotFence->GetCompletedValue() >= last) return;
+    std::vector<ComPtr<IUnknown>> keep;
+    if (m_List) keep.emplace_back(m_List);
+    for (auto& a : m_Allocators) if (a) keep.emplace_back(a);
+    for (auto& [key, sig] : m_CmdSigs) if (sig) keep.emplace_back(sig);
+    for (auto& slot : m_TempResources) for (auto& r : slot) if (r) keep.emplace_back(r);
+    m_Device->DeferRelease(m_SlotFence, last, std::move(keep));
 }
 
 bool D3D12CommandList::Initialize(D3D12Device* device, QueueType queue) {

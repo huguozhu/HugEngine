@@ -221,6 +221,7 @@ D3D12Device::~D3D12Device() {
     // 退出前确保 GPU 空闲，否则销毁资源时驱动会报 use-after-free
     if (m_Queue) { m_Queue->Signal(nullptr, 0); }
     WaitIdle();
+    m_DeferredReleases.clear();   // GPU 已空闲：延迟释放的对象可以全部释放
     // 调试层报告（退出时统一输出一次，避免刷屏）
     if (m_InfoQueue) {
         UINT64 n = m_InfoQueue->GetNumStoredMessages();
@@ -520,6 +521,7 @@ void D3D12Device::Submit(IRHICommandList* cmdList, RHICommandList* stream) {
     (void)stream;
     if (TraceEnabled()) { std::printf("[TRACE] Submit\n"); std::fflush(stdout); }
     if (!cmdList || !m_Queue) return;
+    CollectDeferredReleases();   // 顺带释放 GPU 已用完的延迟对象（析构的命令列表等）
     auto* cl = static_cast<D3D12CommandList*>(cmdList);
     ID3D12CommandList* lists[1] = { cl->GetNativeCommandList() };
     if (!lists[0]) return;
@@ -1333,6 +1335,18 @@ void D3D12Device::RegisterCommandList(D3D12CommandList* cl) {
 
 void D3D12Device::UnregisterCommandList(D3D12CommandList* cl) {
     g_CommandLists.erase(std::remove(g_CommandLists.begin(), g_CommandLists.end(), cl), g_CommandLists.end());
+}
+
+void D3D12Device::DeferRelease(ComPtr<ID3D12Fence> fence, u64 value, std::vector<ComPtr<IUnknown>> objects) {
+    if (!fence || fence->GetCompletedValue() >= value) return;   // GPU 已执行完：objects 随参数析构即释放
+    m_DeferredReleases.push_back({ std::move(fence), value, std::move(objects) });
+}
+
+void D3D12Device::CollectDeferredReleases() {
+    m_DeferredReleases.erase(
+        std::remove_if(m_DeferredReleases.begin(), m_DeferredReleases.end(),
+                       [](const DeferredRelease& d) { return d.fence->GetCompletedValue() >= d.value; }),
+        m_DeferredReleases.end());
 }
 
 void D3D12Device::SetResourceDebugName(IRHIBuffer* resource, const char* name) {

@@ -124,6 +124,12 @@ public:
     void RegisterCommandList(class D3D12CommandList* cl);
     void UnregisterCommandList(class D3D12CommandList* cl);
 
+    /// 延迟释放：命令列表析构时 GPU 可能仍在执行它（RenderGraph 每帧新建异步计算列表、提交后即销毁），
+    /// 原生列表、分配器、命令签名与临时资源交给设备保管，围栏到达 value 后再释放
+    void DeferRelease(ComPtr<ID3D12Fence> fence, u64 value, std::vector<ComPtr<IUnknown>> objects);
+    /// 释放围栏已到达的延迟对象（每次提交时调用）
+    void CollectDeferredReleases();
+
     /// 资源命名（ID3D12Object::SetName）：RenderDoc / PIX / DRED 报告里显示。采样器与加速结构没有对应的 D3D12 对象
     void SetResourceDebugName(IRHIBuffer* resource, const char* name) override;
     void SetResourceDebugName(IRHITexture* resource, const char* name) override;
@@ -371,6 +377,13 @@ public:
     /// 与实例化网格的实例数；超出时 IA 越界读到 0
     static constexpr u32 kInstanceIndexCount = 1u << 20;
 private:
+    /// 等待 GPU 执行完才能释放的对象（见 DeferRelease）
+    struct DeferredRelease {
+        ComPtr<ID3D12Fence>          fence;
+        u64                          value = 0;
+        std::vector<ComPtr<IUnknown>> objects;
+    };
+    std::vector<DeferredRelease> m_DeferredReleases;
     class D3D12Buffer* m_LastUploadedObject = nullptr;
     ComPtr<ID3D12Resource> m_ZeroVertexBuffer;   // 懒创建的 64 字节全零缓冲
     ComPtr<ID3D12Resource> m_InstanceIndexBuffer;   // 懒创建的实例序号缓冲（0,1,2…）
