@@ -1166,7 +1166,20 @@ void D3D12CommandList::PipelineBarrier(PipelineStage, PipelineStage,
     auto* t = static_cast<D3D12Texture*>(texture);
     const D3D12_RESOURCE_STATES from = ToD3D12ResourceState(srcState, t->IsDepth());
     const D3D12_RESOURCE_STATES to   = ToD3D12ResourceState(dstState, t->IsDepth());
-    if (from == to) return;
+    // 【UAV → UAV 必须是 UAV 屏障】引擎在相互依赖的计算派发之间发「UAV → UAV」屏障（如 SDF 的清空 → 散射 →
+    // 逐轮洪泛），Vulkan 下它是内存屏障。此前状态相同就直接返回、什么都不做：前后派发在 GPU 上可以重叠执行，
+    // 后一次读到前一次未写完的数据（实测 Lumen 逐 mesh 距离场在 D3D12 下大片未写入 / 误差偏大）
+    auto uavBarrier = [&]() {
+        D3D12_RESOURCE_BARRIER ub{};
+        ub.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        ub.UAV.pResource = t->GetResource();
+        m_List->ResourceBarrier(1, &ub);
+    };
+    if (from == to) {
+        if (to == D3D12_RESOURCE_STATE_UNORDERED_ACCESS &&
+            (!m_Device || m_Device->GetResourceState(t->GetResource()) == to)) uavBarrier();
+        return;
+    }
 
     D3D12_RESOURCE_BARRIER b{};
     b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -1177,7 +1190,10 @@ void D3D12CommandList::PipelineBarrier(PipelineStage, PipelineStage,
         ID3D12Resource* bres = t->GetResource();
         const D3D12_RESOURCE_STATES actualFrom =
             m_Device ? m_Device->GetResourceState(bres) : from;
-        if (actualFrom == to) return;
+        if (actualFrom == to) {
+            if (to == D3D12_RESOURCE_STATE_UNORDERED_ACCESS) uavBarrier();   // 已是 UAV：仍要同步前后派发
+            return;
+        }
         b.Transition.StateBefore = actualFrom;
     b.Transition.StateAfter  = to;
     m_List->ResourceBarrier(1, &b);
