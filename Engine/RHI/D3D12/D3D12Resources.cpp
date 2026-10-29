@@ -391,7 +391,10 @@ void D3D12Texture::UploadInitialData(D3D12Device* device, const TextureDesc& des
     ID3D12CommandQueue* q = device->GetQueue();
     if (!dev || !q || !m_Resource) return;
     const D3D12_RESOURCE_DESC rd = m_Resource->GetDesc();
-    const u32 layers = static_cast<u32>(rd.DepthOrArraySize);
+    // 3D 纹理的子资源只按 mip 划分：DepthOrArraySize 是深度切片数而非数组层，整个体积作为一个子资源上传
+    //（拷贝足迹的 Depth 即切片数，下面逐行拷贝时 numRows × Depth 行连续覆盖所有切片）
+    const bool is3D = rd.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+    const u32 layers = is3D ? 1u : static_cast<u32>(rd.DepthOrArraySize);
 
     // 【mip 链】Vulkan 后端上传 mip 0 后用 blit 逐级生成其余 mip；D3D12 没有 blit，
     // 这里在 CPU 上用 2×2 盒式滤波生成。只传 mip 0 时其余级是未初始化显存，远处/斜视表面
@@ -399,8 +402,8 @@ void D3D12Texture::UploadInitialData(D3D12Device* device, const TextureDesc& des
     // 支持 8 位四通道格式；sRGB 格式先转线性空间再平均，与 Vulkan 的线性 blit 一致。
     const bool isSrgb = rd.Format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || rd.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
     const bool is8x4  = isSrgb || rd.Format == DXGI_FORMAT_R8G8B8A8_UNORM || rd.Format == DXGI_FORMAT_B8G8R8A8_UNORM;
-    const u32 mips = (m_MipLevels > 1 && is8x4) ? m_MipLevels : 1u;
-    if (m_MipLevels > 1 && !is8x4) {
+    const u32 mips = (m_MipLevels > 1 && is8x4 && !is3D) ? m_MipLevels : 1u;   // 3D 纹理不在 CPU 生成 mip
+    if (m_MipLevels > 1 && (!is8x4 || is3D)) {
         HE_CORE_WARN("D3D12Texture: 格式 {} 不支持 CPU 生成 mip，只上传 mip 0（{}x{}）",
                      static_cast<u32>(rd.Format), m_Width, m_Height);
     }
@@ -854,11 +857,8 @@ bool D3D12Texture::Initialize(D3D12Device* device, const TextureDesc& desc) {
 
     // 【初始数据】此前 D3D12 纹理完全忽略 initialData：占位白图、天空盒立方体图等
     // 内容都是未初始化显存，且一直停在 COPY_DEST（GPU 验证层 id=942）⇒ 采样结果与 Vulkan 不一致。
-    // 3D 纹理的子资源按 mip 划分（深度切片不是独立子资源），现有上传按数组层逐层写会写坏数据：明确拒绝
-    if (desc.initialData && is3D) {
-        HE_CORE_ERROR("D3D12Texture: 3D 纹理的初始数据上传尚未实现（{}x{}x{}），内容未初始化",
-                      desc.width, desc.height, desc.depth);
-    } else if (desc.initialData) {
+    // 3D 纹理的子资源按 mip 划分（深度切片不是独立子资源），上传时整个体积作为 mip 0 一次拷贝
+    if (desc.initialData) {
         UploadInitialData(device, desc, initState);
     }
 
