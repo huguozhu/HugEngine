@@ -89,6 +89,10 @@ public:
     void CopyBuffer(IRHIBuffer* src, IRHIBuffer* dst, u64 size,
                     u64 srcOffset = 0, u64 dstOffset = 0) override;
     void CopyTextureToTexture(IRHITexture* src, IRHITexture* dst) override;
+    /// 纹理 (mip 0, 层 0) 的矩形区域 → 缓冲（从 bufferOffset 起逐行紧密排列，与 Vulkan 的
+    /// bufferRowLength=0 一致）。width / height 为 0 表示取满纹理
+    void CopyTextureToBuffer(IRHITexture* src, IRHIBuffer* dst, u32 x = 0, u32 y = 0,
+                             u32 width = 0, u32 height = 0, u64 bufferOffset = 0) override;
 
     // ---- 光追（阶段 4）----
     void BuildBLAS(IRHIAccelerationStructure*, IRHIBuffer*, const BLASBuildDesc&, bool = false) override {}
@@ -213,6 +217,8 @@ private:
     /// 所以每个列表开始录制时所有缓冲都是 COMMON（Begin 时清空）。用设备级的全局记录会被
     /// 其他命令列表的转换干扰，屏障的 StateBefore 与实际不符（GPU 验证 id=942）。
     std::unordered_map<ID3D12Resource*, D3D12_RESOURCE_STATES> m_BufferStates;
+    /// 各帧槽位录制期间创建的临时资源（如纹理回读的中转缓冲）：该槽位下次 Begin 等到围栏后释放
+    std::vector<ComPtr<ID3D12Resource>> m_TempResources[kMaxFramesInFlight];
     /// 本次录制写过的查询：提交时（OnSubmitted）打上围栏值，之后才算可读
     std::vector<std::pair<class D3D12QueryPool*, u32>> m_PendingQueries;
     /// 读取查询结果（wait 为真时阻塞等待），返回是否全部可用

@@ -61,6 +61,8 @@ void D3D12CommandList::Begin() {
             CloseHandle(ev);
         }
     }
+    // 该槽位上一轮的临时资源：GPU 已执行完（上面已等围栏），可以释放
+    m_TempResources[m_FrameSlot].clear();
     // 每次录制前必须 Reset 分配器与列表
     if (FAILED(m_Allocator->Reset())) {
         // 【关键】分配器仍被 GPU 使用时 Reset 会失败。此前直接 return，
@@ -1061,6 +1063,103 @@ void D3D12CommandList::CopyTextureToTexture(IRHITexture* src, IRHITexture* dst) 
     auto* s = static_cast<D3D12Texture*>(src);
     auto* d = static_cast<D3D12Texture*>(dst);
     m_List->CopyResource(d->GetResource(), s->GetResource());
+}
+
+void D3D12CommandList::CopyTextureToBuffer(IRHITexture* src, IRHIBuffer* dst, u32 x, u32 y,
+                                           u32 width, u32 height, u64 bufferOffset) {
+    if (!m_List || !m_Device || !m_Device->GetDevice() || !src || !dst) return;
+    auto* t = static_cast<D3D12Texture*>(src);
+    auto* b = static_cast<D3D12Buffer*>(dst);
+    ID3D12Resource* texRes = t->GetResource();
+    ID3D12Resource* bufRes = b->GetResource();
+    if (!texRes || !bufRes) return;
+    const u32 w = width  ? width  : t->GetWidth();
+    const u32 h = height ? height : t->GetHeight();
+    if (w == 0 || h == 0 || x + w > t->GetWidth() || y + h > t->GetHeight()) return;
+    D3D12_RESOURCE_DESC rd = texRes->GetDesc();
+    if (rd.SampleDesc.Count > 1) return;   // 多重采样纹理不能直接拷贝
+
+    // 【两步拷贝】D3D12 的纹理 → 缓冲拷贝要求行距按 256 字节、起点按 512 字节对齐，
+    // 而引擎期望从任意 bufferOffset 起紧密排列（像素探针把多个 1×1 像素按 8 字节间隔写进同一缓冲）。
+    // 先拷到行距对齐的中转缓冲，再逐行用 CopyBufferRegion（无对齐要求）拷到目标位置。
+    rd.Width = w;
+    rd.Height = h;
+    rd.DepthOrArraySize = 1;
+    rd.MipLevels = 1;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};
+    UINT   rows = 0;
+    UINT64 rowBytes = 0, total = 0;
+    m_Device->GetDevice()->GetCopyableFootprints(&rd, 0, 1, 0, &fp, &rows, &rowBytes, &total);
+    if (rows == 0 || rowBytes == 0 || total == 0) return;
+    if (bufferOffset + rowBytes * rows > b->GetSize()) {
+        HE_CORE_ERROR("D3D12 CopyTextureToBuffer: 目标缓冲太小（需要 {} 字节，缓冲 {} 字节）",
+                      bufferOffset + rowBytes * rows, static_cast<u64>(b->GetSize()));
+        return;
+    }
+
+    // 中转缓冲：DEFAULT 堆，挂在本槽位的临时资源表上，GPU 执行完后（下次复用本槽位时）释放
+    D3D12_HEAP_PROPERTIES hp{};
+    hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC bd{};
+    bd.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
+    bd.Width            = total;
+    bd.Height           = 1;
+    bd.DepthOrArraySize = 1;
+    bd.MipLevels        = 1;
+    bd.Format           = DXGI_FORMAT_UNKNOWN;
+    bd.SampleDesc       = { 1, 0 };
+    bd.Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ComPtr<ID3D12Resource> staging;
+    if (FAILED(m_Device->GetDevice()->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd,
+            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&staging)))) {
+        HE_CORE_ERROR("D3D12 CopyTextureToBuffer: 中转缓冲创建失败（{} 字节）", total);
+        return;
+    }
+    m_TempResources[m_FrameSlot].push_back(staging);
+
+    // 纹理临时转到 COPY_SOURCE，拷完转回原状态（设备级记录不变）
+    const D3D12_RESOURCE_STATES texState = m_Device->GetResourceState(texRes);
+    D3D12_RESOURCE_BARRIER tb{};
+    tb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    tb.Transition.pResource   = texRes;
+    tb.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    tb.Transition.StateBefore = texState;
+    tb.Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    if (texState != D3D12_RESOURCE_STATE_COPY_SOURCE) m_List->ResourceBarrier(1, &tb);
+
+    D3D12_TEXTURE_COPY_LOCATION dstLoc{};
+    dstLoc.pResource       = staging.Get();
+    dstLoc.Type            = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    dstLoc.PlacedFootprint = fp;
+    D3D12_TEXTURE_COPY_LOCATION srcLoc{};
+    srcLoc.pResource        = texRes;
+    srcLoc.Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    srcLoc.SubresourceIndex = 0;
+    const D3D12_BOX box{ x, y, 0, x + w, y + h, 1 };
+    m_List->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, &box);
+
+    if (texState != D3D12_RESOURCE_STATE_COPY_SOURCE) {
+        std::swap(tb.Transition.StateBefore, tb.Transition.StateAfter);
+        m_List->ResourceBarrier(1, &tb);
+    }
+
+    // 中转缓冲 → COPY_SOURCE，目标缓冲 → COPY_DEST，然后逐行紧密拷贝（行距相同时一次拷完）
+    D3D12_RESOURCE_BARRIER sb{};
+    sb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    sb.Transition.pResource   = staging.Get();
+    sb.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    sb.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    sb.Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    m_List->ResourceBarrier(1, &sb);
+    TransitionBuffer(bufRes, D3D12_RESOURCE_STATE_COPY_DEST);
+    if (fp.Footprint.RowPitch == rowBytes) {
+        m_List->CopyBufferRegion(bufRes, bufferOffset, staging.Get(), 0, rowBytes * rows);
+    } else {
+        for (UINT r = 0; r < rows; ++r) {
+            m_List->CopyBufferRegion(bufRes, bufferOffset + rowBytes * r,
+                                     staging.Get(), static_cast<UINT64>(fp.Footprint.RowPitch) * r, rowBytes);
+        }
+    }
 }
 
 void D3D12CommandList::SetTimelineSignal(RHIFenceHandle fence, u64 value) {
