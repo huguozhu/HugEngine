@@ -180,11 +180,14 @@ void D3D12SwapChain::Present(bool vsync) {
         m_BackBufferState = D3D12_RESOURCE_STATE_PRESENT;
     }
 
-    if (std::getenv("HE_SCAN_ALL") && m_Device) {
+    // 诊断开关每帧都要判断：只在首次读一次环境变量
+    static const bool s_ScanAll  = (std::getenv("HE_SCAN_ALL") != nullptr);
+    static const bool s_StatsDraw = (std::getenv("HE_STATS_DRAW") != nullptr);
+    if (s_ScanAll && m_Device) {
         static int s_n = 0;
         if (++s_n == 40) m_Device->ScanAllHdrTargets();   // 只扫一次，避免太慢
     }
-    if (std::getenv("HE_STATS_DRAW") && m_Device) {
+    if (s_StatsDraw && m_Device) {
         static int s_n = 0;
         if (++s_n == 60) m_Device->PassStatsRead("第60帧的全部索引绘制");   // 只读一次
     }

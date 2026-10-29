@@ -28,12 +28,20 @@
 
 // 需要 Agility SDK 的新特性时取消注释（本工程当前用系统自带 runtime）
 #include <d3d12shader.h>
+#include <cstdlib>   // std::getenv（TraceEnabled）
 
 namespace he::rhi {
 
 /// COM 智能指针的简写（Microsoft::WRL::ComPtr）
 template <typename T>
 using ComPtr = Microsoft::WRL::ComPtr<T>;
+
+/// 逐调用跟踪开关（HE_D3D12_TRACE）：只在首次调用时读一次环境变量。
+/// getenv 每次都要加锁并扫描整个环境块，不能放在每次绘制 / 设置状态的热路径上。
+inline bool TraceEnabled() {
+    static const bool s_Enabled = (std::getenv("HE_D3D12_TRACE") != nullptr);
+    return s_Enabled;
+}
 
 /// D3D12 的 HRESULT 检查：失败时打印可读错误并返回 false
 /// 用法：HE_D3D12_CHECK(device->CreateBuffer(&bd, nullptr, &buf), "CreateBuffer");

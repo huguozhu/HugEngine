@@ -359,12 +359,13 @@ void D3D12Device::WaitFenceOnQueue(QueueType, RHIFenceHandle fence, u64 value) {
 
 void D3D12Device::Submit(IRHICommandList* cmdList, RHICommandList* stream) {
     (void)stream;
-    if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] Submit\n"); std::fflush(stdout); }
+    if (TraceEnabled()) { std::printf("[TRACE] Submit\n"); std::fflush(stdout); }
     if (!cmdList || !m_Queue) return;
     auto* cl = static_cast<D3D12CommandList*>(cmdList);
     ID3D12CommandList* lists[1] = { cl->GetNativeCommandList() };
     if (!lists[0]) return;
-    if (std::getenv("HE_SUBSEQ")) HE_CORE_ERROR("[SUB] list={} draws={}", (void*)cl, cl->GetTotalDraws());
+    static const bool s_LogSubmit = (std::getenv("HE_SUBSEQ") != nullptr);   // 每帧调用，只读一次环境变量
+    if (s_LogSubmit) HE_CORE_ERROR("[SUB] list={} draws={}", (void*)cl, cl->GetTotalDraws());
     m_Queue->ExecuteCommandLists(1, lists);
     cl->OnSubmitted(m_Queue.Get());   // 记录该列表当前帧槽位的完成围栏
     // 每帧输出一次调试层的 ERROR（VS 的「输出」窗口内容进不了日志，这里补上）
