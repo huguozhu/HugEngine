@@ -201,9 +201,21 @@ bool D3D12Device::CreateDeviceAndQueue() {
     m_Caps.supportsRayTracing = false;
     m_Caps.supportsMeshShaders = false;     // 阶段 5 用 D3D12_FEATURE_D3D12_OPTIONS7 查询
     m_Caps.supportsDGC = true;              // D3D12 原生支持 ExecuteIndirect
-    HE_CORE_INFO("[D3D12] 设备就绪：bindless={} pushConst={} RT={}",
+    // 最高支持的着色器模型（从高往低探测：传入的 HighestShaderModel 不被支持时 CheckFeatureSupport 失败）
+    {
+        D3D12_FEATURE_DATA_SHADER_MODEL sm{};
+        const D3D_SHADER_MODEL candidates[] = { D3D_SHADER_MODEL_6_8, D3D_SHADER_MODEL_6_7, D3D_SHADER_MODEL_6_6,
+                                               D3D_SHADER_MODEL_6_5, D3D_SHADER_MODEL_6_0 };
+        for (D3D_SHADER_MODEL c : candidates) {
+            sm.HighestShaderModel = c;
+            if (SUCCEEDED(m_Device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &sm, sizeof(sm)))) break;
+            sm.HighestShaderModel = static_cast<D3D_SHADER_MODEL>(0);
+        }
+        m_HighestShaderModel = static_cast<u32>(sm.HighestShaderModel);
+    }
+    HE_CORE_INFO("[D3D12] 设备就绪：bindless={} pushConst={} RT={} 最高着色器模型=0x{:x}",
                  m_Caps.maxBindlessResources, m_Caps.maxPushConstantsSize,
-                 m_Caps.supportsRayTracing ? "支持" : "不支持");
+                 m_Caps.supportsRayTracing ? "支持" : "不支持", m_HighestShaderModel);
     return true;
 }
 

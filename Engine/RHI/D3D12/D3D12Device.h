@@ -294,6 +294,7 @@ public:
 private:
     class D3D12Buffer* m_LastUploadedObject = nullptr;
     ComPtr<ID3D12Resource> m_ZeroVertexBuffer;   // 懒创建的 64 字节全零缓冲
+    u32                    m_HighestShaderModel = 0;   // D3D_SHADER_MODEL（如 0x68 = SM 6.8）
     // 逐 mip RTV 池（CreateTextureMipStorageView 分配、DestroyTextureMipView 回收）
     static constexpr u32 kMipRtvCapacity = 1024;
     ComPtr<ID3D12DescriptorHeap> m_MipRtvHeap;
