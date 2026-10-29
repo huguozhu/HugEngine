@@ -61,6 +61,10 @@ static VkPipelineStageFlags ToVkPipelineStageFlags(PipelineStage stage) {
     VkPipelineStageFlags flags = 0;
     u32 s = u32(stage);
     if (s & u32(PipelineStage::ColorAttachmentOutput))   flags |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    // 间接参数读取 / 顶点输入阶段：此前缺这两项，「计算写间接命令 → 间接绘制」的屏障在 Vulkan 下
+    // 不等间接参数读取（逐实例剔除的实例数被读成清零后的 0，实例化网格时有时无）
+    if (s & u32(PipelineStage::DrawIndirect))            flags |= VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT;
+    if (s & u32(PipelineStage::VertexInput))             flags |= VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
     if (s & u32(PipelineStage::FragmentShader))          flags |= VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
     if (s & u32(PipelineStage::ComputeShader))           flags |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
     if (s & u32(PipelineStage::Transfer))                flags |= VK_PIPELINE_STAGE_TRANSFER_BIT;
@@ -87,6 +91,7 @@ static VkAccessFlags ToVkAccessFlags(ResourceState state) {
     if (s & u32(ResourceState::UnorderedAccess))    flags |= VK_ACCESS_SHADER_WRITE_BIT;
     if (s & u32(ResourceState::CopySrc))            flags |= VK_ACCESS_TRANSFER_READ_BIT;
     if (s & u32(ResourceState::CopyDst))            flags |= VK_ACCESS_TRANSFER_WRITE_BIT;
+    if (s & u32(ResourceState::IndirectArgument))   flags |= VK_ACCESS_INDIRECT_COMMAND_READ_BIT;   // 间接参数读取
     return flags ? flags : VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
 }
 
@@ -1043,6 +1048,13 @@ void VulkanCommandList::PipelineBarrier(
     memoryBarrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
     memoryBarrier.srcAccessMask = ToVkAccessFlags(srcState);
     memoryBarrier.dstAccessMask = ToVkAccessFlags(dstState);
+    // 目标阶段含间接参数读取时补全访问位：调用方常写「→ DrawIndirect | VertexShader，状态 ShaderResource」，
+    // 只有 SHADER_READ 时间接命令的读取不在内存依赖内。实测（Intel Arc，参数缓冲在主机可见内存、由计算
+    // 着色器原子累加）只补 INDIRECT_COMMAND_READ 仍会读到清零后的实例数，补上 MEMORY_WRITE / MEMORY_READ 才稳定
+    if (u32(dstStage) & u32(PipelineStage::DrawIndirect)) {
+        memoryBarrier.srcAccessMask |= VK_ACCESS_MEMORY_WRITE_BIT;
+        memoryBarrier.dstAccessMask |= VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_MEMORY_READ_BIT;
+    }
 
     vkCmdPipelineBarrier(m_CmdBuffers[m_FrameIndex],
         ToVkPipelineStageFlags(srcStage), ToVkPipelineStageFlags(dstStage),
