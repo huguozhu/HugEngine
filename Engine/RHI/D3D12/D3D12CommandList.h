@@ -28,15 +28,19 @@ public:
     ~D3D12CommandList() override;
 
     bool Initialize(D3D12Device* device, QueueType queue);
+    /// 创建二级命令列表（D3D12 bundle）：供多线程录制，主列表在渲染通道内用 ExecuteSecondary 执行
+    bool InitializeBundle(D3D12Device* device);
     /// 本列表提交到的队列类型（计算列表进计算队列）
     QueueType GetQueueType() const { return m_QueueType; }
 
     // ---- 生命周期 ----
     void Begin() override;
     void End()   override;
-    void BeginSecondary(IRHIPipelineState*) override {}
-    void ExecuteSecondary(IRHICommandList*) override {}
-    bool IsSecondary() const override { return false; }
+    /// 开始录制二级列表（bundle）：每次轮换一个帧槽位的分配器，等执行过它的主列表在 GPU 上完成后再复用
+    void BeginSecondary(IRHIPipelineState* pso) override;
+    /// 主列表执行二级列表：先按二级列表记下的用法补资源状态转换（bundle 里不能发屏障），再 ExecuteBundle
+    void ExecuteSecondary(IRHICommandList* secondary) override;
+    bool IsSecondary() const override { return m_IsBundle; }
 
     // ---- Render pass ----
     void BeginRenderPass(u32 colorCount, Format colorFormat,
@@ -181,6 +185,24 @@ private:
     IRHISwapChain*    m_SwapChain = nullptr;
     D3D12PipelineState* m_Pipeline = nullptr;
     bool m_Recording = false;
+    /// 二级列表（bundle）：不能发资源屏障、设视口 / 裁剪 / 渲染目标，这些由执行它的主列表负责
+    bool m_IsBundle = false;
+    /// bundle 录制期间每次绘制 / 派发用到的管线与已绑定集：主列表执行前据此补资源状态转换
+    struct BundleUsage {
+        D3D12PipelineState* pipeline = nullptr;
+        bool                compute  = false;
+        DescriptorSetHandle sets[8]  = {};
+    };
+    std::vector<BundleUsage> m_BundleUsages;
+    /// bundle 录制期间请求的缓冲状态转换（如间接参数缓冲 → INDIRECT_ARGUMENT），由主列表补发
+    std::vector<std::pair<ID3D12Resource*, D3D12_RESOURCE_STATES>> m_BundleBufferTransitions;
+    /// bundle 各帧槽位最后一次被哪个主列表的哪次提交执行：复用该槽位的分配器前等它完成
+    struct BundleSlotUse { ComPtr<ID3D12Fence> fence; u64 value = 0; };
+    BundleSlotUse m_BundleSlotUses[kMaxFramesInFlight];
+    /// 主列表本次录制执行过的 bundle 及其槽位：提交时（OnSubmitted）给它们打上本次的围栏值
+    std::vector<std::pair<D3D12CommandList*, u32>> m_ExecutedBundles;
+    /// Begin / BeginSecondary 共用：清空一次录制内的缓存状态并申请推送常量槽位
+    void ResetRecordingState();
     QueueType m_QueueType = QueueType::Graphics;   // 创建时确定的队列类型
     /// 当前管线是否为计算管线（决定绑定哪一套根签名与描述符表）
     bool m_IsComputePipeline = false;

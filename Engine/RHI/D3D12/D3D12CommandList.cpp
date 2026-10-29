@@ -22,14 +22,20 @@ D3D12CommandList::~D3D12CommandList() {
     // 【GPU 可能仍在执行】RenderGraph 每帧新建异步计算列表，提交后函数返回即析构：此前原生列表、
     // 分配器、命令签名、临时资源随之立即释放，GPU 还在读它们（命令内存被回收 ⇒ 页错误 / 设备移除）。
     // 取各槽位最后一次提交的围栏值，未完成就交给设备延迟到围栏到达后再释放
-    u64 last = 0;
-    for (u64 v : m_SlotFenceValues) last = std::max(last, v);
-    if (!m_SlotFence || last == 0 || m_SlotFence->GetCompletedValue() >= last) return;
     std::vector<ComPtr<IUnknown>> keep;
     if (m_List) keep.emplace_back(m_List);
     for (auto& a : m_Allocators) if (a) keep.emplace_back(a);
     for (auto& [key, sig] : m_CmdSigs) if (sig) keep.emplace_back(sig);
     for (auto& slot : m_TempResources) for (auto& r : slot) if (r) keep.emplace_back(r);
+    if (m_IsBundle) {
+        // bundle 自己不提交：按执行过它的主列表的提交围栏延迟释放（未完成的每一次都挂上）
+        for (const auto& u : m_BundleSlotUses)
+            if (u.fence && u.fence->GetCompletedValue() < u.value) m_Device->DeferRelease(u.fence, u.value, keep);
+        return;
+    }
+    u64 last = 0;
+    for (u64 v : m_SlotFenceValues) last = std::max(last, v);
+    if (!m_SlotFence || last == 0 || m_SlotFence->GetCompletedValue() >= last) return;
     m_Device->DeferRelease(m_SlotFence, last, std::move(keep));
 }
 
@@ -70,6 +76,96 @@ bool D3D12CommandList::Initialize(D3D12Device* device, QueueType queue) {
     return true;
 }
 
+bool D3D12CommandList::InitializeBundle(D3D12Device* device) {
+    if (!device || !device->GetDevice()) return false;
+    m_Device   = device;
+    m_IsBundle = true;
+    ID3D12Device* dev = device->GetDevice();
+    for (auto& alloc : m_Allocators) {
+        if (!HE_D3D12_CHECK(dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_BUNDLE, IID_PPV_ARGS(&alloc)),
+                            "CreateCommandAllocator(Bundle)")) {
+            return false;
+        }
+    }
+    m_Allocator = m_Allocators[0];
+    if (!HE_D3D12_CHECK(dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_BUNDLE, m_Allocator.Get(), nullptr,
+                                               IID_PPV_ARGS(&m_List)),
+                        "CreateCommandList(Bundle)")) {
+        return false;
+    }
+    m_Device->RegisterCommandList(this);
+    m_List->SetName(L"HugEngine 二级命令列表（bundle）");
+    m_List->Close();
+    return true;
+}
+
+void D3D12CommandList::BeginSecondary(IRHIPipelineState* pso) {
+    if (!m_IsBundle || !m_List) return;
+    // 轮换槽位；该槽位上一次被执行的主列表提交在 GPU 上完成之前，分配器不能 Reset
+    m_FrameSlot = (m_FrameSlot + 1) % kMaxFramesInFlight;
+    m_Allocator = m_Allocators[m_FrameSlot];
+    auto& use = m_BundleSlotUses[m_FrameSlot];
+    if (use.fence && use.fence->GetCompletedValue() < use.value) {
+        if (HANDLE ev = CreateEventEx(nullptr, nullptr, 0, EVENT_ALL_ACCESS)) {
+            use.fence->SetEventOnCompletion(use.value, ev);
+            WaitForSingleObject(ev, 8000);   // 有上限：设备挂起时不至于永久卡住
+            CloseHandle(ev);
+        }
+    }
+    m_TempResources[m_FrameSlot].clear();
+    auto* initPso = static_cast<D3D12PipelineState*>(pso);
+    if (FAILED(m_Allocator->Reset()) ||
+        FAILED(m_List->Reset(m_Allocator.Get(), initPso ? initPso->GetPso() : nullptr))) {
+        HE_CORE_ERROR("D3D12CommandList::BeginSecondary: bundle Reset 失败");
+        return;
+    }
+    m_Recording = true;
+    ResetRecordingState();
+    m_BundleUsages.clear();
+    m_BundleBufferTransitions.clear();
+    if (pso) SetPipeline(pso);
+}
+
+void D3D12CommandList::ExecuteSecondary(IRHICommandList* secondary) {
+    auto* b = static_cast<D3D12CommandList*>(secondary);
+    if (!m_List || !m_Recording || !m_Device || !b || !b->m_IsBundle || !b->m_List) return;
+    // 1. 资源状态：bundle 里不能发屏障，按它记下的每次绘制的管线 + 绑定集，在主列表上补状态转换
+    D3D12PipelineState* savedPso = m_Pipeline;
+    const bool savedCompute = m_IsComputePipeline;
+    DescriptorSetHandle savedSets[8];
+    std::copy(std::begin(m_BoundSets), std::end(m_BoundSets), savedSets);
+    for (const auto& u : b->m_BundleUsages) {
+        m_Pipeline          = u.pipeline;
+        m_IsComputePipeline = u.compute;
+        std::copy(std::begin(u.sets), std::end(u.sets), std::begin(m_BoundSets));
+        EnsureBoundResourceStates();
+    }
+    m_Pipeline          = savedPso;
+    m_IsComputePipeline = savedCompute;
+    std::copy(std::begin(savedSets), std::end(savedSets), std::begin(m_BoundSets));
+    for (const auto& [res, want] : b->m_BundleBufferTransitions) TransitionBuffer(res, want);
+    AfterDrawOrDispatch();   // 按子资源拆分的转换在这里没有绘制可依附：立即转回统一状态
+
+    // 2. bundle 用到描述符表时，主列表必须先绑定同一组描述符堆
+    if (!m_HeapsSet && m_Device->EnsureDescriptorHeaps()) {
+        ID3D12DescriptorHeap* heaps[2] = { m_Device->GetCbvSrvUavHeap(), m_Device->GetSetSamplerHeap() };
+        if (heaps[0] && heaps[1]) { m_List->SetDescriptorHeaps(2, heaps); m_HeapsSet = true; }
+    }
+
+    // 3. 执行，并记下：bundle 用过的描述符快照块、提交时要给 bundle 槽位打的围栏
+    m_List->ExecuteBundle(b->m_List.Get());
+    m_SetRingChunkMask |= b->m_SetRingChunkMask;
+    m_ExecutedBundles.emplace_back(b, b->m_FrameSlot);
+    m_TotalDraws += b->m_TotalDraws;
+
+    // 4. bundle 改过的管线、根签名、根参数、IA 状态会延续到主列表：主列表缓存全部作废，下次绘制重新下发
+    for (auto& t : m_RootTables) t.ptr = 0;
+    for (auto& ss : m_SnapSets) ss = kInvalidSet;
+    m_RootArgsDirty = true;
+    m_PushDirty     = true;
+    if (m_Pipeline) SetPipeline(m_Pipeline);
+}
+
 void D3D12CommandList::Begin() {
     if (!m_List || !m_Allocator) return;
     // 轮换到下一个帧槽位，并等待该槽位上一次提交的命令在 GPU 上执行完，再复用其分配器
@@ -104,6 +200,10 @@ void D3D12CommandList::Begin() {
         return;
     }
     m_Recording = true;
+    ResetRecordingState();
+}
+
+void D3D12CommandList::ResetRecordingState() {
     // 新的录制：列表的根参数与描述符堆都已失效，清空缓存
     for (auto& t : m_RootTables) t.ptr = 0;
     m_RootArgsDirty = true;
@@ -118,6 +218,7 @@ void D3D12CommandList::Begin() {
     m_SetRingChunkMask = 0;
     m_PendingWaits.clear();     // 上一次录制若未提交，残留的等待 / 信号作废
     m_PendingSignals.clear();
+    m_ExecutedBundles.clear();  // 上一次录制执行过的 bundle 已在提交时处理
     ClearPassAttachments();
     // 缓冲在每次提交执行完后衰减回 COMMON：新录制从全 COMMON 开始
     m_BufferStates.clear();
@@ -142,6 +243,9 @@ void D3D12CommandList::OnSubmitted(ID3D12CommandQueue* queue) {
     // 本次提交写过的查询：围栏到达 v 后结果可读
     for (const auto& [pool, idx] : m_PendingQueries) pool->MarkSubmitted(idx, m_SlotFence.Get(), v);
     m_PendingQueries.clear();
+    // 本次提交执行过的 bundle：其该槽位的分配器要等围栏到达 v 才能复用
+    for (const auto& [bundle, slot] : m_ExecutedBundles) bundle->m_BundleSlotUses[slot] = { m_SlotFence, v };
+    m_ExecutedBundles.clear();
 }
 
 // ── 调试标签 ──
@@ -749,6 +853,7 @@ void D3D12CommandList::SetViewport(const Viewport& vp) {
         v.Height   = -vp.height;
     }
     m_LastVp = v;
+    if (m_IsBundle) return;   // bundle 不能设视口（继承执行它的主列表）
     m_List->RSSetViewports(1, &v);
 }
 
@@ -760,6 +865,7 @@ void D3D12CommandList::SetScissor(const ScissorRect& sc) {
     r.top    = sc.y;
     r.right  = sc.x + static_cast<i32>(sc.width);
     r.bottom = sc.y + static_cast<i32>(sc.height);
+    if (m_IsBundle) return;   // bundle 不能设裁剪矩形（继承执行它的主列表）
     m_List->RSSetScissorRects(1, &r);
 }
 
@@ -833,6 +939,17 @@ void D3D12CommandList::AfterDrawOrDispatch() {
 
 void D3D12CommandList::EnsureBoundResourceStates() {
     if (!m_List || !m_Device || !m_Pipeline) return;
+    if (m_IsBundle) {
+        // bundle 不能发屏障：记下本次绘制的管线与绑定集（与上一条相同则不重复），由主列表执行前补转换
+        BundleUsage u;
+        u.pipeline = m_Pipeline;
+        u.compute  = m_IsComputePipeline;
+        std::copy(std::begin(m_BoundSets), std::end(m_BoundSets), std::begin(u.sets));
+        if (m_BundleUsages.empty() || m_BundleUsages.back().pipeline != u.pipeline ||
+            !std::equal(std::begin(u.sets), std::end(u.sets), std::begin(m_BundleUsages.back().sets)))
+            m_BundleUsages.push_back(u);
+        return;
+    }
     constexpr D3D12_RESOURCE_STATES kRead =
         D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     m_BarrierScratch.clear();
@@ -1177,7 +1294,7 @@ void D3D12CommandList::PipelineBarrier(PipelineStage, PipelineStage,
                                        ResourceState, ResourceState) {
     // 无资源参数的全局屏障：D3D12 要求屏障绑定到具体资源，
     // 引擎里这种调用通常用于「pass 之间的全局同步」，D3D12 下由 UAV 屏障近似。
-    if (!m_List) return;
+    if (!m_List || m_IsBundle) return;   // bundle 不能发屏障
     D3D12_RESOURCE_BARRIER b{};
     b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     b.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
@@ -1188,7 +1305,7 @@ void D3D12CommandList::PipelineBarrier(PipelineStage, PipelineStage,
 void D3D12CommandList::PipelineBarrier(PipelineStage, PipelineStage,
                                        ResourceState srcState, ResourceState dstState,
                                        IRHITexture* texture) {
-    if (!m_List || !texture) return;
+    if (!m_List || !texture || m_IsBundle) return;   // bundle 不能发屏障
     auto* t = static_cast<D3D12Texture*>(texture);
     const D3D12_RESOURCE_STATES from = ToD3D12ResourceState(srcState, t->IsDepth());
     const D3D12_RESOURCE_STATES to   = ToD3D12ResourceState(dstState, t->IsDepth());
@@ -1240,6 +1357,7 @@ void D3D12CommandList::CopyBuffer(IRHIBuffer* src, IRHIBuffer* dst, u64 size,
 
 void D3D12CommandList::TransitionBuffer(ID3D12Resource* res, D3D12_RESOURCE_STATES want) {
     if (!res || !m_Device) return;
+    if (m_IsBundle) { m_BundleBufferTransitions.emplace_back(res, want); return; }   // 由主列表补发
     D3D12_HEAP_PROPERTIES hp{};
     if (FAILED(res->GetHeapProperties(&hp, nullptr)) ||
         (hp.Type != D3D12_HEAP_TYPE_DEFAULT && hp.Type != D3D12_HEAP_TYPE_CUSTOM)) return;

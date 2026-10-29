@@ -12,6 +12,7 @@
 #include "D3D12Common.h"
 #include "D3D12BindlessHeap.h"
 #include <vector>
+#include <mutex>   // 多线程录制：设备分配加锁
 #include <unordered_map>
 #include <memory>
 
@@ -389,6 +390,8 @@ private:
         std::vector<ComPtr<IUnknown>> objects;
     };
     std::vector<DeferredRelease> m_DeferredReleases;
+    /// 多线程录制（二级列表并行录制）时录制路径会调用的设备分配：常量环、描述符快照环、懒创建的缓冲等
+    std::recursive_mutex m_RecordMutex;
     class D3D12Buffer* m_LastUploadedObject = nullptr;
     ComPtr<ID3D12Resource> m_ZeroVertexBuffer;   // 懒创建的 64 字节全零缓冲
     ComPtr<ID3D12Resource> m_InstanceIndexBuffer;   // 懒创建的实例序号缓冲（0,1,2…）

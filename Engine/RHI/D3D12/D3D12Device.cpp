@@ -422,7 +422,10 @@ std::unique_ptr<IRHICommandList> D3D12Device::CreateCommandList(QueueType queue)
 }
 
 std::unique_ptr<IRHICommandList> D3D12Device::CreateSecondaryCommandList() {
-    return nullptr;   // 阶段 3（多线程录制）实现
+    // 二级列表 = D3D12 bundle：工作线程并行录制，主列表在渲染通道内按块序 ExecuteBundle
+    auto cl = std::make_unique<D3D12CommandList>();
+    if (!cl->InitializeBundle(this)) return nullptr;
+    return cl;
 }
 
 std::unique_ptr<IRHIBuffer> D3D12Device::CreateBuffer(const BufferDesc& desc) {
@@ -712,6 +715,7 @@ u64 D3D12Device::GetSetVersion(DescriptorSetHandle set) const {
 
 bool D3D12Device::SnapshotDescriptorSet(DescriptorSetHandle set, D3D12_GPU_DESCRIPTOR_HANDLE& srvOut,
                                         D3D12_GPU_DESCRIPTOR_HANDLE& uavOut, u32& chunkOut) {
+    std::lock_guard<std::recursive_mutex> lock(m_RecordMutex);   // 多线程录制：快照环分配加锁
     if (set == kInvalidSet || set > m_DescriptorSets.size()) return false;
     if (!m_CbvSrvUavHeap || !m_SetStagingHeap) return false;
     const D3D12Set& s = m_DescriptorSets[static_cast<size_t>(set - 1)];
@@ -794,6 +798,7 @@ u32 D3D12Device::GetSetBaseSlot(DescriptorSetHandle set) const {
 // 懒创建两个 shader-visible 堆（SRV 4096 槽 + 采样器 16 槽）。
 // 根签名同时声明了 SRV 表与 SAMPLER 表 ⇒ 绑定时两个堆都得设置。
 bool D3D12Device::EnsureDescriptorHeaps() {
+    std::lock_guard<std::recursive_mutex> lock(m_RecordMutex);   // 多线程录制：首次建堆加锁
     if (!m_Device) return false;
     if (!m_CbvSrvUavHeap) {
         D3D12_DESCRIPTOR_HEAP_DESC hd{};
@@ -1161,6 +1166,7 @@ void D3D12Device::NoteSetLayoutStrides(ID3D12ShaderReflection* refl,
 
 
 void D3D12Device::FlushPendingBindlessBuffers() {
+    std::lock_guard<std::recursive_mutex> lock(m_RecordMutex);   // 多线程录制：待写队列加锁
     if (m_PendingBindlessBufs.empty() && m_PendingBindlessUavs.empty()) return;
     if (!m_CbvSrvUavHeap || m_CbvSrvUavSize == 0) return;
     auto pending = std::move(m_PendingBindlessBufs);
@@ -1193,6 +1199,7 @@ u32 D3D12Device::LookupStructStride(u32 registerIndex) const {
 }
 
 D3D12_VERTEX_BUFFER_VIEW D3D12Device::GetZeroVertexBufferView() {
+    std::lock_guard<std::recursive_mutex> lock(m_RecordMutex);   // 多线程录制：懒创建加锁
     D3D12_VERTEX_BUFFER_VIEW v{};
     if (!m_ZeroVertexBuffer && m_Device) {
         // UPLOAD 堆即可：只读、体积极小；创建后写一次全零
@@ -1226,6 +1233,7 @@ D3D12_VERTEX_BUFFER_VIEW D3D12Device::GetZeroVertexBufferView() {
 }
 
 D3D12_VERTEX_BUFFER_VIEW D3D12Device::GetInstanceIndexBufferView() {
+    std::lock_guard<std::recursive_mutex> lock(m_RecordMutex);   // 多线程录制：懒创建加锁
     D3D12_VERTEX_BUFFER_VIEW v{};
     constexpr UINT64 kBytes = static_cast<UINT64>(kInstanceIndexCount) * sizeof(u32);
     if (!m_InstanceIndexBuffer && m_Device) {
@@ -1597,6 +1605,7 @@ D3D12_GPU_DESCRIPTOR_HANDLE D3D12Device::GetDefaultSamplerGpu() const {
 // 常量缓冲环：每次取一个 256 字节槽，写 CBV 到 CBV 堆，返回两者。
 bool D3D12Device::AllocateConstants(D3D12_GPU_VIRTUAL_ADDRESS& outGpuAddr,
                                     D3D12_GPU_DESCRIPTOR_HANDLE& outCbvHandle) {
+    std::lock_guard<std::recursive_mutex> lock(m_RecordMutex);   // 多线程录制：常量环分配加锁
     if (!m_Device) return false;
 
     // 首次使用：建上传缓冲 + CBV 堆
