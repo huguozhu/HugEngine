@@ -655,7 +655,7 @@ D3D12Texture::~D3D12Texture() {
     }
 }
 
-bool D3D12Texture::Initialize(D3D12Device* device, const TextureDesc& desc) {
+bool D3D12Texture::Initialize(D3D12Device* device, const TextureDesc& desc, bool transient) {
     m_OwnerDevice = device;
     if (!device || !device->GetDevice()) {
         HE_CORE_ERROR("D3D12Texture: 设备为空");
@@ -735,9 +735,21 @@ bool D3D12Texture::Initialize(D3D12Device* device, const TextureDesc& desc) {
                  static_cast<u32>(rd.Dimension), static_cast<u32>(rd.Width), rd.Height,
                  static_cast<u32>(rd.DepthOrArraySize), rd.MipLevels,
                  static_cast<u32>(rd.Format), rd.SampleDesc.Count, static_cast<u32>(rd.Flags));
-    HRESULT crh = dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, initState,
-                                               hasClear ? &clearValue : nullptr,
-                                               IID_PPV_ARGS(&m_Resource));
+    HRESULT crh = E_FAIL;
+    if (transient) {
+        // 瞬态纹理：在本帧瞬态堆上线性放置（帧内不复用，帧槽位轮换回来时整堆重置）。
+        // 放置在复用内存上的渲染目标 / 深度内容未定义，使用方须先清除（RenderGraph 的瞬态资源都是本帧新写）
+        ID3D12Heap* heap = nullptr;
+        UINT64 offset = 0;
+        if (!device->AllocateTransient(rd, heap, offset)) return false;   // 堆不够：调用方回退普通纹理
+        crh = dev->CreatePlacedResource(heap, offset, &rd, initState, hasClear ? &clearValue : nullptr,
+                                        IID_PPV_ARGS(&m_Resource));
+        if (SUCCEEDED(crh)) device->TrackTransient(m_Resource);   // 保活到堆重置（GPU 用完之后）
+    } else {
+        crh = dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, initState,
+                                           hasClear ? &clearValue : nullptr,
+                                           IID_PPV_ARGS(&m_Resource));
+    }
     if (!HE_D3D12_CHECK(crh, "CreateCommittedResource(Texture)")) {
         HE_CORE_ERROR("[D3D12Texture] CreateCommittedResource 失败 hr=0x{:08x}", static_cast<u32>(crh));
         return false;

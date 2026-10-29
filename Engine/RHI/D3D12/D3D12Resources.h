@@ -74,7 +74,8 @@ class D3D12Texture final : public IRHITexture {
 public:
     ~D3D12Texture() override;
 
-    bool Initialize(D3D12Device* device, const TextureDesc& desc);
+    /// transient = true：资源放在设备的逐帧瞬态堆上（placed resource），堆空间不足时返回 false
+    bool Initialize(D3D12Device* device, const TextureDesc& desc, bool transient = false);
 
     u32    GetWidth()  const override { return m_Width; }
     u32    GetHeight() const override { return m_Height; }

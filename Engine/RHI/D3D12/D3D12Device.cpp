@@ -507,6 +507,63 @@ std::unique_ptr<IRHITexture> D3D12Device::CreateTexture(const TextureDesc& desc)
     return t;
 }
 
+std::unique_ptr<IRHITexture> D3D12Device::CreateTransientTexture(const TextureDesc& desc) {
+    auto t = std::make_unique<D3D12Texture>();
+    if (!t->Initialize(this, desc, /*transient=*/true)) return nullptr;
+    return t;
+}
+
+void D3D12Device::AdvanceTransientResources() {
+    if (!m_Device) return;
+    if (m_ResourceHeapTier < 0) {
+        D3D12_FEATURE_DATA_D3D12_OPTIONS opt{};
+        m_ResourceHeapTier = SUCCEEDED(m_Device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &opt, sizeof(opt)))
+                           ? static_cast<int>(opt.ResourceHeapTier) : 0;
+    }
+    if (m_ResourceHeapTier < 2) return;   // Tier 1 的堆不能混放渲染目标与普通纹理：不启用瞬态纹理
+    m_TransientSlot = (m_TransientSlot + 1) % kMaxFramesInFlight;
+    TransientFrame& f = m_Transient[m_TransientSlot];
+    f.live.clear();   // 上一轮（kMaxFramesInFlight 帧前）放置的资源：GPU 已用完
+    f.offset = 0;
+    // 首次使用或上一轮峰值超过堆大小：按峰值（留 25% 余量，64 MB 起步）重建堆
+    constexpr UINT64 kMinHeap = 64ull << 20;
+    if (!f.heap || f.peak > f.size) {
+        const UINT64 want = std::max(kMinHeap, (f.peak + f.peak / 4 + 0xFFFFull) & ~0xFFFFull);
+        D3D12_HEAP_DESC hd{};
+        hd.SizeInBytes = want;
+        hd.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+        hd.Alignment = D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT;   // 允许放 MSAA 纹理
+        hd.Flags = D3D12_HEAP_FLAG_ALLOW_ALL_BUFFERS_AND_TEXTURES;
+        ComPtr<ID3D12Heap> heap;
+        if (SUCCEEDED(m_Device->CreateHeap(&hd, IID_PPV_ARGS(&heap)))) {
+            f.heap = heap;
+            f.size = want;
+            f.heap->SetName(L"HugEngine 瞬态纹理堆");
+        }
+    }
+    f.peak = 0;
+}
+
+bool D3D12Device::AllocateTransient(const D3D12_RESOURCE_DESC& rd, ID3D12Heap*& heapOut, UINT64& offsetOut) {
+    if (!m_Device || m_ResourceHeapTier < 2) return false;
+    TransientFrame& f = m_Transient[m_TransientSlot];
+    const D3D12_RESOURCE_ALLOCATION_INFO info = m_Device->GetResourceAllocationInfo(0, 1, &rd);
+    if (info.SizeInBytes == UINT64_MAX) return false;   // 描述非法
+    const UINT64 align = info.Alignment ? info.Alignment : D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+    const UINT64 start = (f.offset + align - 1) & ~(align - 1);
+    const UINT64 end   = start + info.SizeInBytes;
+    f.peak = std::max(f.peak, end);   // 失败的请求也计入峰值：下一轮按它扩容
+    if (!f.heap || end > f.size) return false;
+    heapOut   = f.heap.Get();
+    offsetOut = start;
+    f.offset  = end;
+    return true;
+}
+
+void D3D12Device::TrackTransient(ComPtr<ID3D12Resource> res) {
+    if (res) m_Transient[m_TransientSlot].live.push_back(std::move(res));
+}
+
 std::unique_ptr<IRHISampler> D3D12Device::CreateSampler(const SamplerDesc& desc) {
     auto s = std::make_unique<D3D12Sampler>();
     if (!s->Initialize(this, desc)) return nullptr;

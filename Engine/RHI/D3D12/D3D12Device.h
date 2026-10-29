@@ -381,6 +381,17 @@ public:
     /// 全零顶点缓冲视图（步长 0）：供 PSO 中引擎布局未提供的属性读取 0
     D3D12_VERTEX_BUFFER_VIEW GetZeroVertexBufferView();
 
+    // ---- 瞬态纹理（IRHIDevice 接口）----
+    /// 在本帧瞬态堆上创建纹理（placed resource）；不支持或堆空间不足时返回空，调用方回退普通纹理
+    std::unique_ptr<IRHITexture> CreateTransientTexture(const TextureDesc& desc) override;
+    /// 帧首调用：轮换到下一帧槽位的瞬态堆。该堆上一次的使用者是 kMaxFramesInFlight 帧之前，
+    /// 主命令列表 Begin 已等过那一帧的围栏，可以整堆重置；上一轮峰值超过堆大小时按峰值扩容
+    void AdvanceTransientResources() override;
+    /// 在当前帧瞬态堆上为资源分配一段（按资源对齐），空间不足时记下所需峰值并返回 false
+    bool AllocateTransient(const D3D12_RESOURCE_DESC& rd, ID3D12Heap*& heapOut, UINT64& offsetOut);
+    /// 瞬态资源保活到其所在堆被重置（纹理对象可能在 GPU 用完之前就被销毁）
+    void TrackTransient(ComPtr<ID3D12Resource> res);
+
     // ---- PSO 后台预编译（IRHIDevice 接口）----
     /// 登记一个 PSO 到预编译队列（深拷贝着色器字节码，线程安全）
     void  PrecompileQueuePSO(const PipelineStateDesc& desc) override;
@@ -404,6 +415,18 @@ private:
         std::vector<ComPtr<IUnknown>> objects;
     };
     std::vector<DeferredRelease> m_DeferredReleases;
+
+    // ---- 瞬态纹理堆（每飞行帧一个）----
+    struct TransientFrame {
+        ComPtr<ID3D12Heap>                   heap;
+        UINT64                               size   = 0;   // 堆大小
+        UINT64                               offset = 0;   // 本帧线性分配游标
+        UINT64                               peak   = 0;   // 本帧所需峰值（含分配失败的请求），用于扩容
+        std::vector<ComPtr<ID3D12Resource>>  live;         // 本帧放置的资源：堆重置时释放
+    };
+    TransientFrame m_Transient[kMaxFramesInFlight];
+    u32            m_TransientSlot = 0;
+    int            m_ResourceHeapTier = -1;   // -1 = 未查询；瞬态堆混放纹理需要资源堆 Tier 2
 
     // ---- PSO 后台预编译 ----
     /// 一项预编译：描述的着色器指针改指向本项自有的字节码副本（调用方的字节码可能在编译前就释放）
