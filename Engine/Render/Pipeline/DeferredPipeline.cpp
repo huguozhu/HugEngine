@@ -473,7 +473,9 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
     // igc-default64.dll 内随机 SIGSEGV（约 50% 概率，见 gdb 栈：线程 27 编译器崩溃），
     // 导致 02.Cube 启动随机崩溃。预编译是纯优化（PSO 缓存已按 hash 去重，
     // 禁用后 PSO 仅在首次使用时惰性编译），故本机禁用。稳定驱动上可恢复。
-    // device->StartPSOPrecompile();
+    // D3D12 的预编译只是在后台线程用同一设备建 PSO 并保存驱动缓存块（不经 Vulkan 驱动的编译线程），
+    // 不受上述崩溃影响，故仅在非 Vulkan 后端启动
+    if (device->GetBackend() != rhi::Backend::Vulkan) device->StartPSOPrecompile();
 
     // ── Nanite 模块（§14.8 任务 1 / N0）──
     // 放在 m_Ready 之前：模块不依赖任何 GI/Lumen/GBuffer 的运行时状态（§14.3 依赖禁令），
