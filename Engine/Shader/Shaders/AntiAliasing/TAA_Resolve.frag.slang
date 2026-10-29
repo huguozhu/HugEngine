@@ -20,7 +20,11 @@ struct TAAUniforms {
     float    blendFactor;      // 基础混合系数 (0.05)
     float    unused;
 };
-[[vk::binding(5, 0)]] cbuffer u_TAA : register(b5) { TAAUniforms u_TAA; }
+// 不写 register：由 ShaderToDxil 按「描述符集常量缓冲 = b(8 + binding)」分配（D3D12 下是 b13）。
+// 此前手写 register(b5) 被原样保留，落在留给推送常量的根 CBV 区间（b0..b7），而根参数 5 从未设置，
+// TAA 一直读未初始化的根参数（GPU 验证 id=935），窗口缩放后读到垃圾，设备挂起。
+// 块名不能与成员同名：同名时 Slang 把块改名为 u_TAA_1，ShaderToDxil 按名字回查源码时对不上、不做重映射
+[[vk::binding(5, 0)]] cbuffer TAAParams { TAAUniforms u_TAA; }
 
 // ── Push Constants ──
 [[vk::push_constant]] cbuffer TAA_PC {
