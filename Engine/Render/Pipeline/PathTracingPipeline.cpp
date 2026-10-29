@@ -211,12 +211,15 @@ void PathTracingPipeline::NextFrame() {
     // 【T2.4 步骤 (b)】推进快照槽位：命令载荷指向的快照在其被消费完之前不会被复用
     m_SnapshotSlot = (m_SnapshotSlot + 1u) % MAX_FRAMES_IN_FLIGHT;
     m_Assembler.Bind(&SnapBuf(), &m_MeshRegistry);
-    m_Assembler.SetFrameSlot(RenderFrameSlot());   // 随快照冻结给渲染命令
+    // 【先推进再冻结】此前用 RenderFrameSlot() 取槽位：有快照时它返回的是**上一帧快照**的槽位，
+    // 自己喂自己，槽位永远停在 0 ⇒ 按飞行帧多份的资源（剔除命令、描述符集、HDR 目标等）实际只用第 0 份，
+    // CPU 录制下一帧时改写 GPU 仍在使用的那份（Vulkan 下逐实例剔除的实例数被提前清零，实例化网格消失）
+    m_CurrentFrameSlot = (m_CurrentFrameSlot + 1) % MAX_FRAMES_IN_FLIGHT;
+    m_Assembler.SetFrameSlot(m_CurrentFrameSlot);   // 随快照冻结给渲染命令
     // 【必须每帧复位】`AssembleScene` 靠 `m_Assembled` 做"每帧只装配一次"的幂等；不复位就会
     // **只在第一帧装配**（静态场景看不出来，但动态场景会冻结，且多槽快照下其它槽永远为空）。
     m_Assembler.BeginFrame();
     m_Assembler.Settings().physicalUnitsEnabled = cvLightPhysicalUnits.Get();
-    m_CurrentFrameSlot = (m_CurrentFrameSlot + 1) % MAX_FRAMES_IN_FLIGHT;
 }
 
 void PathTracingPipeline::OnResize(u32 w, u32 h) {

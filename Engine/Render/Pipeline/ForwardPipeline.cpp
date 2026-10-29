@@ -581,9 +581,12 @@ void ForwardPipeline::NextFrame() {
     // 【T2.4 步骤 (b)】推进快照槽位：命令载荷指向的快照在其被消费完之前不会被复用
     m_SnapshotSlot = (m_SnapshotSlot + 1u) % MAX_FRAMES_IN_FLIGHT;
     m_Assembler.Bind(&SnapBuf(), &m_MeshRegistry);
-    m_Assembler.SetFrameSlot(RenderFrameSlot());   // 随快照冻结给渲染命令
     // 推进三缓冲槽位（帧首调用，确保 Shadow 和 Scene 使用同一帧的缓冲区）
+    // 【先推进再冻结】此前用 RenderFrameSlot() 取槽位：有快照时它返回的是**上一帧快照**的槽位，
+    // 自己喂自己，槽位永远停在 0 ⇒ 按飞行帧多份的资源（剔除命令、描述符集、HDR 目标等）实际只用第 0 份，
+    // CPU 录制下一帧时改写 GPU 仍在使用的那份（Vulkan 下逐实例剔除的实例数被提前清零，实例化网格消失）
     m_CurrentFrameSlot = (m_CurrentFrameSlot + 1) % MAX_FRAMES_IN_FLIGHT;
+    m_Assembler.SetFrameSlot(m_CurrentFrameSlot);   // 随快照冻结给渲染命令
 
     // 清理延迟销毁的旧 PSO（等 GPU 完成 3 帧后安全释放）
     for (auto it = m_RetiredPSOs.begin(); it != m_RetiredPSOs.end(); ) {
