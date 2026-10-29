@@ -19,6 +19,7 @@ VulkanSwapChain::VulkanSwapChain(VkDevice device, VkPhysicalDevice physical,
     , m_PresentQueue(presentQueue)
     , m_Width(desc.width), m_Height(desc.height)
     , m_HDR(desc.hdr)
+    , m_Vsync(desc.vsync)
 {
     CreateSwapchain();
     HE_CORE_INFO("Vulkan swapchain created: {}x{}", m_Width, m_Height);
@@ -66,13 +67,15 @@ void VulkanSwapChain::CreateSwapchain() {
     std::vector<VkPresentModeKHR> presentModes(presentModeCount);
     vkGetPhysicalDeviceSurfacePresentModesKHR(m_Physical, m_Surface, &presentModeCount, presentModes.data());
 
+    // 呈现模式：此前不看 desc.vsync，只在有 MAILBOX 时用 MAILBOX，否则 FIFO ⇒ 不支持 MAILBOX 的设备上
+    // 关掉垂直同步（HE_NO_VSYNC=1）帧率仍锁在刷新率。关闭时优先 IMMEDIATE（不等垂直消隐，可能撕裂，
+    // 对应 D3D12 的 ALLOW_TEARING），其次 MAILBOX；开启时沿用 MAILBOX 优先、FIFO 兜底
+    auto hasMode = [&](VkPresentModeKHR m) {
+        return std::find(presentModes.begin(), presentModes.end(), m) != presentModes.end();
+    };
     VkPresentModeKHR presentMode = VK_PRESENT_MODE_FIFO_KHR; // 始终可用
-    for (auto& mode : presentModes) {
-        if (mode == VK_PRESENT_MODE_MAILBOX_KHR) {
-            presentMode = mode;
-            break;
-        }
-    }
+    if (!m_Vsync && hasMode(VK_PRESENT_MODE_IMMEDIATE_KHR))  presentMode = VK_PRESENT_MODE_IMMEDIATE_KHR;
+    else if (hasMode(VK_PRESENT_MODE_MAILBOX_KHR))           presentMode = VK_PRESENT_MODE_MAILBOX_KHR;
 
     // 窗口最小化时尺寸可能为 0，跳过创建
     if (m_Width == 0 || m_Height == 0) return;

@@ -66,6 +66,7 @@ private:
     VkFormat         m_Format        = VK_FORMAT_B8G8R8A8_UNORM;
     VkColorSpaceKHR  m_ColorSpace    = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
     bool             m_HDR           = false;
+    bool             m_Vsync         = true;    // 创建时的垂直同步设置（决定呈现模式）
     u32              m_Width         = 0;
     u32              m_Height        = 0;
     u32              m_ImageCount    = 0;
