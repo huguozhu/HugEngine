@@ -777,6 +777,11 @@ void D3D12CommandList::BindDescriptorSet(u32 setIndex, DescriptorSetHandle set) 
 
 void D3D12CommandList::PrepareSetTables() {
     if (!m_Device) return;
+    // space2 的 bindless 表：此前只在 DrawIndexed 里设置，计算派发与 Draw 都没有，
+    // 用 bindless 的 compute（如逐实例剔除）读到未初始化的根参数（GPU 验证 id=935）
+    if (const auto h = m_Device->GetBindlessSrvGpuHandle(); h.ptr) SetRootTable(10, h);
+    if (const auto h = m_Device->GetBindlessUavGpuHandle(); h.ptr) SetRootTable(18, h);
+    if (const auto h = m_Device->GetBindlessSmpGpuHandle(); h.ptr) SetRootTable(26, h);
     for (u32 i = 0; i < 8u; ++i) {
         const DescriptorSetHandle set = m_BoundSets[i];
         if (set == kInvalidSet) continue;
@@ -928,6 +933,7 @@ void D3D12CommandList::EnsureBoundResourceStates() {
 
 void D3D12CommandList::SetRootTable(u32 param, D3D12_GPU_DESCRIPTOR_HANDLE handle) {
     if (param >= 32u) return;
+    if (m_RootTables[param].ptr == handle.ptr) return;   // 未变：不必重发（切管线另有标脏）
     m_RootTables[param] = handle;
     m_RootArgsDirty = true;
 }
@@ -1035,17 +1041,6 @@ void D3D12CommandList::Draw(u32 vertexCount, u32 instanceCount, u32 firstVertex,
 
 void D3D12CommandList::DrawIndexed(u32 indexCount, u32 instanceCount, u32 firstIndex,
                                    i32 vertexOffset, u32 firstInstance) {
-    // space2 绑定分测：分别用 HE_BIND2_SRV / HE_BIND2_SMP 控制
-    if (m_Device && m_List) {
-        if (true) {   // space2 的 bindless 表必须总是绑定
-            const D3D12_GPU_DESCRIPTOR_HANDLE h1 = m_Device->GetBindlessSrvGpuHandle();
-            if (h1.ptr) SetRootTable(10, h1);
-        }
-        if (true) {
-            const D3D12_GPU_DESCRIPTOR_HANDLE h2 = m_Device->GetBindlessSmpGpuHandle();
-            if (h2.ptr) SetRootTable(26, h2);
-        }
-    }
     static const bool s_NoDraw = (std::getenv("HE_D3D12_NO_DRAW") != nullptr);   // 实验开关：跳过实际绘制（只读一次环境变量）
     if (s_NoDraw) return;
     if (!m_List) return;

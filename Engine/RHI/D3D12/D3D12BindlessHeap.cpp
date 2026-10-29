@@ -55,6 +55,8 @@ BindlessHandle D3D12BindlessHeap::RegisterBuffer(IRHIBuffer* ssbo) {
             m_Device->WriteBindlessBufferSrv(base, ssbo);
         }
     }
+    // 可写区间（u0 可见索引、u64 间接命令）：同一句柄同样写进两段，供 compute 按句柄写入
+    for (u32 base : { 0u, 64u }) m_Device->WriteBindlessBufferUav(base + hIdx, ssbo);
     return h;
 }
 

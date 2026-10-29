@@ -765,6 +765,30 @@ bool D3D12Device::EnsureDescriptorHeaps() {
         // bindless 保留区：放在堆尾，避免与普通描述符集分配冲突（4096 个槽）
         // 实验：可通过环境变量把 bindless 基址设为 0（绑到堆起点），用于判别是基址越界还是绑定本身
         m_BindlessSrvBase = std::getenv("HE_BINDLESS_BASE0") ? 0u : (kDescriptorHeapCapacity - 4096u);
+        // 【bindless 区预填空描述符】只有注册过的句柄会写入描述符，其余槽位是未定义内容，
+        // 着色器读到未注册的槽位（句柄为 0 / 越界）时行为未定义。按区间类型写空视图：
+        //   t0..t1023 纹理（2D SRV）、t1024..t1279 结构化缓冲（缓冲 SRV）、u0..u127 可写缓冲（缓冲 UAV）；
+        //   其后直到堆尾（ImGui 字体槽之前）也填空视图：根签名的表是无界的，表的范围一直延伸到堆尾
+        {
+            D3D12_SHADER_RESOURCE_VIEW_DESC texNull{};
+            texNull.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            texNull.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            texNull.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            texNull.Texture2D.MipLevels = 1;
+            D3D12_SHADER_RESOURCE_VIEW_DESC bufNull{};
+            bufNull.Format = DXGI_FORMAT_R32_UINT;
+            bufNull.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+            bufNull.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            D3D12_UNORDERED_ACCESS_VIEW_DESC uavNull{};
+            uavNull.Format = DXGI_FORMAT_R32_UINT;
+            uavNull.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+            for (u32 i = 0; i < 4096u && m_BindlessSrvBase + i < kImGuiFontSlot; ++i) {
+                D3D12_CPU_DESCRIPTOR_HANDLE h = GetSlotCpuHandle(m_BindlessSrvBase + i);
+                if (i < 1024u)                  m_Device->CreateShaderResourceView(nullptr, &texNull, h);
+                else if (i < kBindlessUavBase)  m_Device->CreateShaderResourceView(nullptr, &bufNull, h);
+                else                            m_Device->CreateUnorderedAccessView(nullptr, nullptr, &uavNull, h);
+            }
+        }
     }
     if (!m_SamplerHeap) {
         D3D12_DESCRIPTOR_HEAP_DESC hd{};
@@ -1084,12 +1108,17 @@ void D3D12Device::NoteSetLayoutStrides(ID3D12ShaderReflection* refl,
 
 
 void D3D12Device::FlushPendingBindlessBuffers() {
-    if (m_PendingBindlessBufs.empty()) return;
+    if (m_PendingBindlessBufs.empty() && m_PendingBindlessUavs.empty()) return;
     if (!m_CbvSrvUavHeap || m_CbvSrvUavSize == 0) return;
     auto pending = std::move(m_PendingBindlessBufs);
     m_PendingBindlessBufs.clear();
     for (auto& [slot, buf] : pending) {
         if (buf) WriteBindlessBufferSrv(slot, buf);
+    }
+    auto pendingUav = std::move(m_PendingBindlessUavs);
+    m_PendingBindlessUavs.clear();
+    for (auto& [slot, buf] : pendingUav) {
+        if (buf) WriteBindlessBufferUav(slot, buf);
     }
 }
 
@@ -1412,6 +1441,41 @@ bool D3D12Device::WriteBindlessBufferSrv(u32 slot, IRHIBuffer* buffer) {
     sd.Buffer.StructureByteStride = stride;
     m_Device->CreateShaderResourceView(buf->GetNativeHandle(), &sd, dst);
     return true;
+}
+
+bool D3D12Device::WriteBindlessBufferUav(u32 slot, IRHIBuffer* buffer) {
+    if (!m_Device || !buffer) return false;
+    if (!m_CbvSrvUavHeap || m_CbvSrvUavSize == 0) {   // 堆尚未创建 ⇒ 排队，BindDescriptorSet 时补写
+        m_PendingBindlessUavs.emplace_back(slot, buffer);
+        return false;
+    }
+    auto* buf = static_cast<D3D12Buffer*>(buffer);
+    ID3D12Resource* res = buf->GetNativeHandle();
+    if (!res || !(res->GetDesc().Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)) return false;   // 不可写的缓冲不进 UAV 区间
+    // 步长按区间：u0.. 可见实例索引 uint（4 字节）；u64.. 间接命令 IndirectCmd（5 个 u32 = 20 字节）
+    u32 stride = 0;
+    if      (slot < 64u)  stride = 4u;
+    else if (slot < 128u) stride = 20u;
+    else return false;
+    if (buf->GetSize() < stride) return false;   // 不足一个元素：视图越界，非法
+    D3D12_CPU_DESCRIPTOR_HANDLE dst = m_CbvSrvUavHeap->GetCPUDescriptorHandleForHeapStart();
+    dst.ptr += static_cast<SIZE_T>(m_BindlessSrvBase + kBindlessUavBase + slot) * m_CbvSrvUavSize;
+    D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
+    ud.Format = DXGI_FORMAT_UNKNOWN;
+    ud.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+    ud.Buffer.FirstElement = 0;
+    ud.Buffer.NumElements = static_cast<UINT>(buf->GetSize() / stride);
+    ud.Buffer.StructureByteStride = stride;
+    m_Device->CreateUnorderedAccessView(res, nullptr, &ud, dst);
+    return true;
+}
+
+D3D12_GPU_DESCRIPTOR_HANDLE D3D12Device::GetBindlessUavGpuHandle() const {
+    D3D12_GPU_DESCRIPTOR_HANDLE h{};
+    if (!m_CbvSrvUavHeap) return h;
+    h = m_CbvSrvUavHeap->GetGPUDescriptorHandleForHeapStart();
+    h.ptr += static_cast<UINT64>(m_BindlessSrvBase + kBindlessUavBase) * m_CbvSrvUavSize;
+    return h;
 }
 
 D3D12_GPU_DESCRIPTOR_HANDLE D3D12Device::GetSetSamplerGpuHandle(u32 slot) const {

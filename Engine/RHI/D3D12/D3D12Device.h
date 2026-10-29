@@ -196,6 +196,11 @@ public:
     /// 描述符堆尚未创建时，bindless 缓冲写入会被丢弃；这里排队等堆就绪后补写
     void FlushPendingBindlessBuffers();
     bool WriteBindlessBufferSrv(u32 slot, IRHIBuffer* buffer);
+    /// bindless 可写缓冲区间（space2 的 u 寄存器）：u0.. 可见索引（uint）、u64.. 间接命令（IndirectCmd），
+    /// 在 bindless 区里位于 SRV 区间（t0..t1279）之后。slot 为 u 寄存器号
+    static constexpr u32 kBindlessUavBase = 1280;
+    bool WriteBindlessBufferUav(u32 slot, IRHIBuffer* buffer);
+    D3D12_GPU_DESCRIPTOR_HANDLE GetBindlessUavGpuHandle() const;
     /// bindless 采样器数组（space2 的 s0 起），必须写进独立的 shader-visible 采样器堆
     bool WriteBindlessSampler(u32 slot, IRHISampler* sampler);
     D3D12_GPU_DESCRIPTOR_HANDLE GetBindlessSmpGpuHandle() const;
@@ -349,6 +354,7 @@ private:
     // 又让句柄映射指向早已不应该存在的实例。改为裸指针，纹理析构时注销。
     std::unordered_map<u32, u32> m_StructStrides;
     std::vector<std::pair<u32, IRHIBuffer*>> m_PendingBindlessBufs;
+    std::vector<std::pair<u32, IRHIBuffer*>> m_PendingBindlessUavs;   // 同上，UAV 区间
 public:
     /// 【多缓冲错位修正】引擎按飞行帧写物体缓冲，但绑定的描述符集可能指向另一个
     /// 飞行帧的缓冲（实测写入地址 390594560，绑定地址 390070272，从未被写过）。
