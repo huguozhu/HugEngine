@@ -997,33 +997,43 @@ void D3D12CommandList::DrawIndexed(u32 indexCount, u32 instanceCount, u32 firstI
                                  static_cast<INT>(vertexOffset), firstInstance);
 }
 
+ID3D12CommandSignature* D3D12CommandList::GetCommandSignature(D3D12_INDIRECT_ARGUMENT_TYPE type, u32 stride) {
+    if (!m_Device || !m_Device->GetDevice()) return nullptr;
+    // 步长为 0 时取该参数类型的紧凑大小
+    UINT want = stride;
+    if (!want) {
+        switch (type) {
+            case D3D12_INDIRECT_ARGUMENT_TYPE_DRAW:         want = sizeof(D3D12_DRAW_ARGUMENTS);         break;
+            case D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED: want = sizeof(D3D12_DRAW_INDEXED_ARGUMENTS); break;
+            case D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH:     want = sizeof(D3D12_DISPATCH_ARGUMENTS);     break;
+            default: return nullptr;
+        }
+    }
+    const u64 key = (static_cast<u64>(type) << 32) | want;
+    // 命令签名必须活到 GPU 执行完，否则间接调用无效（id=921）：缓存到列表销毁为止
+    if (auto it = m_CmdSigs.find(key); it != m_CmdSigs.end()) return it->second.Get();
+    D3D12_INDIRECT_ARGUMENT_DESC arg{};
+    arg.Type = type;
+    D3D12_COMMAND_SIGNATURE_DESC sd{};
+    sd.ByteStride       = want;
+    sd.NumArgumentDescs = 1;
+    sd.pArgumentDescs   = &arg;
+    sd.NodeMask         = 0;
+    ComPtr<ID3D12CommandSignature> created;
+    if (FAILED(m_Device->GetDevice()->CreateCommandSignature(&sd, nullptr, IID_PPV_ARGS(&created)))) {
+        HE_CORE_ERROR("D3D12: 创建命令签名失败（类型 {}，步长 {}）", static_cast<int>(type), want);
+        return nullptr;
+    }
+    return (m_CmdSigs[key] = created).Get();
+}
+
 void D3D12CommandList::DrawIndexedIndirect(IRHIBuffer* buffer, u64 offset, u32 drawCount, u32 stride) {
     if (!m_List || !buffer) return;
     auto* b = static_cast<D3D12Buffer*>(buffer);
-
-    // 命令签名按 stride 缓存：必须活到 GPU 执行完，否则间接绘制无效（id=921）
-    const u32 want = stride ? stride : static_cast<u32>(sizeof(D3D12_DRAW_INDEXED_ARGUMENTS));
-    ID3D12CommandSignature* sig = nullptr;
-    auto it = m_CmdSigs.find(want);
-    if (it != m_CmdSigs.end()) {
-        sig = it->second.Get();
-    } else {
-        D3D12_INDIRECT_ARGUMENT_DESC arg{};
-        arg.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED;
-        D3D12_COMMAND_SIGNATURE_DESC sd{};
-        sd.ByteStride = want;
-        sd.NumArgumentDescs = 1;
-        sd.pArgumentDescs = &arg;
-        sd.NodeMask = 0;
-        ComPtr<ID3D12CommandSignature> created;
-        if (FAILED(m_Device->GetDevice()->CreateCommandSignature(&sd, nullptr, IID_PPV_ARGS(&created)))) {
-            HE_CORE_ERROR("D3D12 DrawIndexedIndirect: 创建命令签名失败");
-            return;
-        }
-        sig = created.Get();
-        m_CmdSigs[want] = created;
-    }
-
+    ID3D12CommandSignature* sig = GetCommandSignature(D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED, stride);
+    if (!sig) return;
+    // 参数缓冲常由 compute（GPU 剔除）以 UAV 写出：执行前必须转到 INDIRECT_ARGUMENT
+    TransitionBuffer(b->GetResource(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
     EnsureBoundResourceStates();
     FlushRootArgs();
     m_List->ExecuteIndirect(sig, drawCount, b->GetResource(), offset, nullptr, 0);
@@ -1036,23 +1046,16 @@ void D3D12CommandList::DrawIndexedIndirectCount(IRHIBuffer* buffer, u64 offset,
     if (!m_List || !buffer || !countBuffer) return;
     auto* b  = static_cast<D3D12Buffer*>(buffer);
     auto* cb = static_cast<D3D12Buffer*>(countBuffer);
-
-    ComPtr<ID3D12CommandSignature> sig;
-    D3D12_INDIRECT_ARGUMENT_DESC arg{};
-    arg.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED;
-    D3D12_COMMAND_SIGNATURE_DESC sd{};
-    sd.ByteStride = stride ? stride : sizeof(D3D12_DRAW_INDEXED_ARGUMENTS);
-    sd.NumArgumentDescs = 1;
-    sd.pArgumentDescs = &arg;
-    sd.NodeMask = 0;
-    if (FAILED(m_Device->GetDevice()->CreateCommandSignature(&sd, nullptr, IID_PPV_ARGS(&sig)))) {
-        HE_CORE_ERROR("D3D12 DrawIndexedIndirectCount: 创建命令签名失败");
-        return;
-    }
+    // 签名走缓存：此前每次调用都建局部 ComPtr，函数返回即销毁而 GPU 尚未执行（同 id=921）
+    ID3D12CommandSignature* sig = GetCommandSignature(D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED, stride);
+    if (!sig) return;
+    // 参数缓冲与计数缓冲都要处于 INDIRECT_ARGUMENT（同一缓冲兼作两者时只转一次）
+    TransitionBuffer(b->GetResource(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+    TransitionBuffer(cb->GetResource(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
     // D3D12 的 ExecuteIndirect 原生支持「计数缓冲」，等价 Vulkan 的 *IndirectCount
     EnsureBoundResourceStates();
     FlushRootArgs();
-    m_List->ExecuteIndirect(sig.Get(), maxDrawCount, b->GetResource(), offset,
+    m_List->ExecuteIndirect(sig, maxDrawCount, b->GetResource(), offset,
                             cb->GetResource(), countOffset);
     m_PushDirty = true;   // 同 Draw：常量槽已被本次绘制消费
 }
@@ -1068,9 +1071,13 @@ void D3D12CommandList::Dispatch(u32 x, u32 y, u32 z) {
 void D3D12CommandList::DispatchIndirect(IRHIBuffer* buffer, u64 offset) {
     if (!m_List || !buffer) return;
     auto* b = static_cast<D3D12Buffer*>(buffer);
+    // 此前签名传空指针：ExecuteIndirect 要求有效的命令签名（派发参数 = 3 个 u32）
+    ID3D12CommandSignature* sig = GetCommandSignature(D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH, 0);
+    if (!sig) return;
+    TransitionBuffer(b->GetResource(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
     EnsureBoundResourceStates();
     FlushRootArgs();
-    m_List->ExecuteIndirect(nullptr, 1, b->GetResource(), offset, nullptr, 0);
+    m_List->ExecuteIndirect(sig, 1, b->GetResource(), offset, nullptr, 0);
     m_PushDirty = true;   // 同 Draw：常量槽已被本次派发消费
 }
 

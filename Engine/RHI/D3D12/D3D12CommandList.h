@@ -182,7 +182,9 @@ private:
     /// 间接绘制的命令签名缓存。**必须活到 GPU 执行完**：此前每次调用都建局部
     /// ComPtr，函数返回即销毁，调试层报 id=921（签名在列表关闭时被销毁），
     /// 间接绘制因此无效 —— 02.Cube 的实例化网格正是走这条路径。
-    std::unordered_map<u32, ComPtr<ID3D12CommandSignature>> m_CmdSigs;
+    std::unordered_map<u64, ComPtr<ID3D12CommandSignature>> m_CmdSigs;
+    /// 取（必要时创建并缓存）命令签名：键 = 参数类型 << 32 | 步长。缓存持有签名直到列表销毁
+    ID3D12CommandSignature* GetCommandSignature(D3D12_INDIRECT_ARGUMENT_TYPE type, u32 stride);
     /// 本帧的推送常量槽位。Vulkan 的 vkCmdPushConstants 语义是「同一块数据、
     /// 多次调用按 offset 累加」，所以整帧必须复用**同一个**槽位；
     /// 每调用一次就新开槽位会让先前的写入丢失（02.Cube 因此黑屏）。
