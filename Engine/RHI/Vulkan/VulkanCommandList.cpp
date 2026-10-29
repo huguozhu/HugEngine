@@ -492,6 +492,14 @@ void VulkanCommandList::DrawIndexedIndirect(rhi::IRHIBuffer* buffer, u64 offset,
     }
     EmitDrawLabel();  // 自动插入 DrawCall 级调试 marker（若已设置）
     auto* vkBuf = static_cast<VulkanBuffer*>(buffer);
+    // 索引/顶点缓冲绑定：SetVertexBuffer / SetIndexBuffer 只记录，绑定在绘制时下发（与 DrawIndexed 一致）。
+    // 此前这里漏了，间接绘制用的是上一次绘制留下的缓冲（实测逐实例剔除后的实例化网格画成别的网格的尖刺）
+    if (m_CurrentIB)
+        vkCmdBindIndexBuffer(m_CmdBuffers[m_FrameIndex], m_CurrentIB, m_IBOffset, m_CurrentIndexType);
+    if (m_CurrentVB) {
+        VkDeviceSize vbOffset = 0;
+        vkCmdBindVertexBuffers(m_CmdBuffers[m_FrameIndex], m_VBBinding, 1, &m_CurrentVB, &vbOffset);
+    }
     vkCmdDrawIndexedIndirect(m_CmdBuffers[m_FrameIndex], vkBuf->GetHandle(),
                               (VkDeviceSize)offset, drawCount, stride);
 }
