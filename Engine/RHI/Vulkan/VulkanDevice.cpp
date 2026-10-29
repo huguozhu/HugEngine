@@ -774,6 +774,14 @@ void VulkanDevice::CreateLogicalDevice() {
         //   **本引擎不建任何几何着色器管线**，开启该特性只为满足这条 SPIR-V 能力要求，
         //   对任何既有渲染结果零影响（特性只在被使用时才改变行为）。
         features.geometryShader = supportedCore.geometryShader;
+
+        // pipelineStatisticsQuery：Profiler 的管线统计查询池（VK_QUERY_TYPE_PIPELINE_STATISTICS）要求启用该特性，
+        // 此前未启用，建池与 vkCmdBeginQuery 均违反规范（VUID-VkQueryPoolCreateInfo-queryType-00791）。
+        // 不支持时 CreateQueryPool 对该类型返回空，调用方按「无统计」处理
+        features.pipelineStatisticsQuery = supportedCore.pipelineStatisticsQuery;
+        m_PipelineStatisticsSupported = supportedCore.pipelineStatisticsQuery == VK_TRUE;
+        if (!supportedCore.pipelineStatisticsQuery)
+            HE_CORE_WARN("设备不支持 pipelineStatisticsQuery —— 管线统计查询不可用");
         if (!supportedCore.geometryShader)
             HE_CORE_WARN("设备不支持 geometryShader —— Nanite 绘制端的 SV_PrimitiveID 计数不可用"
                          "（该特性是 Vulkan 1.0 可选特性，桌面 GPU 均支持）");
@@ -1275,6 +1283,7 @@ void VulkanDevice::SubmitAll(Span<IRHICommandList*> cmdLists) {
 // GPU Query
 // ============================================================
 std::unique_ptr<IRHIQueryPool> VulkanDevice::CreateQueryPool(u32 queryCount, QueryType type) {
+    if (type == QueryType::PipelineStatistics && !m_PipelineStatisticsSupported) return nullptr;   // 特性未启用
     return std::make_unique<VulkanQueryPool>(m_Device, queryCount, type);
 }
 

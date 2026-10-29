@@ -422,6 +422,7 @@ private:
     VmaAllocator               m_VmaAllocator     = VK_NULL_HANDLE;
     VkDebugUtilsMessengerEXT m_DebugMessenger = VK_NULL_HANDLE;
     bool m_ValidationEnabled = false;
+    bool m_PipelineStatisticsSupported = false;   // 是否启用了 pipelineStatisticsQuery 特性（管线统计查询池）
 
     VulkanRTDispatch m_RT;
     VulkanDGCFuncs   m_DGCFuncs;
