@@ -190,6 +190,13 @@ private:
     bool            m_HeapsSet = false;
     /// 各 setIndex 当前绑定的描述符集（EnsureBoundTextureStates 据此找纹理）
     DescriptorSetHandle m_BoundSets[8]{};
+    /// 各 setIndex 当前根参数表所指快照对应的集与版本：集换了或内容变了才重新拍快照
+    DescriptorSetHandle m_SnapSets[8]{};
+    u64                 m_SnapVersions[8]{};
+    /// 本次录制用过的快照环形区块（位掩码），提交时交给设备标记围栏
+    u32                 m_SetRingChunkMask = 0;
+    /// 绘制/派发前调用：为已绑定的描述符集准备快照，并更新 SRV / UAV 表根参数
+    void PrepareSetTables();
     /// 当前 pass 正作为附件的资源：它们不能同时被转成可读状态
     std::vector<ID3D12Resource*> m_PassAttachments;
     /// 当前 pass 绑定的 RTV / DSV：切换只读 DSV 时需要重新 OMSetRenderTargets

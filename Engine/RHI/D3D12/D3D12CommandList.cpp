@@ -89,6 +89,8 @@ void D3D12CommandList::Begin() {
     m_RootArgsDirty = true;
     m_HeapsSet = false;
     for (auto& bs : m_BoundSets) bs = kInvalidSet;
+    for (auto& ss : m_SnapSets) ss = kInvalidSet;   // 新的录制：快照一律重新拍
+    m_SetRingChunkMask = 0;
     ClearPassAttachments();
     // 缓冲在每次提交执行完后衰减回 COMMON：新录制从全 COMMON 开始
     m_BufferStates.clear();
@@ -107,6 +109,9 @@ void D3D12CommandList::OnSubmitted(ID3D12CommandQueue* queue) {
     const u64 v = m_NextFenceValue++;
     queue->Signal(m_SlotFence.Get(), v);
     m_SlotFenceValues[m_FrameSlot] = v;
+    // 本次录制用过的描述符集快照块：围栏到达 v 前不能被覆盖
+    if (m_Device && m_SetRingChunkMask) m_Device->MarkSetRingChunks(m_SetRingChunkMask, m_SlotFence.Get(), v);
+    m_SetRingChunkMask = 0;
     // 本次提交写过的查询：围栏到达 v 后结果可读
     for (const auto& [pool, idx] : m_PendingQueries) pool->MarkSubmitted(idx, m_SlotFence.Get(), v);
     m_PendingQueries.clear();
@@ -691,45 +696,37 @@ void D3D12CommandList::BindDescriptorSet(u32 setIndex, DescriptorSetHandle set) 
     m_BoundSets[setIndex] = set;
     const u32 baseSlot = m_Device->GetSetBaseSlot(set);
     m_LastBoundSet = set; m_LastBaseSlot = baseSlot;
-    { static int n8=0; if (++n8 % 60 == 1) { std::printf("[LISTID-B] list=%p set=%llu base=%u\n", (void*)this, (unsigned long long)set, baseSlot); std::fflush(stdout); } }
-    std::printf("[BS] base ok\n"); std::fflush(stdout);
     if (baseSlot == 0xFFFFFFFFu) return;
-    std::printf("[BS] baseret ok\n"); std::fflush(stdout);
-
-    // 根签名：0..7 = root CBV，8..11 = SRV 表(space0..3)，12..15 = Sampler 表(space0..3)
-    const D3D12_GPU_DESCRIPTOR_HANDLE srv  = m_Device->GetSetGpuHandle(baseSlot);
-    // 采样器表从该 set 自己的采样器基址开始（见 AllocateDescriptorSet）
-    const D3D12_GPU_DESCRIPTOR_HANDLE smp  = m_Device->GetSetSamplerGpuHandle(m_Device->GetSetSamplerBase(set));
-
-    // 根签名：0..7 CBV，8..11 SRV，12..15 UAV，16..19 Sampler
-    const u32 uavSlot  = baseSlot + m_Device->GetSetUavOffset(set);
-    const D3D12_GPU_DESCRIPTOR_HANDLE uav = m_Device->GetSetGpuHandle(uavSlot);
 
     // 【参数偏移必须与根签名一致】根签名布局：8 个 root CBV 之后依次是
     //   SRV 表 8..15、UAV 表 16..23、Sampler 表 24..31（每类 8 个寄存器空间）。
     // 之前这里用 12/16 是老布局（当时 kSpaceCount=4）的偏移，把 UAV/Sampler
     // 表绑到了 SRV 的槽位上，描述符类型对不上会让 D3D12 直接卡死。
-    std::printf("[BS] srv=%llu uav=%llu\n",(unsigned long long)srv.ptr,(unsigned long long)uav.ptr); std::fflush(stdout);
-    { static int n=0; if (++n <= 8) { const auto h0=m_Device->GetSrvHeapGpuStart();
-        std::printf("[GPUDIFF] setIndex=%u base=%u gpuOff=%llu\n", setIndex, baseSlot,
-            (unsigned long long)(srv.ptr - h0.ptr)); std::fflush(stdout); } }
-    static const bool s_Copy0 = (std::getenv("HE_COPY0") != nullptr);   // 每次绑定都会判断：只读一次环境变量
-    if (s_Copy0 && setIndex == 0) {
-        // diag: copy this set SRV range to slot 0 and bind heap base
-        m_Device->GetDevice()->CopyDescriptorsSimple(32,
-            m_Device->GetSlotCpuHandle(0), m_Device->GetSlotCpuHandle(baseSlot),
-            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-        SetRootTable(8, m_Device->GetSrvHeapGpuStart());
-    } else {
-        SetRootTable(8  + setIndex, srv);
+    //
+    // SRV / UAV 表不在这里设置：它们指向集内容的快照，由 PrepareSetTables 在绘制/派发前
+    // 按集的当前版本拍摄（与 Vulkan UPDATE_AFTER_BIND 一致：绑定之后的更新对之后的绘制可见）。
+    // 采样器表从该 set 自己的采样器基址开始（见 AllocateDescriptorSet）；
+    // 只记录到缓存，由 FlushRootArgs 在绘制/派发前按当前管线类型（图形/计算）下发
+    SetRootTable(24 + setIndex, m_Device->GetSetSamplerGpuHandle(m_Device->GetSetSamplerBase(set)));
+    m_RootArgsDirty = true;
+}
+
+void D3D12CommandList::PrepareSetTables() {
+    if (!m_Device) return;
+    for (u32 i = 0; i < 8u; ++i) {
+        const DescriptorSetHandle set = m_BoundSets[i];
+        if (set == kInvalidSet) continue;
+        const u64 ver = m_Device->GetSetVersion(set);
+        if (m_SnapSets[i] == set && m_SnapVersions[i] == ver) continue;   // 快照仍有效
+        D3D12_GPU_DESCRIPTOR_HANDLE srv{}, uav{};
+        u32 chunk = 0;
+        if (!m_Device->SnapshotDescriptorSet(set, srv, uav, chunk)) continue;
+        SetRootTable(8  + i, srv);
+        SetRootTable(16 + i, uav);
+        m_SnapSets[i]     = set;
+        m_SnapVersions[i] = ver;
+        m_SetRingChunkMask |= (1u << chunk);
     }
-    // 只记录到缓存，由 FlushRootArgs 在绘制/派发前按当前管线类型（图形/计算）下发，
-    // 这样 BindDescriptorSet 与 SetPipeline 的先后顺序不再影响结果
-    SetRootTable(16 + setIndex, uav);
-    std::printf("[BS] g-uav ok\n"); std::fflush(stdout);
-    SetRootTable(24 + setIndex, smp);
-    std::printf("[BS] g-smp ok\n"); std::fflush(stdout);
-    std::printf("[BS] tables ok\n"); std::fflush(stdout);
 }
 
 void D3D12CommandList::EnsureBoundResourceStates() {
@@ -820,6 +817,7 @@ void D3D12CommandList::SetRootTable(u32 param, D3D12_GPU_DESCRIPTOR_HANDLE handl
 }
 
 void D3D12CommandList::FlushRootArgs() {
+    PrepareSetTables();   // 集内容变了要换快照：会更新 SRV/UAV 表并标脏根参数
     if (!m_List || !m_Pipeline || !m_RootArgsDirty) return;
     // 描述符表必须在 SetDescriptorHeaps 之后才能设置
     if (!m_HeapsSet && m_Device && m_Device->EnsureDescriptorHeaps()) {
@@ -932,12 +930,6 @@ void D3D12CommandList::DrawIndexed(u32 indexCount, u32 instanceCount, u32 firstI
         std::fflush(stdout); } }
     { static int n8=0; if (++n8 % 400 == 1) { std::printf("[OBJFIX] obj=%p base=%u\n",
         (void*)m_Device->GetLastObjectBuffer(), m_LastBaseSlot); std::fflush(stdout); } }
-    // 绘制前重新绑定 space0 的 SRV 表：引擎只在 pass 开始绑一次，若期间有别的
-    // BindDescriptorSet（同样是 setIndex=0）覆盖了同一张表，绘制时就会读到别的 set。
-    if (m_Device && m_LastBaseSlot != 0xFFFFFFFFu) {
-        const D3D12_GPU_DESCRIPTOR_HANDLE s0 = m_Device->GetSetGpuHandle(m_LastBaseSlot);
-        if (s0.ptr) SetRootTable(8, s0);
-    }
     { static int n=0; if (indexCount == 1728 && ++n <= 4) { std::printf("[DRAWSET] set=%llu base=%u idx=%u\n", (unsigned long long)m_LastBoundSet, m_LastBaseSlot, indexCount); std::fflush(stdout); } }
     // space2 绑定分测：分别用 HE_BIND2_SRV / HE_BIND2_SMP 控制
     if (m_Device && m_List) {
@@ -966,12 +958,6 @@ void D3D12CommandList::DrawIndexed(u32 indexCount, u32 instanceCount, u32 firstI
             std::printf("[INSTH] useInst=%u w24..29=%u,%u,%u,%u,%u,%u\n",
                 w[22], w[24],w[25],w[26],w[27],w[28],w[29]); std::fflush(stdout); } }
         m_PushDirty = true;   // 下一次推送开始新的常量槽位
-    // rebind space0 SRV table right before the draw: a later BindDescriptorSet
-    // (also setIndex 0) can overwrite the table with a different set.
-    if (m_Device && m_LastBaseSlot != 0xFFFFFFFFu) {
-        const D3D12_GPU_DESCRIPTOR_HANDLE s0 = m_Device->GetSetGpuHandle(m_LastBaseSlot);
-        if (s0.ptr) SetRootTable(8, s0);
-    }
     EnsureBoundResourceStates();
     FlushRootArgs();
     m_List->DrawIndexedInstanced(indexCount, instanceCount, firstIndex,

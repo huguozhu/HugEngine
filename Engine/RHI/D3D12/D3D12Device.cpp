@@ -496,6 +496,71 @@ D3D12_GPU_DESCRIPTOR_HANDLE D3D12Device::GetSetGpuHandle(u32 slot) const {
     return h;
 }
 
+D3D12_CPU_DESCRIPTOR_HANDLE D3D12Device::SetWriteHandle(D3D12Set& s, u32 slot) {
+    ++s.version;   // 内容即将改变：已有快照全部过期
+    D3D12_CPU_DESCRIPTOR_HANDLE h{};
+    if (!m_SetStagingHeap || slot >= kSetRegionCapacity) return h;
+    h = m_SetStagingHeap->GetCPUDescriptorHandleForHeapStart();
+    h.ptr += static_cast<SIZE_T>(slot) * m_CbvSrvUavSize;
+    return h;
+}
+
+u64 D3D12Device::GetSetVersion(DescriptorSetHandle set) const {
+    if (set == kInvalidSet || set > m_DescriptorSets.size()) return 0;
+    return m_DescriptorSets[static_cast<size_t>(set - 1)].version;
+}
+
+bool D3D12Device::SnapshotDescriptorSet(DescriptorSetHandle set, D3D12_GPU_DESCRIPTOR_HANDLE& srvOut,
+                                        D3D12_GPU_DESCRIPTOR_HANDLE& uavOut, u32& chunkOut) {
+    if (set == kInvalidSet || set > m_DescriptorSets.size()) return false;
+    if (!m_CbvSrvUavHeap || !m_SetStagingHeap) return false;
+    const D3D12Set& s = m_DescriptorSets[static_cast<size_t>(set - 1)];
+    // 集在暂存堆里是连续的两段：[baseSlot, +slotCount) 为 SRV/CBV，紧接着同样长度的 UAV
+    const u32 count = s.slotCount * 2u;
+    if (count == 0 || count > kSetRingChunkSize) return false;
+
+    // 当前块放不下：换到下一块。该块上一轮的使用者必须已在 GPU 上执行完，否则等它
+    if (m_SetRingOffset + count > kSetRingChunkSize) {
+        m_SetRingChunk  = (m_SetRingChunk + 1) % kSetRingChunkCount;
+        m_SetRingOffset = 0;
+        auto& uses = m_SetRingChunks[m_SetRingChunk].uses;
+        for (auto& [fence, value] : uses) {
+            if (!fence || fence->GetCompletedValue() >= value) continue;
+            if (HANDLE ev = CreateEventEx(nullptr, nullptr, 0, EVENT_ALL_ACCESS)) {
+                fence->SetEventOnCompletion(value, ev);
+                WaitForSingleObject(ev, 5000);   // 有上限：设备挂起时不至于永久阻塞
+                CloseHandle(ev);
+            }
+        }
+        uses.clear();
+    }
+    const u32 dstSlot = kSetRingBase + m_SetRingChunk * kSetRingChunkSize + m_SetRingOffset;
+    m_SetRingOffset += count;
+
+    D3D12_CPU_DESCRIPTOR_HANDLE src = m_SetStagingHeap->GetCPUDescriptorHandleForHeapStart();
+    src.ptr += static_cast<SIZE_T>(s.baseSlot) * m_CbvSrvUavSize;
+    m_Device->CopyDescriptorsSimple(count, GetSlotCpuHandle(dstSlot), src, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+    srvOut   = GetSetGpuHandle(dstSlot);
+    uavOut   = GetSetGpuHandle(dstSlot + (s.uavBase - s.baseSlot));
+    chunkOut = m_SetRingChunk;
+    return true;
+}
+
+void D3D12Device::MarkSetRingChunks(u32 chunkMask, ID3D12Fence* fence, u64 value) {
+    if (!fence) return;
+    for (u32 c = 0; c < kSetRingChunkCount && chunkMask; ++c) {
+        if (!(chunkMask & (1u << c))) continue;
+        chunkMask &= ~(1u << c);
+        auto& uses = m_SetRingChunks[c].uses;
+        bool found = false;
+        for (auto& u : uses) {
+            if (u.first.Get() == fence) { u.second = std::max(u.second, value); found = true; break; }
+        }
+        if (!found) uses.emplace_back(fence, value);
+    }
+}
+
 ID3D12Resource* D3D12Device::GetSetResource(DescriptorSetHandle set, u32 binding, bool& isBuffer) const {
     isBuffer = false;
     if (set == kInvalidSet || set > m_DescriptorSets.size()) return nullptr;
@@ -533,6 +598,16 @@ bool D3D12Device::EnsureDescriptorHeaps() {
             return false;
         }
         m_CbvSrvUavSize = m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        // 描述符集暂存堆：不可被着色器访问（CopyDescriptors 的源必须是这种堆）
+        D3D12_DESCRIPTOR_HEAP_DESC sd{};
+        sd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        sd.NumDescriptors = kSetRegionCapacity;
+        sd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+        if (FAILED(m_Device->CreateDescriptorHeap(&sd, IID_PPV_ARGS(&m_SetStagingHeap)))) {
+            HE_CORE_ERROR("D3D12Device: 创建描述符集暂存堆失败");
+            m_CbvSrvUavHeap.Reset();
+            return false;
+        }
         // bindless 保留区：放在堆尾，避免与普通描述符集分配冲突（4096 个槽）
         // 实验：可通过环境变量把 bindless 基址设为 0（绑到堆起点），用于判别是基址越界还是绑定本身
         m_BindlessSrvBase = std::getenv("HE_BINDLESS_BASE0") ? 0u : (kDescriptorHeapCapacity - 4096u);
@@ -1025,7 +1100,7 @@ bool D3D12Device::WriteBindlessSrv(u32 slot, IRHITexture* texture) {
     if (!m_BindlessSrvHeap) {
         D3D12_DESCRIPTOR_HEAP_DESC hd{};
         hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-        hd.NumDescriptors = kDescriptorHeapCapacity;
+        hd.NumDescriptors = kBindlessMirrorCapacity;
         hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         if (FAILED(m_Device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_BindlessSrvHeap)))) return false;
         m_BindlessDescSize = m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -1066,7 +1141,7 @@ bool D3D12Device::WriteBindlessBufferSrv(u32 slot, IRHIBuffer* buffer) {
     if (!m_BindlessSrvHeap) {
         D3D12_DESCRIPTOR_HEAP_DESC hd{};
         hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-        hd.NumDescriptors = kDescriptorHeapCapacity;
+        hd.NumDescriptors = kBindlessMirrorCapacity;
         hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         if (FAILED(m_Device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_BindlessSrvHeap)))) return false;
         m_BindlessDescSize = m_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -1230,9 +1305,14 @@ DescriptorSetHandle D3D12Device::AllocateDescriptorSet(DescriptorSetLayoutHandle
     // 两个 shader-visible 堆（SRV + SAMPLER）都必须在绑定前就绪
     if (!EnsureDescriptorHeaps()) return {};
 
-    if (m_NextFreeSlot + need > kDescriptorHeapCapacity) {
+    // 单个集的快照必须放得进环形区的一块
+    if (need > kSetRingChunkSize) {
+        HE_CORE_ERROR("D3D12Device: 描述符集过大（{} 槽，快照块只有 {} 槽）", need, kSetRingChunkSize);
+        return {};
+    }
+    if (m_NextFreeSlot + need > kSetRegionCapacity) {
         HE_CORE_ERROR("D3D12Device: 描述符堆耗尽（需要 {}，剩余 {}）", need,
-                      kDescriptorHeapCapacity - m_NextFreeSlot);
+                      kSetRegionCapacity - m_NextFreeSlot);
         return {};
     }
     D3D12Set s;
@@ -1303,7 +1383,7 @@ void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, Desc
 void D3D12Device::WriteSetBufferDescriptor(D3D12Set& s, u32 binding, const D3D12Set::BufferBinding& bb) {
     ID3D12Resource* res = bb.resource.Get();
     if (!res) return;
-    D3D12_CPU_DESCRIPTOR_HANDLE dst = GetSlotCpuHandle(s.baseSlot + binding);
+    D3D12_CPU_DESCRIPTOR_HANDLE dst = SetWriteHandle(s, s.baseSlot + binding);
     const u64 size = bb.size;
 
     if (bb.type == DescriptorType::UniformBuffer) {
@@ -1351,7 +1431,7 @@ void D3D12Device::WriteSetBufferDescriptor(D3D12Set& s, u32 binding, const D3D12
         uav.Buffer.NumElements  = nElems;
         uav.Buffer.StructureByteStride = stride;
         uav.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_NONE;
-        m_Device->CreateUnorderedAccessView(res, nullptr, &uav, GetSlotCpuHandle(s.uavBase + binding));
+        m_Device->CreateUnorderedAccessView(res, nullptr, &uav, SetWriteHandle(s, s.uavBase + binding));
     }
 }
 
@@ -1362,7 +1442,7 @@ void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, Desc
     if (set == kInvalidSet || set > m_DescriptorSets.size()) return;
     if (!EnsureDescriptorHeaps()) return;
 
-    const auto& s = m_DescriptorSets[static_cast<size_t>(set - 1)];
+    auto& s = m_DescriptorSets[static_cast<size_t>(set - 1)];
     // 【采样器槽位 = 该 set 的采样器基址 + binding】采样器堆与 CBV_SRV_UAV 堆分开编号：
     // 不能叠加 baseSlot（CBV_SRV_UAV 堆有 65536 槽，叠加后会越过采样器堆上限）。
     // 每个 set 的采样器基址在 AllocateDescriptorSet 里独立分配，避免不同 set 互相覆盖。
@@ -1393,7 +1473,7 @@ void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, Desc
     m_DescriptorSets[static_cast<size_t>(set - 1)].buffers.erase(binding);   // 同一 binding 改写为纹理
     // 描述符写在「该 set 的基址 + binding」：绑定时按 space 绑 set 的区段基址，
     // 写入与读取用同一套偏移才能对上。
-    D3D12_CPU_DESCRIPTOR_HANDLE dst = GetSlotCpuHandle(s.baseSlot + binding);
+    D3D12_CPU_DESCRIPTOR_HANDLE dst = SetWriteHandle(s, s.baseSlot + binding);
     D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
     // 立方体贴图（天空盒/IBL）必须用 TEXTURECUBE 维度建 SRV，否则采样恒为 0
     srv.ViewDimension = (tex->GetArrayLayers() == 6) ? D3D12_SRV_DIMENSION_TEXTURECUBE : D3D12_SRV_DIMENSION_TEXTURE2D;
@@ -1436,7 +1516,7 @@ void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, Desc
         uav.Texture2D.MipSlice = 0;
         uav.Texture2D.PlaneSlice = 0;
         m_Device->CreateUnorderedAccessView(tex->GetResource(), nullptr, &uav,
-                                            GetSlotCpuHandle(s.uavBase + binding));
+                                            SetWriteHandle(s, s.uavBase + binding));
     }
 
     // 同时把采样器写到同一槽位（CombinedImageSampler 语义）
@@ -1493,7 +1573,7 @@ void D3D12Device::UpdateDescriptorSetWithImageView(DescriptorSetHandle set, u32 
     if (!EnsureDescriptorHeaps()) return;
     auto& s = m_DescriptorSets[static_cast<size_t>(set - 1)];
     s.textures[binding] = res;   // 同上：供绘制前补状态转换
-    const D3D12_CPU_DESCRIPTOR_HANDLE dst = GetSlotCpuHandle(s.baseSlot + binding);
+    const D3D12_CPU_DESCRIPTOR_HANDLE dst = SetWriteHandle(s, s.baseSlot + binding);
     if (!dst.ptr) return;
 
     // TYPELESS / 深度格式需要映射成可采样的具体格式

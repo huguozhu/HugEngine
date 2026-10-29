@@ -62,8 +62,30 @@ public:
     //  这样引擎侧「按 binding 号更新/绑定」的语义在 D3D12 上得以保留。
     // 【容量】引擎的部分描述符集 layout 里有很大的 binding 号（bindless 数组，
     // 单个 layout 就要 4000+ 槽），4096 会很快耗尽。D3D12 的 shader-visible
-    // CBV_SRV_UAV 堆上限是 1,000,000 描述符，这里取 65536（约 2 MB）。
-    static constexpr u32 kDescriptorHeapCapacity = 65536;
+    // CBV_SRV_UAV 堆上限是 1,000,000 描述符。
+    //
+    // 【描述符集的写入与 GPU 读取分离】引擎按 Vulkan 语义（UPDATE_AFTER_BIND）在帧间原地
+    // 改写描述符集（如 TAA 历史纹理每帧乒乓切换），而 D3D12 的 GPU 在**执行**绘制时才读
+    // shader-visible 堆里的描述符：直接写 shader-visible 堆会改到仍在 GPU 队列里的帧。
+    // 因此描述符集的内容只写进 CPU 侧暂存堆（不可被着色器访问，随时可改），绘制/派发前
+    // 再把集的当前内容整段拷到 shader-visible 堆的环形区，根参数表指向这份快照。
+    //
+    // shader-visible 堆划分：
+    //   [0, kSetRingBase)                         未用（描述符集只存在于暂存堆）
+    //   [kSetRingBase, + 块大小 × 块数)            描述符集快照环形区，按块随围栏回收
+    //   [kDescriptorHeapCapacity - 4096, 末尾)     bindless 区（最后一槽给 ImGui 字体）
+    static constexpr u32 kDescriptorHeapCapacity = 524288;
+    /// 描述符集在暂存堆里可用的槽位总数（集按 2×slotCount 线性分配）
+    static constexpr u32 kSetRegionCapacity = 131072;
+    /// 快照环形区：起点、每块槽数（必须容得下最大的集，目前约 8300）、块数
+    static constexpr u32 kSetRingBase       = kSetRegionCapacity;
+    static constexpr u32 kSetRingChunkSize  = 16384;
+    static constexpr u32 kSetRingChunkCount = 23;
+    static_assert(kSetRingBase + kSetRingChunkSize * kSetRingChunkCount <= kDescriptorHeapCapacity - 4096,
+                  "快照环形区不能与堆尾的 bindless 区重叠");
+    static_assert(kSetRingChunkCount <= 32, "命令列表用 32 位掩码记录用过的块");
+    /// 未使用的 bindless 镜像堆的容量（与主堆脱钩，避免随主堆扩容）
+    static constexpr u32 kBindlessMirrorCapacity = 65536;
     /// shader-visible 的**采样器**堆上限是 4080（D3D12 硬限制），
     /// 用 4096 会报 "NumDescriptors 4096, but the limit ... is 4080"。
     static constexpr u32 kSetSamplerCapacity = 2048;
@@ -161,6 +183,14 @@ public:
     D3D12_GPU_DESCRIPTOR_HANDLE      GetSetSamplerGpuHandle(u32 slot) const;
     D3D12_GPU_DESCRIPTOR_HANDLE      GetSetGpuHandle(u32 slot) const;
     D3D12_CPU_DESCRIPTOR_HANDLE      GetSlotCpuHandle(u32 slot) const;
+    /// 描述符集当前内容的版本号：每写一次加一，命令列表据此判断快照是否过期
+    u64                              GetSetVersion(DescriptorSetHandle set) const;
+    /// 把描述符集的当前内容（SRV/CBV 区 + UAV 区）拷进快照环形区，输出两张表的 GPU 句柄
+    /// 与所用的块号；失败（无效集 / 堆未就绪）返回 false
+    bool SnapshotDescriptorSet(DescriptorSetHandle set, D3D12_GPU_DESCRIPTOR_HANDLE& srvOut,
+                               D3D12_GPU_DESCRIPTOR_HANDLE& uavOut, u32& chunkOut);
+    /// 命令列表提交后调用：它用过的快照块（位掩码）在 fence 到达 value 前不能被覆盖
+    void MarkSetRingChunks(u32 chunkMask, ID3D12Fence* fence, u64 value);
     /// 某个描述符集的堆内起始槽位（0xFFFFFFFF 表示无效句柄）
     u32                              GetSetBaseSlot(DescriptorSetHandle set) const;
     /// 取 set 某个 binding 写入的资源（纹理或 DEFAULT 堆缓冲），供绘制/派发前补状态转换；
@@ -361,6 +391,16 @@ private:   // register -> 元素字节数
 
     UINT                         m_CbvSrvUavSize = 0;
     u32                          m_NextFreeSlot  = 0;      // 简单的线性分配（阶段 2 换空闲链表）
+    /// 描述符集暂存堆（CPU 侧，不可被着色器访问）：UpdateDescriptorSet 只写这里
+    ComPtr<ID3D12DescriptorHeap> m_SetStagingHeap;
+    /// 快照环形区的分配位置与各块的占用记录
+    struct SetRingChunk {
+        /// 用过本块、已提交的命令列表的完成条件（同一围栏只保留最大值）
+        std::vector<std::pair<ComPtr<ID3D12Fence>, u64>> uses;
+    };
+    SetRingChunk                 m_SetRingChunks[kSetRingChunkCount];
+    u32                          m_SetRingChunk  = 0;      // 当前分配块
+    u32                          m_SetRingOffset = 0;      // 当前块内已用槽数
 
     struct D3D12SetLayout {
         std::vector<DescriptorSetLayoutBinding> bindings;
@@ -376,6 +416,7 @@ private:   // register -> 元素字节数
         u32 slotCount = 0;
         u32 layout   = 0;
         u32 samplerBase = 0; // 采样器堆中的起始槽位（各 set 独立，互不覆盖）
+        u64 version = 0;     // 内容版本：每次写描述符加一（快照是否过期的依据）
         /// binding → 写入的缓冲：布局学到新步长时据此重写描述符。
         /// 持有资源引用而不是引擎的缓冲指针：引擎可能已销毁/重建该缓冲，裸指针会悬空
         struct BufferBinding {
@@ -391,6 +432,8 @@ private:   // register -> 元素字节数
     };
     /// 按所属布局记录的步长写某个 set 某个 binding 的缓冲描述符（SRV/CBV + UAV）
     void WriteSetBufferDescriptor(D3D12Set& s, u32 binding, const D3D12Set::BufferBinding& bb);
+    /// 取暂存堆槽位的 CPU 句柄，并把该集的版本号加一（所有写集描述符的地方都经过这里）
+    D3D12_CPU_DESCRIPTOR_HANDLE SetWriteHandle(D3D12Set& s, u32 slot);
     /// 采样器堆下一个可分配槽位（描述符集区间从 0 往上，bindless 区在堆尾）
     u32 m_NextSamplerSlot = 0;
     std::vector<D3D12Set> m_DescriptorSets;        // 1-based 句柄
