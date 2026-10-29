@@ -123,6 +123,14 @@ public:
     ID3D12GraphicsCommandList* GetNativeCommandList() const { return m_List.Get(); }
     /// 提交到队列后调用：在队列上打一个围栏，标记当前帧槽位的分配器何时可以复用
     void OnSubmitted(ID3D12CommandQueue* queue);
+
+    // ---- 调试标签（PIX 事件格式：RenderDoc / PIX 显示为分组与标记，DRED 报告据此给出所在 pass）----
+    void BeginDebugLabel(const char* name, const float color[4] = nullptr) override;
+    void EndDebugLabel() override;
+    void InsertDebugLabel(const char* name, const float color[4] = nullptr) override;
+    /// 记下标签，下一次绘制 / 派发前插入一次瞬时标记（与 Vulkan 一致，受 r.Debug.DrawMarker 控制）
+    void SetDrawDebugLabel(const char* name, const float color[4] = nullptr) override;
+    void ClearDrawDebugLabel() override;
     /// 提交前 / 后调用：执行录制期记下的时间线等待 / 信号（见 SetTimelineWait / SetTimelineSignal）
     void ApplyTimelineWaits();
     void ApplyTimelineSignals();
@@ -200,6 +208,13 @@ private:
     /// 各 setIndex 当前根参数表所指快照对应的集与版本：集换了或内容变了才重新拍快照
     DescriptorSetHandle m_SnapSets[8]{};
     u64                 m_SnapVersions[8]{};
+    /// 未配对的 BeginDebugLabel 层数：End 时补齐 EndEvent，否则列表关闭失败
+    u32                 m_LabelDepth = 0;
+    /// SetDrawDebugLabel 记下、等待下一次绘制 / 派发插入的标签
+    std::string         m_DrawLabel;
+    bool                m_DrawLabelSet = false;
+    /// 插入待定的逐绘制标签（FlushRootArgs 开头调用，所有绘制 / 派发路径都经过它）
+    void EmitDrawLabel();
     /// 本次录制用过的快照环形区块（位掩码），提交时交给设备标记围栏
     u32                 m_SetRingChunkMask = 0;
     /// 绘制/派发前调用：为已绑定的描述符集准备快照，并更新 SRV / UAV 表根参数

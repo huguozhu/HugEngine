@@ -1150,6 +1150,21 @@ void D3D12Device::DestroyTextureMipView(void* view) {
     m_MipRtvFree.push_back(static_cast<u32>((p - base) / m_MipRtvInc));
 }
 
+void D3D12Device::SetResourceDebugName(IRHIBuffer* resource, const char* name) {
+    if (auto* b = static_cast<D3D12Buffer*>(resource); b && b->GetResource() && name)
+        b->GetResource()->SetName(Utf8ToWide(name).c_str());
+}
+
+void D3D12Device::SetResourceDebugName(IRHITexture* resource, const char* name) {
+    if (auto* t = static_cast<D3D12Texture*>(resource); t && t->GetResource() && name)
+        t->GetResource()->SetName(Utf8ToWide(name).c_str());
+}
+
+void D3D12Device::SetResourceDebugName(IRHIPipelineState* resource, const char* name) {
+    if (auto* p = static_cast<D3D12PipelineState*>(resource); p && p->GetPso() && name)
+        p->GetPso()->SetName(Utf8ToWide(name).c_str());
+}
+
 float D3D12Device::GetTimestampPeriod() {
     UINT64 freq = 0;
     if (!m_Queue || FAILED(m_Queue->GetTimestampFrequency(&freq)) || freq == 0) return 1.0f;

@@ -1111,6 +1111,7 @@ bool D3D12PipelineState::Initialize(D3D12Device* device, const PipelineStateDesc
             return false;
         }
         m_IsCompute = true;
+        if (!desc.debugName.empty()) m_Pso->SetName(Utf8ToWide(desc.debugName.c_str()).c_str());   // RenderDoc / DRED 里显示管线名
         HE_CORE_INFO("D3D12PipelineState: 计算 PSO 创建成功 name={} CS={}B",
                      desc.debugName.c_str(), static_cast<u32>(cd.CS.BytecodeLength));
         return true;
@@ -1555,6 +1556,7 @@ bool D3D12PipelineState::Initialize(D3D12Device* device, const PipelineStateDesc
                       static_cast<u32>(pd.PrimitiveTopologyType), pd.InputLayout.NumElements, m_VertexStride);
         return false;
     }
+    if (!desc.debugName.empty()) m_Pso->SetName(Utf8ToWide(desc.debugName.c_str()).c_str());   // RenderDoc / DRED 里显示管线名
     HE_CORE_INFO("D3D12PipelineState: PSO 创建成功 name={}", desc.debugName.c_str());
     return true;
 }

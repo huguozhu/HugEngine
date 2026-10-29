@@ -29,6 +29,7 @@
 // 需要 Agility SDK 的新特性时取消注释（本工程当前用系统自带 runtime）
 #include <d3d12shader.h>
 #include <cstdlib>   // std::getenv（TraceEnabled）
+#include <string>    // std::wstring（Utf8ToWide）
 
 namespace he::rhi {
 
@@ -41,6 +42,16 @@ using ComPtr = Microsoft::WRL::ComPtr<T>;
 inline bool TraceEnabled() {
     static const bool s_Enabled = (std::getenv("HE_D3D12_TRACE") != nullptr);
     return s_Enabled;
+}
+
+/// UTF-8 → UTF-16：D3D12 的对象名（SetName）与 PIX 事件字符串都是宽字符，引擎的名字是 UTF-8（含中文）
+inline std::wstring Utf8ToWide(const char* s) {
+    if (!s || !*s) return {};
+    const int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, nullptr, 0);
+    if (n <= 1) return {};
+    std::wstring w(static_cast<size_t>(n - 1), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s, -1, w.data(), n);
+    return w;
 }
 
 /// D3D12 的 HRESULT 检查：失败时打印可读错误并返回 false

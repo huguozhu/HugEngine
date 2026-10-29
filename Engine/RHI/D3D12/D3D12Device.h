@@ -116,6 +116,11 @@ public:
     static constexpr u32 kImGuiFontSlot = kDescriptorHeapCapacity - 1;
     /// 返回主 CBV_SRV_UAV 堆（ImGui_ImplDX12_Init 的 cbv_srv_heap 参数）
     void* CreateImGuiDescriptorPool() override;
+
+    /// 资源命名（ID3D12Object::SetName）：RenderDoc / PIX / DRED 报告里显示。采样器与加速结构没有对应的 D3D12 对象
+    void SetResourceDebugName(IRHIBuffer* resource, const char* name) override;
+    void SetResourceDebugName(IRHITexture* resource, const char* name) override;
+    void SetResourceDebugName(IRHIPipelineState* resource, const char* name) override;
     void  DestroyImGuiDescriptorPool(void*) override {}
     /// 返回 ID3D12GraphicsCommandList*，并为外部渲染（ImGui）准备好描述符堆
     void* GetImGuiCommandBuffer(IRHICommandList* cmd) const override;

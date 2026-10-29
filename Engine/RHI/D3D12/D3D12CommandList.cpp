@@ -6,6 +6,7 @@
 #include "D3D12Resources.h"
 #include "D3D12SwapChain.h"
 #include "D3D12Converters.h"
+#include "Core/CVar.h"   // r.Debug.DrawMarker（与 Vulkan 后端共用的逐绘制标签开关）
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -43,6 +44,8 @@ bool D3D12CommandList::Initialize(D3D12Device* device, QueueType queue) {
                         "CreateCommandList")) {
         return false;
     }
+    // 命名：DRED 报告与 RenderDoc 里据此区分图形 / 计算列表
+    m_List->SetName(queue == QueueType::Compute ? L"HugEngine 计算命令列表" : L"HugEngine 图形命令列表");
     // 创建后默认是开着的，先关掉，等 Begin() 再 Reset
     m_List->Close();
     return true;
@@ -88,6 +91,8 @@ void D3D12CommandList::Begin() {
     m_HeapsSet = false;
     for (auto& bs : m_BoundSets) bs = kInvalidSet;
     for (auto& ss : m_SnapSets) ss = kInvalidSet;   // 新的录制：快照一律重新拍
+    m_LabelDepth   = 0;         // 标签层级与待插入的逐绘制标签不跨录制
+    m_DrawLabelSet = false;
     m_SetRingChunkMask = 0;
     m_PendingWaits.clear();     // 上一次录制若未提交，残留的等待 / 信号作废
     m_PendingSignals.clear();
@@ -115,6 +120,55 @@ void D3D12CommandList::OnSubmitted(ID3D12CommandQueue* queue) {
     // 本次提交写过的查询：围栏到达 v 后结果可读
     for (const auto& [pool, idx] : m_PendingQueries) pool->MarkSubmitted(idx, m_SlotFence.Get(), v);
     m_PendingQueries.clear();
+}
+
+// ── 调试标签 ──
+// PIX 事件的 Metadata：0 = UTF-16 字符串（WINPIX_EVENT_UNICODE_VERSION），数据含结尾的 0。
+// 不链接 WinPixEventRuntime，直接用 ID3D12GraphicsCommandList 的 BeginEvent / SetMarker。
+namespace {
+constexpr UINT kPixEventUnicode = 0;
+}
+
+void D3D12CommandList::BeginDebugLabel(const char* name, const float*) {
+    if (!m_List || !m_Recording) return;
+    const std::wstring w = Utf8ToWide(name ? name : "");
+    m_List->BeginEvent(kPixEventUnicode, w.c_str(), static_cast<UINT>((w.size() + 1) * sizeof(wchar_t)));
+    ++m_LabelDepth;
+}
+
+void D3D12CommandList::EndDebugLabel() {
+    if (!m_List || !m_Recording || m_LabelDepth == 0) return;   // 不配对的 End 直接忽略（D3D12 会判非法）
+    m_List->EndEvent();
+    --m_LabelDepth;
+}
+
+void D3D12CommandList::InsertDebugLabel(const char* name, const float*) {
+    if (!m_List || !m_Recording || !name || !*name) return;
+    const std::wstring w = Utf8ToWide(name);
+    m_List->SetMarker(kPixEventUnicode, w.c_str(), static_cast<UINT>((w.size() + 1) * sizeof(wchar_t)));
+}
+
+void D3D12CommandList::SetDrawDebugLabel(const char* name, const float*) {
+    // 空标签视为清除，避免残留到下一个绘制
+    if (!name || !*name) { m_DrawLabelSet = false; return; }
+    m_DrawLabel    = name;
+    m_DrawLabelSet = true;
+}
+
+void D3D12CommandList::ClearDrawDebugLabel() {
+    m_DrawLabelSet = false;
+}
+
+void D3D12CommandList::EmitDrawLabel() {
+    // 一次性语义：插入后自动清除，防止跨 pass 泄漏脏标签。开关与 Vulkan 后端共用 r.Debug.DrawMarker
+    if (!m_DrawLabelSet) return;
+    m_DrawLabelSet = false;
+    static const CVarBase* s_DrawMarker = FindCVar("r.Debug.DrawMarker");
+    if (s_DrawMarker) {
+        const CVarValue v = s_DrawMarker->GetValue();
+        if (const bool* on = std::get_if<bool>(&v); on && !*on) return;
+    }
+    InsertDebugLabel(m_DrawLabel.c_str());
 }
 
 // ── GPU 查询（时间戳 / 管线统计）──
@@ -208,6 +262,8 @@ void D3D12CommandList::End() {
     if (TraceEnabled()) { std::printf("[TRACE] End\n"); std::fflush(stdout); }
 
     if (!m_List || !m_Recording) return;
+    // 引擎若漏调 EndDebugLabel，未闭合的事件会让 Close 失败：这里补齐
+    for (; m_LabelDepth > 0; --m_LabelDepth) m_List->EndEvent();
     if (FAILED(m_List->Close())) {
         HE_CORE_ERROR("D3D12CommandList::End: Close 失败");
     }
@@ -799,6 +855,7 @@ void D3D12CommandList::SetRootTable(u32 param, D3D12_GPU_DESCRIPTOR_HANDLE handl
 }
 
 void D3D12CommandList::FlushRootArgs() {
+    EmitDrawLabel();      // 逐绘制标签：插在本次绘制 / 派发的命令之前
     PrepareSetTables();   // 集内容变了要换快照：会更新 SRV/UAV 表并标脏根参数
     if (!m_List || !m_Pipeline || !m_RootArgsDirty) return;
     // 描述符表必须在 SetDescriptorHeaps 之后才能设置

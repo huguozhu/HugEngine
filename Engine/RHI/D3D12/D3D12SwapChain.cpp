@@ -147,6 +147,7 @@ void D3D12SwapChain::Present(bool vsync) {
             ok = ok && SUCCEEDED(dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, m_PresentAllocs[0].Get(),
                                                         nullptr, IID_PPV_ARGS(&m_PresentList)));
             ok = ok && SUCCEEDED(m_PresentList->Close());
+            if (ok) m_PresentList->SetName(L"HugEngine 呈现屏障列表");   // DRED / RenderDoc 里据此识别
             ok = ok && SUCCEEDED(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_PresentFence)));
             if (!ok) m_PresentList.Reset();
         }
