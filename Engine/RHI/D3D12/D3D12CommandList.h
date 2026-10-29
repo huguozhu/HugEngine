@@ -245,6 +245,11 @@ private:
     void SetPassAttachments(const D3D12_CPU_DESCRIPTOR_HANDLE* rtvs, u32 rtvCount, const D3D12_CPU_DESCRIPTOR_HANDLE* dsv);
     void ClearPassAttachments();
     std::vector<D3D12_RESOURCE_BARRIER> m_BarrierScratch;   // 复用的临时数组
+    /// 本次绘制 / 派发之后要补的屏障：同一纹理被整体读、同时某一级被写（Hi-Z 逐级下采样）时，
+    /// 绘制前只把那一级转到 UAV，绘制后再转回可读，使整张纹理重新回到统一状态
+    std::vector<D3D12_RESOURCE_BARRIER> m_PostDrawBarriers;
+    /// 每次绘制 / 派发命令之后调用：下发 m_PostDrawBarriers
+    void AfterDrawOrDispatch();
     /// 缓冲的状态按命令列表各自跟踪：缓冲在每次 ExecuteCommandLists 执行完后都会衰减回 COMMON，
     /// 所以每个列表开始录制时所有缓冲都是 COMMON（Begin 时清空）。用设备级的全局记录会被
     /// 其他命令列表的转换干扰，屏障的 StateBefore 与实际不符（GPU 验证 id=942）。

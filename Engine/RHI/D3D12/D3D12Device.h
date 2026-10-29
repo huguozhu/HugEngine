@@ -220,7 +220,9 @@ public:
     u32                              GetSetBaseSlot(DescriptorSetHandle set) const;
     /// 取 set 某个 binding 写入的资源（纹理或 DEFAULT 堆缓冲），供绘制/派发前补状态转换；
     /// 没写过或不可转状态（如 UPLOAD 堆缓冲）时返回 nullptr。isBuffer 输出资源是否为缓冲
-    ID3D12Resource* GetSetResource(DescriptorSetHandle set, u32 binding, bool& isBuffer) const;
+    /// subresource 非空时输出绑定的子资源下标（整资源绑定为 D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES）
+    ID3D12Resource* GetSetResource(DescriptorSetHandle set, u32 binding, bool& isBuffer,
+                                   UINT* subresource = nullptr) const;
     /// 该 set 在描述符集采样器堆中的起始槽位（采样器槽位 = 该值 + binding）
     u32                              GetSetSamplerBase(DescriptorSetHandle set) const;
     /// UAV 区域相对 baseSlot 的偏移（= 该 set 的 slotCount）
@@ -464,6 +466,8 @@ private:   // register -> 元素字节数
         std::unordered_map<u32, BufferBinding> buffers;
         /// binding → 写入的纹理资源：绘制/派发前据此补状态转换
         std::unordered_map<u32, ComPtr<ID3D12Resource>> textures;
+        /// binding → 子资源下标：只记录经逐 mip / 逐层视图绑定的纹理（其余为整资源）
+        std::unordered_map<u32, UINT> subresources;
     };
     /// 按所属布局记录的步长写某个 set 某个 binding 的缓冲描述符（SRV/CBV + UAV）
     void WriteSetBufferDescriptor(D3D12Set& s, u32 binding, const D3D12Set::BufferBinding& bb);

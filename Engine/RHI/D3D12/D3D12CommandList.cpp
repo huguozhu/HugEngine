@@ -95,6 +95,7 @@ void D3D12CommandList::Begin() {
     for (auto& bs : m_BoundSets) bs = kInvalidSet;
     for (auto& ss : m_SnapSets) ss = kInvalidSet;   // 新的录制：快照一律重新拍
     m_LabelDepth   = 0;         // 标签层级与待插入的逐绘制标签不跨录制
+    m_PostDrawBarriers.clear(); // 待补的绘制后屏障不跨录制
     m_EventLogs[m_FrameSlot].begins.clear();    // 本槽位上一次的录制已执行完，记录作废
     m_EventLogs[m_FrameSlot].markers.clear();
     m_DrawLabelSet = false;
@@ -792,6 +793,12 @@ void D3D12CommandList::PrepareSetTables() {
     }
 }
 
+void D3D12CommandList::AfterDrawOrDispatch() {
+    if (m_PostDrawBarriers.empty() || !m_List) return;
+    m_List->ResourceBarrier(static_cast<UINT>(m_PostDrawBarriers.size()), m_PostDrawBarriers.data());
+    m_PostDrawBarriers.clear();
+}
+
 void D3D12CommandList::EnsureBoundResourceStates() {
     if (!m_List || !m_Device || !m_Pipeline) return;
     constexpr D3D12_RESOURCE_STATES kRead =
@@ -813,11 +820,57 @@ void D3D12CommandList::EnsureBoundResourceStates() {
         m_DsvReadOnly = false;
     }
     bool needReadOnlyDsv = false;
+
+    // 【同一纹理：整体读 + 某一级写】Hi-Z 逐级下采样在一次派发里把整张金字塔当 SRV 读（第 N 级），
+    // 同时经逐 mip 视图把第 N+1 级当 UAV 写。整资源状态只能取其一（此前按先出现的用途转换，属非法使用）。
+    // 这里按子资源拆开：整张先转到可读，只把被写的那一级转到 UAV；派发后再把它转回可读
+    //（见 AfterDrawOrDispatch），对外仍是「整张纹理处于同一状态」，其他代码无需感知子资源。
+    std::vector<ID3D12Resource*> splitHandled;
+    {
+        struct Usage { bool read = false; bool uavWhole = false; UINT uavSub = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES; };
+        std::vector<std::pair<ID3D12Resource*, Usage>> usages;
+        for (const auto& use : m_Pipeline->GetResourceUses()) {
+            if (use.space >= 8u || m_BoundSets[use.space] == kInvalidSet) continue;
+            bool isBuffer = false;
+            UINT sub = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            ID3D12Resource* res = m_Device->GetSetResource(m_BoundSets[use.space], use.binding, isBuffer, &sub);
+            if (!res || isBuffer) continue;
+            auto it = std::find_if(usages.begin(), usages.end(), [&](const auto& u) { return u.first == res; });
+            if (it == usages.end()) { usages.emplace_back(res, Usage{}); it = usages.end() - 1; }
+            if (!use.uav) it->second.read = true;
+            else if (sub == D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES) it->second.uavWhole = true;
+            else it->second.uavSub = sub;
+        }
+        for (const auto& [res, u] : usages) {
+            if (!u.read || u.uavWhole || u.uavSub == D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES) continue;
+            if (std::find(m_PassAttachments.begin(), m_PassAttachments.end(), res) != m_PassAttachments.end()) continue;
+            const D3D12_RESOURCE_STATES cur = m_Device->GetResourceState(res);
+            D3D12_RESOURCE_BARRIER b{};
+            b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            b.Transition.pResource = res;
+            if (cur != kRead) {   // 整张 → 可读
+                b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                b.Transition.StateBefore = cur;
+                b.Transition.StateAfter  = kRead;
+                m_BarrierScratch.push_back(b);
+            }
+            b.Transition.Subresource = u.uavSub;   // 被写的那一级 → UAV
+            b.Transition.StateBefore = kRead;
+            b.Transition.StateAfter  = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+            m_BarrierScratch.push_back(b);
+            std::swap(b.Transition.StateBefore, b.Transition.StateAfter);   // 绘制后转回可读
+            m_PostDrawBarriers.push_back(b);
+            m_Device->SetResourceState(res, kRead);   // 绘制后整张统一为可读
+            splitHandled.push_back(res);
+        }
+    }
+
     for (const auto& use : m_Pipeline->GetResourceUses()) {
         if (use.space >= 8u || m_BoundSets[use.space] == kInvalidSet) continue;
         bool isBuffer = false;
         ID3D12Resource* res = m_Device->GetSetResource(m_BoundSets[use.space], use.binding, isBuffer);
         if (!res) continue;
+        if (std::find(splitHandled.begin(), splitHandled.end(), res) != splitHandled.end()) continue;   // 已按子资源处理
         // 正作为本 pass 附件的资源不能同时转成可读（引擎真这样用时属于 feedback，保持原状）
         if (std::find(m_PassAttachments.begin(), m_PassAttachments.end(), res) != m_PassAttachments.end()) {
             // 深度附件被同时采样（如软粒子）且当前 PSO 不写深度：改绑只读 DSV，
@@ -969,6 +1022,7 @@ void D3D12CommandList::Draw(u32 vertexCount, u32 instanceCount, u32 firstVertex,
     EnsureBoundResourceStates();
     FlushRootArgs();
     m_List->DrawInstanced(vertexCount, instanceCount, firstVertex, firstInstance);
+    AfterDrawOrDispatch();
     // 本次绘制已消费当前常量槽：之后的推送必须写新槽位，否则 GPU 执行时
     // 前面的绘制会读到后写入的值（实测天空盒读到后续全屏 pass 的矩阵，天空成纯色）
     m_PushDirty = true;
@@ -995,6 +1049,7 @@ void D3D12CommandList::DrawIndexed(u32 indexCount, u32 instanceCount, u32 firstI
     FlushRootArgs();
     m_List->DrawIndexedInstanced(indexCount, instanceCount, firstIndex,
                                  static_cast<INT>(vertexOffset), firstInstance);
+    AfterDrawOrDispatch();
 }
 
 ID3D12CommandSignature* D3D12CommandList::GetCommandSignature(D3D12_INDIRECT_ARGUMENT_TYPE type, u32 stride) {
@@ -1037,6 +1092,7 @@ void D3D12CommandList::DrawIndexedIndirect(IRHIBuffer* buffer, u64 offset, u32 d
     EnsureBoundResourceStates();
     FlushRootArgs();
     m_List->ExecuteIndirect(sig, drawCount, b->GetResource(), offset, nullptr, 0);
+    AfterDrawOrDispatch();
     m_PushDirty = true;   // 同 Draw：常量槽已被本次绘制消费
 }
 
@@ -1057,6 +1113,7 @@ void D3D12CommandList::DrawIndexedIndirectCount(IRHIBuffer* buffer, u64 offset,
     FlushRootArgs();
     m_List->ExecuteIndirect(sig, maxDrawCount, b->GetResource(), offset,
                             cb->GetResource(), countOffset);
+    AfterDrawOrDispatch();
     m_PushDirty = true;   // 同 Draw：常量槽已被本次绘制消费
 }
 
@@ -1065,6 +1122,7 @@ void D3D12CommandList::Dispatch(u32 x, u32 y, u32 z) {
     EnsureBoundResourceStates();
     FlushRootArgs();
     m_List->Dispatch(x, y, z);
+    AfterDrawOrDispatch();
     m_PushDirty = true;   // 同 Draw：常量槽已被本次派发消费
 }
 
@@ -1078,6 +1136,7 @@ void D3D12CommandList::DispatchIndirect(IRHIBuffer* buffer, u64 offset) {
     EnsureBoundResourceStates();
     FlushRootArgs();
     m_List->ExecuteIndirect(sig, 1, b->GetResource(), offset, nullptr, 0);
+    AfterDrawOrDispatch();
     m_PushDirty = true;   // 同 Draw：常量槽已被本次派发消费
 }
 

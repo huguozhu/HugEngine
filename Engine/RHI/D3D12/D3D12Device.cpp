@@ -708,11 +708,18 @@ void D3D12Device::MarkSetRingChunks(u32 chunkMask, ID3D12Fence* fence, u64 value
     }
 }
 
-ID3D12Resource* D3D12Device::GetSetResource(DescriptorSetHandle set, u32 binding, bool& isBuffer) const {
+ID3D12Resource* D3D12Device::GetSetResource(DescriptorSetHandle set, u32 binding, bool& isBuffer,
+                                            UINT* subresource) const {
     isBuffer = false;
+    if (subresource) *subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     if (set == kInvalidSet || set > m_DescriptorSets.size()) return nullptr;
     const auto& s = m_DescriptorSets[static_cast<size_t>(set - 1)];
-    if (auto it = s.textures.find(binding); it != s.textures.end()) return it->second.Get();
+    if (auto it = s.textures.find(binding); it != s.textures.end()) {
+        if (subresource) {
+            if (auto si = s.subresources.find(binding); si != s.subresources.end()) *subresource = si->second;
+        }
+        return it->second.Get();
+    }
     if (auto it = s.buffers.find(binding); it != s.buffers.end() && it->second.defaultHeap) {
         isBuffer = true;
         return it->second.resource.Get();
@@ -1593,6 +1600,7 @@ void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, Desc
     auto& s = m_DescriptorSets[static_cast<size_t>(set - 1)];
     // 记下这个 binding 写的是哪个缓冲：布局之后从 PSO 反射学到（或修正）步长时据此重写
     s.textures.erase(binding);   // 同一 binding 改写为缓冲：清掉旧的纹理记录
+    s.subresources.erase(binding);
     D3D12Set::BufferBinding& bb = s.buffers[binding];
     bb.resource     = b->GetResource();
     bb.size         = b->GetSize() ? b->GetSize() : 256;
@@ -1693,6 +1701,7 @@ void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, Desc
     auto* tex = static_cast<D3D12Texture*>(texture);
     // 记下该 binding 的纹理：绘制/派发前由命令列表转到着色器可读（或 UAV）状态
     m_DescriptorSets[static_cast<size_t>(set - 1)].textures[binding] = tex->GetResource();
+    m_DescriptorSets[static_cast<size_t>(set - 1)].subresources.erase(binding);   // 整资源绑定
     m_DescriptorSets[static_cast<size_t>(set - 1)].buffers.erase(binding);   // 同一 binding 改写为纹理
     // 描述符写在「该 set 的基址 + binding」：绑定时按 space 绑 set 的区段基址，
     // 写入与读取用同一套偏移才能对上。
@@ -1761,6 +1770,13 @@ void D3D12Device::UpdateDescriptorSetWithImageView(DescriptorSetHandle set, u32 
     auto& s = m_DescriptorSets[static_cast<size_t>(set - 1)];
     s.textures[binding] = res;   // 同上：供绘制前补状态转换
     s.buffers.erase(binding);
+    // 逐 mip / 逐层视图：记下子资源下标（D3D12CalcSubresource：mip + 层 × mip 数；3D 纹理只有 mip 一维）
+    if (vi->subresource) {
+        const bool is3D = rd.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+        s.subresources[binding] = vi->mip + (is3D ? 0u : vi->layer) * rd.MipLevels;
+    } else {
+        s.subresources.erase(binding);
+    }
 
     D3D12_SHADER_RESOURCE_VIEW_DESC  sd{};
     D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
