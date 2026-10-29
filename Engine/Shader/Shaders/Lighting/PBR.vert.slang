@@ -53,7 +53,18 @@ struct PBRVertexInput {
     uint     instancePad[2];
 };
 
-PBRVSOutput vertexMain(PBRVertexInput vin, uint instanceID : SV_InstanceID) {
+// 实例号语义：Vulkan 下 Slang 把 SV_InstanceID 编成 gl_InstanceIndex - gl_BaseInstance（不含 firstInstance），
+// 而本引擎用 firstInstance 传对象号 / 簇号（GPU 剔除、Nanite），需要含 firstInstance 的 gl_InstanceIndex（SV_VulkanInstanceID）。
+// D3D12 仍写 SV_InstanceID，由 ShaderToDxil 改为读逐实例序号缓冲（同样含起始实例）
+#ifndef HE_SV_INSTANCE
+#if defined(HE_SHADER_D3D12)
+#define HE_SV_INSTANCE SV_InstanceID
+#else
+#define HE_SV_INSTANCE SV_VulkanInstanceID
+#endif
+#endif
+
+PBRVSOutput vertexMain(PBRVertexInput vin, uint instanceID : HE_SV_INSTANCE) {
     const float3 inPosition = vin.inPosition;
     const float3 inNormal   = vin.inNormal;
     const float2 inUV       = vin.inUV;

@@ -33,7 +33,18 @@ struct VSInput {
     uint     _pad[12];               // 填充到 192B
 };
 
-GBufferVSOutput vertexMain(VSInput input, uint instanceID : SV_InstanceID) {
+// 实例号语义：Vulkan 下 Slang 把 SV_InstanceID 编成 gl_InstanceIndex - gl_BaseInstance（不含 firstInstance），
+// 而本引擎用 firstInstance 传对象号 / 簇号（GPU 剔除、Nanite），需要含 firstInstance 的 gl_InstanceIndex（SV_VulkanInstanceID）。
+// D3D12 仍写 SV_InstanceID，由 ShaderToDxil 改为读逐实例序号缓冲（同样含起始实例）
+#ifndef HE_SV_INSTANCE
+#if defined(HE_SHADER_D3D12)
+#define HE_SV_INSTANCE SV_InstanceID
+#else
+#define HE_SV_INSTANCE SV_VulkanInstanceID
+#endif
+#endif
+
+GBufferVSOutput vertexMain(VSInput input, uint instanceID : HE_SV_INSTANCE) {
     // 对象/材质条目：GPU Driven 模式（1）用 SV_InstanceID 当对象下标；
     // 实例化网格（2）是"一个对象条目 + N 个实例"——对象下标仍取 push constant 的 objectIndex，
     // 只有世界矩阵来自实例 SSBO（这一点与 PBR.vert 的语义必须一致，否则会越界读到别的物体）。

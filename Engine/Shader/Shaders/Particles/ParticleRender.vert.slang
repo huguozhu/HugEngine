@@ -19,7 +19,18 @@ struct VSOutput {
     float3 worldPos : TEXCOORD3;
 };
 
-VSOutput vertexMain(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID) {
+// 实例号语义：Vulkan 下 Slang 把 SV_InstanceID 编成 gl_InstanceIndex - gl_BaseInstance（不含 firstInstance），
+// 而本引擎用 firstInstance 传对象号 / 簇号（GPU 剔除、Nanite），需要含 firstInstance 的 gl_InstanceIndex（SV_VulkanInstanceID）。
+// D3D12 仍写 SV_InstanceID，由 ShaderToDxil 改为读逐实例序号缓冲（同样含起始实例）
+#ifndef HE_SV_INSTANCE
+#if defined(HE_SHADER_D3D12)
+#define HE_SV_INSTANCE SV_InstanceID
+#else
+#define HE_SV_INSTANCE SV_VulkanInstanceID
+#endif
+#endif
+
+VSOutput vertexMain(uint vertexID : SV_VertexID, uint instanceID : HE_SV_INSTANCE) {
     // 1. 获取粒子数据
     SortInfo si = u_SortIndices[instanceID];
     uint particleIdx = si.particle_index;

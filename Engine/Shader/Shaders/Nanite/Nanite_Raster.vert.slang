@@ -30,8 +30,19 @@ struct RasterVSOut {
     uint   clusterId : TEXCOORD0;   // 间接命令的 firstInstance（簇号）
 };
 
+// 实例号语义：Vulkan 下 Slang 把 SV_InstanceID 编成 gl_InstanceIndex - gl_BaseInstance（不含 firstInstance），
+// 而本引擎用 firstInstance 传对象号 / 簇号（GPU 剔除、Nanite），需要含 firstInstance 的 gl_InstanceIndex（SV_VulkanInstanceID）。
+// D3D12 仍写 SV_InstanceID，由 ShaderToDxil 改为读逐实例序号缓冲（同样含起始实例）
+#ifndef HE_SV_INSTANCE
+#if defined(HE_SHADER_D3D12)
+#define HE_SV_INSTANCE SV_InstanceID
+#else
+#define HE_SV_INSTANCE SV_VulkanInstanceID
+#endif
+#endif
+
 [shader("vertex")]
-RasterVSOut vertexMain(uint vid : SV_VertexID, uint iid : SV_InstanceID) {
+RasterVSOut vertexMain(uint vid : SV_VertexID, uint iid : HE_SV_INSTANCE) {
     RasterVSOut o;
     // 顶点 (-1,-1) / (3,-1) / (-1,3)：三角形覆盖整个 NDC 方块（含 [-1,1]²）。
     // 【为什么用 `vid % 3` 而不是 `vid`】见文件头"任务 16 的改动"：真实的 `vid` 起点与步长
