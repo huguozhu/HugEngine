@@ -136,7 +136,9 @@ public:
     /// 记录结构化缓冲的「元素字节数」：D3D12 的 StructuredBuffer<T> 的 SRV 必须用
     /// sizeof(T) 作为 StructureByteStride，而引擎的 BufferDesc 只给顶点/索引缓冲带 stride。
     /// 这里在 PSO 创建时从 DXIL 反射里算出每个 register 对应结构的字节数并缓存。
-    void NoteStructStrides(ID3D12ShaderReflection* refl);
+    /// PSO 创建时调用：从着色器反射里记下各结构化缓冲的真实步长，按「布局 + binding」存放
+    ///（register space S 对应 layouts[S]）；若某 binding 的步长变化，重写该布局下已写入的缓冲描述符
+    void NoteSetLayoutStrides(ID3D12ShaderReflection* refl, const std::vector<DescriptorSetLayoutHandle>& layouts);
     u32  LookupStructStride(u32 registerIndex) const;
 
     bool WriteBindlessSrv(u32 slot, IRHITexture* texture);
@@ -157,6 +159,9 @@ public:
     D3D12_CPU_DESCRIPTOR_HANDLE      GetSlotCpuHandle(u32 slot) const;
     /// 某个描述符集的堆内起始槽位（0xFFFFFFFF 表示无效句柄）
     u32                              GetSetBaseSlot(DescriptorSetHandle set) const;
+    /// 取 set 某个 binding 写入的资源（纹理或 DEFAULT 堆缓冲），供绘制/派发前补状态转换；
+    /// 没写过或不可转状态（如 UPLOAD 堆缓冲）时返回 nullptr。isBuffer 输出资源是否为缓冲
+    ID3D12Resource* GetSetResource(DescriptorSetHandle set, u32 binding, bool& isBuffer) const;
     /// 该 set 在描述符集采样器堆中的起始槽位（采样器槽位 = 该值 + binding）
     u32                              GetSetSamplerBase(DescriptorSetHandle set) const;
     /// UAV 区域相对 baseSlot 的偏移（= 该 set 的 slotCount）
@@ -358,6 +363,7 @@ private:   // register -> 元素字节数
         std::vector<DescriptorSetLayoutBinding> bindings;
         u32 slotCount = 0;   // 该布局占用的连续槽位数
         u32 samplerSpan = 0; // 采样器类 binding 的最大编号 + 1（每个 set 在采样器堆里占这么多槽）
+        std::unordered_map<u32, u32> strides;   // binding → 结构化缓冲步长（来自 PSO 反射）
     };
     std::vector<D3D12SetLayout> m_SetLayouts;      // 1-based 句柄
 
@@ -367,7 +373,21 @@ private:   // register -> 元素字节数
         u32 slotCount = 0;
         u32 layout   = 0;
         u32 samplerBase = 0; // 采样器堆中的起始槽位（各 set 独立，互不覆盖）
+        /// binding → 写入的缓冲：布局学到新步长时据此重写描述符。
+        /// 持有资源引用而不是引擎的缓冲指针：引擎可能已销毁/重建该缓冲，裸指针会悬空
+        struct BufferBinding {
+            ComPtr<ID3D12Resource> resource;
+            u64                    size = 0;
+            u32                    bufferStride = 0;
+            DescriptorType         type = DescriptorType::StorageBuffer;
+            bool                   defaultHeap = false;   // 只有 DEFAULT 堆上的缓冲能做状态转换
+        };
+        std::unordered_map<u32, BufferBinding> buffers;
+        /// binding → 写入的纹理资源：绘制/派发前据此补状态转换
+        std::unordered_map<u32, ComPtr<ID3D12Resource>> textures;
     };
+    /// 按所属布局记录的步长写某个 set 某个 binding 的缓冲描述符（SRV/CBV + UAV）
+    void WriteSetBufferDescriptor(D3D12Set& s, u32 binding, const D3D12Set::BufferBinding& bb);
     /// 采样器堆下一个可分配槽位（描述符集区间从 0 往上，bindless 区在堆尾）
     u32 m_NextSamplerSlot = 0;
     std::vector<D3D12Set> m_DescriptorSets;        // 1-based 句柄

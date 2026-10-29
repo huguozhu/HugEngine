@@ -945,6 +945,42 @@ bool D3D12PipelineState::Initialize(D3D12Device* device, const PipelineStateDesc
     m_ColorLoadOp = desc.colorLoadOp;
     m_DepthLoadOp = desc.depthLoadOp;
 
+    // ---- 登记结构化缓冲步长 ----
+    // 从各阶段 DXIL 反射出结构化缓冲的真实步长，按「描述符集布局 + binding」登记到设备，
+    // 写描述符时据此设置 StructureByteStride（此前按寄存器号在全局表里猜，不同 pass 同号
+    // 寄存器的结构体不同，延迟渲染等路径大量错位，GPU 验证 id=1387）。
+    {
+        ComPtr<IDxcUtils> utils;
+        if (SUCCEEDED(DxcCreateInstance(CLSID_DxcUtils, IID_PPV_ARGS(&utils))) && utils) {
+            for (const ShaderBytecode* bc : { desc.vertexShader, desc.pixelShader, desc.computeShader }) {
+                if (!bc || bc->dxil.empty()) continue;
+                DxcBuffer db{};
+                db.Ptr = bc->dxil.data();
+                db.Size = bc->dxil.size();
+                db.Encoding = DXC_CP_ACP;
+                ComPtr<ID3D12ShaderReflection> r;
+                if (FAILED(utils->CreateReflection(&db, IID_PPV_ARGS(&r))) || !r) continue;
+                device->NoteSetLayoutStrides(r.Get(), desc.descriptorSetLayouts);
+                // 记下着色器读写的描述符集资源（只看引擎描述符集对应的 space；bindless 的 space2 是静态资源）
+                D3D12_SHADER_DESC sd{};
+                if (FAILED(r->GetDesc(&sd))) continue;
+                for (UINT i = 0; i < sd.BoundResources; ++i) {
+                    D3D12_SHADER_INPUT_BIND_DESC bd{};
+                    if (FAILED(r->GetResourceBindingDesc(i, &bd)) || bd.Space >= desc.descriptorSetLayouts.size()) continue;
+                    bool uav = false;
+                    switch (bd.Type) {
+                        case D3D_SIT_TEXTURE: case D3D_SIT_STRUCTURED: case D3D_SIT_BYTEADDRESS: uav = false; break;
+                        case D3D_SIT_UAV_RWTYPED: case D3D_SIT_UAV_RWSTRUCTURED: case D3D_SIT_UAV_RWBYTEADDRESS:
+                        case D3D_SIT_UAV_APPEND_STRUCTURED: case D3D_SIT_UAV_CONSUME_STRUCTURED:
+                        case D3D_SIT_UAV_RWSTRUCTURED_WITH_COUNTER: uav = true; break;
+                        default: continue;   // CBV / 采样器不涉及资源状态
+                    }
+                    m_ResourceUses.push_back({ bd.Space, bd.BindPoint, uav });
+                }
+            }
+        }
+    }
+
     // ---- 计算管线 ----
     //
     // D3D12 的计算 PSO 与图形 PSO 是**两套完全不同的描述结构**，

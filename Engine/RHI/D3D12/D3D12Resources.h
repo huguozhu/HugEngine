@@ -175,6 +175,9 @@ public:
     LoadOp GetColorLoadOp() const { return m_ColorLoadOp; }
     LoadOp GetDepthLoadOp() const { return m_DepthLoadOp; }
 
+    /// 着色器实际使用的描述符集资源（来自 DXIL 反射）：绘制/派发前据此补资源状态转换
+    struct ResourceUse { u32 space = 0; u32 binding = 0; bool uav = false; };
+    const std::vector<ResourceUse>& GetResourceUses() const { return m_ResourceUses; }
 
 private:
     ComPtr<ID3D12RootSignature> m_RootSig;
@@ -188,6 +191,7 @@ private:
     bool                        m_NeedsZeroVB = false;
     LoadOp                      m_ColorLoadOp = LoadOp::Clear;
     LoadOp                      m_DepthLoadOp = LoadOp::Clear;
+    std::vector<ResourceUse>    m_ResourceUses;
 };
 
 } // namespace he::rhi::d3d12

@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <algorithm>
 
 #if defined(_WIN32)
 
@@ -87,6 +88,10 @@ void D3D12CommandList::Begin() {
     for (auto& t : m_RootTables) t.ptr = 0;
     m_RootArgsDirty = true;
     m_HeapsSet = false;
+    for (auto& bs : m_BoundSets) bs = kInvalidSet;
+    m_PassAttachments.clear();
+    // 缓冲在每次提交执行完后衰减回 COMMON：新录制从全 COMMON 开始
+    m_BufferStates.clear();
     // 为整帧申请一块推送常量槽位，并清零
     m_PushGpu = 0;
     m_PushCpu = nullptr;
@@ -203,6 +208,7 @@ void D3D12CommandList::EndRenderPass() {
     if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] EndRenderPass\n"); std::fflush(stdout); }
 
     // D3D12 没有 pass 结束的概念；资源状态转换由显式 PipelineBarrier 负责
+    m_PassAttachments.clear();
 }
 
 void D3D12CommandList::BeginOffscreenPass(void* colorImageView, void* depthImageView,
@@ -217,6 +223,10 @@ void D3D12CommandList::BeginOffscreenPass(void* colorImageView, void* depthImage
     D3D12_CPU_DESCRIPTOR_HANDLE dsv = ToCpuHandle(depthImageView);
     const bool hasRtv = (colorImageView != nullptr);
     const bool hasDsv = (depthImageView != nullptr);
+    // 记下本 pass 的附件：绘制前补纹理状态时跳过它们
+    m_PassAttachments.clear();
+    if (m_Device && hasRtv) if (auto* r = m_Device->FindViewResource(static_cast<UINT64>(rtv.ptr))) m_PassAttachments.push_back(r);
+    if (m_Device && hasDsv) if (auto* r = m_Device->FindViewResource(static_cast<UINT64>(dsv.ptr))) m_PassAttachments.push_back(r);
 
     // RTV 数量必须与指针一致：只有深度附件的 pass 传 1+nullptr 是非法调用（设备会被移除）
     // 【必须做资源屏障】D3D12 要求绑定为 RTV/DSV 的资源处于 RENDER_TARGET /
@@ -393,6 +403,11 @@ void D3D12CommandList::BeginOffscreenPassMRT(void* const* colorImageViews, u32 c
     for (u32 i = 0; i < n; ++i) rtvs[i] = ToCpuHandle(colorImageViews[i]);
     D3D12_CPU_DESCRIPTOR_HANDLE dsv = ToCpuHandle(depthImageView);
     const bool hasDsv = (depthImageView != nullptr);
+    // 记下本 pass 的附件：绘制前补纹理状态时跳过它们
+    m_PassAttachments.clear();
+    for (u32 i = 0; i < n && m_Device; ++i)
+        if (colorImageViews[i]) if (auto* r = m_Device->FindViewResource(static_cast<UINT64>(rtvs[i].ptr))) m_PassAttachments.push_back(r);
+    if (m_Device && hasDsv) if (auto* r = m_Device->FindViewResource(static_cast<UINT64>(dsv.ptr))) m_PassAttachments.push_back(r);
 
     // 【MRT 也必须做状态转换】此前只有单目标路径做了屏障，多目标 pass（GBuffer 等）
     // 的渲染目标停在 COMMON/PRESENT，被调试层判定非法、绘制被丢弃（id=538）。
@@ -465,7 +480,9 @@ void D3D12CommandList::BeginOffscreenPassMRT(void* const* colorImageViews, u32 c
     m_List->RSSetScissorRects(1, &rc);
 }
 
-void D3D12CommandList::EndOffscreenPass() {}
+void D3D12CommandList::EndOffscreenPass() {
+    m_PassAttachments.clear();   // pass 结束：附件之后可以被转成可读状态
+}
 
 void D3D12CommandList::SetPipeline(IRHIPipelineState* pso) {
 
@@ -572,6 +589,7 @@ void D3D12CommandList::BindDescriptorSet(u32 setIndex, DescriptorSetHandle set) 
     m_HeapsSet = true;
     std::printf("[BS] heaps ok\n"); std::fflush(stdout);
 
+    m_BoundSets[setIndex] = set;
     const u32 baseSlot = m_Device->GetSetBaseSlot(set);
     m_LastBoundSet = set; m_LastBaseSlot = baseSlot;
     { static int n8=0; if (++n8 % 60 == 1) { std::printf("[LISTID-B] list=%p set=%llu base=%u\n", (void*)this, (unsigned long long)set, baseSlot); std::fflush(stdout); } }
@@ -612,6 +630,40 @@ void D3D12CommandList::BindDescriptorSet(u32 setIndex, DescriptorSetHandle set) 
     SetRootTable(24 + setIndex, smp);
     std::printf("[BS] g-smp ok\n"); std::fflush(stdout);
     std::printf("[BS] tables ok\n"); std::fflush(stdout);
+}
+
+void D3D12CommandList::EnsureBoundResourceStates() {
+    if (!m_List || !m_Device || !m_Pipeline) return;
+    constexpr D3D12_RESOURCE_STATES kRead =
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    m_BarrierScratch.clear();
+    for (const auto& use : m_Pipeline->GetResourceUses()) {
+        if (use.space >= 8u || m_BoundSets[use.space] == kInvalidSet) continue;
+        bool isBuffer = false;
+        ID3D12Resource* res = m_Device->GetSetResource(m_BoundSets[use.space], use.binding, isBuffer);
+        if (!res) continue;
+        // 正作为本 pass 附件的资源不能同时转成可读（引擎真这样用时属于 feedback，保持原状）
+        if (std::find(m_PassAttachments.begin(), m_PassAttachments.end(), res) != m_PassAttachments.end()) continue;
+        // 缓冲按本列表的记录（起始为 COMMON），纹理按设备级记录（纹理不会衰减）
+        const D3D12_RESOURCE_STATES cur  = isBuffer ? GetBufferState(res) : m_Device->GetResourceState(res);
+        const D3D12_RESOURCE_STATES want = use.uav ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS : kRead;
+        if (cur == want || (!use.uav && (cur & kRead) == kRead)) continue;   // 已满足（含额外的只读位）
+        // 同一资源在一次绘制里只转一次（以先出现的用途为准）
+        bool dup = false;
+        for (const auto& bb : m_BarrierScratch) if (bb.Transition.pResource == res) { dup = true; break; }
+        if (dup) continue;
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition.pResource   = res;
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = cur;
+        b.Transition.StateAfter  = want;
+        m_BarrierScratch.push_back(b);
+        if (isBuffer) m_BufferStates[res] = want;
+        else          m_Device->SetResourceState(res, want);
+    }
+    if (!m_BarrierScratch.empty())
+        m_List->ResourceBarrier(static_cast<UINT>(m_BarrierScratch.size()), m_BarrierScratch.data());
 }
 
 void D3D12CommandList::SetRootTable(u32 param, D3D12_GPU_DESCRIPTOR_HANDLE handle) {
@@ -715,6 +767,7 @@ void D3D12CommandList::Draw(u32 vertexCount, u32 instanceCount, u32 firstVertex,
         }
     }
     if (!m_List) return;
+    EnsureBoundResourceStates();
     FlushRootArgs();
     m_List->DrawInstanced(vertexCount, instanceCount, firstVertex, firstInstance);
     // 本次绘制已消费当前常量槽：之后的推送必须写新槽位，否则 GPU 执行时
@@ -771,6 +824,7 @@ void D3D12CommandList::DrawIndexed(u32 indexCount, u32 instanceCount, u32 firstI
         const D3D12_GPU_DESCRIPTOR_HANDLE s0 = m_Device->GetSetGpuHandle(m_LastBaseSlot);
         if (s0.ptr) SetRootTable(8, s0);
     }
+    EnsureBoundResourceStates();
     FlushRootArgs();
     m_List->DrawIndexedInstanced(indexCount, instanceCount, firstIndex,
                                  static_cast<INT>(vertexOffset), firstInstance);
@@ -803,6 +857,7 @@ void D3D12CommandList::DrawIndexedIndirect(IRHIBuffer* buffer, u64 offset, u32 d
         m_CmdSigs[want] = created;
     }
 
+    EnsureBoundResourceStates();
     FlushRootArgs();
     m_List->ExecuteIndirect(sig, drawCount, b->GetResource(), offset, nullptr, 0);
     m_PushDirty = true;   // 同 Draw：常量槽已被本次绘制消费
@@ -828,6 +883,7 @@ void D3D12CommandList::DrawIndexedIndirectCount(IRHIBuffer* buffer, u64 offset,
         return;
     }
     // D3D12 的 ExecuteIndirect 原生支持「计数缓冲」，等价 Vulkan 的 *IndirectCount
+    EnsureBoundResourceStates();
     FlushRootArgs();
     m_List->ExecuteIndirect(sig.Get(), maxDrawCount, b->GetResource(), offset,
                             cb->GetResource(), countOffset);
@@ -837,6 +893,7 @@ void D3D12CommandList::DrawIndexedIndirectCount(IRHIBuffer* buffer, u64 offset,
 void D3D12CommandList::Dispatch(u32 x, u32 y, u32 z) {
     { static int s=0; if (s<4) { ++s; std::printf("[STP] Dispatch %d\n", s); std::fflush(stdout); } }
     if (!m_List) return;
+    EnsureBoundResourceStates();
     FlushRootArgs();
     m_List->Dispatch(x, y, z);
     m_PushDirty = true;   // 同 Draw：常量槽已被本次派发消费
@@ -845,6 +902,7 @@ void D3D12CommandList::Dispatch(u32 x, u32 y, u32 z) {
 void D3D12CommandList::DispatchIndirect(IRHIBuffer* buffer, u64 offset) {
     if (!m_List || !buffer) return;
     auto* b = static_cast<D3D12Buffer*>(buffer);
+    EnsureBoundResourceStates();
     FlushRootArgs();
     m_List->ExecuteIndirect(nullptr, 1, b->GetResource(), offset, nullptr, 0);
     m_PushDirty = true;   // 同 Draw：常量槽已被本次派发消费
@@ -892,7 +950,28 @@ void D3D12CommandList::CopyBuffer(IRHIBuffer* src, IRHIBuffer* dst, u64 size,
     if (!m_List || !src || !dst) return;
     auto* s = static_cast<D3D12Buffer*>(src);
     auto* d = static_cast<D3D12Buffer*>(dst);
+    // 拷贝要求源 / 目标分别处于 COPY_SOURCE / COPY_DEST：同一列表里缓冲可能已被提升为 UAV 等状态，
+    // 这时必须显式转换（只处理 DEFAULT/CUSTOM 堆；UPLOAD/READBACK 堆的缓冲状态固定）
+    TransitionBuffer(s->GetResource(), D3D12_RESOURCE_STATE_COPY_SOURCE);
+    TransitionBuffer(d->GetResource(), D3D12_RESOURCE_STATE_COPY_DEST);
     m_List->CopyBufferRegion(d->GetResource(), dstOffset, s->GetResource(), srcOffset, size);
+}
+
+void D3D12CommandList::TransitionBuffer(ID3D12Resource* res, D3D12_RESOURCE_STATES want) {
+    if (!res || !m_Device) return;
+    D3D12_HEAP_PROPERTIES hp{};
+    if (FAILED(res->GetHeapProperties(&hp, nullptr)) ||
+        (hp.Type != D3D12_HEAP_TYPE_DEFAULT && hp.Type != D3D12_HEAP_TYPE_CUSTOM)) return;
+    const D3D12_RESOURCE_STATES cur = GetBufferState(res);
+    if (cur == want) return;
+    D3D12_RESOURCE_BARRIER b{};
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    b.Transition.pResource   = res;
+    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    b.Transition.StateBefore = cur;
+    b.Transition.StateAfter  = want;
+    m_List->ResourceBarrier(1, &b);
+    m_BufferStates[res] = want;   // 本列表内的缓冲状态（列表执行完后衰减回 COMMON，见 Begin）
 }
 
 void D3D12CommandList::CopyTextureToTexture(IRHITexture* src, IRHITexture* dst) {

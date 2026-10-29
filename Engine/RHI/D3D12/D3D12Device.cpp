@@ -495,6 +495,18 @@ D3D12_GPU_DESCRIPTOR_HANDLE D3D12Device::GetSetGpuHandle(u32 slot) const {
     return h;
 }
 
+ID3D12Resource* D3D12Device::GetSetResource(DescriptorSetHandle set, u32 binding, bool& isBuffer) const {
+    isBuffer = false;
+    if (set == kInvalidSet || set > m_DescriptorSets.size()) return nullptr;
+    const auto& s = m_DescriptorSets[static_cast<size_t>(set - 1)];
+    if (auto it = s.textures.find(binding); it != s.textures.end()) return it->second.Get();
+    if (auto it = s.buffers.find(binding); it != s.buffers.end() && it->second.defaultHeap) {
+        isBuffer = true;
+        return it->second.resource.Get();
+    }
+    return nullptr;
+}
+
 u32 D3D12Device::GetSetSamplerBase(DescriptorSetHandle set) const {
     if (set == kInvalidSet || set > m_DescriptorSets.size()) return 0;
     return m_DescriptorSets[static_cast<size_t>(set - 1)].samplerBase;
@@ -795,20 +807,35 @@ u32 TypeSize(ID3D12ShaderReflectionType* ty) {
 }
 }
 
-void D3D12Device::NoteStructStrides(ID3D12ShaderReflection* refl) {
-    { static int n=0; if (++n <= 3) { std::printf("[NOTE] called refl=%p\n", (void*)refl); std::fflush(stdout); } }
+void D3D12Device::NoteSetLayoutStrides(ID3D12ShaderReflection* refl,
+                                       const std::vector<DescriptorSetLayoutHandle>& layouts) {
     if (!refl) return;
     D3D12_SHADER_DESC sd{};
-    refl->GetDesc(&sd);
+    if (FAILED(refl->GetDesc(&sd))) return;
     for (UINT i = 0; i < sd.BoundResources; ++i) {
         D3D12_SHADER_INPUT_BIND_DESC bd{};
         if (FAILED(refl->GetResourceBindingDesc(i, &bd))) continue;
-        if (bd.Type != D3D_SIT_STRUCTURED && bd.Type != D3D_SIT_TBUFFER) continue;
-        auto* var = refl->GetVariableByName(bd.Name);
-        if (!var) continue;
-        const u32 sz = TypeSize(var->GetType());
-        if (sz >= 4 && sz <= 4096) { m_StructStrides[bd.BindPoint] = sz;
-            std::printf("[NOTE] reg=%u stride=%u name=%s\n", bd.BindPoint, sz, bd.Name); std::fflush(stdout); }
+        const bool structured = bd.Type == D3D_SIT_STRUCTURED || bd.Type == D3D_SIT_UAV_RWSTRUCTURED ||
+                                bd.Type == D3D_SIT_UAV_APPEND_STRUCTURED || bd.Type == D3D_SIT_UAV_CONSUME_STRUCTURED ||
+                                bd.Type == D3D_SIT_UAV_RWSTRUCTURED_WITH_COUNTER;
+        // 对结构化缓冲，NumSamples 字段存的就是结构体步长
+        if (!structured || bd.NumSamples == 0 || bd.Space >= layouts.size()) continue;
+        const DescriptorSetLayoutHandle lh = layouts[bd.Space];
+        if (lh == kInvalidLayout || lh > m_SetLayouts.size()) continue;
+        const u32 li = static_cast<u32>(lh - 1);
+        u32& known = m_SetLayouts[li].strides[bd.BindPoint];
+        if (known == bd.NumSamples) continue;
+        if (known != 0) {
+            HE_CORE_WARN("D3D12Device: 布局 {} 的 binding {} 在不同着色器里步长不一致（{} → {}）",
+                         li + 1, bd.BindPoint, known, bd.NumSamples);
+        }
+        known = bd.NumSamples;
+        // 先写描述符、后建 PSO 是常态：按新步长重写该布局下所有已写入此 binding 的 set
+        for (auto& s : m_DescriptorSets) {
+            if (s.layout != li) continue;
+            auto it = s.buffers.find(bd.BindPoint);
+            if (it != s.buffers.end()) WriteSetBufferDescriptor(s, bd.BindPoint, it->second);
+        }
     }
 }
 
@@ -1237,77 +1264,78 @@ static D3D12_SRV_DIMENSION SrvDimFor(DescriptorType) { return D3D12_SRV_DIMENSIO
 // ---------------------------------------------------------------------------
 void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, DescriptorType type,
                                       IRHIBuffer* buffer) {
-    { static std::unordered_map<u64,int> seen0; const u64 k0=(u64)set*10000+(u64)binding*100+(u32)type; if (binding==0 && ++seen0[k0]==1) HE_CORE_ERROR("[UDS0] set={} binding=0 type={}", (u64)set, (u32)type); }
-    { static int s=0; if (s<12) { ++s; std::printf("[STP] UDS1 n=%d\n", s); std::fflush(stdout); } }
     if (set == kInvalidSet || set > m_DescriptorSets.size() || !buffer) return;
     if (!EnsureDescriptorHeaps()) return;
 
-    const auto& s = m_DescriptorSets[static_cast<size_t>(set - 1)];
-    { static int n=0; if (++n <= 12) { auto h=GetSlotCpuHandle(s.baseSlot + binding);
-        std::printf("[UDW] set=%llu binding=%u base=%u cpuOff=%llu\n", (unsigned long long)set, binding, s.baseSlot,
-            (unsigned long long)(h.ptr - m_CbvSrvUavHeap->GetCPUDescriptorHandleForHeapStart().ptr)); std::fflush(stdout); } }
     auto* b = static_cast<D3D12Buffer*>(buffer);
-    if (!b || !b->GetResource()) return;
+    if (!b->GetResource()) return;
+    auto& s = m_DescriptorSets[static_cast<size_t>(set - 1)];
+    // 记下这个 binding 写的是哪个缓冲：布局之后从 PSO 反射学到（或修正）步长时据此重写
+    s.textures.erase(binding);   // 同一 binding 改写为缓冲：清掉旧的纹理记录
+    D3D12Set::BufferBinding& bb = s.buffers[binding];
+    bb.resource     = b->GetResource();
+    bb.size         = b->GetSize() ? b->GetSize() : 256;
+    bb.bufferStride = static_cast<u32>(b->GetStride());
+    bb.type         = type;
+    D3D12_HEAP_PROPERTIES hp{};
+    // DEFAULT 与 CUSTOM（CPU 可读写的 UAV 缓冲）堆上的缓冲都按普通资源状态规则转换；UPLOAD/READBACK 堆不行
+    bb.defaultHeap  = SUCCEEDED(bb.resource->GetHeapProperties(&hp, nullptr)) &&
+                      (hp.Type == D3D12_HEAP_TYPE_DEFAULT || hp.Type == D3D12_HEAP_TYPE_CUSTOM);
+    WriteSetBufferDescriptor(s, binding, bb);
+}
 
+void D3D12Device::WriteSetBufferDescriptor(D3D12Set& s, u32 binding, const D3D12Set::BufferBinding& bb) {
+    ID3D12Resource* res = bb.resource.Get();
+    if (!res) return;
     D3D12_CPU_DESCRIPTOR_HANDLE dst = GetSlotCpuHandle(s.baseSlot + binding);
-    const u64 size = b->GetSize() ? b->GetSize() : 256;
+    const u64 size = bb.size;
 
-    if (type == DescriptorType::UniformBuffer) {
+    if (bb.type == DescriptorType::UniformBuffer) {
         D3D12_CONSTANT_BUFFER_VIEW_DESC cbv{};
-        cbv.BufferLocation = b->GetResource()->GetGPUVirtualAddress();
+        cbv.BufferLocation = res->GetGPUVirtualAddress();
         cbv.SizeInBytes    = static_cast<UINT>((size + 255) & ~255ull);
         m_Device->CreateConstantBufferView(&cbv, dst);
-    } else {
-        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
-        srv.Format = DXGI_FORMAT_UNKNOWN;
-        srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        srv.Buffer.FirstElement = 0;
-        // stride must equal the shader struct size; engine BufferDesc has no SSBO stride
-        u32 stride = static_cast<u32>(b->GetStride());
-        if (!stride) stride = LookupStructStride(binding);
-        if (!stride) stride = 4u;
-        // 元素数必须 ≥1：缓冲比 stride 小时 size/stride=0，CreateShaderResourceView 判非法
-        // 会直接把设备移除（实测 hr=0x887a0005）。
-        UINT nElems = static_cast<UINT>(size / stride);
-        if (nElems == 0) nElems = 1;
-        srv.Buffer.NumElements  = nElems;
-        srv.Buffer.StructureByteStride = stride;
-        srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
-        { static int n=0; if (++n % 200 == 1) { std::printf("[UDSBUF] set=%llu binding=%u stride=%u size=%llu numElems=%u\n",
-        (unsigned long long)set, binding, srv.Buffer.StructureByteStride,
-        (unsigned long long)size, srv.Buffer.NumElements); std::fflush(stdout); } }
-    if (binding == 2u || binding == 1u || binding == 3u) {
-        static int n=0; if (++n <= 8) { std::printf("[OBJBIND] set=%llu binding=%u gpu=%llu stride=%u elems=%u\n",
-            (unsigned long long)set, binding,
-            (unsigned long long)b->GetResource()->GetGPUVirtualAddress(),
-            srv.Buffer.StructureByteStride, srv.Buffer.NumElements); std::fflush(stdout); }
-    }
-    m_Device->CreateShaderResourceView(b->GetResource(), &srv, dst);
-    // 记录引擎为这个集合指定的物体缓冲（绑定时据此重写 t2 槽位）
-    if (binding == 2u) m_ObjectBufferBySet[static_cast<UINT64>(set)] = b;
-    // 诊断：把同一份 SSBO 视图铺满该 set 的前 32 个槽，判断「未绑定」是否是槽位偏移导致
-    if (std::getenv("HE_SPREAD")) {
-        for (u32 k = 0; k < 32u; ++k) {
-            D3D12_CPU_DESCRIPTOR_HANDLE d2 = GetSlotCpuHandle(s.baseSlot + k);
-            m_Device->CreateShaderResourceView(b->GetResource(), &srv, d2);
-        }
+        return;
     }
 
-        // 【同时写一份 UAV】计算着色器要写同一个 SSBO（引擎用 StorageBuffer
-        // 表示只读/读写两用），D3D12 的 UAV 与 SRV 是两种描述符，
-        // 必须分别放在各自的区域里（根签名也各有表）。
+    // 【步长】StructureByteStride 必须等于着色器里的结构体大小，否则按下标取到的元素整体错位
+    //（GPU 验证 id=1387）。引擎的 BufferDesc 不带步长，按优先级取：
+    //   1) 该 set 所属布局从 PSO 反射记下的步长（NoteSetLayoutStrides，按「布局 + binding」）
+    //   2) 缓冲自身的步长
+    //   3) 旧的按寄存器号兜底表（布局尚未被任何 PSO 使用时的临时值，PSO 创建后会被重写）
+    u32 stride = 0;
+    const auto& layout = m_SetLayouts[s.layout];
+    if (auto it = layout.strides.find(binding); it != layout.strides.end()) stride = it->second;
+    if (!stride) stride = bb.bufferStride;
+    if (!stride) stride = LookupStructStride(binding);
+    if (!stride) stride = 4u;
+    // 元素数必须 ≥1：缓冲比 stride 小时 size/stride=0，CreateShaderResourceView 判非法
+    // 会直接把设备移除（实测 hr=0x887a0005）。
+    const UINT nElems = std::max<UINT>(1u, static_cast<UINT>(size / stride));
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+    srv.Format = DXGI_FORMAT_UNKNOWN;
+    srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.Buffer.FirstElement = 0;
+    srv.Buffer.NumElements  = nElems;
+    srv.Buffer.StructureByteStride = stride;
+    srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
+    m_Device->CreateShaderResourceView(res, &srv, dst);
+
+    // 【同时写一份 UAV】计算着色器要写同一个 SSBO（引擎用 StorageBuffer
+    // 表示只读/读写两用），D3D12 的 UAV 与 SRV 是两种描述符，
+    // 必须分别放在各自的区域里（根签名也各有表）。
+    // 只有允许 UAV 的资源才能建 UAV（例如 UPLOAD 堆上的缓冲不行）。
+    if (res->GetDesc().Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) {
         D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
         uav.Format = DXGI_FORMAT_UNKNOWN;
         uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
         uav.Buffer.FirstElement = 0;
-        UINT nElemsU = static_cast<UINT>(size / stride);
-        if (nElemsU == 0) nElemsU = 1;
-        uav.Buffer.NumElements  = nElemsU;
+        uav.Buffer.NumElements  = nElems;
         uav.Buffer.StructureByteStride = stride;
         uav.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_NONE;
-        D3D12_CPU_DESCRIPTOR_HANDLE uavDst = GetSlotCpuHandle(s.uavBase + binding);
-        m_Device->CreateUnorderedAccessView(b->GetResource(), nullptr, &uav, uavDst);
+        m_Device->CreateUnorderedAccessView(res, nullptr, &uav, GetSlotCpuHandle(s.uavBase + binding));
     }
 }
 
@@ -1344,6 +1372,9 @@ void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, Desc
 
     if (!texture) return;
     auto* tex = static_cast<D3D12Texture*>(texture);
+    // 记下该 binding 的纹理：绘制/派发前由命令列表转到着色器可读（或 UAV）状态
+    m_DescriptorSets[static_cast<size_t>(set - 1)].textures[binding] = tex->GetResource();
+    m_DescriptorSets[static_cast<size_t>(set - 1)].buffers.erase(binding);   // 同一 binding 改写为纹理
     // 描述符写在「该 set 的基址 + binding」：绑定时按 space 绑 set 的区段基址，
     // 写入与读取用同一套偏移才能对上。
     D3D12_CPU_DESCRIPTOR_HANDLE dst = GetSlotCpuHandle(s.baseSlot + binding);
@@ -1444,7 +1475,8 @@ void D3D12Device::UpdateDescriptorSetWithImageView(DescriptorSetHandle set, u32 
     // 目标槽位：与 UpdateDescriptorSet(texture) 相同的布局（set 的 baseSlot + binding）
     if (set == kInvalidSet || set > m_DescriptorSets.size()) return;
     if (!EnsureDescriptorHeaps()) return;
-    const auto& s = m_DescriptorSets[static_cast<size_t>(set - 1)];
+    auto& s = m_DescriptorSets[static_cast<size_t>(set - 1)];
+    s.textures[binding] = res;   // 同上：供绘制前补状态转换
     const D3D12_CPU_DESCRIPTOR_HANDLE dst = GetSlotCpuHandle(s.baseSlot + binding);
     if (!dst.ptr) return;
 

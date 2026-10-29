@@ -136,6 +136,13 @@ private:
     /// 绘制/派发前把缓存的根参数重新下发。D3D12 的 Set*RootSignature 会清空全部根参数，
     /// 而 Vulkan 切管线时兼容的绑定会保留 —— 引擎按 Vulkan 语义只绑一次，这里负责补齐。
     void FlushRootArgs();
+    /// 绘制/派发前，按当前 PSO 反射出的资源用途（SRV 读 / UAV 读写）把已绑定描述符集里的
+    /// 纹理与缓冲转到所需状态。引擎按 Vulkan 习惯只发全局内存屏障、常不为「刚写完就读」发
+    /// 资源屏障（Intel 的 Vulkan 驱动容忍）；D3D12 下渲染目标未转状态就采样会读到未解压数据，
+    /// 缓冲在同一列表里从 UAV 改为 SRV 使用也必须显式转换（GPU 验证 id=942）。
+    void EnsureBoundResourceStates();
+    /// 把 DEFAULT/CUSTOM 堆上的缓冲转到指定状态（并记入本次录制转换过的缓冲）
+    void TransitionBuffer(ID3D12Resource* res, D3D12_RESOURCE_STATES want);
 
     /// 每个飞行帧槽位一个分配器（同 Vulkan 的逐帧命令缓冲）：分配器在 GPU 执行完之前
     /// 不能 Reset，样例只建一个命令列表并每帧重录，单分配器会在 GPU 仍在执行上一帧时
@@ -178,6 +185,19 @@ private:
     bool            m_RootArgsDirty = true;
     /// 本次录制中是否已经 SetDescriptorHeaps（描述符表要求先绑堆）
     bool            m_HeapsSet = false;
+    /// 各 setIndex 当前绑定的描述符集（EnsureBoundTextureStates 据此找纹理）
+    DescriptorSetHandle m_BoundSets[8]{};
+    /// 当前 pass 正作为附件的资源：它们不能同时被转成可读状态
+    std::vector<ID3D12Resource*> m_PassAttachments;
+    std::vector<D3D12_RESOURCE_BARRIER> m_BarrierScratch;   // 复用的临时数组
+    /// 缓冲的状态按命令列表各自跟踪：缓冲在每次 ExecuteCommandLists 执行完后都会衰减回 COMMON，
+    /// 所以每个列表开始录制时所有缓冲都是 COMMON（Begin 时清空）。用设备级的全局记录会被
+    /// 其他命令列表的转换干扰，屏障的 StateBefore 与实际不符（GPU 验证 id=942）。
+    std::unordered_map<ID3D12Resource*, D3D12_RESOURCE_STATES> m_BufferStates;
+    D3D12_RESOURCE_STATES GetBufferState(ID3D12Resource* res) const {
+        auto it = m_BufferStates.find(res);
+        return it != m_BufferStates.end() ? it->second : D3D12_RESOURCE_STATE_COMMON;
+    }
     u32             m_LastBaseSlot = 0;      // 本列表累计绘制数（诊断用）
     bool            m_PassHasRtv = false;
     u32             m_PassW = 0;
