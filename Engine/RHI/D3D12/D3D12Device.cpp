@@ -19,7 +19,7 @@ namespace he::rhi::d3d12 {
 // 设备丢失时打印 DRED（需 HE_D3D12_DRED=1 在建设备前开启）：
 // 自动面包屑给出每个命令列表最后完成的操作，页错误给出出错的 GPU 虚拟地址。只打印一次。
 /// 按资源描述与子资源范围构造纹理的 SRV / UAV 描述。
-/// · 3D 纹理用 TEXTURE3D；立方体图整体视图用 TEXTURECUBE；指定了数组层的子资源视图用 TEXTURE2DARRAY
+/// · 3D 纹理用 TEXTURE3D；立方体图整体视图用 TEXTURECUBE；数组整体视图与指定了数组层的子资源视图用 TEXTURE2DARRAY
 /// · 子资源视图（single）只暴露 (mip, layer) 一级；整体视图从 mip 0 起覆盖全部级
 /// · 深度 / TYPELESS 格式映射到可读写的具体格式（DSV 格式不是合法的 SRV 格式，直接用会移除设备）
 void BuildTextureViewDescs(const D3D12_RESOURCE_DESC& rd, u32 mip, u32 layer, bool single,
@@ -70,6 +70,20 @@ void BuildTextureViewDescs(const D3D12_RESOURCE_DESC& rd, u32 mip, u32 layer, bo
         srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
         srv.TextureCube.MostDetailedMip = 0;
         srv.TextureCube.MipLevels       = mips;
+        uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
+        uav.Texture2DArray.MipSlice        = mip;
+        uav.Texture2DArray.FirstArraySlice = 0;
+        uav.Texture2DArray.ArraySize       = layers;
+        return;
+    }
+    if (!single && layers > 1) {
+        // 普通 2D 数组的整体视图：必须用 TEXTURE2DARRAY 覆盖全部层，
+        // 此前落到下面的 TEXTURE2D 分支，只能看到第 0 层（着色器按 Texture2DArray 读其余层得到 0）
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+        srv.Texture2DArray.MostDetailedMip = 0;
+        srv.Texture2DArray.MipLevels       = mips;
+        srv.Texture2DArray.FirstArraySlice = 0;
+        srv.Texture2DArray.ArraySize       = layers;
         uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
         uav.Texture2DArray.MipSlice        = mip;
         uav.Texture2DArray.FirstArraySlice = 0;
