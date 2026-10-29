@@ -366,7 +366,12 @@ public:
     float m_MergeNormalCos = 0.995f;                  // 法线一致阈值（cos；越大越严格 ⇒ 探针越多）
     rhi::RHIBufferHandle m_ProbeBuf{};   // A-3
     rhi::RHIBufferHandle m_ProbeCountBuf{}, m_TileDevBuf{};   // A-3
-    void* m_ProbeCountMapped = nullptr;
+    /// 探针计数的清零源（常量 0）与按飞行帧轮换的回读副本：计数器由 GPU 原子累加，
+    /// CPU 不能在录制时直接读写它（那时前几帧可能尚未执行完），只读已完成帧的回读副本
+    rhi::RHIBufferHandle m_ProbeCountZero{};
+    rhi::RHIBufferHandle m_ProbeCountRb[rhi::kMaxFramesInFlight]{};
+    void*                m_ProbeCountRbMapped[rhi::kMaxFramesInFlight]{};
+    u32                  m_ProbeCountRbSlot = 0;
     void* m_TileDevMapped = nullptr;
     rhi::DescriptorSetLayoutHandle m_ProbeLayout = 0;
     rhi::DescriptorSetHandle       m_ProbeSet    = 0;

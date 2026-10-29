@@ -985,10 +985,23 @@ void LumenScene::RunProbePlacement(rhi::IRHICommandList* cmd, rhi::IRHITexture* 
         pb.usage = rhi::BufferUsage::Storage;
         m_ProbeBuf = m_Device->CreateBufferHandle(pb);   // A-3
 
+        // 计数器只由 GPU 读写：每帧在 GPU 时间线上清零（从常量 0 拷贝），派发后拷到本帧槽位的回读副本
         rhi::BufferDesc cb;
-        cb.size = sizeof(u32); cb.usage = rhi::BufferUsage::Storage; cb.cpuAccess = true;
+        cb.size = sizeof(u32);
+        cb.usage = rhi::BufferUsage::Storage | rhi::BufferUsage::TransferSrc | rhi::BufferUsage::TransferDst;
         m_ProbeCountBuf = m_Device->CreateBufferHandle(cb);   // A-3
-        m_ProbeCountMapped = ResB(m_ProbeCountBuf)->Map();
+        const u32 zero = 0;
+        rhi::BufferDesc zb;
+        zb.size = sizeof(u32); zb.usage = rhi::BufferUsage::TransferSrc; zb.cpuAccess = true; zb.initialData = &zero;
+        m_ProbeCountZero = m_Device->CreateBufferHandle(zb);
+        // 回读副本是拷贝目标且要 CPU 读：带 Storage 才能放进 GPU 可写、CPU 可读的堆（D3D12 的 UPLOAD 堆 GPU 不可写）
+        rhi::BufferDesc rb;
+        rb.size = sizeof(u32); rb.usage = rhi::BufferUsage::Storage | rhi::BufferUsage::TransferDst; rb.cpuAccess = true;
+        for (u32 k = 0; k < rhi::kMaxFramesInFlight; ++k) {
+            m_ProbeCountRb[k] = m_Device->CreateBufferHandle(rb);
+            m_ProbeCountRbMapped[k] = ResB(m_ProbeCountRb[k]) ? ResB(m_ProbeCountRb[k])->Map() : nullptr;
+            if (m_ProbeCountRbMapped[k]) std::memcpy(m_ProbeCountRbMapped[k], &zero, sizeof(zero));
+        }
 
         const u32 tiles = 256u * 256u;   // 偏差缓冲按 8K 屏幕上限（256×256 个 32×32 tile）
         rhi::BufferDesc db;
@@ -1025,9 +1038,12 @@ void LumenScene::RunProbePlacement(rhi::IRHICommandList* cmd, rhi::IRHITexture* 
     // ① 先读上一帧的偏差缓冲（本帧清零计数之后再派发）
     if (m_ProbeFrame >= 1 && m_TileDevMapped) {
         std::memcpy(m_ProbeTileDev.data(), m_TileDevMapped, (usize)tileCount * sizeof(float));
-        if (m_ProbeCountMapped) {   // 【先读后清】计数由 GPU 原子加写入；先清零再读只会读到 0
+        // 读本帧槽位的回读副本：它是 kMaxFramesInFlight 帧之前写入的，命令列表 Begin 已等过那一帧的围栏，
+        // GPU 一定执行完了。此前直接读计数器本身：GPU 可能还没执行上一帧（读到 0 ⇒ 后续探针追踪整段跳过），
+        // CPU 的清零也可能落在上一帧执行之前（两帧计数叠加，实测 D3D12 下出现 0 / 2 倍）
+        if (void* p = m_ProbeCountRbMapped[m_ProbeCountRbSlot]) {
             u32 c = 0;
-            std::memcpy(&c, m_ProbeCountMapped, sizeof(c));
+            std::memcpy(&c, p, sizeof(c));
             m_ProbeCount = c;
         }
         // 曲线：阈值（cos）越大越严格 ⇒ 探针数单调不减（8.000 = 每 tile 4 个）
@@ -1059,7 +1075,12 @@ void LumenScene::RunProbePlacement(rhi::IRHICommandList* cmd, rhi::IRHITexture* 
     }
 
     // ② 派发本帧
-    if (m_ProbeCountMapped) { u32 zero = 0; std::memcpy(m_ProbeCountMapped, &zero, sizeof(zero)); }
+    // 计数器在 GPU 时间线上清零（拷贝 → 计算着色器原子累加）
+    if (auto* zeroBuf = ResB(m_ProbeCountZero)) {
+        cmd->CopyBuffer(zeroBuf, ResB(m_ProbeCountBuf), sizeof(u32), 0, 0);
+        cmd->PipelineBarrier(rhi::PipelineStage::Transfer, rhi::PipelineStage::ComputeShader,
+                             rhi::ResourceState::CopyDst, rhi::ResourceState::UnorderedAccess);
+    }
     struct { u32 x, y, z, w; float4 merge; } pc{};
     // dims.w = **单元**总数（16×16 单元 → 探针映射的容量），步骤 24 的合成端按它做边界判断
     const u32 cellsX = (m_Width + 15u) / 16u;
@@ -1070,6 +1091,13 @@ void LumenScene::RunProbePlacement(rhi::IRHICommandList* cmd, rhi::IRHITexture* 
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_ProbeSet);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
     cmd->Dispatch((tilesX + 7u) / 8u, (tilesY + 7u) / 8u, 1);
+    // 本帧计数拷到本帧槽位的回读副本（计算着色器写 → 拷贝读），轮到同一槽位时再由 CPU 读取
+    if (auto* rbBuf = ResB(m_ProbeCountRb[m_ProbeCountRbSlot])) {
+        cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::Transfer,
+                             rhi::ResourceState::UnorderedAccess, rhi::ResourceState::CopySrc);
+        cmd->CopyBuffer(ResB(m_ProbeCountBuf), rbBuf, sizeof(u32), 0, 0);
+    }
+    m_ProbeCountRbSlot = (m_ProbeCountRbSlot + 1u) % rhi::kMaxFramesInFlight;
     ++m_ProbeFrame;
 
 }
