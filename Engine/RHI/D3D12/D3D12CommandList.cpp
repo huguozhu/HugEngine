@@ -49,9 +49,7 @@ bool D3D12CommandList::Initialize(D3D12Device* device, QueueType queue) {
 }
 
 void D3D12CommandList::Begin() {
-    { static int s=0; if (s<4) { ++s; std::printf("[STP] Begin %d\n", s); std::fflush(stdout); } }
-
-    if (!m_List || !m_Allocator) { std::printf("[BGN] no list/alloc\n"); std::fflush(stdout); return; }
+    if (!m_List || !m_Allocator) return;
     // 轮换到下一个帧槽位，并等待该槽位上一次提交的命令在 GPU 上执行完，再复用其分配器
     m_FrameSlot = (m_FrameSlot + 1) % kMaxFramesInFlight;
     m_Allocator = m_Allocators[m_FrameSlot];
@@ -64,7 +62,6 @@ void D3D12CommandList::Begin() {
         }
     }
     // 每次录制前必须 Reset 分配器与列表
-    std::printf("[BGN] before alloc Reset\n"); std::fflush(stdout);
     if (FAILED(m_Allocator->Reset())) {
         // 【关键】分配器仍被 GPU 使用时 Reset 会失败。此前直接 return，
         // 列表停留在 Close 状态，之后所有录制（清屏、绘制、屏障）都被 D3D12 丢弃，
@@ -78,7 +75,6 @@ void D3D12CommandList::Begin() {
             return;
         }
     }
-    std::printf("[BGN] before list Reset\n"); std::fflush(stdout);
     if (FAILED(m_List->Reset(m_Allocator.Get(), nullptr))) {
         HE_CORE_ERROR("D3D12CommandList::Begin: 列表 Reset 失败");
         return;
@@ -205,7 +201,6 @@ void D3D12CommandList::PrepareForExternalRendering() {
 }
 
 void D3D12CommandList::End() {
-    { static int s=0; if (s<4) { ++s; std::printf("[STP] End %d\n", s); std::fflush(stdout); } }
     if (TraceEnabled()) { std::printf("[TRACE] End\n"); std::fflush(stdout); }
 
     if (!m_List || !m_Recording) return;
@@ -218,8 +213,6 @@ void D3D12CommandList::End() {
 void D3D12CommandList::BeginRenderPass(u32 colorCount, Format colorFormat,
                                        Format depthFormat, const ClearValue* clear,
                                        LoadOp loadOp) {
-    { static int s=0; if (s<4) { ++s; std::printf("[STP] BRP %d\n", s); std::fflush(stdout); } }
-
     if (!m_List) return;
 
     // 后缓冲的 RTV：从交换链取（引擎传的 colorFormat 是后缓冲格式）
@@ -299,7 +292,6 @@ void D3D12CommandList::BeginOffscreenPass(void* colorImageView, void* depthImage
                                           u32 width, u32 height,
                                           const ClearValue* clear,
                                           bool allowSecondary) {
-    { static int s=0; if (s<4) { ++s; std::printf("[STP] BOP %d\n", s); std::fflush(stdout); } }
     (void)allowSecondary;
     if (!m_List) return;
 
@@ -314,7 +306,6 @@ void D3D12CommandList::BeginOffscreenPass(void* colorImageView, void* depthImage
     // 【必须做资源屏障】D3D12 要求绑定为 RTV/DSV 的资源处于 RENDER_TARGET /
     // DEPTH_WRITE 状态。引擎只把 CPU 句柄传进来，所以先按句柄反查资源，
     // 再按记录的状态做一次转换（否则 OMSetRenderTargets / Clear 会静默卡死）。
-    std::printf("[BOPA] barrier begin\n"); std::fflush(stdout);
     if (m_Device) {
         if (hasRtv) {
             if (auto* res = m_Device->FindViewResource(static_cast<UINT64>(rtv.ptr))) {
@@ -351,7 +342,6 @@ void D3D12CommandList::BeginOffscreenPass(void* colorImageView, void* depthImage
         }
     }
 
-    std::printf("[BOPB] rtv=%p rtvRes=%p dsv=%p\n", (void*)rtv.ptr, (void*)m_Device->FindViewResource(static_cast<UINT64>(rtv.ptr)), (void*)dsv.ptr); std::fflush(stdout);
     // 【HDR 中间结果转储】进入宽屏离屏 pass 时，把该目标回读并打印首像素。
     // 此刻里面是**上一帧**完整渲染后的结果，可判断几何是否真的画进了 HDR。
     // 【任意尺寸的渲染目标回读扫描】HE_DUMP_HDR=1 时，把每个离屏 pass 的目标
@@ -429,7 +419,6 @@ void D3D12CommandList::BeginOffscreenPass(void* colorImageView, void* depthImage
     }
 
     m_List->OMSetRenderTargets(hasRtv ? 1u : 0u, hasRtv ? &rtv : nullptr, FALSE, hasDsv ? &dsv : nullptr);
-    std::printf("[BOPC] after OMSetRT\n"); std::fflush(stdout);
     m_HasRtv = hasRtv;
 
     // 【是否清空附件由 PSO 的 loadOp 决定】与 Vulkan 一致：离屏 pass 用当前 PSO 的 render pass，
@@ -441,7 +430,6 @@ void D3D12CommandList::BeginOffscreenPass(void* colorImageView, void* depthImage
     static const float kZeroColor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
     if (hasRtv && clearColor) {
         m_List->ClearRenderTargetView(rtv, clear ? clear->color : kZeroColor, 0, nullptr);
-        std::printf("[BOPD] after ClearRTV\n"); std::fflush(stdout);
     }
     if (hasDsv && clearDepth) {
         // 【只有带模板的格式才能传 STENCIL 标志】D32_FLOAT 没有模板位，
@@ -464,20 +452,15 @@ void D3D12CommandList::BeginOffscreenPass(void* colorImageView, void* depthImage
     vp.Width  = static_cast<float>(width);
     vp.Height = static_cast<float>(height);
     vp.MaxDepth = 1.0f;
-    std::printf("[BOPY] before VP\n"); std::fflush(stdout);
     m_List->RSSetViewports(1, &vp);
     D3D12_RECT rc{ 0, 0, static_cast<LONG>(width), static_cast<LONG>(height) };
     m_List->RSSetScissorRects(1, &rc);
-
-    HE_CORE_INFO("[D3D12 离屏] rtv={} dsv={} {}x{}",
-                 hasRtv ? "有" : "无", hasDsv ? "有" : "无", width, height);
 }
 
 void D3D12CommandList::BeginOffscreenPassMRT(void* const* colorImageViews, u32 colorCount,
                                              void* depthImageView, u32 width, u32 height,
                                              const ClearValue* clears,
                                              bool allowSecondary) {
-    { static int s=0; if (s<4) { ++s; std::printf("[STP] BOPM %d\n", s); std::fflush(stdout); } }
     (void)allowSecondary;
     if (!m_List || colorCount == 0) return;
 
@@ -612,7 +595,6 @@ void D3D12CommandList::SetPipeline(IRHIPipelineState* pso) {
 }
 
 void D3D12CommandList::SetVertexBuffer(IRHIBuffer* buffer, u32 binding) {
-    { static int n4=0; if (n4++ < 30 && buffer) { std::printf("[VBSET] %p\n", (void*)buffer); std::fflush(stdout); } }
     if (TraceEnabled()) { std::printf("[TRACE] SetVertexBuffer\n"); std::fflush(stdout); }
     if (!m_List || !buffer) return;
     auto* b = static_cast<D3D12Buffer*>(buffer);
@@ -630,7 +612,6 @@ void D3D12CommandList::SetVertexBuffer(IRHIBuffer* buffer, u32 binding) {
 }
 
 void D3D12CommandList::SetIndexBuffer(IRHIBuffer* buffer, u32 offset) {
-    { static int s=0; if (s<4) { ++s; std::printf("[STP] SetIB %d\n", s); std::fflush(stdout); } }
     if (TraceEnabled()) { std::printf("[TRACE] SetIndexBuffer\n"); std::fflush(stdout); }
     if (!m_List || !buffer) return;
     auto* b = static_cast<D3D12Buffer*>(buffer);
@@ -681,8 +662,6 @@ void D3D12CommandList::SetFullscreenViewport(u32 width, u32 height) {
 }
 
 void D3D12CommandList::BindDescriptorSet(u32 setIndex, DescriptorSetHandle set) {
-    static int s_call=0; std::printf("[BSN] call#%d setIndex=%u set=%llu\n", ++s_call, setIndex, (unsigned long long)set); std::fflush(stdout);
-    { static int s=0; if (s<4) { ++s; std::printf("[STP] BindSet %d\n", s); std::fflush(stdout); } }
     if (!m_List || !m_Device || set == kInvalidSet || setIndex >= 8) return;
     if (!m_Device->EnsureDescriptorHeaps()) return;
     m_Device->FlushPendingBindlessBuffers();   // 补写初始化早期被丢弃的 bindless 缓冲描述符
@@ -691,7 +670,6 @@ void D3D12CommandList::BindDescriptorSet(u32 setIndex, DescriptorSetHandle set) 
     if (!heaps[0] || !heaps[1]) return;
     m_List->SetDescriptorHeaps(2, heaps);
     m_HeapsSet = true;
-    std::printf("[BS] heaps ok\n"); std::fflush(stdout);
 
     m_BoundSets[setIndex] = set;
     const u32 baseSlot = m_Device->GetSetBaseSlot(set);
@@ -883,22 +861,12 @@ void D3D12CommandList::SetPushConstants(u32 offset, u32 size, const void* data) 
         const u8* raw = static_cast<const u8*>(data);
         m_LastObjIdx = *reinterpret_cast<const u32*>(raw + (84u - offset));
     }
-    if (size >= 160u && data) {
-        static int n1=0; if (++n1 % 300 == 1) {
-            const u32* w = static_cast<const u32*>(data);
-            std::printf("[PCSET] list=%p light=%u obj=%u useInst=%u w24..31=%u,%u,%u,%u,%u,%u,%u,%u\n",
-                (void*)this, w[20], w[21], w[22],
-                w[24],w[25],w[26],w[27],w[28],w[29],w[30],w[31]);
-            std::fflush(stdout);
-        }
-    }
     if (offset >= 256u) return;
     const u32 copySize = ((offset + size) > 256u) ? (256u - offset) : size;
     std::memcpy(static_cast<unsigned char*>(m_PushCpu) + offset, data, copySize);
 }
 
 void D3D12CommandList::Draw(u32 vertexCount, u32 instanceCount, u32 firstVertex, u32 firstInstance) {
-    { static int s=0; if (s<4) { ++s; std::printf("[STP] Draw %d\n", s); std::fflush(stdout); } }
     // 诊断：每 60 次绘制打印一次（D3D12 的 GraphicsCommandList 没有 Get* 查询接口，
     // 所以这里打印我们自己记录的状态）
     if (TraceEnabled()) {
@@ -922,15 +890,6 @@ void D3D12CommandList::Draw(u32 vertexCount, u32 instanceCount, u32 firstVertex,
 
 void D3D12CommandList::DrawIndexed(u32 indexCount, u32 instanceCount, u32 firstIndex,
                                    i32 vertexOffset, u32 firstInstance) {
-    { static int n7=0; if (++n7 % 200 == 1) {
-        const unsigned k = (m_LastObjIdx < 32u) ? m_LastObjIdx : 0u;
-        std::printf("[OBJIDX] idx=%u scale=(%.2f,%.2f,%.2f) trans=(%.2f,%.2f,%.2f)\n",
-            m_LastObjIdx, m_Device->m_LastObjM[k][0], m_Device->m_LastObjM[k][1], m_Device->m_LastObjM[k][2],
-            m_Device->m_LastObjM[k][3], m_Device->m_LastObjM[k][4], m_Device->m_LastObjM[k][5]);
-        std::fflush(stdout); } }
-    { static int n8=0; if (++n8 % 400 == 1) { std::printf("[OBJFIX] obj=%p base=%u\n",
-        (void*)m_Device->GetLastObjectBuffer(), m_LastBaseSlot); std::fflush(stdout); } }
-    { static int n=0; if (indexCount == 1728 && ++n <= 4) { std::printf("[DRAWSET] set=%llu base=%u idx=%u\n", (unsigned long long)m_LastBoundSet, m_LastBaseSlot, indexCount); std::fflush(stdout); } }
     // space2 绑定分测：分别用 HE_BIND2_SRV / HE_BIND2_SMP 控制
     if (m_Device && m_List) {
         if (true) {   // space2 的 bindless 表必须总是绑定
@@ -945,19 +904,7 @@ void D3D12CommandList::DrawIndexed(u32 indexCount, u32 instanceCount, u32 firstI
     static const bool s_NoDraw = (std::getenv("HE_D3D12_NO_DRAW") != nullptr);   // 实验开关：跳过实际绘制（只读一次环境变量）
     if (s_NoDraw) return;
     if (!m_List) return;
-    { static int n6=0; if (++n6 % 90 == 1) { std::printf("[DRAWLOG] idx=%u inst=%u\n", indexCount, instanceCount); std::fflush(stdout); } }
-    { static int n2=0; if (++n2 % 150 == 1 && m_PushCpu) {
-        const u32* w = static_cast<const u32*>(m_PushCpu);
-        std::printf("[PCFIELDS] idx=%u light=%u obj=%u useInst=%u ibl=%.2f w24..31=%u,%u,%u,%u,%u,%u,%u,%u\n",
-            indexCount, w[20], w[21], w[22], *reinterpret_cast<const float*>(&w[23]),
-            w[24],w[25],w[26],w[27],w[28],w[29],w[30],w[31]);
-        std::fflush(stdout); } }
-        { static u32* w=nullptr; static int n=0;
-          if (m_PushCpu) w = static_cast<u32*>(m_PushCpu);
-          if (w && w[22] >= 2u && n++ < 3) {
-            std::printf("[INSTH] useInst=%u w24..29=%u,%u,%u,%u,%u,%u\n",
-                w[22], w[24],w[25],w[26],w[27],w[28],w[29]); std::fflush(stdout); } }
-        m_PushDirty = true;   // 下一次推送开始新的常量槽位
+    m_PushDirty = true;   // 下一次推送开始新的常量槽位
     EnsureBoundResourceStates();
     FlushRootArgs();
     m_List->DrawIndexedInstanced(indexCount, instanceCount, firstIndex,
@@ -1025,7 +972,6 @@ void D3D12CommandList::DrawIndexedIndirectCount(IRHIBuffer* buffer, u64 offset,
 }
 
 void D3D12CommandList::Dispatch(u32 x, u32 y, u32 z) {
-    { static int s=0; if (s<4) { ++s; std::printf("[STP] Dispatch %d\n", s); std::fflush(stdout); } }
     if (!m_List) return;
     EnsureBoundResourceStates();
     FlushRootArgs();
@@ -1126,7 +1072,6 @@ void D3D12CommandList::SetTimelineWait(RHIFenceHandle fence, u64 value) {
 }
 
 void D3D12CommandList::Submit() {
-    { static int s=0; if (s<4) { ++s; std::printf("[STP] Submit %d\n", s); std::fflush(stdout); } }
     if (TraceEnabled()) { std::printf("[TRACE] Submit\n"); std::fflush(stdout); }
     if (m_Device) m_Device->Submit(this, nullptr);
 }

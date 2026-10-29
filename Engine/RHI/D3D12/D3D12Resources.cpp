@@ -251,7 +251,7 @@ bool D3D12Buffer::Initialize(D3D12Device* device, const BufferDesc& desc) {
     return true;
 }
 
-void* D3D12Buffer::Map() {    std::printf("[BUF] Map enter\n"); std::fflush(stdout);
+void* D3D12Buffer::Map() {
 
     if (!m_Resource) return nullptr;
     if (m_MappedPtr) return m_MappedPtr;
@@ -279,12 +279,6 @@ void D3D12Buffer::Unmap() {
     // 记录最近一次被 CPU 写入的物体缓冲（多飞行帧错位修正用）
     // 只有「确实写入了有效矩阵」的缓冲才记为当前物体缓冲：
     // 三缓冲里有些槽本帧没写（全 0），绑到它们会让世界矩阵为 0。
-    { static int n1=0; if (n1++ < 40 && m_Resource) {
-        std::printf("[WADDR] buf=%p gpu=%llu m0=%.2f m15=%.2f\n", (void*)this,
-            (unsigned long long)m_Resource->GetGPUVirtualAddress(),
-            (double)static_cast<const float*>(m_MappedPtr)[0],
-            (double)static_cast<const float*>(m_MappedPtr)[15]);
-        std::fflush(stdout); } }
     if (m_Size == 212992u && m_Device && m_MappedPtr) {
         const float* fchk = static_cast<const float*>(m_MappedPtr);
         if (fchk[15] != 0.0f || fchk[52 * 1 + 15] != 0.0f) {
@@ -303,12 +297,9 @@ void D3D12Buffer::Unmap() {
             m_Device->m_LastObjM[i][4] = e[13];
             m_Device->m_LastObjM[i][5] = e[14];
         }
-    }    std::printf("[BUF] Unmap enter\n"); std::fflush(stdout);
+    }
 
     if (!m_Resource || !m_MappedPtr) return;
-    if (m_Size == 212992u) { static int n9=0; if (++n9 <= 6) {
-        std::printf("[OBJUP] gpu=%llu\n", (unsigned long long)m_Resource->GetGPUVirtualAddress());
-        std::fflush(stdout); } }
 
     ID3D12Resource* target = m_NeedsStagingCopy ? m_CpuStaging.Get() : m_Resource.Get();
     if (target) {
@@ -322,7 +313,6 @@ void D3D12Buffer::Unmap() {
     // 多槽轮转时若上一代拷贝还没跑完就 Reset 分配器，D3D12 会直接判设备丢失
     //（实测 02.Cube 初始化阶段出现 0x887a0005）。这里改成只有一个槽，
     // 每次 Reset 前**必须**等上一次的围栏完成，正确性优先。
-    HE_CORE_INFO("[Unmap 进入] size={} staging={}", static_cast<u64>(m_Size), m_NeedsStagingCopy ? 1 : 0);
     // 【必须无条件上传】此前被 HE_D3D12_STAGING_COPY 环境变量门控，默认不执行
     if (m_NeedsStagingCopy && m_CpuStaging && m_Device && m_Size > 0) {
         const u32 copySize = static_cast<u32>((m_Size + 3) & ~3ull);

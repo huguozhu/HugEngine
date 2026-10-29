@@ -41,8 +41,6 @@ BindlessHandle D3D12BindlessHeap::RegisterBuffer(IRHIBuffer* ssbo) {
     // u_BoneMatrices=t1152、u_Materials=t1216（每段 64 个槽；t0..t1023 留给 bindless 纹理）。
     // 同一个缓冲注册到统一句柄空间，因此要把它的描述符写进全部四段，
     // 这样任何数组按 handle 索引都能取到同一份数据。
-    { static int n5=0; if (n5++ < 20) { std::printf("[BLHANDLE] h=%llu size=%llu\n",
-        (unsigned long long)h, (unsigned long long)ssbo->GetSize()); std::fflush(stdout); } }
     const u32 hIdx = static_cast<u32>(h);
     for (u32 base : { 1024u, 1088u, 1152u, 1216u }) {
         m_Device->WriteBindlessBufferSrv(base + hIdx, ssbo);

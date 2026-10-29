@@ -861,8 +861,6 @@ u32 TypeSize(ID3D12ShaderReflectionType* ty) {
     if (!ty) return 4;
     D3D12_SHADER_TYPE_DESC td{};
     if (FAILED(ty->GetDesc(&td))) return 4;
-    { static int n=0; if (++n <= 6) { std::printf("[TYDESC] class=%d rows=%u cols=%u elems=%u members=%u offset=%u\n",
-        (int)td.Class, td.Rows, td.Columns, td.Elements, td.Members, td.Offset); std::fflush(stdout); } }
     if (td.Class == D3D_SVC_STRUCT) {
         u32 end = 0;
         for (UINT m = 0; m < td.Members; ++m) {
@@ -1095,7 +1093,6 @@ void D3D12Device::FlushRetired() {
 
 bool D3D12Device::WriteBindlessSrv(u32 slot, IRHITexture* texture) {
     if (!m_Device || !texture) return false;
-    { static int n4=0; if (n4++ < 40) { std::printf("[BLW] bufWrite heap=%p size=%u base=%u slot=%u\n", (void*)m_CbvSrvUavHeap.Get(), m_CbvSrvUavSize, m_BindlessSrvBase, slot); std::fflush(stdout); } }
     if (!m_CbvSrvUavHeap || m_CbvSrvUavSize == 0) return false;   // 绑定的堆尚未创建
     if (!m_BindlessSrvHeap) {
         D3D12_DESCRIPTOR_HEAP_DESC hd{};
@@ -1267,11 +1264,6 @@ u32 D3D12Device::GetSetUavOffset(DescriptorSetHandle set) const {
 }
 
 DescriptorSetLayoutHandle D3D12Device::CreateDescriptorSetLayout(const DescriptorSetLayoutDesc& desc) {
-    { static int n=0; if (++n <= 12) {
-        std::printf("[LAYOUT] #%d bindings=%d:", n, (int)desc.bindings.size()); std::fflush(stdout);
-        for (const auto& b : desc.bindings) { std::printf(" (b=%u t=%d)", b.binding, (int)b.type); }
-        std::printf("\n"); std::fflush(stdout);
-    } }
     D3D12SetLayout layout;
     layout.bindings = desc.bindings;
     // 槽位数 = 最大 binding + 该 binding 的 count（保守做法：每个 binding 按 count 展开）
@@ -1340,8 +1332,6 @@ DescriptorSetHandle D3D12Device::AllocateDescriptorSet(DescriptorSetLayoutHandle
             s.samplerBase = 0;
         }
     }
-    { static int n9=0; if (++n9 % 200 == 1) { std::printf("[SLOTS] sets=%zu nextFree=%u bindlessBase=%u\n",
-        m_DescriptorSets.size(), m_NextFreeSlot, m_BindlessSrvBase); std::fflush(stdout); } }
     m_DescriptorSets.push_back(s);
 
     return static_cast<DescriptorSetHandle>(m_DescriptorSets.size());     // 1-based
@@ -1437,8 +1427,6 @@ void D3D12Device::WriteSetBufferDescriptor(D3D12Set& s, u32 binding, const D3D12
 
 void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, DescriptorType type,
                                       IRHITexture* texture, IRHISampler* sampler) {
-    { static std::unordered_map<u64,int> seen0; const u64 k0=(u64)set*10000+(u64)binding*100+(u32)type; if (binding==0 && ++seen0[k0]==1) HE_CORE_ERROR("[UDS0] set={} binding=0 type={}", (u64)set, (u32)type); }
-    { static int s=0; if (s<12) { ++s; std::printf("[STP] UDS2 n=%d\n", s); std::fflush(stdout); } }
     if (set == kInvalidSet || set > m_DescriptorSets.size()) return;
     if (!EnsureDescriptorHeaps()) return;
 
@@ -1496,15 +1484,6 @@ void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, Desc
             default:                            srv.Format = DXGI_FORMAT_UNKNOWN; break;   // 颜色纹理沿用资源格式
         }
     }
-    if (auto* res = tex->GetResource()) {
-        const D3D12_RESOURCE_DESC d = res->GetDesc();
-        HE_CORE_INFO("[SRV] res: dim={} {}x{} mip={} arr={} fmt={} flags=0x{:x} | srv: view={} mipLevels={} slot={}",
-                     static_cast<int>(d.Dimension), static_cast<u64>(d.Width),
-                     static_cast<u32>(d.Height), static_cast<u32>(d.MipLevels),
-                     static_cast<u32>(d.DepthOrArraySize), static_cast<u32>(d.Format),
-                     static_cast<u32>(d.Flags), static_cast<int>(srv.ViewDimension),
-                     static_cast<u32>(srv.Texture2D.MipLevels), slot);
-    }
     m_Device->CreateShaderResourceView(tex->GetResource(), &srv, dst);
     CheckDeviceAlive(m_Device.Get(), "CreateShaderResourceView(texture)");
 
@@ -1531,8 +1510,6 @@ void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, Desc
 
 void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, DescriptorType type,
                                       IRHITexture** textures, IRHISampler** samplers, u32 count) {
-    { static std::unordered_map<u64,int> seen0; const u64 k0=(u64)set*10000+(u64)binding*100+(u32)type; if (binding==0 && ++seen0[k0]==1) HE_CORE_ERROR("[UDS0] set={} binding=0 type={}", (u64)set, (u32)type); }
-    { static int s=0; if (s<12) { ++s; std::printf("[STP] UDS3 n=%d\n", s); std::fflush(stdout); } }
     for (u32 i = 0; i < count; ++i) {
         UpdateDescriptorSet(set, binding + i, type,
                             textures ? textures[i] : nullptr,
@@ -1542,8 +1519,6 @@ void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, Desc
 
 void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, DescriptorType type,
                                       IRHIBuffer** buffers, u32 count) {
-    { static std::unordered_map<u64,int> seen0; const u64 k0=(u64)set*10000+(u64)binding*100+(u32)type; if (binding==0 && ++seen0[k0]==1) HE_CORE_ERROR("[UDS0] set={} binding=0 type={}", (u64)set, (u32)type); }
-    { static int s=0; if (s<12) { ++s; std::printf("[STP] UDS4 n=%d\n", s); std::fflush(stdout); } }
     if (type == DescriptorType::Sampler) {
         // 采样器数组（引擎用 buffers=nullptr, samplers=... 之外的形态很少见）
         return;
