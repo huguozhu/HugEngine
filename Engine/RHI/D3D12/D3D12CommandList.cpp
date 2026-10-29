@@ -648,6 +648,11 @@ void D3D12CommandList::EnsureBoundResourceStates() {
         const D3D12_RESOURCE_STATES cur  = isBuffer ? GetBufferState(res) : m_Device->GetResourceState(res);
         const D3D12_RESOURCE_STATES want = use.uav ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS : kRead;
         if (cur == want || (!use.uav && (cur & kRead) == kRead)) continue;   // 已满足（含额外的只读位）
+        // 【缓冲首次使用走隐式提升】缓冲在每个列表开头都是 COMMON，且可以从 COMMON 隐式提升到
+        // 任意状态（首次访问时自动完成）。这里不发显式屏障、只记下提升后的状态；同一列表里
+        // 后续换用途时再从该状态显式转换。显式发 COMMON → X 会与验证层对实际状态的判断冲突
+        //（GPU 验证 id=942 StateBefore invalid）。
+        if (isBuffer && cur == D3D12_RESOURCE_STATE_COMMON) { m_BufferStates[res] = want; continue; }
         // 同一资源在一次绘制里只转一次（以先出现的用途为准）
         bool dup = false;
         for (const auto& bb : m_BarrierScratch) if (bb.Transition.pResource == res) { dup = true; break; }
@@ -964,6 +969,8 @@ void D3D12CommandList::TransitionBuffer(ID3D12Resource* res, D3D12_RESOURCE_STAT
         (hp.Type != D3D12_HEAP_TYPE_DEFAULT && hp.Type != D3D12_HEAP_TYPE_CUSTOM)) return;
     const D3D12_RESOURCE_STATES cur = GetBufferState(res);
     if (cur == want) return;
+    // 本列表内首次使用：由 COMMON 隐式提升，不发屏障（见 EnsureBoundResourceStates）
+    if (cur == D3D12_RESOURCE_STATE_COMMON) { m_BufferStates[res] = want; return; }
     D3D12_RESOURCE_BARRIER b{};
     b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     b.Transition.pResource   = res;
