@@ -83,14 +83,90 @@ void BuildTextureViewDescs(const D3D12_RESOURCE_DESC& rd, u32 mip, u32 layer, bo
     uav.Texture2D.MipSlice = mip;
 }
 
+// 已登记的命令列表（DumpDeviceRemovedInfo 是自由函数，拿不到设备对象，因此用文件级表）
+static std::vector<D3D12CommandList*> g_CommandLists;
+
+bool FindRecordedEventNames(const ID3D12CommandList* native, u32 beginCount, u32 markerCount,
+                            std::vector<std::string>& begins, std::vector<std::string>& markers) {
+    for (auto* cl : g_CommandLists)
+        if (cl && cl->FindEventNames(native, beginCount, markerCount, begins, markers)) return true;
+    return false;
+}
+
 void DumpDeviceRemovedInfo(ID3D12Device* dev) {
     static bool s_dumped = false;
     if (s_dumped || !dev) return;
     s_dumped = true;
     ComPtr<ID3D12DeviceRemovedExtendedData> dred;
     if (FAILED(dev->QueryInterface(IID_PPV_ARGS(&dred)))) return;
-    D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT bc{};
-    if (SUCCEEDED(dred->GetAutoBreadcrumbsOutput(&bc))) {
+    // DRED 1.2：带面包屑上下文（调试标签字符串），可直接给出卡住的命令所在的 pass 与最近的绘制标记
+    ComPtr<ID3D12DeviceRemovedExtendedData1> dred1;
+    D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT1 bc1{};
+    if (SUCCEEDED(dred.As(&dred1)) && SUCCEEDED(dred1->GetAutoBreadcrumbsOutput1(&bc1))) {
+        auto narrow = [](const wchar_t* w) -> std::string {
+            if (!w) return {};
+            const int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
+            std::string s(n > 1 ? static_cast<size_t>(n - 1) : 0u, '\0');
+            if (n > 1) WideCharToMultiByte(CP_UTF8, 0, w, -1, s.data(), n, nullptr, nullptr);
+            return s;
+        };
+        // 摘要总是输出：没有后续明细时，能区分「全部执行完」与「没拿到 DRED 数据」
+        u32 nodeCount = 0, pending = 0;
+        for (const D3D12_AUTO_BREADCRUMB_NODE1* n = bc1.pHeadAutoBreadcrumbNode; n; n = n->pNext) {
+            ++nodeCount;
+            if ((n->pLastBreadcrumbValue ? *n->pLastBreadcrumbValue : 0) < n->BreadcrumbCount) ++pending;
+        }
+        HE_CORE_ERROR("[DRED] 面包屑：{} 个命令列表记录，其中 {} 个未执行完", nodeCount, pending);
+        for (const D3D12_AUTO_BREADCRUMB_NODE1* n = bc1.pHeadAutoBreadcrumbNode; n; n = n->pNext) {
+            const UINT done = n->pLastBreadcrumbValue ? *n->pLastBreadcrumbValue : 0;
+            if (done >= n->BreadcrumbCount) continue;   // 已全部完成的列表不是元凶
+            // 面包屑序号 → 名字：运行时给了上下文字符串就用它；否则按「第 k 个事件 / 标记命令 =
+            // 该次录制记下的第 k 个名字」对应（需开 HE_D3D12_DRED 时的事件名记录）
+            std::unordered_map<UINT, std::string> ctx;
+            for (UINT c = 0; c < n->BreadcrumbContextsCount; ++c)
+                ctx[n->pBreadcrumbContexts[c].BreadcrumbIndex] = narrow(n->pBreadcrumbContexts[c].pContextString);
+            if (ctx.empty()) {
+                u32 nb = 0, nm = 0;
+                for (UINT i = 0; i < n->BreadcrumbCount; ++i) {
+                    if (n->pCommandHistory[i] == D3D12_AUTO_BREADCRUMB_OP_BEGINEVENT) ++nb;
+                    else if (n->pCommandHistory[i] == D3D12_AUTO_BREADCRUMB_OP_SETMARKER) ++nm;
+                }
+                std::vector<std::string> begins, markers;
+                if (FindRecordedEventNames(n->pCommandList, nb, nm, begins, markers)) {
+                    u32 bi = 0, mi = 0;
+                    for (UINT i = 0; i < n->BreadcrumbCount; ++i) {
+                        if (n->pCommandHistory[i] == D3D12_AUTO_BREADCRUMB_OP_BEGINEVENT && bi < begins.size()) ctx[i] = begins[bi++];
+                        else if (n->pCommandHistory[i] == D3D12_AUTO_BREADCRUMB_OP_SETMARKER && mi < markers.size()) ctx[i] = markers[mi++];
+                    }
+                }
+            }
+            // 走到卡住的位置：事件栈 = 所在 pass 的嵌套路径，最近的标记 = 最近的绘制标签
+            std::vector<std::string> stack;
+            std::string lastMarker;
+            for (UINT i = 0; i < done && i < n->BreadcrumbCount; ++i) {
+                const auto op = n->pCommandHistory[i];
+                const auto it = ctx.find(i);
+                if (op == D3D12_AUTO_BREADCRUMB_OP_BEGINEVENT) stack.push_back(it != ctx.end() ? it->second : "?");
+                else if (op == D3D12_AUTO_BREADCRUMB_OP_ENDEVENT && !stack.empty()) stack.pop_back();
+                else if (op == D3D12_AUTO_BREADCRUMB_OP_SETMARKER && it != ctx.end()) lastMarker = it->second;
+            }
+            std::string path;
+            for (const auto& s : stack) { if (!path.empty()) path += " / "; path += s; }
+            HE_CORE_ERROR("[DRED] 列表={}（{}）完成 {}/{} 个操作；所在 pass：{}；最近标记：{}",
+                          static_cast<const void*>(n->pCommandList), narrow(n->pCommandListDebugNameW),
+                          done, n->BreadcrumbCount, path.empty() ? "-" : path,
+                          lastMarker.empty() ? "-" : lastMarker);
+            const UINT from = done >= 4 ? done - 4 : 0;
+            const UINT to   = (done + 4 < n->BreadcrumbCount) ? done + 4 : n->BreadcrumbCount;
+            for (UINT i = from; i < to; ++i) {
+                const auto it = ctx.find(i);
+                HE_CORE_ERROR("[DRED]   op[{}]={}{}{}", i, static_cast<int>(n->pCommandHistory[i]),
+                              it != ctx.end() ? "  " + it->second : std::string(),
+                              i == done ? "  <== 未完成" : "");
+            }
+        }
+    } else if (D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT bc{}; SUCCEEDED(dred->GetAutoBreadcrumbsOutput(&bc))) {
+        // 旧系统（无 DRED 1.2）：只有操作序列
         for (const D3D12_AUTO_BREADCRUMB_NODE* n = bc.pHeadAutoBreadcrumbNode; n; n = n->pNext) {
             const UINT done = n->pLastBreadcrumbValue ? *n->pLastBreadcrumbValue : 0;
             if (done >= n->BreadcrumbCount) continue;   // 已全部完成的列表不是元凶
@@ -219,6 +295,10 @@ bool D3D12Device::CreateDeviceAndQueue() {
         if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dredSettings)))) {
             dredSettings->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
             dredSettings->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+            // 面包屑上下文（DRED 1.2）：记下 BeginEvent / SetMarker 的字符串，报告里据此给出 pass 名
+            ComPtr<ID3D12DeviceRemovedExtendedDataSettings1> dredSettings1;
+            if (SUCCEEDED(dredSettings.As(&dredSettings1)))
+                dredSettings1->SetBreadcrumbContextEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
             HE_CORE_INFO("[D3D12] DRED 已启用");
         }
     }
@@ -1148,6 +1228,14 @@ void D3D12Device::DestroyTextureMipView(void* view) {
     UnregisterViewResource(static_cast<UINT64>(p));
     // RTV 描述符在 OMSetRenderTargets 录制时就被读取，回收后复用不影响已录制的命令
     m_MipRtvFree.push_back(static_cast<u32>((p - base) / m_MipRtvInc));
+}
+
+void D3D12Device::RegisterCommandList(D3D12CommandList* cl) {
+    if (cl) g_CommandLists.push_back(cl);
+}
+
+void D3D12Device::UnregisterCommandList(D3D12CommandList* cl) {
+    g_CommandLists.erase(std::remove(g_CommandLists.begin(), g_CommandLists.end(), cl), g_CommandLists.end());
 }
 
 void D3D12Device::SetResourceDebugName(IRHIBuffer* resource, const char* name) {

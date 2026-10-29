@@ -208,6 +208,18 @@ private:
     /// 各 setIndex 当前根参数表所指快照对应的集与版本：集换了或内容变了才重新拍快照
     DescriptorSetHandle m_SnapSets[8]{};
     u64                 m_SnapVersions[8]{};
+public:
+    /// DRED 报告用：按 DRED 记录里事件 / 标记命令的条数，找到对应那次录制记下的名字
+    /// （本运行时不为直接写入的 PIX 事件记录面包屑上下文字符串，只能自己对应）。
+    /// 找到返回 true，begins / markers 依次是 BeginEvent / SetMarker 的名字
+    bool FindEventNames(const ID3D12CommandList* native, u32 beginCount, u32 markerCount,
+                        std::vector<std::string>& begins, std::vector<std::string>& markers) const;
+    /// 开启 DRED（HE_D3D12_DRED）时为真：才记录事件名，平时零开销
+    static bool DredEventLogEnabled();
+private:
+    /// 每个帧槽位一次录制的事件名记录（与分配器同步轮换：GPU 可能仍在执行的录制都还在）
+    struct EventLog { std::vector<std::string> begins, markers; };
+    EventLog            m_EventLogs[kMaxFramesInFlight];
     /// 未配对的 BeginDebugLabel 层数：End 时补齐 EndEvent，否则列表关闭失败
     u32                 m_LabelDepth = 0;
     /// SetDrawDebugLabel 记下、等待下一次绘制 / 派发插入的标签

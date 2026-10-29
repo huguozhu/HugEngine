@@ -19,6 +19,9 @@ namespace he::rhi::d3d12 {
 
 /// 设备丢失时打印 DRED 面包屑与页错误信息（需 HE_D3D12_DRED=1，只打印一次）
 void DumpDeviceRemovedInfo(ID3D12Device* dev);
+/// DumpDeviceRemovedInfo 用：在已登记的命令列表里查某次录制的事件 / 标记名
+bool FindRecordedEventNames(const ID3D12CommandList* native, u32 beginCount, u32 markerCount,
+                            std::vector<std::string>& begins, std::vector<std::string>& markers);
 /// 按资源描述与子资源范围构造纹理的 SRV / UAV 描述（3D / 立方体 / 数组层 / 深度格式映射）
 void BuildTextureViewDescs(const D3D12_RESOURCE_DESC& rd, u32 mip, u32 layer, bool single,
                            D3D12_SHADER_RESOURCE_VIEW_DESC& srv, D3D12_UNORDERED_ACCESS_VIEW_DESC& uav);
@@ -116,6 +119,10 @@ public:
     static constexpr u32 kImGuiFontSlot = kDescriptorHeapCapacity - 1;
     /// 返回主 CBV_SRV_UAV 堆（ImGui_ImplDX12_Init 的 cbv_srv_heap 参数）
     void* CreateImGuiDescriptorPool() override;
+
+    /// 命令列表登记（DRED 报告按原生列表指针找回各次录制的事件名）
+    void RegisterCommandList(class D3D12CommandList* cl);
+    void UnregisterCommandList(class D3D12CommandList* cl);
 
     /// 资源命名（ID3D12Object::SetName）：RenderDoc / PIX / DRED 报告里显示。采样器与加速结构没有对应的 D3D12 对象
     void SetResourceDebugName(IRHIBuffer* resource, const char* name) override;

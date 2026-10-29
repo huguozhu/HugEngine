@@ -16,7 +16,9 @@
 
 namespace he::rhi::d3d12 {
 
-D3D12CommandList::~D3D12CommandList() = default;
+D3D12CommandList::~D3D12CommandList() {
+    if (m_Device) m_Device->UnregisterCommandList(this);
+}
 
 bool D3D12CommandList::Initialize(D3D12Device* device, QueueType queue) {
     if (!device || !device->GetDevice()) return false;
@@ -44,6 +46,7 @@ bool D3D12CommandList::Initialize(D3D12Device* device, QueueType queue) {
                         "CreateCommandList")) {
         return false;
     }
+    m_Device->RegisterCommandList(this);   // DRED 报告据此把面包屑对应回事件名
     // 命名：DRED 报告与 RenderDoc 里据此区分图形 / 计算列表
     m_List->SetName(queue == QueueType::Compute ? L"HugEngine 计算命令列表" : L"HugEngine 图形命令列表");
     // 创建后默认是开着的，先关掉，等 Begin() 再 Reset
@@ -92,6 +95,8 @@ void D3D12CommandList::Begin() {
     for (auto& bs : m_BoundSets) bs = kInvalidSet;
     for (auto& ss : m_SnapSets) ss = kInvalidSet;   // 新的录制：快照一律重新拍
     m_LabelDepth   = 0;         // 标签层级与待插入的逐绘制标签不跨录制
+    m_EventLogs[m_FrameSlot].begins.clear();    // 本槽位上一次的录制已执行完，记录作废
+    m_EventLogs[m_FrameSlot].markers.clear();
     m_DrawLabelSet = false;
     m_SetRingChunkMask = 0;
     m_PendingWaits.clear();     // 上一次录制若未提交，残留的等待 / 信号作废
@@ -134,6 +139,7 @@ void D3D12CommandList::BeginDebugLabel(const char* name, const float*) {
     const std::wstring w = Utf8ToWide(name ? name : "");
     m_List->BeginEvent(kPixEventUnicode, w.c_str(), static_cast<UINT>((w.size() + 1) * sizeof(wchar_t)));
     ++m_LabelDepth;
+    if (DredEventLogEnabled()) m_EventLogs[m_FrameSlot].begins.emplace_back(name ? name : "");
 }
 
 void D3D12CommandList::EndDebugLabel() {
@@ -146,6 +152,25 @@ void D3D12CommandList::InsertDebugLabel(const char* name, const float*) {
     if (!m_List || !m_Recording || !name || !*name) return;
     const std::wstring w = Utf8ToWide(name);
     m_List->SetMarker(kPixEventUnicode, w.c_str(), static_cast<UINT>((w.size() + 1) * sizeof(wchar_t)));
+    if (DredEventLogEnabled()) m_EventLogs[m_FrameSlot].markers.emplace_back(name);
+}
+
+bool D3D12CommandList::DredEventLogEnabled() {
+    static const bool s_On = (std::getenv("HE_D3D12_DRED") != nullptr);
+    return s_On;
+}
+
+bool D3D12CommandList::FindEventNames(const ID3D12CommandList* native, u32 beginCount, u32 markerCount,
+                                      std::vector<std::string>& begins, std::vector<std::string>& markers) const {
+    if (!native || native != static_cast<const ID3D12CommandList*>(m_List.Get())) return false;
+    for (const auto& log : m_EventLogs) {
+        if (log.begins.size() == beginCount && log.markers.size() == markerCount && (beginCount || markerCount)) {
+            begins = log.begins;
+            markers = log.markers;
+            return true;
+        }
+    }
+    return false;
 }
 
 void D3D12CommandList::SetDrawDebugLabel(const char* name, const float*) {
