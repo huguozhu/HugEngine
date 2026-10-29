@@ -420,6 +420,25 @@ IRHITexture* D3D12Device::ResolveTexture(RHITextureHandle handle) const {
     return m_Textures.Get(handle.index, handle.generation);
 }
 
+RHISamplerHandle D3D12Device::CreateSamplerHandle(const SamplerDesc& desc) {
+    auto obj = CreateSampler(desc);
+    if (!obj) {
+        HE_CORE_ERROR("D3D12Device::CreateSamplerHandle: 采样器创建失败");
+        return {};
+    }
+    RHISamplerHandle h{};
+    h.index = m_Samplers.Acquire(std::move(obj), h.generation);
+    return h;
+}
+
+void D3D12Device::DestroySamplerHandle(RHISamplerHandle handle) {
+    m_Samplers.Release(handle.index, handle.generation);
+}
+
+IRHISampler* D3D12Device::ResolveSampler(RHISamplerHandle handle) const {
+    return m_Samplers.Get(handle.index, handle.generation);
+}
+
 RHIPipelineStateHandle D3D12Device::CreatePipelineStateHandle(const PipelineStateDesc& desc) {
     auto obj = CreatePipelineState(desc);
     if (!obj) return {};

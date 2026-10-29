@@ -223,6 +223,12 @@ public:
     void                   DestroyPipelineStateHandle(RHIPipelineStateHandle handle) override;
     IRHIPipelineState*     ResolvePipelineState(RHIPipelineStateHandle handle) const override;
 
+    // 采样器句柄：此前漏实现，默认实现返回空句柄 ⇒ 所有 CreateSamplerHandle 创建的采样器都是空
+    //（TAA 输出采样器为空 ⇒ 色调映射输入从未写入 ⇒ 延迟渲染样例全黑；Hi-Z、GI 等同理）
+    RHISamplerHandle       CreateSamplerHandle(const SamplerDesc& desc) override;
+    void                   DestroySamplerHandle(RHISamplerHandle handle) override;
+    IRHISampler*           ResolveSampler(RHISamplerHandle handle) const override;
+
 private:
     /// 通用的槽位表（index 0 保留为无效）
     template <typename T>
@@ -370,6 +376,7 @@ private:   // register -> 元素字节数
     HandleTable<IRHIBuffer>        m_Buffers;
     HandleTable<IRHITexture>       m_Textures;
     HandleTable<IRHIPipelineState> m_PipelineStates;
+    HandleTable<IRHISampler>       m_Samplers;
 
     /// 创建设备、队列、围栏（Initialize 的分解步骤，便于早退）
     bool CreateDeviceAndQueue();
