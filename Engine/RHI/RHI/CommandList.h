@@ -266,6 +266,9 @@ public:
     // GPU 时间戳查询
     virtual void WriteTimestamp(IRHIQueryPool* pool, u32 queryIndex) = 0;
     virtual void ResetQueryPool(IRHIQueryPool* pool) = 0;
+    /// 读回 [first, first + count) 这 count 个**查询**的结果。时间戳每个查询写 1 个 u64；
+    /// 管线统计每个查询写 6 个 u64（IA 顶点、IA 图元、VS 调用、裁剪调用、裁剪图元、PS 调用，
+    /// 即 PipelineStatistics::kNumCounters），data 需容纳 count × 6 个 u64
     virtual void GetQueryResults(IRHIQueryPool* pool, u32 first, u32 count, u64* data) = 0;
 
     /// **不阻塞**地读回查询结果：结果尚未就绪时返回 false（`data` 内容未定义）。

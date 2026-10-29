@@ -267,10 +267,9 @@ bool D3D12CommandList::ReadQueryResults(IRHIQueryPool* pool, u32 first, u32 coun
         return all;
     }
     // 管线统计：与 Vulkan 查询池选的统计项同序，每个查询输出 6 个 u64：
-    // IA 顶点、IA 图元、VS 调用、裁剪调用、裁剪图元、PS 调用。count 按 u64 个数计（ProfilerManager 的口径）
+    // IA 顶点、IA 图元、VS 调用、裁剪调用、裁剪图元、PS 调用。count 是查询个数（与 Vulkan 一致），data 容纳 count × 6 个 u64
     constexpr u32 kPerQuery = 6;
-    const u32 queries = (count + kPerQuery - 1) / kPerQuery;
-    for (u32 k = 0; k < queries; ++k) {
+    for (u32 k = 0; k < count; ++k) {
         const u32  q  = first + k;
         const bool ok = qp->IsAvailable(q, wait);
         u64 vals[kPerQuery] = {};
@@ -281,7 +280,7 @@ bool D3D12CommandList::ReadQueryResults(IRHIQueryPool* pool, u32 first, u32 coun
             vals[3] = st.CInvocations; vals[4] = st.CPrimitives;  vals[5] = st.PSInvocations;
         }
         all = all && ok;
-        for (u32 j = 0; j < kPerQuery && k * kPerQuery + j < count; ++j) data[k * kPerQuery + j] = vals[j];
+        for (u32 j = 0; j < kPerQuery; ++j) data[k * kPerQuery + j] = vals[j];
     }
     return all;
 }

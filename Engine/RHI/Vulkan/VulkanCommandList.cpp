@@ -684,15 +684,21 @@ void VulkanCommandList::ResetQueryPool(IRHIQueryPool* pool) {
     vkCmdResetQueryPool(m_CmdBuffers[m_FrameIndex], vkPool->GetHandle(), 0, vkPool->GetQueryCount());
 }
 
+// 每个查询的结果个数：管线统计池选了 6 个计数器（见 VulkanQueryPool），时间戳为 1 个
+static u32 QueryValueCount(const IRHIQueryPool* pool) {
+    return (pool && pool->GetQueryType() == QueryType::PipelineStatistics) ? 6u : 1u;
+}
+
 void VulkanCommandList::GetQueryResults(IRHIQueryPool* pool, u32 first, u32 count, u64* data) {
+    const u32 per = QueryValueCount(pool);   // count 是查询个数，每个查询写 per 个 u64
     if (m_StreamMode) {
         // L4-3: queries are never recorded in stream mode; VK_QUERY_RESULT_WAIT_BIT would block forever.
-        if (data) std::memset(data, 0, sizeof(u64) * count);
+        if (data) std::memset(data, 0, sizeof(u64) * per * count);
         return;
     }
     auto* vkPool = static_cast<VulkanQueryPool*>(pool);
     vkGetQueryPoolResults(m_Device, vkPool->GetHandle(), first, count,
-        sizeof(u64) * count, data, sizeof(u64),
+        sizeof(u64) * per * count, data, sizeof(u64) * per,
         VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
 }
 
@@ -700,15 +706,17 @@ bool VulkanCommandList::TryGetQueryResults(IRHIQueryPool* pool, u32 first, u32 c
     if (m_StreamMode) { return false; }   // L4-3: same as GetQueryResults
     auto* vkPool = static_cast<VulkanQueryPool*>(pool);
     if (!data || count == 0) return false;
-    // WITH_AVAILABILITY：每个查询返回 (结果, 是否可用) 两个 u64；**不等待**
-    std::vector<u64> raw(size_t(count) * 2, 0);
+    // WITH_AVAILABILITY：每个查询返回 (per 个结果, 是否可用)；**不等待**
+    const u32 per    = QueryValueCount(pool);
+    const u32 stride = per + 1;
+    std::vector<u64> raw(size_t(count) * stride, 0);
     vkGetQueryPoolResults(m_Device, vkPool->GetHandle(), first, count,
-        sizeof(u64) * 2 * count, raw.data(), sizeof(u64) * 2,
+        sizeof(u64) * stride * count, raw.data(), sizeof(u64) * stride,
         VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
     bool allAvailable = true;
     for (u32 i = 0; i < count; ++i) {
-        data[i] = raw[size_t(i) * 2 + 0];
-        if (raw[size_t(i) * 2 + 1] == 0) allAvailable = false;
+        for (u32 j = 0; j < per; ++j) data[size_t(i) * per + j] = raw[size_t(i) * stride + j];
+        if (raw[size_t(i) * stride + per] == 0) allAvailable = false;
     }
     return allAvailable;
 }
