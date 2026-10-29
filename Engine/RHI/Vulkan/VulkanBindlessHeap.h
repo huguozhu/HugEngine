@@ -2,6 +2,7 @@
 
 #include "RHI/Bindless.h"
 #include "RHI/BindlessSlotRing.h"
+#include "RHI/RHIHandles.h"   // RHIBufferHandle（槽位 0 的占位缓冲）
 #include <vector>
 
 namespace he::rhi {
@@ -53,6 +54,7 @@ private:
     std::vector<IRHITexture*> m_Textures;   // 下标 = 纹理槽位（与 m_Samplers 同步写）
     std::vector<IRHISampler*> m_Samplers;
     std::vector<IRHIBuffer*>  m_Buffers;
+    RHIBufferHandle           m_NullBuffer;   // 槽位 0 的占位缓冲（句柄 0 保留为无效）
     BindlessSlotRing m_TexRing;             // 纹理槽位环形分配（纹理/采样器成对复用）
     BindlessSlotRing m_BufRing;             // SSBO 槽位环形分配
     u64 m_FrameIndex = 0;                   // 最近一次 BeginFrame 的设备帧号（调试用）
