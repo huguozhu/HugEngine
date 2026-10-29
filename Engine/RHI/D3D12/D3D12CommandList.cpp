@@ -932,6 +932,11 @@ void D3D12CommandList::SetRootTable(u32 param, D3D12_GPU_DESCRIPTOR_HANDLE handl
     m_RootArgsDirty = true;
 }
 
+void D3D12CommandList::BufferBarrier(IRHIBuffer* buffer, ResourceState, ResourceState dstState) {
+    if (!m_List || !buffer) return;
+    TransitionBuffer(static_cast<D3D12Buffer*>(buffer)->GetResource(), ToD3D12ResourceState(dstState, false));
+}
+
 void D3D12CommandList::FlushRootArgs() {
     EmitDrawLabel();      // 逐绘制标签：插在本次绘制 / 派发的命令之前
     PrepareSetTables();   // 集内容变了要换快照：会更新 SRV/UAV 表并标脏根参数

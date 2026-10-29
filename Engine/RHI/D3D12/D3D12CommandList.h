@@ -79,6 +79,8 @@ public:
     void DispatchIndirect(IRHIBuffer* buffer, u64 offset) override;
 
     // ---- 同步 ----
+    /// 单个缓冲的状态转换：按本列表的缓冲状态记录转换（srcState 不使用，以记录为准）
+    void BufferBarrier(IRHIBuffer* buffer, ResourceState srcState, ResourceState dstState) override;
     void PipelineBarrier(PipelineStage srcStage, PipelineStage dstStage,
                          ResourceState srcState, ResourceState dstState) override;
     void PipelineBarrier(PipelineStage srcStage, PipelineStage dstStage,

@@ -189,6 +189,13 @@ public:
         ResourceState srcState, ResourceState dstState,
         IRHITexture* texture) = 0;
 
+    /// 单个缓冲的状态转换（声明该缓冲接下来的用途）。
+    /// 经 bindless 句柄读写的缓冲后端无从得知是哪一个（句柄在推送常量里）：D3D12 的缓冲状态必须
+    /// 按资源转换，全局屏障不够，调用方据此显式声明。Vulkan 下全局内存屏障已足够，默认空实现
+    virtual void BufferBarrier(IRHIBuffer* buffer, ResourceState srcState, ResourceState dstState) {
+        (void)buffer; (void)srcState; (void)dstState;
+    }
+
     // 计算着色器调度
     virtual void Dispatch(u32 groupCountX, u32 groupCountY, u32 groupCountZ) = 0;
     virtual void DispatchIndirect(IRHIBuffer* buffer, u64 offset) = 0;

@@ -312,6 +312,11 @@ u32 InstanceCuller::Cull(rhi::IRHICommandList* cmd,
     char label[64];
     snprintf(label, sizeof(label), "InstancedCull (%u inst)", instanceCount);
     cmd->SetDrawDebugLabel(label);
+    // 可见列表与间接命令经 bindless 句柄写入：后端不知道是哪两个缓冲，显式声明（D3D12 按资源转换状态；
+    // 可见列表在上一个组件的绘制里还被顶点着色器读着）
+    rhi::IRHIBuffer* visibleBuf = ResB(m_VisibleBuf[frameSlot]);
+    cmd->BufferBarrier(visibleBuf,    rhi::ResourceState::ShaderResource,   rhi::ResourceState::UnorderedAccess);
+    cmd->BufferBarrier(commandBuffer, rhi::ResourceState::IndirectArgument, rhi::ResourceState::UnorderedAccess);
     cmd->Dispatch((instanceCount + 63) / 64, 1, 1);
 
     // 屏障：compute 写的可见列表/命令 → 之后的 DrawIndexedIndirect（读命令）与顶点着色器（读列表）
@@ -319,6 +324,8 @@ u32 InstanceCuller::Cull(rhi::IRHICommandList* cmd,
                          rhi::PipelineStage::DrawIndirect | rhi::PipelineStage::VertexShader,
                          rhi::ResourceState::UnorderedAccess,
                          rhi::ResourceState::ShaderResource);
+    cmd->BufferBarrier(visibleBuf,    rhi::ResourceState::UnorderedAccess, rhi::ResourceState::ShaderResource);
+    cmd->BufferBarrier(commandBuffer, rhi::ResourceState::UnorderedAccess, rhi::ResourceState::IndirectArgument);
     ++m_CullCount;
     return prevVisible;
 }
