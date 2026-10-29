@@ -838,6 +838,10 @@ void D3D12CommandList::EnsureBoundResourceStates() {
     // 这里按子资源拆开：整张先转到可读，只把被写的那一级转到 UAV；派发后再把它转回可读
     //（见 AfterDrawOrDispatch），对外仍是「整张纹理处于同一状态」，其他代码无需感知子资源。
     std::vector<ID3D12Resource*> splitHandled;
+    // 【同一纹理：整体读 + 整体写】如 Lumen 全局 SDF 的层集把同一张 3D 纹理既绑成 UAV（转换阶段写）
+    // 又绑成带采样器的 SRV（占位）。此前按先出现的用途转换：SRV 在前时纹理停在只读状态，
+    // UAV 写入非法、在 Intel 上直接丢失（实测全局 SDF 自检 FAIL）。这种组合以写为准，读用途跳过
+    std::vector<ID3D12Resource*> uavWins;
     {
         struct Usage { bool read = false; bool uavWhole = false; UINT uavSub = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES; };
         std::vector<std::pair<ID3D12Resource*, Usage>> usages;
@@ -854,6 +858,7 @@ void D3D12CommandList::EnsureBoundResourceStates() {
             else it->second.uavSub = sub;
         }
         for (const auto& [res, u] : usages) {
+            if (u.read && u.uavWhole) { uavWins.push_back(res); continue; }
             if (!u.read || u.uavWhole || u.uavSub == D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES) continue;
             if (std::find(m_PassAttachments.begin(), m_PassAttachments.end(), res) != m_PassAttachments.end()) continue;
             const D3D12_RESOURCE_STATES cur = m_Device->GetResourceState(res);
@@ -883,6 +888,7 @@ void D3D12CommandList::EnsureBoundResourceStates() {
         ID3D12Resource* res = m_Device->GetSetResource(m_BoundSets[use.space], use.binding, isBuffer);
         if (!res) continue;
         if (std::find(splitHandled.begin(), splitHandled.end(), res) != splitHandled.end()) continue;   // 已按子资源处理
+        if (!use.uav && std::find(uavWins.begin(), uavWins.end(), res) != uavWins.end()) continue;    // 同时被写：以写为准
         // 正作为本 pass 附件的资源不能同时转成可读（引擎真这样用时属于 feedback，保持原状）
         if (std::find(m_PassAttachments.begin(), m_PassAttachments.end(), res) != m_PassAttachments.end()) {
             // 深度附件被同时采样（如软粒子）且当前 PSO 不写深度：改绑只读 DSV，
