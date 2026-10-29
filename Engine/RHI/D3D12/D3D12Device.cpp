@@ -1197,6 +1197,42 @@ D3D12_VERTEX_BUFFER_VIEW D3D12Device::GetZeroVertexBufferView() {
     return v;
 }
 
+D3D12_VERTEX_BUFFER_VIEW D3D12Device::GetInstanceIndexBufferView() {
+    D3D12_VERTEX_BUFFER_VIEW v{};
+    constexpr UINT64 kBytes = static_cast<UINT64>(kInstanceIndexCount) * sizeof(u32);
+    if (!m_InstanceIndexBuffer && m_Device) {
+        // 与零缓冲一样放 UPLOAD 堆：只读，创建时写一次序号（引擎的顶点缓冲也在 UPLOAD 堆）
+        D3D12_HEAP_PROPERTIES hp{};
+        hp.Type = D3D12_HEAP_TYPE_UPLOAD;
+        hp.CreationNodeMask = 1;
+        hp.VisibleNodeMask  = 1;
+        D3D12_RESOURCE_DESC rd{};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        rd.Width = kBytes;
+        rd.Height = 1; rd.DepthOrArraySize = 1; rd.MipLevels = 1;
+        rd.Format = DXGI_FORMAT_UNKNOWN;
+        rd.SampleDesc = { 1, 0 };
+        rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        if (SUCCEEDED(m_Device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+                D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&m_InstanceIndexBuffer)))) {
+            void* p = nullptr;
+            D3D12_RANGE noRead{ 0, 0 };
+            if (SUCCEEDED(m_InstanceIndexBuffer->Map(0, &noRead, &p)) && p) {
+                u32* dst = static_cast<u32*>(p);
+                for (u32 i = 0; i < kInstanceIndexCount; ++i) dst[i] = i;
+                m_InstanceIndexBuffer->Unmap(0, nullptr);
+            }
+            m_InstanceIndexBuffer->SetName(L"HE_InstanceIndex");
+        }
+    }
+    if (m_InstanceIndexBuffer) {
+        v.BufferLocation = m_InstanceIndexBuffer->GetGPUVirtualAddress();
+        v.SizeInBytes    = static_cast<UINT>(kBytes);
+        v.StrideInBytes  = sizeof(u32);
+    }
+    return v;
+}
+
 void* D3D12Device::CreateTextureMipStorageView(IRHITexture* texture, u32 mipLevel, u32 arrayLayer) {
     auto* tex = static_cast<D3D12Texture*>(texture);
     if (!m_Device || !tex || !tex->GetResource()) return nullptr;

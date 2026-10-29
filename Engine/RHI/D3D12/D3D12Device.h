@@ -365,9 +365,15 @@ public:
     class D3D12Buffer* GetLastObjectBuffer() const { return m_LastUploadedObject; }
     /// 全零顶点缓冲视图（步长 0）：供 PSO 中引擎布局未提供的属性读取 0
     D3D12_VERTEX_BUFFER_VIEW GetZeroVertexBufferView();
+    /// 实例序号缓冲（懒创建）：第 i 个 u32 为 i，供顶点着色器取含起始实例的实例号
+    D3D12_VERTEX_BUFFER_VIEW GetInstanceIndexBufferView();
+    /// 序号缓冲容量（实例号上限）：覆盖对象号（kGPUMaxObjects）、Nanite 簇号（kNaniteMaxBVHClusters）
+    /// 与实例化网格的实例数；超出时 IA 越界读到 0
+    static constexpr u32 kInstanceIndexCount = 1u << 20;
 private:
     class D3D12Buffer* m_LastUploadedObject = nullptr;
     ComPtr<ID3D12Resource> m_ZeroVertexBuffer;   // 懒创建的 64 字节全零缓冲
+    ComPtr<ID3D12Resource> m_InstanceIndexBuffer;   // 懒创建的实例序号缓冲（0,1,2…）
     u32                    m_HighestShaderModel = 0;   // D3D_SHADER_MODEL（如 0x68 = SM 6.8）
     // 逐 mip RTV 池（CreateTextureMipStorageView 分配、DestroyTextureMipView 回收）
     static constexpr u32 kMipRtvCapacity = 1024;

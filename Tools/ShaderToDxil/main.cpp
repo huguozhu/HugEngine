@@ -264,6 +264,15 @@ static std::string PatchCBuffers(const std::string& src) {
 }
 
 /// 给 for 循环加 [loop]：抑制 DXC 的激进展开（某些循环展开后编译时间爆炸）
+/// 顶点着色器的实例号改为读逐实例顶点属性 HE_INSTANCEINDEX。
+/// Vulkan 的 gl_InstanceIndex 含 firstInstance（GPU 剔除把对象号、Nanite 把簇号放在 firstInstance 里），
+/// 而 D3D12 的 SV_InstanceID 恒从 0 起、不含 StartInstanceLocation（SM 6.8 才有 SV_StartInstanceLocation）。
+/// 但 IA 取逐实例数据时会加上 StartInstanceLocation：后端在专用输入槽绑定内容为 0,1,2… 的逐实例缓冲，
+/// 读出的值即「起始实例 + 实例号」，直接绘制与间接绘制都与 Vulkan 一致（见 D3D12PipelineState::kInstanceIndexSlot）
+static void PatchInstanceId(std::string& s) {
+    ReplaceAll(s, ": SV_InstanceID", ": HE_INSTANCEINDEX");
+}
+
 static void PatchLoops(std::string& s) {
     size_t p = 0;
     while ((p = s.find("for (", p)) != std::string::npos) {
@@ -511,6 +520,7 @@ int main(int argc, char** argv) {
     //（dxc 报 "resource X at register 0 overlaps with resource Y"）。
     // 正确的做法是保留着色器自己的寄存器分配（b0/b1/...），根签名用 root CBV 覆盖 b0..b7。
     PatchLoops(patched);
+    if (std::string(stage) == "vs") PatchInstanceId(patched);
     // 寄存器按 vk::binding 重排，与 D3D12 后端的「register = binding、space = set」约定一致
     patched = PatchRegisters(patched);
 

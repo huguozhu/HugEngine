@@ -221,6 +221,12 @@ public:
     static constexpr u32 kZeroVertexSlot = 15;
     /// 是否有属性挂在零缓冲槽上（SetPipeline 时需要绑定零缓冲）
     bool NeedsZeroVertexBuffer() const { return m_NeedsZeroVB; }
+    /// 实例序号缓冲所在的输入槽：顶点着色器的实例号经 ShaderToDxil 改为逐实例属性 HE_INSTANCEINDEX，
+    /// 从这里绑定的 0,1,2… 序号缓冲读取。IA 取逐实例数据时会加上起始实例（StartInstanceLocation），
+    /// 读到的值即「起始实例 + 实例号」，与 Vulkan 的 gl_InstanceIndex 一致（SV_InstanceID 不含起始实例）
+    static constexpr u32 kInstanceIndexSlot = 14;
+    /// 顶点着色器是否读实例号（SetPipeline 时需要绑定实例序号缓冲）
+    bool NeedsInstanceIndexBuffer() const { return m_NeedsInstanceIndexVB; }
     /// 附件加载操作（与 Vulkan 的 render pass loadOp 对应）：离屏 pass 据此决定是否清空附件
     LoadOp GetColorLoadOp() const { return m_ColorLoadOp; }
     LoadOp GetDepthLoadOp() const { return m_DepthLoadOp; }
@@ -241,6 +247,7 @@ private:
     /// 用于缓冲 stride 为 0 时兜底（D3D12 要求 StrideInBytes 非零）
     u32                         m_VertexStride = 0;
     bool                        m_NeedsZeroVB = false;
+    bool                        m_NeedsInstanceIndexVB = false;   // 顶点着色器读 HE_INSTANCEINDEX
     LoadOp                      m_ColorLoadOp = LoadOp::Clear;
     LoadOp                      m_DepthLoadOp = LoadOp::Clear;
     bool                        m_DepthWrite  = true;

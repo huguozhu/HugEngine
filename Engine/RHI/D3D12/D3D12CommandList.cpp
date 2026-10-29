@@ -683,6 +683,11 @@ void D3D12CommandList::SetPipeline(IRHIPipelineState* pso) {
         const D3D12_VERTEX_BUFFER_VIEW zv = m_Device->GetZeroVertexBufferView();
         if (zv.BufferLocation) m_List->IASetVertexBuffers(D3D12PipelineState::kZeroVertexSlot, 1, &zv);
     }
+    // 顶点着色器读实例号：绑定实例序号缓冲（读出值含起始实例，见 kInstanceIndexSlot）
+    if (m_Pipeline->NeedsInstanceIndexBuffer() && m_Device) {
+        const D3D12_VERTEX_BUFFER_VIEW iv = m_Device->GetInstanceIndexBufferView();
+        if (iv.BufferLocation) m_List->IASetVertexBuffers(D3D12PipelineState::kInstanceIndexSlot, 1, &iv);
+    }
     // 设置根签名会清空所有根参数，下一次绘制/派发前需要重新下发
     m_RootArgsDirty = true;
 }
