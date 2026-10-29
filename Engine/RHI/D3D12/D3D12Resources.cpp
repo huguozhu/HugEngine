@@ -100,7 +100,14 @@ bool D3D12Buffer::Initialize(D3D12Device* device, const BufferDesc& desc) {
     // UAV 缓冲一律配一份 UPLOAD 暂存：D3D12 的 DEFAULT 堆资源**不能** Map，
     // 而引擎对所有 SSBO 都会调用 Map()/Unmap() 写数据（不管有没有置 cpuAccess）
     // ⇒ 没有暂存就会在 Map 时失败（实测 02.Cube 初始化最后一步卡在这里）。
-    const bool needStaging = isStorage;
+    // 【Storage 缓冲一律 CPU 可读写】Vulkan 后端给所有缓冲分配主机可见、持久映射的内存
+    //（VMA HOST_ACCESS + MAPPED），引擎因此对任何 Storage 缓冲都直接 Map 读写，GPU 与 CPU 访问
+    // 同一块内存、不发生拷贝。此前 D3D12 用「DEFAULT 堆 + UPLOAD 暂存」：Map 拿到的是暂存区，
+    // 读不到 GPU 结果；Unmap 还会把暂存区拷回 GPU 缓冲，覆盖 GPU 刚写入的数据（实测 06.GILab
+    // 自动曝光卡在初始值；04 的粒子系统每帧调试回读后整个粒子池被清零，粒子永不死亡）。
+    // 改为放在 CPU 可访问的自定义堆上（属性按 READBACK 堆取，自动适配集显/独显），直接映射。
+    const bool cpuVisibleUav = isStorage;
+    const bool needStaging = isStorage && !cpuVisibleUav;
 
     D3D12_RESOURCE_DESC rd{};
     rd.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
@@ -125,6 +132,11 @@ bool D3D12Buffer::Initialize(D3D12Device* device, const BufferDesc& desc) {
     hp.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
     hp.CreationNodeMask = 1;
     hp.VisibleNodeMask  = 1;
+    if (cpuVisibleUav) {
+        hp = dev->GetCustomHeapProperties(0, D3D12_HEAP_TYPE_READBACK);   // 返回 CUSTOM 类型 + 适配器对应的页属性/内存池
+        hp.CreationNodeMask = 1;
+        hp.VisibleNodeMask  = 1;
+    }
 
     const D3D12_RESOURCE_STATES initState =
         (heapType == D3D12_HEAP_TYPE_UPLOAD) ? D3D12_RESOURCE_STATE_GENERIC_READ
@@ -167,7 +179,7 @@ bool D3D12Buffer::Initialize(D3D12Device* device, const BufferDesc& desc) {
 
     // 初始数据：UPLOAD 堆可以直接 Map 写入；DEFAULT 堆需要中转缓冲 + 一次拷贝
     if (desc.initialData) {
-        if (heapType == D3D12_HEAP_TYPE_UPLOAD) {
+        if (heapType == D3D12_HEAP_TYPE_UPLOAD || cpuVisibleUav) {   // CPU 可映射的堆：直接写
             void* dst = nullptr;
             D3D12_RANGE range{ 0, 0 };
             if (SUCCEEDED(m_Resource->Map(0, &range, &dst)) && dst) {
