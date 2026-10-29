@@ -89,6 +89,8 @@ void D3D12CommandList::Begin() {
     for (auto& bs : m_BoundSets) bs = kInvalidSet;
     for (auto& ss : m_SnapSets) ss = kInvalidSet;   // 新的录制：快照一律重新拍
     m_SetRingChunkMask = 0;
+    m_PendingWaits.clear();     // 上一次录制若未提交，残留的等待 / 信号作废
+    m_PendingSignals.clear();
     ClearPassAttachments();
     // 缓冲在每次提交执行完后衰减回 COMMON：新录制从全 COMMON 开始
     m_BufferStates.clear();
@@ -1162,12 +1164,26 @@ void D3D12CommandList::CopyTextureToBuffer(IRHITexture* src, IRHIBuffer* dst, u3
     }
 }
 
+// 【时间线信号 / 等待附在提交上】Vulkan 把它们放进本次 vkQueueSubmit（命令执行完才 signal）。
+// 此前这里在**录制时**就直接对队列 Signal：本列表尚未提交，信号排在之前的帧之后，很快到达，
+// 等它的一方（帧转储读回等）以为拷贝已完成 ⇒ 读到全 0。改为记下来，由 Device::Submit 在
+// ExecuteCommandLists 前后执行。
 void D3D12CommandList::SetTimelineSignal(RHIFenceHandle fence, u64 value) {
-    if (m_Device) m_Device->SignalFenceOnQueue(QueueType::Graphics, fence, value);
+    m_PendingSignals.emplace_back(fence, value);
 }
 
 void D3D12CommandList::SetTimelineWait(RHIFenceHandle fence, u64 value) {
-    if (m_Device) m_Device->WaitFenceOnQueue(QueueType::Graphics, fence, value);
+    m_PendingWaits.emplace_back(fence, value);
+}
+
+void D3D12CommandList::ApplyTimelineWaits() {
+    if (m_Device) for (const auto& [f, v] : m_PendingWaits) m_Device->WaitFenceOnQueue(QueueType::Graphics, f, v);
+    m_PendingWaits.clear();
+}
+
+void D3D12CommandList::ApplyTimelineSignals() {
+    if (m_Device) for (const auto& [f, v] : m_PendingSignals) m_Device->SignalFenceOnQueue(QueueType::Graphics, f, v);
+    m_PendingSignals.clear();
 }
 
 void D3D12CommandList::Submit() {

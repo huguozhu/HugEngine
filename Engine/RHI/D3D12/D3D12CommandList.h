@@ -123,6 +123,9 @@ public:
     ID3D12GraphicsCommandList* GetNativeCommandList() const { return m_List.Get(); }
     /// 提交到队列后调用：在队列上打一个围栏，标记当前帧槽位的分配器何时可以复用
     void OnSubmitted(ID3D12CommandQueue* queue);
+    /// 提交前 / 后调用：执行录制期记下的时间线等待 / 信号（见 SetTimelineWait / SetTimelineSignal）
+    void ApplyTimelineWaits();
+    void ApplyTimelineSignals();
     /// 外部代码（ImGui）直接往原生列表录制前调用：绑定引擎的描述符堆；
     /// 外部会改根签名与 PSO，因此之后的绘制必须重新 SetPipeline 并下发根参数
     void PrepareForExternalRendering();
@@ -217,6 +220,10 @@ private:
     /// 所以每个列表开始录制时所有缓冲都是 COMMON（Begin 时清空）。用设备级的全局记录会被
     /// 其他命令列表的转换干扰，屏障的 StateBefore 与实际不符（GPU 验证 id=942）。
     std::unordered_map<ID3D12Resource*, D3D12_RESOURCE_STATES> m_BufferStates;
+    /// 录制期记下的时间线等待 / 信号：与 Vulkan 一样附在**这次提交**上，
+    /// 等待在 ExecuteCommandLists 之前、信号在之后下到队列
+    std::vector<std::pair<RHIFenceHandle, u64>> m_PendingWaits;
+    std::vector<std::pair<RHIFenceHandle, u64>> m_PendingSignals;
     /// 各帧槽位录制期间创建的临时资源（如纹理回读的中转缓冲）：该槽位下次 Begin 等到围栏后释放
     std::vector<ComPtr<ID3D12Resource>> m_TempResources[kMaxFramesInFlight];
     /// 本次录制写过的查询：提交时（OnSubmitted）打上围栏值，之后才算可读
