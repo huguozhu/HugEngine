@@ -103,6 +103,10 @@ public:
     void RegisterViewResource(UINT64 handle, ID3D12Resource* res);
     void UnregisterViewResource(UINT64 handle);
     ID3D12Resource* FindViewResource(UINT64 handle) const;
+    /// 深度纹理的只读 DSV（READ_ONLY_DEPTH）：同一张深度图需要同时作附件与 SRV 时使用
+    void RegisterReadOnlyDsv(UINT64 dsv, UINT64 readOnlyDsv) { if (dsv && readOnlyDsv) m_ReadOnlyDsv[dsv] = readOnlyDsv; }
+    void UnregisterReadOnlyDsv(UINT64 dsv) { m_ReadOnlyDsv.erase(dsv); }
+    UINT64 GetReadOnlyDsv(UINT64 dsv) const { auto it = m_ReadOnlyDsv.find(dsv); return it != m_ReadOnlyDsv.end() ? it->second : 0; }
     D3D12_RESOURCE_STATES GetResourceState(ID3D12Resource* res) const;
     void SetResourceState(ID3D12Resource* res, D3D12_RESOURCE_STATES st);
     /// 分配一块常量缓冲（返回映射地址与它的 GPU 描述符句柄）
@@ -318,6 +322,7 @@ private:
 private:
 private:   // register -> 元素字节数
     std::unordered_map<UINT64, ID3D12Resource*> m_ViewResources;
+    std::unordered_map<UINT64, UINT64>          m_ReadOnlyDsv;   // 普通 DSV → 只读 DSV
     mutable std::unordered_map<ID3D12Resource*, D3D12_RESOURCE_STATES> m_ResStates;
 
     D3D12SwapChain*              m_SwapChainPtr = nullptr;

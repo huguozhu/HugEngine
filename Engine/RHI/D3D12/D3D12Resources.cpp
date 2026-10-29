@@ -588,6 +588,7 @@ D3D12Texture::~D3D12Texture() {
     if (m_OwnerDevice) {
         if (m_Rtv.ptr) m_OwnerDevice->UnregisterViewResource(static_cast<UINT64>(m_Rtv.ptr));
         if (m_Dsv.ptr) m_OwnerDevice->UnregisterViewResource(static_cast<UINT64>(m_Dsv.ptr));
+        if (m_Dsv.ptr) m_OwnerDevice->UnregisterReadOnlyDsv(static_cast<UINT64>(m_Dsv.ptr));
         for (auto& s : m_Srvs) if (s.ptr) m_OwnerDevice->UnregisterViewResource(static_cast<UINT64>(s.ptr));
         for (auto& v : m_FaceViews) if (v.ptr) m_OwnerDevice->UnregisterViewResource(static_cast<UINT64>(v.ptr));
     }
@@ -701,7 +702,7 @@ bool D3D12Texture::Initialize(D3D12Device* device, const TextureDesc& desc) {
     if (m_IsDepth) {
         D3D12_DESCRIPTOR_HEAP_DESC hd{};
         hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
-        hd.NumDescriptors = 1;
+        hd.NumDescriptors = 2;   // [0] 可写 DSV，[1] 只读 DSV
         if (SUCCEEDED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_DsvHeap)))) {
             m_Dsv = m_DsvHeap->GetCPUDescriptorHandleForHeapStart();
             D3D12_DEPTH_STENCIL_VIEW_DESC vd{};
@@ -710,6 +711,15 @@ bool D3D12Texture::Initialize(D3D12Device* device, const TextureDesc& desc) {
             vd.Texture2D.MipSlice = 0;
             dev->CreateDepthStencilView(m_Resource.Get(), &vd, m_Dsv);
     device->RegisterViewResource(static_cast<UINT64>(m_Dsv.ptr), m_Resource.Get());
+            // 只读 DSV：深度测试但不写深度的 pass（如软粒子）同时把这张深度图当 SRV 采样时使用，
+            // 对应 Vulkan 的 DEPTH_STENCIL_READ_ONLY 布局
+            m_DsvReadOnly = m_Dsv;
+            m_DsvReadOnly.ptr += dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+            vd.Flags = D3D12_DSV_FLAG_READ_ONLY_DEPTH;
+            if (fmt == DXGI_FORMAT_D24_UNORM_S8_UINT || fmt == DXGI_FORMAT_D32_FLOAT_S8X24_UINT)
+                vd.Flags |= D3D12_DSV_FLAG_READ_ONLY_STENCIL;
+            dev->CreateDepthStencilView(m_Resource.Get(), &vd, m_DsvReadOnly);
+            device->RegisterReadOnlyDsv(static_cast<UINT64>(m_Dsv.ptr), static_cast<UINT64>(m_DsvReadOnly.ptr));
         }
     }
 
@@ -944,6 +954,7 @@ bool D3D12PipelineState::Initialize(D3D12Device* device, const PipelineStateDesc
 
     m_ColorLoadOp = desc.colorLoadOp;
     m_DepthLoadOp = desc.depthLoadOp;
+    m_DepthWrite  = desc.depthWrite;
 
     // ---- 登记结构化缓冲步长 ----
     // 从各阶段 DXIL 反射出结构化缓冲的真实步长，按「描述符集布局 + binding」登记到设备，

@@ -122,6 +122,7 @@ private:
     ComPtr<ID3D12DescriptorHeap> m_RtvHeap;
     ComPtr<ID3D12DescriptorHeap> m_DsvHeap;
     D3D12_CPU_DESCRIPTOR_HANDLE m_Dsv{};
+    D3D12_CPU_DESCRIPTOR_HANDLE m_DsvReadOnly{};   // 只读深度视图（深度测试 + 同时采样）
     std::vector<D3D12_CPU_DESCRIPTOR_HANDLE> m_Srvs;
     ComPtr<ID3D12DescriptorHeap>             m_FaceViewHeap;   // 逐层 RTV/DSV 的堆
     std::vector<D3D12_CPU_DESCRIPTOR_HANDLE> m_FaceViews;      // 每个数组层一个视图（mip 0）
@@ -174,6 +175,8 @@ public:
     /// 附件加载操作（与 Vulkan 的 render pass loadOp 对应）：离屏 pass 据此决定是否清空附件
     LoadOp GetColorLoadOp() const { return m_ColorLoadOp; }
     LoadOp GetDepthLoadOp() const { return m_DepthLoadOp; }
+    /// 是否写深度：不写深度的 PSO 可以配只读 DSV，从而同时采样同一张深度图
+    bool   GetDepthWrite()   const { return m_DepthWrite; }
 
     /// 着色器实际使用的描述符集资源（来自 DXIL 反射）：绘制/派发前据此补资源状态转换
     struct ResourceUse { u32 space = 0; u32 binding = 0; bool uav = false; };
@@ -191,6 +194,7 @@ private:
     bool                        m_NeedsZeroVB = false;
     LoadOp                      m_ColorLoadOp = LoadOp::Clear;
     LoadOp                      m_DepthLoadOp = LoadOp::Clear;
+    bool                        m_DepthWrite  = true;
     std::vector<ResourceUse>    m_ResourceUses;
 };
 

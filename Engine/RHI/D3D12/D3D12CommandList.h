@@ -189,6 +189,15 @@ private:
     DescriptorSetHandle m_BoundSets[8]{};
     /// 当前 pass 正作为附件的资源：它们不能同时被转成可读状态
     std::vector<ID3D12Resource*> m_PassAttachments;
+    /// 当前 pass 绑定的 RTV / DSV：切换只读 DSV 时需要重新 OMSetRenderTargets
+    D3D12_CPU_DESCRIPTOR_HANDLE  m_PassRtvs[8]{};
+    u32                          m_PassRtvCount = 0;
+    D3D12_CPU_DESCRIPTOR_HANDLE  m_PassDsv{};
+    ID3D12Resource*              m_PassDsvRes = nullptr;
+    bool                         m_DsvReadOnly = false;   // 当前是否绑着只读 DSV
+    /// 记录本 pass 的附件（RTV 数组 + DSV），供状态转换跳过与只读 DSV 切换使用
+    void SetPassAttachments(const D3D12_CPU_DESCRIPTOR_HANDLE* rtvs, u32 rtvCount, const D3D12_CPU_DESCRIPTOR_HANDLE* dsv);
+    void ClearPassAttachments();
     std::vector<D3D12_RESOURCE_BARRIER> m_BarrierScratch;   // 复用的临时数组
     /// 缓冲的状态按命令列表各自跟踪：缓冲在每次 ExecuteCommandLists 执行完后都会衰减回 COMMON，
     /// 所以每个列表开始录制时所有缓冲都是 COMMON（Begin 时清空）。用设备级的全局记录会被

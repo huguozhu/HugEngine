@@ -89,7 +89,7 @@ void D3D12CommandList::Begin() {
     m_RootArgsDirty = true;
     m_HeapsSet = false;
     for (auto& bs : m_BoundSets) bs = kInvalidSet;
-    m_PassAttachments.clear();
+    ClearPassAttachments();
     // 缓冲在每次提交执行完后衰减回 COMMON：新录制从全 COMMON 开始
     m_BufferStates.clear();
     // 为整帧申请一块推送常量槽位，并清零
@@ -208,7 +208,7 @@ void D3D12CommandList::EndRenderPass() {
     if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] EndRenderPass\n"); std::fflush(stdout); }
 
     // D3D12 没有 pass 结束的概念；资源状态转换由显式 PipelineBarrier 负责
-    m_PassAttachments.clear();
+    ClearPassAttachments();
 }
 
 void D3D12CommandList::BeginOffscreenPass(void* colorImageView, void* depthImageView,
@@ -224,9 +224,7 @@ void D3D12CommandList::BeginOffscreenPass(void* colorImageView, void* depthImage
     const bool hasRtv = (colorImageView != nullptr);
     const bool hasDsv = (depthImageView != nullptr);
     // 记下本 pass 的附件：绘制前补纹理状态时跳过它们
-    m_PassAttachments.clear();
-    if (m_Device && hasRtv) if (auto* r = m_Device->FindViewResource(static_cast<UINT64>(rtv.ptr))) m_PassAttachments.push_back(r);
-    if (m_Device && hasDsv) if (auto* r = m_Device->FindViewResource(static_cast<UINT64>(dsv.ptr))) m_PassAttachments.push_back(r);
+    SetPassAttachments(&rtv, hasRtv ? 1u : 0u, hasDsv ? &dsv : nullptr);
 
     // RTV 数量必须与指针一致：只有深度附件的 pass 传 1+nullptr 是非法调用（设备会被移除）
     // 【必须做资源屏障】D3D12 要求绑定为 RTV/DSV 的资源处于 RENDER_TARGET /
@@ -404,10 +402,7 @@ void D3D12CommandList::BeginOffscreenPassMRT(void* const* colorImageViews, u32 c
     D3D12_CPU_DESCRIPTOR_HANDLE dsv = ToCpuHandle(depthImageView);
     const bool hasDsv = (depthImageView != nullptr);
     // 记下本 pass 的附件：绘制前补纹理状态时跳过它们
-    m_PassAttachments.clear();
-    for (u32 i = 0; i < n && m_Device; ++i)
-        if (colorImageViews[i]) if (auto* r = m_Device->FindViewResource(static_cast<UINT64>(rtvs[i].ptr))) m_PassAttachments.push_back(r);
-    if (m_Device && hasDsv) if (auto* r = m_Device->FindViewResource(static_cast<UINT64>(dsv.ptr))) m_PassAttachments.push_back(r);
+    SetPassAttachments(rtvs, n, hasDsv ? &dsv : nullptr);
 
     // 【MRT 也必须做状态转换】此前只有单目标路径做了屏障，多目标 pass（GBuffer 等）
     // 的渲染目标停在 COMMON/PRESENT，被调试层判定非法、绘制被丢弃（id=538）。
@@ -481,7 +476,31 @@ void D3D12CommandList::BeginOffscreenPassMRT(void* const* colorImageViews, u32 c
 }
 
 void D3D12CommandList::EndOffscreenPass() {
-    m_PassAttachments.clear();   // pass 结束：附件之后可以被转成可读状态
+    ClearPassAttachments();   // pass 结束：附件之后可以被转成可读状态
+}
+
+void D3D12CommandList::SetPassAttachments(const D3D12_CPU_DESCRIPTOR_HANDLE* rtvs, u32 rtvCount,
+                                          const D3D12_CPU_DESCRIPTOR_HANDLE* dsv) {
+    ClearPassAttachments();
+    m_PassRtvCount = (rtvCount < 8u) ? rtvCount : 8u;
+    for (u32 i = 0; i < m_PassRtvCount; ++i) {
+        m_PassRtvs[i] = rtvs[i];
+        if (m_Device && rtvs[i].ptr)
+            if (auto* r = m_Device->FindViewResource(static_cast<UINT64>(rtvs[i].ptr))) m_PassAttachments.push_back(r);
+    }
+    if (dsv && dsv->ptr) {
+        m_PassDsv = *dsv;
+        m_PassDsvRes = m_Device ? m_Device->FindViewResource(static_cast<UINT64>(dsv->ptr)) : nullptr;
+        if (m_PassDsvRes) m_PassAttachments.push_back(m_PassDsvRes);
+    }
+}
+
+void D3D12CommandList::ClearPassAttachments() {
+    m_PassAttachments.clear();
+    m_PassRtvCount = 0;
+    m_PassDsv = {};
+    m_PassDsvRes = nullptr;
+    m_DsvReadOnly = false;
 }
 
 void D3D12CommandList::SetPipeline(IRHIPipelineState* pso) {
@@ -637,13 +656,34 @@ void D3D12CommandList::EnsureBoundResourceStates() {
     constexpr D3D12_RESOURCE_STATES kRead =
         D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     m_BarrierScratch.clear();
+    const bool gfxPso = !m_IsComputePipeline;
+
+    // 当前绑着只读 DSV，但新的 PSO 要写深度：先切回可写 DSV
+    if (m_DsvReadOnly && gfxPso && m_PassDsvRes && m_Pipeline->GetDepthWrite()) {
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition.pResource   = m_PassDsvRes;
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = m_Device->GetResourceState(m_PassDsvRes);
+        b.Transition.StateAfter  = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+        m_List->ResourceBarrier(1, &b);
+        m_Device->SetResourceState(m_PassDsvRes, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+        m_List->OMSetRenderTargets(m_PassRtvCount, m_PassRtvCount ? m_PassRtvs : nullptr, FALSE, &m_PassDsv);
+        m_DsvReadOnly = false;
+    }
+    bool needReadOnlyDsv = false;
     for (const auto& use : m_Pipeline->GetResourceUses()) {
         if (use.space >= 8u || m_BoundSets[use.space] == kInvalidSet) continue;
         bool isBuffer = false;
         ID3D12Resource* res = m_Device->GetSetResource(m_BoundSets[use.space], use.binding, isBuffer);
         if (!res) continue;
         // 正作为本 pass 附件的资源不能同时转成可读（引擎真这样用时属于 feedback，保持原状）
-        if (std::find(m_PassAttachments.begin(), m_PassAttachments.end(), res) != m_PassAttachments.end()) continue;
+        if (std::find(m_PassAttachments.begin(), m_PassAttachments.end(), res) != m_PassAttachments.end()) {
+            // 深度附件被同时采样（如软粒子）且当前 PSO 不写深度：改绑只读 DSV，
+            // 深度转到 DEPTH_READ | 着色器可读，对应 Vulkan 的 DEPTH_STENCIL_READ_ONLY 布局
+            if (!use.uav && gfxPso && res == m_PassDsvRes && !m_Pipeline->GetDepthWrite()) needReadOnlyDsv = true;
+            continue;
+        }
         // 缓冲按本列表的记录（起始为 COMMON），纹理按设备级记录（纹理不会衰减）
         const D3D12_RESOURCE_STATES cur  = isBuffer ? GetBufferState(res) : m_Device->GetResourceState(res);
         const D3D12_RESOURCE_STATES want = use.uav ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS : kRead;
@@ -667,8 +707,29 @@ void D3D12CommandList::EnsureBoundResourceStates() {
         if (isBuffer) m_BufferStates[res] = want;
         else          m_Device->SetResourceState(res, want);
     }
+    const UINT64 roDsv = (needReadOnlyDsv && !m_DsvReadOnly) ? m_Device->GetReadOnlyDsv(static_cast<UINT64>(m_PassDsv.ptr)) : 0;
+    if (roDsv) {
+        const D3D12_RESOURCE_STATES want = D3D12_RESOURCE_STATE_DEPTH_READ | kRead;
+        const D3D12_RESOURCE_STATES cur  = m_Device->GetResourceState(m_PassDsvRes);
+        if (cur != want) {
+            D3D12_RESOURCE_BARRIER b{};
+            b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            b.Transition.pResource   = m_PassDsvRes;
+            b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            b.Transition.StateBefore = cur;
+            b.Transition.StateAfter  = want;
+            m_BarrierScratch.push_back(b);
+            m_Device->SetResourceState(m_PassDsvRes, want);
+        }
+    }
     if (!m_BarrierScratch.empty())
         m_List->ResourceBarrier(static_cast<UINT>(m_BarrierScratch.size()), m_BarrierScratch.data());
+    if (roDsv) {
+        D3D12_CPU_DESCRIPTOR_HANDLE ro{};
+        ro.ptr = static_cast<SIZE_T>(roDsv);
+        m_List->OMSetRenderTargets(m_PassRtvCount, m_PassRtvCount ? m_PassRtvs : nullptr, FALSE, &ro);
+        m_DsvReadOnly = true;
+    }
 }
 
 void D3D12CommandList::SetRootTable(u32 param, D3D12_GPU_DESCRIPTOR_HANDLE handle) {
