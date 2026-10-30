@@ -1,4 +1,4 @@
-﻿// ============================================================================
+// ============================================================================
 //  D3D12Common.h —— D3D12 后端的公共头
 //
 //  职责：统一的平台头包含、COM 智能指针、错误检查宏、调试日志。
@@ -43,6 +43,15 @@ inline bool TraceEnabled() {
     static const bool s_Enabled = (std::getenv("HE_D3D12_TRACE") != nullptr);
     return s_Enabled;
 }
+
+/// 着色器实际使用的描述符集资源（来自 DXIL 反射）：绘制 / 派发前据此补资源状态转换。
+/// 图形 / 计算 PSO 用 ID3D12ShaderReflection，光追状态对象用 ID3D12LibraryReflection，
+/// 两者填**同一口径**的数据，命令列表按同一段逻辑处理（见 D3D12CommandList::EnsureBoundResourceStates）。
+struct D3D12ResourceUse {
+    u32  space   = 0;
+    u32  binding = 0;
+    bool uav     = false;
+};
 
 /// UTF-8 → UTF-16：D3D12 的对象名（SetName）与 PIX 事件字符串都是宽字符，引擎的名字是 UTF-8（含中文）
 inline std::wstring Utf8ToWide(const char* s) {

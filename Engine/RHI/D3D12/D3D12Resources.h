@@ -1,4 +1,4 @@
-﻿// ============================================================================
+// ============================================================================
 //  D3D12Resources.h —— D3D12 的资源与管线对象
 //
 //  包含 Buffer / Texture / Sampler / PipelineState 四个实现。
@@ -239,7 +239,7 @@ public:
     bool   GetDepthWrite()   const { return m_DepthWrite; }
 
     /// 着色器实际使用的描述符集资源（来自 DXIL 反射）：绘制/派发前据此补资源状态转换
-    struct ResourceUse { u32 space = 0; u32 binding = 0; bool uav = false; };
+    using ResourceUse = D3D12ResourceUse;
     const std::vector<ResourceUse>& GetResourceUses() const { return m_ResourceUses; }
 
 private:

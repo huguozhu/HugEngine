@@ -1,9 +1,10 @@
-﻿#include <cstdio>
+#include <cstdio>
 // ============================================================================
 //  D3D12Resources.cpp —— Buffer / Texture / Sampler / PipelineState 的实现
 // ============================================================================
 #include "D3D12Resources.h"
 #include "D3D12Device.h"
+#include "D3D12RayTracing.h"   // CreateEngineRootSignature（图形 / 计算 / 光追共用）
 #include "D3D12Converters.h"
 #include <d3dcompiler.h>
 #include <dxcapi.h>       // IDxcUtils::CreateReflection（DXIL 反射）
@@ -58,43 +59,54 @@ bool D3D12Buffer::Initialize(D3D12Device* device, const BufferDesc& desc) {
     m_Size   = desc.size;
     m_Stride = static_cast<u32>(desc.stride);
 
-    // 光追缓冲（BLAS/TLAS 的存储、SBT）需要 D3D12_RESOURCE_FLAG_RAYTRACING_ACCELERATION_STRUCTURE，
-    // 而本后端的 BLAS/TLAS/SBT 属阶段 4，尚未实现。这里直接拒绝，
-    // 避免 CreateCommittedResource 抛 E_INVALIDARG 噪音。
-    // 【只跳过"纯光追"缓冲】引擎给**所有**顶点/索引缓冲都额外带上了
-    // AccelerationStruct 标志（`Vertex | AccelerationStruct`），以便后续建 BLAS。
-    // 之前在此无条件跳过，导致所有网格的顶点/索引缓冲都变成无效句柄 ⇒
-    // 注册表里 mesh 的 buffer 为 null ⇒ 一个网格都画不出来 ⇒ 画面全黑。
-    // 现在只在「除了光追标志之外没有任何可用用途」时才跳过。
-    constexpr u32 kRtOnly = static_cast<u32>(BufferUsage::AccelerationStruct) |
-                            static_cast<u32>(BufferUsage::ShaderBindingTable);
-    const u32 usageBits = static_cast<u32>(desc.usage);
-    if ((usageBits & kRtOnly) != 0 && (usageBits & ~kRtOnly) == 0) {
-        HE_CORE_INFO("D3D12Buffer: 跳过纯光追缓冲（阶段 4 未实现）size={}", static_cast<u64>(desc.size));
-        return false;
-    }
+    // 光追缓冲的创建说明（T5）：加速结构本身由 D3D12AccelerationStructure 自己创建，
+    // 不经过本类；经过本类的是 SBT / scratch / TLAS 实例缓冲，按下面 T5.3 的分支区分堆类型。
+    // 【引擎给所有顶点/索引缓冲都带 AccelerationStruct 标志】以便后续建 BLAS；
+    // 它们走「非 Storage + initialData ⇒ UPLOAD 堆」的同一条普通路径。
 
     // 实际分配大小：至少 256 字节（D3D12 的常量缓冲/间接参数都要求 256 对齐）
     const u64 allocSize = (desc.size == 0) ? 256ull
                                           : ((static_cast<u64>(desc.size) + 255ull) & ~255ull);
 
-    // 堆类型：
-    //   · Storage（UAV）⇒ **必须** DEFAULT 堆。D3D12 禁止 UPLOAD 堆的缓冲带
-    //     ALLOW_UNORDERED_ACCESS（实测 CreateCommittedResource 返回 E_INVALIDARG）。
-    //     CPU 更新走「暂存缓冲 + CopyBufferRegion」，见下方 m_CpuStaging。
-    //   · 其余 cpuAccess ⇒ UPLOAD 堆（可以直接 Map 写）
-    //   · 回读 ⇒ READBACK 堆
-    const bool isStorage = HasAny(desc.usage, BufferUsage::Storage);
+    // ------------------------------------------------------------------
+    //  堆类型
+    //
+    //    · Storage（UAV）⇒ **必须** DEFAULT 堆。D3D12 禁止 UPLOAD 堆的缓冲带
+    //      ALLOW_UNORDERED_ACCESS（实测 CreateCommittedResource 返回 E_INVALIDARG）。
+    //      CPU 更新走「暂存缓冲 + CopyBufferRegion」，见下方 m_CpuStaging。
+    //      （本后端实际用 CPU 可见的自定义堆承载 Storage 缓冲，见 cpuVisibleUav。）
+    //    · 其余 cpuAccess ⇒ UPLOAD 堆（可以直接 Map 写）
+    //    · 回读 ⇒ READBACK 堆
+    //
+    //  【光追缓冲的堆类型（手册 T5.3）】引擎给光追创建的三类缓冲用途位几乎相同，
+    //  但 D3D12 的存放位置要求完全不同：
+    //    · SBT（带 ShaderBindingTable）：CPU 写一次、GPU 只读 ⇒ UPLOAD 堆 + GENERIC_READ；
+    //    · scratch（带 RayTracingScratch，由调用方显式标注）：GPU 只写 ⇒
+    //      DEFAULT 堆 + ALLOW_UNORDERED_ACCESS（构建前转到 UNORDERED_ACCESS）；
+    //    · TLAS 实例缓冲（Storage | AccelerationStruct，不带上面两位）：CPU 每帧 Map
+    //      写入、GPU 只读 ⇒ 同样放 UPLOAD 堆（GPU 地址 64KB 对齐，满足 16 字节要求）。
+    // ------------------------------------------------------------------
+    const bool isStorage    = HasAny(desc.usage, BufferUsage::Storage);
+    const bool isSbt        = HasAny(desc.usage, BufferUsage::ShaderBindingTable);
+    const bool isRtScratch  = HasAny(desc.usage, BufferUsage::RayTracingScratch);
+    const bool isRtInstance = HasAny(desc.usage, BufferUsage::AccelerationStruct) && !isSbt &&
+                              !isRtScratch && HasAny(desc.usage, BufferUsage::Storage);
+    // 只有可被着色器写的缓冲才需要 UAV；SBT 与实例缓冲只被 GPU 读
+    const bool allowUav     = isStorage && !isSbt && !isRtInstance;
+
     D3D12_HEAP_TYPE heapType = D3D12_HEAP_TYPE_DEFAULT;
-    // 【关键】带 initialData 的非 UAV 缓冲（顶点/索引/常量）直接用 UPLOAD 堆：
-    //   · UPLOAD 堆可以立即 Map 写入，数据当场就有效
-    //   · 之前走 DEFAULT 堆 + 中转缓冲，但**从未执行拷贝** ⇒ 顶点数据全 0
-    //     ⇒ 三角形退化 ⇒ 画面全黑（实测就是这个问题）
-    // 常量缓冲（Uniform）一律放 UPLOAD 堆：引擎把它们当 CPU 每帧写入的数据，即使没置
-    // cpuAccess 也会直接 Map（Vulkan 下它们本就在主机可见内存）；DEFAULT 堆不可映射，
-    // Map 会直接失败（调试层 id=822），调用方随后写空指针崩溃（实测 04.Sponza-Deferred）。
-    if (!isStorage && (HasAny(desc.usage, BufferUsage::TransferDst) || desc.cpuAccess ||
+    if (isSbt || isRtInstance) {
+        // CPU 写、GPU 只读：UPLOAD 堆可以直接映射（也避开 UPLOAD 堆不能带 UAV 标志的限制）
+        heapType = D3D12_HEAP_TYPE_UPLOAD;
+    } else if (!isStorage && (HasAny(desc.usage, BufferUsage::TransferDst) || desc.cpuAccess ||
         desc.initialData != nullptr || HasAny(desc.usage, BufferUsage::Uniform))) {
+        // 【关键】带 initialData 的非 UAV 缓冲（顶点/索引/常量）直接用 UPLOAD 堆：
+        //   · UPLOAD 堆可以立即 Map 写入，数据当场就有效
+        //   · 之前走 DEFAULT 堆 + 中转缓冲，但**从未执行拷贝** ⇒ 顶点数据全 0
+        //     ⇒ 三角形退化 ⇒ 画面全黑（实测就是这个问题）
+        // 常量缓冲（Uniform）一律放 UPLOAD 堆：引擎把它们当 CPU 每帧写入的数据，即使没置
+        // cpuAccess 也会直接 Map（Vulkan 下它们本就在主机可见内存）；DEFAULT 堆不可映射，
+        // Map 会直接失败（调试层 id=822），调用方随后写空指针崩溃（实测 04.Sponza-Deferred）。
         heapType = D3D12_HEAP_TYPE_UPLOAD;
     }
     // UAV 缓冲需要一份等大的 UPLOAD 暂存来承载 CPU 写入
@@ -107,8 +119,10 @@ bool D3D12Buffer::Initialize(D3D12Device* device, const BufferDesc& desc) {
     // 读不到 GPU 结果；Unmap 还会把暂存区拷回 GPU 缓冲，覆盖 GPU 刚写入的数据（实测 06.GILab
     // 自动曝光卡在初始值；04 的粒子系统每帧调试回读后整个粒子池被清零，粒子永不死亡）。
     // 改为放在 CPU 可访问的自定义堆上（属性按 READBACK 堆取，自动适配集显/独显），直接映射。
-    const bool cpuVisibleUav = isStorage;
-    const bool needStaging = isStorage && !cpuVisibleUav;
+    // 【scratch 例外】光追 scratch 只由 GPU 写、CPU 从不访问，必须留在 DEFAULT 堆（DXR 要求），
+    // 既不能映射也不需要暂存。
+    const bool cpuVisibleUav = allowUav && !isRtScratch;
+    const bool needStaging   = allowUav && !cpuVisibleUav && !isRtScratch;
 
     D3D12_RESOURCE_DESC rd{};
     rd.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
@@ -122,8 +136,8 @@ bool D3D12Buffer::Initialize(D3D12Device* device, const BufferDesc& desc) {
     rd.Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
     rd.Flags            = D3D12_RESOURCE_FLAG_NONE;
 
-    // 允许 UAV 的缓冲需要显式声明
-    if (HasAny(desc.usage, BufferUsage::Storage)) {
+    // 允许 UAV 的缓冲需要显式声明（SBT / 实例缓冲只被 GPU 读，不带该标志）
+    if (allowUav) {
         rd.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
     }
 
@@ -987,119 +1001,19 @@ bool D3D12PipelineState::Initialize(D3D12Device* device, const PipelineStateDesc
     // ---- 根签名 ----
     //
     //  【必须与 DXIL 的寄存器布局严格对齐】ShaderToDxil 产出的 HLSL 里，
-    //  所有资源都落在 **space0**，寄存器按下表的惯例分配：
+    //  所有资源都落在 space<描述符集号>，寄存器按下表的惯例分配：
     //      t0..t63  : SRV（StructuredBuffer / Texture2D 数组）
     //      s0..s15  : Sampler
-    //      b0       : root constants（push constant）
+    //      b0..b7   : root CBV（push constant）
+    //      b8..     : 描述符集里的常量缓冲（CBV，与 SRV 共用同一段表）
     //  根签名只要少声明一类，PSO 就会被 D3D12 拒绝（E_INVALIDARG）。
+    //
+    //  【与光追共用】这段布局已抽到 D3D12RayTracing.cpp 的 CreateEngineRootSignature：
+    //  图形 / 计算 PSO 与 RT 状态对象的全局根签名必须**是同一份**，否则同一套
+    //  ShaderToDxil 产物在两条路径上会有一边绑不上（详见实施手册 T5.6 第 5 条）。
     // ------------------------------------------------------------------
-    //  参数布局（顺序很关键，CommandList 按编号绑定）
-    //
-    //    0 .. 7   : 8 个 root CBV（b0..b7，space0）
-    //    8 .. 11  : SRV 表，space 0..3
-    //   12 .. 15  : UAV 表，space 0..3
-    //   16 .. 19  : Sampler 表，space 0..3
-    //
-    //  【为什么是 4 个 space】引擎的描述符集索引被 Slang/DXC 翻译成
-    //  `register(tN, space<setIndex>)`（实测 PBR.vert 里
-    //   u_InstanceTransforms 在 space1、u_VisibleInstanceIndices 在 space2、
-    //   u_BoneMatrices 在 space3）。只声明 space0 会被拒绝：
-    //  "Root Signature doesn't match Vertex Shader: Shader SRV descriptor range
-    //   (... RegisterSpace=2) is not fully bound in root signature"。
-    //
-    //  【为什么还要 UAV 表】计算着色器往 SSBO/RWTexture 写数据，用的是
-    //  `register(uN, spaceN)`；缺 UAV 范围会让计算 PSO 直接 E_INVALIDARG。
-    //
-    //  表都用**无界**（NumDescriptors = UINT_MAX）：着色器里既有定长数组
-    //  （u_Textures[64]）也有无界数组（u_InstanceTransforms[]）。
-    // ------------------------------------------------------------------
-    static constexpr u32 kRootCbvCount = 8;
-    // 【space 数量】实测引擎最多用到 space5（GBuffer 用到 space5），
-    // 取 8 留余量。注意根签名的参数总数上限是 64 DWORD：
-    // 8 个 root CBV + 3 类表 × 8 = 32，安全。
-    static constexpr u32 kSpaceCount   = 8;
-    static constexpr u32 kTableCount   = kSpaceCount * 3;   // SRV + UAV + Sampler
-
-    D3D12_ROOT_PARAMETER  params[kRootCbvCount + kTableCount]{};
-    D3D12_DESCRIPTOR_RANGE ranges[kTableCount]{};
-
-    // 0..7：root CBV
-    for (u32 i = 0; i < kRootCbvCount; ++i) {
-        params[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-        params[i].Descriptor.ShaderRegister = i;   // b0..b7
-        params[i].Descriptor.RegisterSpace  = 0;
-        params[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-    }
-
-    // 三组表：SRV(0..3) / UAV(4..7) / SAMPLER(8..11)
-    struct TableSpec { D3D12_DESCRIPTOR_RANGE_TYPE type; u32 rangeBase; u32 paramBase; };
-    const TableSpec tables[3] = {
-        { D3D12_DESCRIPTOR_RANGE_TYPE_SRV,     0,                  kRootCbvCount                    },
-        { D3D12_DESCRIPTOR_RANGE_TYPE_UAV,     kSpaceCount,        kRootCbvCount + kSpaceCount      },
-        { D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, kSpaceCount * 2,    kRootCbvCount + kSpaceCount * 2  },
-    };
-
-    // 【描述符集里的常量缓冲】SRV 表额外带一段 CBV 范围：寄存器 b(kSetCbvRegisterBase + binding)，
-    // 与 SRV 共用同一段描述符（偏移都从表头起），即 b(8+k) 对应「set 基址 + k」——正是
-    // UpdateDescriptorSet(UniformBuffer) 写 CBV 的位置。寄存器从 b8 起是为了避开 b0..b7 的
-    // root CBV（推送常量）；ShaderToDxil 按同一规则给带 vk::binding 的 cbuffer 分配寄存器。
-    // 此前表里只有 SRV 范围，集合里的 CBV 着色器访问不到，而这类 cbuffer 还被 Slang 自动
-    // 分到 b0，与推送常量重叠（实测 PBR 的 GIBlendParams 读到的是推送常量数据）。
-    static constexpr u32 kSetCbvRegisterBase = 8;
-    static constexpr u32 kSetCbvCount        = 64;
-    D3D12_DESCRIPTOR_RANGE srvTableRanges[kSpaceCount][2]{};
-
-    for (const auto& spec : tables) {
-        for (u32 s = 0; s < kSpaceCount; ++s) {
-            const u32 ri = spec.rangeBase + s;
-            ranges[ri].RangeType  = spec.type;
-            ranges[ri].NumDescriptors = UINT_MAX;   // 无界
-            ranges[ri].BaseShaderRegister = 0;
-            ranges[ri].RegisterSpace = s;           // 描述符集索引 → 寄存器空间
-            ranges[ri].OffsetInDescriptorsFromTableStart = 0;
-
-            const u32 pi = spec.paramBase + s;
-            params[pi].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-            params[pi].DescriptorTable.NumDescriptorRanges = 1;
-            params[pi].DescriptorTable.pDescriptorRanges = &ranges[ri];
-            params[pi].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-
-            if (spec.type == D3D12_DESCRIPTOR_RANGE_TYPE_SRV) {
-                // 有界的 CBV 范围在前，无界的 SRV 范围必须放在最后
-                D3D12_DESCRIPTOR_RANGE& cbv = srvTableRanges[s][0];
-                cbv.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
-                cbv.NumDescriptors = kSetCbvCount;
-                cbv.BaseShaderRegister = kSetCbvRegisterBase;
-                cbv.RegisterSpace = s;
-                cbv.OffsetInDescriptorsFromTableStart = 0;
-                srvTableRanges[s][1] = ranges[ri];
-                params[pi].DescriptorTable.NumDescriptorRanges = 2;
-                params[pi].DescriptorTable.pDescriptorRanges = srvTableRanges[s];
-            }
-        }
-    }
-
-    D3D12_ROOT_SIGNATURE_DESC rsd{};
-    rsd.NumParameters = kRootCbvCount + kTableCount;
-    rsd.pParameters = params;
-    rsd.NumStaticSamplers = 0;
-    rsd.pStaticSamplers = nullptr;
-    rsd.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
-
-    ComPtr<ID3DBlob> sigBlob, errBlob;
-    HRESULT hr = D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1,
-                                             &sigBlob, &errBlob);
-    if (FAILED(hr)) {
-        if (errBlob) {
-            HE_CORE_ERROR("D3D12PipelineState: 根签名序列化失败: {}",
-                          static_cast<const char*>(errBlob->GetBufferPointer()));
-        }
-        return false;
-    }
-    if (!HE_D3D12_CHECK(dev->CreateRootSignature(0, sigBlob->GetBufferPointer(),
-                                                 sigBlob->GetBufferSize(),
-                                                 IID_PPV_ARGS(&m_RootSig)),
-                        "CreateRootSignature")) {
+    if (!CreateEngineRootSignature(dev, &m_RootSig)) {
+        HE_CORE_ERROR("D3D12PipelineState: 根签名创建失败（name={}）", desc.debugName.c_str());
         return false;
     }
 

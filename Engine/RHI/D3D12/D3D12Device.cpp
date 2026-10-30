@@ -1,4 +1,4 @@
-﻿// ============================================================================
+// ============================================================================
 //  D3D12Device.cpp —— D3D12 设备的实现
 // ============================================================================
 #include "D3D12Device.h"
@@ -6,6 +6,7 @@
 #include "D3D12CommandList.h"
 #include "D3D12Resources.h"
 #include "D3D12BindlessHeap.h"
+#include "D3D12RayTracing.h"       // 光追对象（加速结构 / RT 状态对象 / 几何描述转换）
 #include "D3D12Converters.h"   // ToDxgiFormat（SupportsStorageImage 用）
 #include "RHI/SubmitRouter.h"     // 提交路由（模式 2）
 #include "RHI/RHICommandReplay.h" // 命令流回放
@@ -425,6 +426,8 @@ bool D3D12Device::CreateDeviceAndQueue() {
             m_Caps.maxRayRecursionDepth     = D3D12_RAYTRACING_MAX_DECLARABLE_TRACE_RECURSION_DEPTH;  // 31
             m_Caps.shaderGroupHandleSize    = D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES;                  // 32
             m_Caps.shaderGroupBaseAlignment = D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT;           // 64
+            // DXR 设备接口留着：T5 实现后光追对象都从它创建；能力上报的开关只影响引擎是否走光追路径
+            m_Device5 = dev5;
         }
     }
     m_Caps.supportsDGC = true;              // D3D12 原生支持 ExecuteIndirect
@@ -1018,6 +1021,157 @@ void D3D12Device::DestroySamplerHandle(RHISamplerHandle handle) {
 
 IRHISampler* D3D12Device::ResolveSampler(RHISamplerHandle handle) const {
     return m_Samplers.Get(handle.index, handle.generation);
+}
+
+// ===========================================================================
+//  光追（T5）
+//
+//  三张表的分工：
+//    · Get*BuildSizes —— 只查 ID3D12Device5::GetRaytracingAccelerationStructurePrebuildInfo，
+//      不创建资源（引擎先用它决定 scratch 大小，再 CreateBLAS/TLAS）；
+//    · CreateBLAS / CreateTLAS —— 创建 DEFAULT 堆上的加速结构存储；
+//    · CreateRTPipelineState —— 组装 ID3D12StateObject。
+// ===========================================================================
+ASBuildSizes D3D12Device::GetBLASBuildSizes(const BLASBuildDesc& desc) {
+    ASBuildSizes sizes{};
+    if (!m_Device5 || desc.geometries.empty()) {
+        if (!m_Device5) HE_CORE_WARN("GetBLASBuildSizes: 设备无 ID3D12Device5（DXR 不可用）");
+        return sizes;
+    }
+
+    // 引擎的几何描述 → D3D12 三角形几何描述（地址在尺寸查询时被忽略，只用到计数与格式）
+    std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> geos;
+    geos.reserve(desc.geometries.size());
+    for (const auto& g : desc.geometries) {
+        D3D12_RAYTRACING_GEOMETRY_DESC d{};
+        FillD3D12GeometryDesc(g, d);
+        geos.push_back(d);
+    }
+
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs{};
+    inputs.Type           = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+    inputs.DescsLayout    = D3D12_ELEMENTS_LAYOUT_ARRAY;
+    inputs.NumDescs       = static_cast<UINT>(geos.size());
+    inputs.pGeometryDescs = geos.data();
+    inputs.Flags          = ToD3D12ASBuildFlags(desc.flags);
+
+    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info{};
+    m_Device5->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &info);
+
+    sizes.accelerationStructureSize = info.ResultDataMaxSizeInBytes;
+    sizes.buildScratchSize          = info.ScratchDataSizeInBytes;
+    sizes.updateScratchSize         = info.UpdateScratchDataSizeInBytes;
+    return sizes;
+}
+
+ASBuildSizes D3D12Device::GetTLASBuildSizes(u32 maxInstanceCount) {
+    ASBuildSizes sizes{};
+    if (!m_Device5 || maxInstanceCount == 0) {
+        if (!m_Device5) HE_CORE_WARN("GetTLASBuildSizes: 设备无 ID3D12Device5（DXR 不可用）");
+        return sizes;
+    }
+
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs{};
+    inputs.Type        = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+    inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+    inputs.NumDescs    = maxInstanceCount;
+    inputs.Flags       = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+
+    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info{};
+    m_Device5->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &info);
+
+    sizes.accelerationStructureSize = info.ResultDataMaxSizeInBytes;
+    sizes.buildScratchSize          = info.ScratchDataSizeInBytes;
+    sizes.updateScratchSize         = info.UpdateScratchDataSizeInBytes;
+    return sizes;
+}
+
+std::unique_ptr<IRHIAccelerationStructure> D3D12Device::CreateBLAS(const BLASBuildDesc& desc) {
+    if (!m_Device5) {
+        HE_CORE_ERROR("CreateBLAS: 设备不支持 DXR");
+        return nullptr;
+    }
+    const ASBuildSizes sizes = GetBLASBuildSizes(desc);
+    auto blas = std::make_unique<D3D12AccelerationStructure>();
+    if (!blas->Initialize(this, AccelerationStructureType::BottomLevel,
+                          sizes.accelerationStructureSize)) {
+        return nullptr;
+    }
+    HE_CORE_INFO("CreateBLAS: {} geometries, AS size={}KB, scratch={}KB",
+                 desc.geometries.size(),
+                 sizes.accelerationStructureSize / 1024, sizes.buildScratchSize / 1024);
+    return blas;
+}
+
+std::unique_ptr<IRHIAccelerationStructure> D3D12Device::CreateTLAS(const TLASBuildDesc& desc) {
+    if (!m_Device5) {
+        HE_CORE_ERROR("CreateTLAS: 设备不支持 DXR");
+        return nullptr;
+    }
+    const ASBuildSizes sizes = GetTLASBuildSizes(desc.maxInstanceCount);
+    auto tlas = std::make_unique<D3D12AccelerationStructure>();
+    if (!tlas->Initialize(this, AccelerationStructureType::TopLevel,
+                          sizes.accelerationStructureSize)) {
+        return nullptr;
+    }
+    HE_CORE_INFO("CreateTLAS: maxInstances={}, AS size={}KB, scratch={}KB",
+                 desc.maxInstanceCount,
+                 sizes.accelerationStructureSize / 1024, sizes.buildScratchSize / 1024);
+    return tlas;
+}
+
+std::unique_ptr<IRHIRayTracingPipelineState>
+D3D12Device::CreateRTPipelineState(const RTPipelineStateDesc& desc) {
+    if (!m_Device5) {
+        HE_CORE_ERROR("CreateRTPipelineState: 设备不支持 DXR");
+        return nullptr;
+    }
+    auto pso = std::make_unique<D3D12RayTracingPipelineState>();
+    if (!pso->Initialize(this, desc)) return nullptr;
+    return pso;
+}
+
+// ---- 光追句柄（与 Buffer / Texture 同一套 HandleTable）----
+RHIAccelerationStructureHandle D3D12Device::CreateBLASHandle(const BLASBuildDesc& desc) {
+    auto obj = CreateBLAS(desc);
+    if (!obj) return {};
+    RHIAccelerationStructureHandle h{};
+    h.index = m_AccelStructures.Acquire(std::move(obj), h.generation);
+    return h;
+}
+
+RHIAccelerationStructureHandle D3D12Device::CreateTLASHandle(const TLASBuildDesc& desc) {
+    auto obj = CreateTLAS(desc);
+    if (!obj) return {};
+    RHIAccelerationStructureHandle h{};
+    h.index = m_AccelStructures.Acquire(std::move(obj), h.generation);
+    return h;
+}
+
+IRHIAccelerationStructure* D3D12Device::ResolveAccelerationStructure(
+    RHIAccelerationStructureHandle handle) const {
+    return m_AccelStructures.Get(handle.index, handle.generation);
+}
+
+void D3D12Device::DestroyAccelerationStructureHandle(RHIAccelerationStructureHandle handle) {
+    m_AccelStructures.Release(handle.index, handle.generation);
+}
+
+RHIRayTracingPipelineHandle D3D12Device::CreateRTPipelineStateHandle(const RTPipelineStateDesc& desc) {
+    auto obj = CreateRTPipelineState(desc);
+    if (!obj) return {};
+    RHIRayTracingPipelineHandle h{};
+    h.index = m_RTPipelines.Acquire(std::move(obj), h.generation);
+    return h;
+}
+
+IRHIRayTracingPipelineState* D3D12Device::ResolveRTPipelineState(
+    RHIRayTracingPipelineHandle handle) const {
+    return m_RTPipelines.Get(handle.index, handle.generation);
+}
+
+void D3D12Device::DestroyRTPipelineStateHandle(RHIRayTracingPipelineHandle handle) {
+    m_RTPipelines.Release(handle.index, handle.generation);
 }
 
 RHIPipelineStateHandle D3D12Device::CreatePipelineStateHandle(const PipelineStateDesc& desc) {
@@ -1620,16 +1774,43 @@ void D3D12Device::NoteSetLayoutStrides(ID3D12ShaderReflection* refl,
     for (UINT i = 0; i < sd.BoundResources; ++i) {
         D3D12_SHADER_INPUT_BIND_DESC bd{};
         if (FAILED(refl->GetResourceBindingDesc(i, &bd))) continue;
+        NoteStrideForBinding(bd, layouts);
+    }
+}
+
+// 光追库版：库容器里是多个入口函数，逐个函数取绑定资源（口径与单着色器版完全一致）
+void D3D12Device::NoteSetLayoutStridesFromLibrary(
+    ID3D12LibraryReflection* libRefl,
+    const std::vector<DescriptorSetLayoutHandle>& layouts) {
+    if (!libRefl) return;
+    D3D12_LIBRARY_DESC ld{};
+    if (FAILED(libRefl->GetDesc(&ld))) return;
+    for (UINT f = 0; f < ld.FunctionCount; ++f) {
+        ID3D12FunctionReflection* fr = libRefl->GetFunctionByIndex(f);
+        if (!fr) continue;
+        D3D12_FUNCTION_DESC fd{};
+        if (FAILED(fr->GetDesc(&fd))) continue;
+        for (UINT i = 0; i < fd.BoundResources; ++i) {
+            D3D12_SHADER_INPUT_BIND_DESC bd{};
+            if (FAILED(fr->GetResourceBindingDesc(i, &bd))) continue;
+            NoteStrideForBinding(bd, layouts);
+        }
+    }
+}
+
+void D3D12Device::NoteStrideForBinding(const D3D12_SHADER_INPUT_BIND_DESC& bd,
+                                       const std::vector<DescriptorSetLayoutHandle>& layouts) {
+    {
         const bool structured = bd.Type == D3D_SIT_STRUCTURED || bd.Type == D3D_SIT_UAV_RWSTRUCTURED ||
                                 bd.Type == D3D_SIT_UAV_APPEND_STRUCTURED || bd.Type == D3D_SIT_UAV_CONSUME_STRUCTURED ||
                                 bd.Type == D3D_SIT_UAV_RWSTRUCTURED_WITH_COUNTER;
         // 对结构化缓冲，NumSamples 字段存的就是结构体步长
-        if (!structured || bd.NumSamples == 0 || bd.Space >= layouts.size()) continue;
+        if (!structured || bd.NumSamples == 0 || bd.Space >= layouts.size()) return;
         const DescriptorSetLayoutHandle lh = layouts[bd.Space];
-        if (lh == kInvalidLayout || lh > m_SetLayouts.size()) continue;
+        if (lh == kInvalidLayout || lh > m_SetLayouts.size()) return;
         const u32 li = static_cast<u32>(lh - 1);
         u32& known = m_SetLayouts[li].strides[bd.BindPoint];
-        if (known == bd.NumSamples) continue;
+        if (known == bd.NumSamples) return;
         if (known != 0) {
             HE_CORE_WARN("D3D12Device: 布局 {} 的 binding {} 在不同着色器里步长不一致（{} → {}）",
                          li + 1, bd.BindPoint, known, bd.NumSamples);
@@ -1878,6 +2059,12 @@ void D3D12Device::SetResourceDebugName(IRHITexture* resource, const char* name) 
 void D3D12Device::SetResourceDebugName(IRHIPipelineState* resource, const char* name) {
     if (auto* p = static_cast<D3D12PipelineState*>(resource); p && p->GetPso() && name)
         p->GetPso()->SetName(Utf8ToWide(name).c_str());
+}
+
+// 加速结构没有独立的 D3D12 对象，名字只能打在它的存储资源上（PIX / DRED 里显示的就是这块缓冲）
+void D3D12Device::SetResourceDebugName(IRHIAccelerationStructure* resource, const char* name) {
+    if (auto* as = static_cast<D3D12AccelerationStructure*>(resource); as && as->GetResource() && name)
+        as->GetResource()->SetName(Utf8ToWide(name).c_str());
 }
 
 float D3D12Device::GetTimestampPeriod() {
@@ -2267,6 +2454,7 @@ void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, Desc
     auto& s = m_DescriptorSets[static_cast<size_t>(set - 1)];
     // 记下这个 binding 写的是哪个缓冲：布局之后从 PSO 反射学到（或修正）步长时据此重写
     s.textures.erase(binding);   // 同一 binding 改写为缓冲：清掉旧的纹理记录
+    s.textureTypes.erase(binding);
     s.subresources.erase(binding);
     D3D12Set::BufferBinding& bb = s.buffers[binding];
     bb.resource     = b->GetResource();
@@ -2368,6 +2556,7 @@ void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, Desc
     auto* tex = static_cast<D3D12Texture*>(texture);
     // 记下该 binding 的纹理：绘制/派发前由命令列表转到着色器可读（或 UAV）状态
     m_DescriptorSets[static_cast<size_t>(set - 1)].textures[binding] = tex->GetResource();
+    m_DescriptorSets[static_cast<size_t>(set - 1)].textureTypes[binding] = type;   // 光追按类型推断用途
     m_DescriptorSets[static_cast<size_t>(set - 1)].subresources.erase(binding);   // 整资源绑定
     m_DescriptorSets[static_cast<size_t>(set - 1)].buffers.erase(binding);   // 同一 binding 改写为纹理
     // 描述符写在「该 set 的基址 + binding」：绑定时按 space 绑 set 的区段基址，
@@ -2416,7 +2605,34 @@ void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, Desc
     }
 }
 
-void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle, u32, DescriptorType, IRHIAccelerationStructure*) {}
+// 加速结构绑定：写一条 SRV 描述符，ViewDimension 为 RAYTRACING_ACCELERATION_STRUCTURE，
+// pResource 必须为 nullptr（D3D12 的规定：AS 不是资源，位置直接填 GPU 地址）。
+void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, DescriptorType type,
+                                      IRHIAccelerationStructure* as) {
+    (void)type;
+    if (set == kInvalidSet || set > m_DescriptorSets.size() || !as) return;
+    if (!EnsureDescriptorHeaps()) return;
+
+    auto* d3dAs = static_cast<D3D12AccelerationStructure*>(as);
+    auto& s = m_DescriptorSets[static_cast<size_t>(set - 1)];
+    // 【必须清掉同一 binding 的旧记录】命令列表在绘制 / 派发前会按 GetSetResource 反查
+    // 每个 binding 的资源去补状态转换；加速结构恒处于 RAYTRACING_ACCELERATION_STRUCTURE
+    // 状态、**不能**被转换，因此这里不登记它 —— 查不到即跳过（见手册 T5.4）。
+    s.buffers.erase(binding);
+    s.textures.erase(binding);
+    s.textureTypes.erase(binding);
+    s.subresources.erase(binding);
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+    srv.Format                  = DXGI_FORMAT_UNKNOWN;
+    srv.ViewDimension           = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.RaytracingAccelerationStructure.Location = d3dAs->GetDeviceAddress();
+
+    const D3D12_CPU_DESCRIPTOR_HANDLE dst = SetWriteHandle(s, s.baseSlot + binding);
+    if (!dst.ptr) return;
+    m_Device->CreateShaderResourceView(nullptr, &srv, dst);
+}
 // 【关键】引擎用「图像视图句柄」更新描述符（例如把 HDR 纹理绑到 set=0/bind=0
 // 的 u_HDRTexture_0）。此前这里是空实现，导致该槽永远是空描述符 ——
 // 色调映射因此采样到空纹理，输出全黑（RenderDoc 实测 d.resource = ResourceId::0）。
@@ -2436,6 +2652,7 @@ void D3D12Device::UpdateDescriptorSetWithImageView(DescriptorSetHandle set, u32 
     if (!EnsureDescriptorHeaps()) return;
     auto& s = m_DescriptorSets[static_cast<size_t>(set - 1)];
     s.textures[binding] = res;   // 同上：供绘制前补状态转换
+    s.textureTypes[binding] = type;   // 光追回退路径按描述符类型推断读 / 写
     s.buffers.erase(binding);
     // 逐 mip / 逐层视图：记下子资源下标（D3D12CalcSubresource：mip + 层 × mip 数；3D 纹理只有 mip 一维）
     if (vi->subresource) {

@@ -1,4 +1,4 @@
-﻿// ============================================================================
+// ============================================================================
 //  D3D12CommandList.h —— D3D12 命令列表
 //
 //  设计要点：
@@ -118,11 +118,18 @@ public:
     void CopyTextureToBuffer(IRHITexture* src, IRHIBuffer* dst, u32 x = 0, u32 y = 0,
                              u32 width = 0, u32 height = 0, u64 bufferOffset = 0) override;
 
-    // ---- 光追（阶段 4）----
-    void BuildBLAS(IRHIAccelerationStructure*, IRHIBuffer*, const BLASBuildDesc&, bool = false) override {}
-    void BuildTLAS(IRHIAccelerationStructure*, IRHIBuffer*, IRHIBuffer*, u32, bool = false) override {}
-    void BindRTPipeline(IRHIRayTracingPipelineState*) override {}
-    void TraceRays(const SBTDesc&, u32, u32, u32 = 1) override {}
+    // ---- 光追（T5：DXR 后端）----
+    //
+    //  构建：BuildRaytracingAccelerationStructure（ID3D12GraphicsCommandList4），
+    //  加速结构与 scratch 都是 DEFAULT 堆缓冲，构建前后发 UAV 屏障；加速结构本身
+    //  **永远**停在 RAYTRACING_ACCELERATION_STRUCTURE 状态，不做状态转换。
+    //  发射：SetPipelineState1 + DispatchRays。
+    void BuildBLAS(IRHIAccelerationStructure* blas, IRHIBuffer* scratchBuffer,
+                   const BLASBuildDesc& desc, bool update = false) override;
+    void BuildTLAS(IRHIAccelerationStructure* tlas, IRHIBuffer* scratchBuffer,
+                   IRHIBuffer* instanceBuffer, u32 instanceCount, bool update = false) override;
+    void BindRTPipeline(IRHIRayTracingPipelineState* rtPSO) override;
+    void TraceRays(const SBTDesc& sbt, u32 width, u32 height, u32 depth = 1) override;
 
     // ---- 队列归属（Vulkan 专有，D3D12 无对应概念）----
     void QueueOwnershipTransfer(IRHITexture*, QueueType, QueueType, ResourceState, ResourceState) override {}
@@ -220,12 +227,18 @@ private:
 
     /// 是否计算队列上的列表（COMPUTE 类型列表只认计算可用的资源状态）
     bool IsComputeQueueList() const { return m_QueueType == QueueType::Compute; }
+    /// 取当前列表的 DXR 接口（ID3D12GraphicsCommandList4）；不支持时返回空
+    ID3D12GraphicsCommandList4* GetList4();
+    /// 光追没有普通 PSO 的 DXIL 反射可用时，按描述符集里记录的类型保守转换资源状态：
+    /// 纹理按 StorageImage→UAV / 其它→可读；缓冲按 StorageBuffer→可读（RT 里写 SSBO 极少）。
+    void EnsureRTSetStatesByType();
+    /// 光追管线（BindRTPipeline 设置，SetPipeline 清空）：非空表示当前绑定的是 RT 状态对象
+    class D3D12RayTracingPipelineState* m_RtPipeline = nullptr;
     /// 着色器可读状态：图形列表为 PIXEL | NON_PIXEL，计算列表只能用 NON_PIXEL_SHADER_RESOURCE
     D3D12_RESOURCE_STATES ShaderReadState() const;
     /// 把目标状态过滤成本列表可用的状态：计算列表去掉 PIXEL_SHADER_RESOURCE 位；
     /// 过滤后仍含图形专用位（渲染目标 / 深度）时返回 false，调用方应跳过该转换
-    bool FilterStateForQueue(D3D12_RESOURCE_STATES& state) const;
-    /// 取纹理当前状态作为本列表屏障的 StateBefore：计算列表遇到图形专用状态时，
+    bool FilterStateForQueue(D3D12_RESOURCE_STATES& state) const;    /// 取纹理当前状态作为本列表屏障的 StateBefore：计算列表遇到图形专用状态时，
     /// 记一条交接转换（见 m_QueueHandoffs），把设备登记的状态改为计算可用状态并返回它
     D3D12_RESOURCE_STATES UsableTextureState(ID3D12Resource* res);
     /// 本次录制累计的交接转换，由设备在提交前放到图形队列上执行
@@ -249,6 +262,9 @@ private:
     ComPtr<ID3D12GraphicsCommandList> m_List;
     /// 同一列表的 6 号接口（DispatchMesh），运行时不支持时为空
     ComPtr<ID3D12GraphicsCommandList6> m_List6;
+    /// 同一列表的 4 号接口（DXR：BuildRaytracingAccelerationStructure / DispatchRays），
+    /// 懒取（与 m_List 同步轮换，Begin 时重置）
+    ComPtr<ID3D12GraphicsCommandList4> m_List4;
     /// 待提交的提交包（渲染线程入队、提交线程出队）
     std::deque<SubmitPacket>          m_SubmitPackets;
     std::mutex                        m_SubmitPacketMutex;

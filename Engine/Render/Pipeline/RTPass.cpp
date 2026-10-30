@@ -106,7 +106,10 @@ bool RTPass::Initialize(rhi::IRHIDevice* device,
     {
         rhi::BufferDesc sb;
         sb.size  = tlasSizes.buildScratchSize;
-        sb.usage = rhi::BufferUsage::Storage | rhi::BufferUsage::AccelerationStruct;
+        // RayTracingScratch：告诉后端这是构建临时缓冲（D3D12 要求 DEFAULT 堆 + UAV，不可映射），
+        // 与下面只被 GPU 读取的实例缓冲区分开（见 Engine/RHI/RHI/Types.h 的注释）
+        sb.usage = rhi::BufferUsage::Storage | rhi::BufferUsage::AccelerationStruct
+                 | rhi::BufferUsage::RayTracingScratch;
         m_TLASScratch = device->CreateBufferHandle(sb);   // A-3
     }
     {
@@ -354,7 +357,9 @@ void RTPass::BuildAS(rhi::IRHICommandList* cmd, const FrameSceneSnapshot& snapsh
         if (!entry.scratchBuffer || entry.scratchBuffer->GetSize() < sizes.buildScratchSize) {
             rhi::BufferDesc sb;
             sb.size  = sizes.buildScratchSize;
-            sb.usage = rhi::BufferUsage::Storage | rhi::BufferUsage::AccelerationStruct;
+            // 同上：构建临时缓冲（D3D12 下必须是 DEFAULT 堆 + ALLOW_UNORDERED_ACCESS）
+            sb.usage = rhi::BufferUsage::Storage | rhi::BufferUsage::AccelerationStruct
+                     | rhi::BufferUsage::RayTracingScratch;
             entry.scratchBuffer = m_Device->CreateBuffer(sb);
         }
 

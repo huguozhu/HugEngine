@@ -1,4 +1,4 @@
-﻿# RHI — Rendering Hardware Interface (L2)
+# RHI — Rendering Hardware Interface (L2)
 # Phase 1 · Weeks 5-8
 
 add_library(HugEngineRHI STATIC)
@@ -115,6 +115,8 @@ endif()
             D3D12/D3D12Device.cpp
             D3D12/D3D12Resources.h
             D3D12/D3D12Resources.cpp
+            D3D12/D3D12RayTracing.h
+            D3D12/D3D12RayTracing.cpp
             D3D12/D3D12SwapChain.h
             D3D12/D3D12SwapChain.cpp
             D3D12/D3D12CommandList.h

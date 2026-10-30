@@ -1,4 +1,4 @@
-﻿// ============================================================================
+// ============================================================================
 //  D3D12Device.h —— D3D12 设备（IRHIDevice 的实现）
 //
 //  阶段 0 的范围：设备创建、命令队列、围栏、交换链、Buffer/Texture/Sampler 创建。
@@ -58,12 +58,18 @@ public:
     std::unique_ptr<IRHIPipelineState> CreatePipelineState(const PipelineStateDesc& desc) override;
     IRHIBindlessHeap* GetBindlessHeap() override { return &m_BindlessHeap; }
 
-    // ---- 光追（阶段 4）----
-    std::unique_ptr<IRHIAccelerationStructure> CreateBLAS(const BLASBuildDesc&) override { return nullptr; }
-    std::unique_ptr<IRHIAccelerationStructure> CreateTLAS(const TLASBuildDesc&) override { return nullptr; }
-    ASBuildSizes GetBLASBuildSizes(const BLASBuildDesc&) override { return {}; }
-    ASBuildSizes GetTLASBuildSizes(u32) override { return {}; }
-    std::unique_ptr<IRHIRayTracingPipelineState> CreateRTPipelineState(const RTPipelineStateDesc&) override { return nullptr; }
+    // ---- 光追（T5：DXR 后端）----
+    //
+    //  实现说明见 D3D12RayTracing.h / .cpp：
+    //    · 加速结构 = DEFAULT 堆缓冲（ALLOW_UNORDERED_ACCESS，状态恒为
+    //      RAYTRACING_ACCELERATION_STRUCTURE）；
+    //    · 尺寸查询 = ID3D12Device5::GetRaytracingAccelerationStructurePrebuildInfo；
+    //    · RT 管线 = ID3D12StateObject（DXIL 库整体导出 + 命中组）。
+    std::unique_ptr<IRHIAccelerationStructure>   CreateBLAS(const BLASBuildDesc& desc) override;
+    std::unique_ptr<IRHIAccelerationStructure>   CreateTLAS(const TLASBuildDesc& desc) override;
+    ASBuildSizes GetBLASBuildSizes(const BLASBuildDesc& desc) override;
+    ASBuildSizes GetTLASBuildSizes(u32 maxInstanceCount) override;
+    std::unique_ptr<IRHIRayTracingPipelineState> CreateRTPipelineState(const RTPipelineStateDesc& desc) override;
 
     // ---- 描述符集 ----
     //
@@ -221,6 +227,14 @@ public:
     /// PSO 创建时调用：从着色器反射里记下各结构化缓冲的真实步长，按「布局 + binding」存放
     ///（register space S 对应 layouts[S]）；若某 binding 的步长变化，重写该布局下已写入的缓冲描述符
     void NoteSetLayoutStrides(ID3D12ShaderReflection* refl, const std::vector<DescriptorSetLayoutHandle>& layouts);
+    /// 光追库反射版：与 NoteSetLayoutStrides 同一口径，只是库要逐函数遍历（ID3D12FunctionReflection）。
+    /// 不做这一步，光追着色器里的 StructuredBuffer SRV 步长会退化成 4，
+    /// GPU 验证报 id=1387「Structured buffer byte stride mismatch」（实测 PT 的 g_Lights）。
+    void NoteSetLayoutStridesFromLibrary(ID3D12LibraryReflection* libRefl,
+                                         const std::vector<DescriptorSetLayoutHandle>& layouts);
+    /// 按一条「着色器输入绑定」登记结构化缓冲步长（上面两个入口共用）
+    void NoteStrideForBinding(const D3D12_SHADER_INPUT_BIND_DESC& bd,
+                              const std::vector<DescriptorSetLayoutHandle>& layouts);
     u32  LookupStructStride(u32 registerIndex) const;
 
     bool WriteBindlessSrv(u32 slot, IRHITexture* texture);
@@ -261,6 +275,24 @@ public:
     /// subresource 非空时输出绑定的子资源下标（整资源绑定为 D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES）
     ID3D12Resource* GetSetResource(DescriptorSetHandle set, u32 binding, bool& isBuffer,
                                    UINT* subresource = nullptr) const;
+    /// 遍历某个描述符集里登记的全部资源绑定（光追无反射时按类型保守转换用）。
+    /// fn 的签名：fn(ID3D12Resource* res, bool isBuffer, bool isUav, u32 binding)
+    template <typename Fn>
+    void ForEachSetBinding(DescriptorSetHandle set, Fn&& fn) const {
+        if (set == kInvalidSet || set > m_DescriptorSets.size()) return;
+        const auto& s = m_DescriptorSets[static_cast<size_t>(set - 1)];
+        for (const auto& [binding, bb] : s.buffers) {
+            if (!bb.resource) continue;
+            // 缓冲在 RT 里几乎都是只读 SSBO：按「可读」处理（写了 SSBO 的光追 pass 需要反射）
+            fn(bb.resource.Get(), true, false, binding);
+        }
+        for (const auto& [binding, res] : s.textures) {
+            if (!res) continue;
+            const auto it = s.textureTypes.find(binding);
+            const bool uav = (it != s.textureTypes.end() && it->second == DescriptorType::StorageImage);
+            fn(res.Get(), false, uav, binding);
+        }
+    }
     /// 该 set 在描述符集采样器堆中的起始槽位（采样器槽位 = 该值 + binding）
     u32                              GetSetSamplerBase(DescriptorSetHandle set) const;
     /// UAV 区域相对 baseSlot 的偏移（= 该 set 的 slotCount）
@@ -362,6 +394,22 @@ public:
     RHISamplerHandle       CreateSamplerHandle(const SamplerDesc& desc) override;
     void                   DestroySamplerHandle(RHISamplerHandle handle) override;
     IRHISampler*           ResolveSampler(RHISamplerHandle handle) const override;
+
+    // ---- 光追句柄（T5）：与 Buffer / Texture 同一套 HandleTable 写法 ----
+    //  引擎通过 `CreateBLASHandle` / `CreateTLASHandle` / `CreateRTPipelineStateHandle`
+    //  拿句柄，再用 `Resolve*` 换回接口指针；句柄失效时 Resolve 返回空。
+    RHIAccelerationStructureHandle CreateBLASHandle(const BLASBuildDesc& desc) override;
+    RHIAccelerationStructureHandle CreateTLASHandle(const TLASBuildDesc& desc) override;
+    IRHIAccelerationStructure*     ResolveAccelerationStructure(RHIAccelerationStructureHandle handle) const override;
+    void                           DestroyAccelerationStructureHandle(RHIAccelerationStructureHandle handle) override;
+    RHIRayTracingPipelineHandle    CreateRTPipelineStateHandle(const RTPipelineStateDesc& desc) override;
+    IRHIRayTracingPipelineState*   ResolveRTPipelineState(RHIRayTracingPipelineHandle handle) const override;
+    void                           DestroyRTPipelineStateHandle(RHIRayTracingPipelineHandle handle) override;
+    void SetResourceDebugName(IRHIAccelerationStructure* resource, const char* name) override;
+
+    /// ID3D12Device5（DXR 入口：CreateStateObject / GetRaytracingAccelerationStructurePrebuildInfo）。
+    /// 设备不支持 DXR 时为空，光追接口据此提前返回（而不是崩溃）。
+    ID3D12Device5* GetDevice5() const { return m_Device5.Get(); }
 
 private:
     /// 通用的槽位表（index 0 保留为无效）
@@ -639,6 +687,9 @@ private:   // register -> 元素字节数
         std::unordered_map<u32, BufferBinding> buffers;
         /// binding → 写入的纹理资源：绘制/派发前据此补状态转换
         std::unordered_map<u32, ComPtr<ID3D12Resource>> textures;
+        /// binding → 该纹理的描述符类型：光追没有可用反射时按类型保守推断用途
+        ///（StorageImage = UAV 写，其余 = 可读）
+        std::unordered_map<u32, DescriptorType> textureTypes;
         /// binding → 子资源下标：只记录经逐 mip / 逐层视图绑定的纹理（其余为整资源）
         std::unordered_map<u32, UINT> subresources;
     };
@@ -655,6 +706,9 @@ private:   // register -> 元素字节数
     HandleTable<IRHIBuffer>        m_Buffers;
     HandleTable<IRHITexture>       m_Textures;
     HandleTable<IRHIPipelineState> m_PipelineStates;
+    /// 光追对象的句柄表（T5）：加速结构与 RT 管线（与上面三张表同一写法）
+    HandleTable<IRHIAccelerationStructure>   m_AccelStructures;
+    HandleTable<IRHIRayTracingPipelineState> m_RTPipelines;
     /// PSO 限流队列：普通版（创建后交给调用方持有）与句柄版（创建后填充占位句柄）
     std::deque<PipelineStateDesc>                                     m_PendingPsoCreates;
     std::deque<std::pair<RHIPipelineStateHandle, PipelineStateDesc>> m_PendingPsoHandleCreates;
@@ -666,6 +720,9 @@ private:   // register -> 元素字节数
 
     ComPtr<IDXGIFactory4>       m_Factory;
     ComPtr<ID3D12Device>        m_Device;
+    /// DXR 入口（CreateStateObject / GetRaytracingAccelerationStructurePrebuildInfo）。
+    /// 取不到说明设备不支持光追，届时所有光追接口直接返回空
+    ComPtr<ID3D12Device5>       m_Device5;
     ComPtr<ID3D12CommandQueue>  m_Queue;
     ComPtr<ID3D12CommandQueue>  m_ComputeQueue;   // 异步计算队列（COMPUTE 类型，与图形队列并行执行）
     /// 提交路由（模式 2 由 RHIThread 注入）；为空时 Submit / Present 就地执行

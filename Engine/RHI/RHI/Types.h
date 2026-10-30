@@ -166,6 +166,12 @@ enum class BufferUsage : u32 {
     TransferSrc       = 1 << 6,
     TransferDst       = 1 << 7,
     ShaderBindingTable= 1 << 8,  // VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR（RT SBT 专用）
+    // 光追构建用的 scratch 缓冲（GPU 只写、CPU 从不访问）。
+    // 【为什么要单独一个位】引擎给 TLAS 实例缓冲也是 `Storage | AccelerationStruct`，
+    // 与 scratch 的用途位完全相同；而 D3D12 要求 scratch 必须放在 DEFAULT 堆且带
+    // ALLOW_UNORDERED_ACCESS，实例缓冲却必须 CPU 可写（UPLOAD 堆）。后端无法从用途位
+    // 区分二者，故由调用方显式标注。Vulkan 侧忽略该位（它本来就处处主机可见）。
+    RayTracingScratch = 1 << 9,
 };
 inline BufferUsage operator|(BufferUsage a, BufferUsage b) { return BufferUsage(u32(a) | u32(b)); }
 inline BufferUsage operator&(BufferUsage a, BufferUsage b) { return BufferUsage(u32(a) & u32(b)); }

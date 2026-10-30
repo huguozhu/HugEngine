@@ -1,9 +1,10 @@
-﻿// ============================================================================
+// ============================================================================
 //  D3D12CommandList.cpp —— D3D12 命令录制的实现
 // ============================================================================
 #include "D3D12CommandList.h"
 #include "D3D12Device.h"
 #include "D3D12Resources.h"
+#include "D3D12RayTracing.h"   // DXR：加速结构 / RT 状态对象 / 几何描述转换
 #include "D3D12SwapChain.h"
 #include "D3D12Converters.h"
 #include "Core/CVar.h"   // r.Debug.DrawMarker（与 Vulkan 后端共用的逐绘制标签开关）
@@ -191,6 +192,7 @@ void D3D12CommandList::Begin() {
         m_List = m_Lists[m_FrameSlot];
         m_List6.Reset();
         m_List.As(&m_List6);
+        m_List4.Reset();          // DXR 接口随列表轮换，懒取（GetList4）
     }
     if (m_SlotFence && m_SlotFence->GetCompletedValue() < m_SlotFenceValues[m_FrameSlot]) {
         HANDLE ev = CreateEventEx(nullptr, nullptr, 0, EVENT_ALL_ACCESS);
@@ -912,6 +914,7 @@ void D3D12CommandList::SetPipeline(IRHIPipelineState* pso) {
     // 结尾常为主列表「恢复」图形 PSO（如 GPU_Cull 末尾的 SetPipeline(GBuffer PSO)），这里忽略
     if (IsComputeQueueList() && pso && !static_cast<D3D12PipelineState*>(pso)->IsCompute()) return;
     m_Pipeline = static_cast<D3D12PipelineState*>(pso);
+    m_RtPipeline = nullptr;   // 切回普通图形 / 计算管线：不再处于光追状态对象绑定
     if (!m_List || !m_Pipeline) return;
     m_IsComputePipeline = m_Pipeline->IsCompute();
     // 【未在录制时只记状态】各样例初始化时会在命令列表 Begin 之前调一次 SetPipeline，
@@ -1080,7 +1083,8 @@ void D3D12CommandList::AfterDrawOrDispatch() {
 }
 
 void D3D12CommandList::EnsureBoundResourceStates() {
-    if (!m_List || !m_Device || !m_Pipeline) return;
+    // 光追状态对象没有普通 PSO，但仍要按库反射出来的资源用途补状态转换 ⇒ 允许 m_RtPipeline
+    if (!m_List || !m_Device || (!m_Pipeline && !m_RtPipeline)) return;
     if (m_IsBundle) {
         // bundle 不能发屏障：记下本次绘制的管线与绑定集（与上一条相同则不重复），由主列表执行前补转换
         BundleUsage u;
@@ -1095,7 +1099,21 @@ void D3D12CommandList::EnsureBoundResourceStates() {
     // 可读状态按队列取：计算列表上不能出现 PIXEL_SHADER_RESOURCE（见 ShaderReadState）
     const D3D12_RESOURCE_STATES kRead = ShaderReadState();
     m_BarrierScratch.clear();
-    const bool gfxPso = !m_IsComputePipeline;
+    // 只有真正的图形 PSO 才涉及渲染目标 / 深度附件（光追按计算管线的口径处理）
+    const bool gfxPso = m_Pipeline && !m_IsComputePipeline;
+
+    // 资源用途表：普通 PSO 用 DXIL 反射，光追状态对象用库反射，二者同一口径
+    const std::vector<D3D12ResourceUse>* uses = nullptr;
+    if (m_RtPipeline)      uses = &m_RtPipeline->GetResourceUses();
+    else if (m_Pipeline)   uses = &m_Pipeline->GetResourceUses();
+    if (!uses) return;
+    // 光追且库反射不可用：退回按描述符集里记录的类型保守转换（RT 里写 SSBO 的场景极少）
+    if (m_RtPipeline && uses->empty()) {
+        EnsureRTSetStatesByType();
+        if (!m_BarrierScratch.empty())
+            m_List->ResourceBarrier(static_cast<UINT>(m_BarrierScratch.size()), m_BarrierScratch.data());
+        return;
+    }
 
     // 当前绑着只读 DSV，但新的 PSO 要写深度：先切回可写 DSV
     if (m_DsvReadOnly && gfxPso && m_PassDsvRes && m_Pipeline->GetDepthWrite()) {
@@ -1124,7 +1142,7 @@ void D3D12CommandList::EnsureBoundResourceStates() {
     {
         struct Usage { bool read = false; bool uavWhole = false; UINT uavSub = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES; };
         std::vector<std::pair<ID3D12Resource*, Usage>> usages;
-        for (const auto& use : m_Pipeline->GetResourceUses()) {
+        for (const auto& use : *uses) {
             if (use.space >= 8u || m_BoundSets[use.space] == kInvalidSet) continue;
             bool isBuffer = false;
             UINT sub = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
@@ -1161,7 +1179,7 @@ void D3D12CommandList::EnsureBoundResourceStates() {
         }
     }
 
-    for (const auto& use : m_Pipeline->GetResourceUses()) {
+    for (const auto& use : *uses) {
         if (use.space >= 8u || m_BoundSets[use.space] == kInvalidSet) continue;
         bool isBuffer = false;
         ID3D12Resource* res = m_Device->GetSetResource(m_BoundSets[use.space], use.binding, isBuffer);
@@ -1239,7 +1257,7 @@ void D3D12CommandList::BufferBarrier(IRHIBuffer* buffer, ResourceState srcState,
 void D3D12CommandList::FlushRootArgs() {
     EmitDrawLabel();      // 逐绘制标签：插在本次绘制 / 派发的命令之前
     PrepareSetTables();   // 集内容变了要换快照：会更新 SRV/UAV 表并标脏根参数
-    if (!m_List || !m_Pipeline || !m_RootArgsDirty) return;
+    if (!m_List || (!m_Pipeline && !m_RtPipeline) || !m_RootArgsDirty) return;
     // 描述符表必须在 SetDescriptorHeaps 之后才能设置
     if (!m_HeapsSet && m_Device && m_Device->EnsureDescriptorHeaps()) {
         ID3D12DescriptorHeap* heaps[2] = { m_Device->GetCbvSrvUavHeap(), m_Device->GetSetSamplerHeap() };
@@ -1552,6 +1570,238 @@ void D3D12CommandList::DispatchIndirect(IRHIBuffer* buffer, u64 offset) {
     m_List->ExecuteIndirect(sig, 1, b->GetResource(), offset, nullptr, 0);
     AfterDrawOrDispatch();
     m_PushDirty = true;   // 同 Draw：常量槽已被本次派发消费
+}
+
+// ===========================================================================
+//  光追（T5 / DXR）
+//
+//  与 Vulkan 的差异（见 docs/计划实现功能/D3D12剩余任务实施指南.md T5.4 / T5.7）：
+//    · 加速结构与 scratch 都是普通缓冲：构建前把 scratch 转到 UNORDERED_ACCESS，
+//      构建后对加速结构发 UAV 屏障；加速结构本身**永远**停在
+//      RAYTRACING_ACCELERATION_STRUCTURE 状态，绝不参与状态转换。
+//    · 顶点 / 索引 / 实例缓冲按「构建输入」要求转到 NON_PIXEL_SHADER_RESOURCE
+//      （UPLOAD 堆上的缓冲 TransitionBuffer 会跳过：它们恒为 GENERIC_READ，本就只读）。
+// ===========================================================================
+ID3D12GraphicsCommandList4* D3D12CommandList::GetList4() {
+    if (!m_List) return nullptr;
+    if (!m_List4) m_List.As(&m_List4);   // 懒取：不支持 DXR 的运行时这里为空
+    return m_List4.Get();
+}
+
+void D3D12CommandList::BuildBLAS(IRHIAccelerationStructure* blas, IRHIBuffer* scratchBuffer,
+                                 const BLASBuildDesc& desc, bool update) {
+    if (m_StreamMode) return;   // 命令流模式不支持光追（流里没有 AS 构建命令）
+    if (!m_List || !blas) return;
+    auto* as = static_cast<D3D12AccelerationStructure*>(blas);
+    ID3D12GraphicsCommandList4* list4 = GetList4();
+    if (!list4) {
+        HE_CORE_ERROR("BuildBLAS: 当前命令列表不支持 DXR（ID3D12GraphicsCommandList4）");
+        return;
+    }
+
+    // 1. 几何描述：引擎的 RTGeometryDesc → D3D12 三角形几何
+    const u32 geoCount = static_cast<u32>(desc.geometries.size());
+    if (geoCount == 0) return;
+    std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> geos(geoCount);
+    for (u32 i = 0; i < geoCount; ++i) FillD3D12GeometryDesc(desc.geometries[i], geos[i]);
+
+    // 2. 构建输入缓冲 → 非像素着色器可读（AS 构建按 SRV 读取顶点 / 索引）
+    for (const auto& g : desc.geometries) {
+        if (auto* vb = static_cast<D3D12Buffer*>(g.vertexBuffer))
+            TransitionBuffer(vb->GetResource(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        if (auto* ib = static_cast<D3D12Buffer*>(g.indexBuffer))
+            TransitionBuffer(ib->GetResource(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        if (auto* tb = static_cast<D3D12Buffer*>(g.transformBuffer))
+            TransitionBuffer(tb->GetResource(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    }
+
+    // 3. scratch → UNORDERED_ACCESS
+    D3D12_GPU_VIRTUAL_ADDRESS scratchAddr = 0;
+    if (auto* sb = static_cast<D3D12Buffer*>(scratchBuffer)) {
+        TransitionBuffer(sb->GetResource(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        scratchAddr = sb->GetGpuAddress();
+    }
+    if (scratchAddr == 0) {
+        HE_CORE_ERROR("BuildBLAS: 缺少 scratch 缓冲（构建被跳过）");
+        return;
+    }
+
+    // 4. 构建
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd{};
+    bd.DestAccelerationStructureData    = as->GetDeviceAddress();
+    bd.ScratchAccelerationStructureData = scratchAddr;
+    bd.Inputs.Type           = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+    bd.Inputs.Flags          = ToD3D12ASBuildFlags(desc.flags);
+    bd.Inputs.DescsLayout    = D3D12_ELEMENTS_LAYOUT_ARRAY;
+    bd.Inputs.NumDescs       = geoCount;
+    bd.Inputs.pGeometryDescs = geos.data();
+    if (update) {
+        // 增量更新：读旧内容作为源（要求 AS 创建时带 ALLOW_UPDATE）
+        bd.Inputs.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE;
+        bd.SourceAccelerationStructureData = as->GetDeviceAddress();
+    }
+
+    list4->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
+
+    // 5. 加速结构写入完成：UAV 屏障（后续 TLAS 构建读它 / 光线遍历读它都要这条）
+    D3D12_RESOURCE_BARRIER ub{};
+    ub.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    ub.UAV.pResource = as->GetResource();
+    m_List->ResourceBarrier(1, &ub);
+}
+
+void D3D12CommandList::BuildTLAS(IRHIAccelerationStructure* tlas, IRHIBuffer* scratchBuffer,
+                                 IRHIBuffer* instanceBuffer, u32 instanceCount, bool update) {
+    if (m_StreamMode) return;
+    if (!m_List || !tlas || instanceCount == 0) return;
+    auto* as = static_cast<D3D12AccelerationStructure*>(tlas);
+    ID3D12GraphicsCommandList4* list4 = GetList4();
+    if (!list4) {
+        HE_CORE_ERROR("BuildTLAS: 当前命令列表不支持 DXR（ID3D12GraphicsCommandList4）");
+        return;
+    }
+
+    // 实例缓冲（引擎的 TLASInstanceDesc 与 D3D12_RAYTRACING_INSTANCE_DESC 逐字段一致，
+    // 可直接当实例数组用）→ 非像素着色器可读
+    D3D12_GPU_VIRTUAL_ADDRESS instanceAddr = 0;
+    if (auto* ib = static_cast<D3D12Buffer*>(instanceBuffer)) {
+        TransitionBuffer(ib->GetResource(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        instanceAddr = ib->GetGpuAddress();
+    }
+    if (instanceAddr == 0) {
+        HE_CORE_ERROR("BuildTLAS: 缺少实例缓冲（构建被跳过）");
+        return;
+    }
+    D3D12_GPU_VIRTUAL_ADDRESS scratchAddr = 0;
+    if (auto* sb = static_cast<D3D12Buffer*>(scratchBuffer)) {
+        TransitionBuffer(sb->GetResource(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        scratchAddr = sb->GetGpuAddress();
+    }
+    if (scratchAddr == 0) {
+        HE_CORE_ERROR("BuildTLAS: 缺少 scratch 缓冲（构建被跳过）");
+        return;
+    }
+
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd{};
+    bd.DestAccelerationStructureData    = as->GetDeviceAddress();
+    bd.ScratchAccelerationStructureData = scratchAddr;
+    bd.Inputs.Type        = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+    bd.Inputs.Flags       = ToD3D12ASBuildFlags(ASBuildFlags::PreferFastTrace);
+    bd.Inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+    bd.Inputs.NumDescs    = instanceCount;
+    bd.Inputs.InstanceDescs = instanceAddr;
+    if (update) {
+        bd.Inputs.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE;
+        bd.SourceAccelerationStructureData = as->GetDeviceAddress();
+    }
+
+    list4->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
+
+    D3D12_RESOURCE_BARRIER ub{};
+    ub.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    ub.UAV.pResource = as->GetResource();
+    m_List->ResourceBarrier(1, &ub);
+}
+
+void D3D12CommandList::BindRTPipeline(IRHIRayTracingPipelineState* rtPSO) {
+    if (m_StreamMode) return;
+    if (!m_List || !rtPSO) return;
+    auto* rt = static_cast<D3D12RayTracingPipelineState*>(rtPSO);
+    ID3D12GraphicsCommandList4* list4 = GetList4();
+    if (!list4 || !rt->GetStateObject()) return;
+
+    m_Pipeline   = nullptr;   // 光追没有普通 PSO：资源状态走 RT 状态对象的库反射
+    m_RtPipeline = rt;
+    // 根参数按「计算管线」的口径下发（SetComputeRoot*），与 Vulkan 的绑定路径一致
+    m_IsComputePipeline = true;
+    if (!m_Recording) { m_RootArgsDirty = true; return; }   // 录制开始前只记状态（同 SetPipeline）
+
+    list4->SetPipelineState1(rt->GetStateObject());
+    m_List->SetComputeRootSignature(rt->GetGlobalRootSignature());
+    m_RootArgsDirty = true;   // 设根签名会清空全部根参数，下一次派发前要重新下发
+}
+
+void D3D12CommandList::TraceRays(const SBTDesc& sbt, u32 width, u32 height, u32 depth) {
+    if (m_StreamMode) return;
+    if (!m_List || !m_RtPipeline || !sbt.buffer) return;
+    ID3D12GraphicsCommandList4* list4 = GetList4();
+    if (!list4) return;
+
+    // 与 Dispatch 一致：先按反射补资源状态、再下发根参数（描述符表 / 推送常量）
+    EnsureBoundResourceStates();
+    FlushRootArgs();
+
+    // SBT 布局由 RTPass::BuildSBT 决定：RayGen → Miss → Hit → Callable 依次相接，
+    // 每段大小取「下一段起点 − 本段起点」，最后一段取「缓冲大小 − 起点」（手册 T5.7）。
+    const u64 va      = sbt.buffer->GetDeviceAddress();
+    const u64 bufSize = static_cast<u64>(sbt.buffer->GetSize());
+    D3D12_DISPATCH_RAYS_DESC d{};
+    d.RayGenerationShaderRecord = { va + sbt.rayGen.handleOffset,
+                                    sbt.rayGen.stride ? sbt.rayGen.stride : 0 };
+    if (sbt.miss.stride && sbt.hit.handleOffset >= sbt.miss.handleOffset) {
+        d.MissShaderTable.StartAddress  = va + sbt.miss.handleOffset;
+        d.MissShaderTable.SizeInBytes   = sbt.hit.handleOffset - sbt.miss.handleOffset;
+        d.MissShaderTable.StrideInBytes = sbt.miss.stride;
+    }
+    if (sbt.hit.stride && sbt.callable.handleOffset >= sbt.hit.handleOffset) {
+        d.HitGroupTable.StartAddress  = va + sbt.hit.handleOffset;
+        d.HitGroupTable.SizeInBytes   = sbt.callable.handleOffset - sbt.hit.handleOffset;
+        d.HitGroupTable.StrideInBytes = sbt.hit.stride;
+    }
+    if (sbt.callable.stride && sbt.callable.handleOffset < bufSize) {
+        d.CallableShaderTable.StartAddress  = va + sbt.callable.handleOffset;
+        d.CallableShaderTable.SizeInBytes   = bufSize - sbt.callable.handleOffset;
+        d.CallableShaderTable.StrideInBytes = sbt.callable.stride;
+    }
+    d.Width  = width;
+    d.Height = height;
+    d.Depth  = depth ? depth : 1;
+
+    list4->DispatchRays(&d);
+    AfterDrawOrDispatch();
+    m_PushDirty = true;   // 常量槽已被本次发射消费（同 Dispatch）
+}
+
+// 光追回退路径：库反射不可用时，按描述符集里记录的描述符类型推断「读 / 写」并补状态转换。
+// 只处理 DEFAULT / CUSTOM 堆上的资源（UPLOAD / READBACK 堆的缓冲不能转状态）。
+void D3D12CommandList::EnsureRTSetStatesByType() {
+    if (!m_List || !m_Device) return;
+    const D3D12_RESOURCE_STATES kRead = ShaderReadState();
+    std::vector<ID3D12Resource*> handled;   // 同一资源在多个 set 里绑定时只转一次
+
+    auto request = [&](ID3D12Resource* res, bool isBuffer, bool uav) {
+        if (!res) return;
+        if (std::find(handled.begin(), handled.end(), res) != handled.end()) return;
+        D3D12_HEAP_PROPERTIES hp{};
+        if (FAILED(res->GetHeapProperties(&hp, nullptr)) ||
+            (hp.Type != D3D12_HEAP_TYPE_DEFAULT && hp.Type != D3D12_HEAP_TYPE_CUSTOM)) return;
+        // 正作为本 pass 附件的资源不能同时转成可读
+        if (std::find(m_PassAttachments.begin(), m_PassAttachments.end(), res) != m_PassAttachments.end()) return;
+        handled.push_back(res);
+
+        const D3D12_RESOURCE_STATES cur  = isBuffer ? GetBufferState(res) : UsableTextureState(res);
+        const D3D12_RESOURCE_STATES want = uav ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS : kRead;
+        if (cur == want || (!uav && (cur & kRead) == kRead)) return;
+        // 缓冲首次使用由 COMMON 隐式提升（与 EnsureBoundResourceStates 同一口径）
+        if (isBuffer && cur == D3D12_RESOURCE_STATE_COMMON) { m_BufferStates[res] = want; return; }
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition.pResource   = res;
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = cur;
+        b.Transition.StateAfter  = want;
+        m_BarrierScratch.push_back(b);
+        if (isBuffer) m_BufferStates[res] = want;
+        else          m_Device->SetResourceState(res, want);
+    };
+
+    for (u32 i = 0; i < 8u; ++i) {
+        const DescriptorSetHandle set = m_BoundSets[i];
+        if (set == kInvalidSet) continue;
+        m_Device->ForEachSetBinding(set, [&](ID3D12Resource* res, bool isBuffer, bool uav, u32) {
+            request(res, isBuffer, uav);
+        });
+    }
 }
 
 void D3D12CommandList::PipelineBarrier(PipelineStage srcStage, PipelineStage dstStage,
