@@ -261,10 +261,16 @@ public:
 // --- Global device access ---
 IRHIDevice*                     GetDevice();
 void                            SetDevice(IRHIDevice* device);
+/// 按后端创建设备。所请求的后端未编译进本构建、尚未实现或初始化失败时，
+/// 打印中文原因后**直接退出进程**（返回码 1）—— 调用方（各样例）不检查空指针，
+/// 返回空只会在下一行解引用时崩溃，不如在这里给出明确原因。
 std::unique_ptr<IRHIDevice>     CreateDevice(Backend backend);
 
+/// 后端的可读名称（日志用），如 "Vulkan" / "D3D12" / "D3D11"
+const char*                     GetBackendName(Backend backend);
+
 /// 从环境变量 `HE_RHI_BACKEND` 解析要使用的后端（大小写不敏感）。
-/// 取值：`vulkan`（默认）/ `d3d12`。无法识别时回退到 Vulkan 并打印警告。
+/// 取值：`vulkan`（默认）/ `d3d12`（或 `dx12`）/ `d3d11`（或 `dx11`）。无法识别时回退到 Vulkan 并打印警告。
 /// 用途：让所有样例统一支持 `set HE_RHI_BACKEND=d3d12` 切换后端，
 /// 而不必每个样例各写一份解析逻辑。
 Backend ResolveBackendFromEnv();

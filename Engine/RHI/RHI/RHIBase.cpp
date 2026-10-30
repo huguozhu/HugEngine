@@ -30,7 +30,7 @@ IRHIDevice::~IRHIDevice() = default;
 
 void IRHIDevice::Initialize(const DeviceInitDesc& desc) {
     HE_CORE_INFO("Initializing RHI device...");
-    HE_CORE_INFO("  Backend: Vulkan");
+    HE_CORE_INFO("  Backend: {}", GetBackendName(GetBackend()));
     HE_CORE_INFO("  Adapter: {}", desc.preferredAdapter >= 0
         ? std::to_string(desc.preferredAdapter) : "default");
 }
@@ -51,17 +51,39 @@ void IRHIDevice::SetResourceDebugName(IRHIAccelerationStructure*, const char*) {
 //  放在后端无关的 RHIBase.cpp 里（原先写在 VulkanDevice.cpp，导致 D3D 后端
 //  依附于 Vulkan 的编译开关）。每个后端由各自的 HE_RHI_* 宏决定是否参与。
 // ---------------------------------------------------------------------------
+const char* GetBackendName(Backend backend) {
+    switch (backend) {
+        case Backend::Vulkan: return "Vulkan";
+        case Backend::D3D12:  return "D3D12";
+        case Backend::D3D11:  return "D3D11";
+        case Backend::Metal:  return "Metal";
+        case Backend::WebGPU: return "WebGPU";
+        default:              return "Unknown";
+    }
+}
+
+/// 设备无法创建时的统一出口：打印原因后退出进程（见 RHI.h 中 CreateDevice 的说明）
+[[noreturn]] static void FailCreateDevice(Backend backend, const char* reason) {
+    HE_CORE_ERROR("CreateDevice: 无法创建 {} 设备：{}。进程退出。", GetBackendName(backend), reason);
+    std::exit(EXIT_FAILURE);
+}
+
 std::unique_ptr<IRHIDevice> CreateDevice(Backend backend) {
 #if defined(HE_RHI_D3D12)
     // D3D12 后端：与 Vulkan 并列，接口完全一致（IRHIDevice）
     if (backend == Backend::D3D12) {
         auto device = std::make_unique<d3d12::D3D12Device>();
         if (!device->Initialize()) {
-            HE_CORE_ERROR("CreateDevice: D3D12 设备初始化失败");
-            return nullptr;
+            FailCreateDevice(backend, "设备初始化失败");
         }
         GetThreadAffinity().Claim();
         return device;
+    }
+#endif
+#if defined(HE_RHI_D3D11)
+    // D3D11 后端：实现中（见 docs/计划实现功能/D3D11后端实现规划.md 的 M2）
+    if (backend == Backend::D3D11) {
+        FailCreateDevice(backend, "D3D11 后端尚未实现");
     }
 #endif
 #if defined(HE_RHI_VULKAN)
@@ -73,8 +95,7 @@ std::unique_ptr<IRHIDevice> CreateDevice(Backend backend) {
         return device;
     }
 #endif
-    HE_CORE_ERROR("CreateDevice: 后端 {} 未编译进本构建", static_cast<int>(backend));
-    return nullptr;
+    FailCreateDevice(backend, "该后端未编译进本构建");
 }
 
 // ---------------------------------------------------------------------------
@@ -93,6 +114,14 @@ Backend ResolveBackendFromEnv() {
         return Backend::D3D12;
 #else
         HE_CORE_WARN("HE_RHI_BACKEND=d3d12 只在 Windows 可用，回退 Vulkan");
+        return Backend::Vulkan;
+#endif
+    }
+    if (s == "d3d11" || s == "dx11") {
+#if defined(_WIN32)
+        return Backend::D3D11;
+#else
+        HE_CORE_WARN("HE_RHI_BACKEND=d3d11 只在 Windows 可用，回退 Vulkan");
         return Backend::Vulkan;
 #endif
     }

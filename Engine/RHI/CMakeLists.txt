@@ -145,6 +145,17 @@ endif()
         message(STATUS "D3D12 backend: ENABLED")
     endif()
 
+    # ========================================================================
+    #  D3D11 后端（Windows 专用，实现中）
+    #
+    #  由根 CMakeLists 的 HUGENGINE_RHI_D3D11 选项控制；实现放在 Engine/RHI/D3D11/。
+    #  目前只定义 HE_RHI_D3D11，CreateDevice(Backend::D3D11) 会提示“尚未实现”并退出。
+    # ========================================================================
+    if(WIN32 AND HUGENGINE_RHI_D3D11)
+        target_compile_definitions(HugEngineRHI PUBLIC HE_RHI_D3D11)
+        message(STATUS "D3D11 backend: ENABLED (实现中)")
+    endif()
+
 # ---------------------------------------------------------------------------
 # 把 dxcompiler.dll 复制到输出目录：D3D12 后端在运行期用 IDxcUtils::CreateReflection
 # 读取结构化缓冲的元素大小（StructuredBuffer<T> 的 SRV stride 必须等于 sizeof(T)）。

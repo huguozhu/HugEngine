@@ -86,6 +86,7 @@ constexpr u32 kStageMaskCallable      = 0x2000;  // Callable Shader
 enum class Backend : u8 {
     Vulkan,
     D3D12,
+    D3D11,      // Windows 专用；SM 5.0 / DXBC，无 bindless、无 mesh shader
     Metal,
     WebGPU,
     Count
