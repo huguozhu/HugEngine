@@ -297,7 +297,20 @@ public:
     void           SignalFenceOnQueue(QueueType queue, RHIFenceHandle fence, u64 value) override;
     void           WaitFenceOnQueue(QueueType queue, RHIFenceHandle fence, u64 value) override;
 
+    /// 提交入口：有提交路由（模式 2）时交给路由，由 RHI 线程稍后调用 ExecuteSubmit；否则就地执行
     void Submit(IRHICommandList* cmdList, RHICommandList* stream = nullptr) override;
+
+    // ---- 提交路由（模式 2：RHI 线程是唯一提交者，见 RHI/SubmitRouter.h）----
+    void           SetSubmitRouter(ISubmitRouter* router) override { m_SubmitRouter = router; }
+    ISubmitRouter* GetSubmitRouter() const override { return m_SubmitRouter; }
+    /// 绕过路由真正提交：流模式列表把命令流回放到影子列表后提交；普通列表直接提交
+    ///（stream 非空时，命令流回放到影子列表、紧随该列表之后提交）
+    void ExecuteSubmit(IRHICommandList* cmdList, RHICommandList* stream) override;
+    /// 绕过路由真正呈现：imageIndex 为渲染线程登记的后缓冲序号，waitSemaphore 携带渲染线程
+    /// 记下的后缓冲状态（D3D12 没有呈现信号量，见 D3D12SwapChain::Present）
+    void ExecutePresent(IRHISwapChain* swapChain, u32 imageIndex, void* waitSemaphore, bool vsync) override;
+    /// 真正把一个已打包的命令列表提交到队列（取出它最早的提交包）
+    void SubmitNow(class D3D12CommandList* cl);
     void SubmitAll(Span<IRHICommandList*> cmdLists) override;
 
     // ---- 内部访问（供 CommandList / SwapChain 使用，非 RHI 接口）----
@@ -537,6 +550,9 @@ private:
 private:
 private:   // register -> 元素字节数
     std::unordered_map<UINT64, ViewInfo> m_ViewResources;
+    /// m_ResStates / m_ViewResources 的锁：模式 2 + 命令流模式下 RHI 线程回放主列表、渲染线程
+    /// 同时录制异步计算列表与创建资源，两边都会读写这两张表（元素地址在插入时不变，查找结果可在锁外使用）
+    mutable std::mutex                   m_StateMutex;
     /// 缓冲 GPU 地址登记表：起始地址 → (大小, 资源)。缓冲可能在任意线程创建 / 销毁，加锁
     std::map<D3D12_GPU_VIRTUAL_ADDRESS, std::pair<u64, ID3D12Resource*>> m_BufferAddrs;
     mutable std::mutex                                                     m_BufferAddrMutex;
@@ -652,6 +668,14 @@ private:   // register -> 元素字节数
     ComPtr<ID3D12Device>        m_Device;
     ComPtr<ID3D12CommandQueue>  m_Queue;
     ComPtr<ID3D12CommandQueue>  m_ComputeQueue;   // 异步计算队列（COMPUTE 类型，与图形队列并行执行）
+    /// 提交路由（模式 2 由 RHIThread 注入）；为空时 Submit / Present 就地执行
+    ISubmitRouter*              m_SubmitRouter = nullptr;
+    /// 队列提交互斥：模式 2 下 RHI 线程（主列表）与渲染线程（异步计算列表）可能同时提交
+    std::mutex                  m_SubmitMutex;
+    /// 延迟释放列表的互斥：渲染线程析构命令列表时登记、提交线程提交时回收
+    std::mutex                  m_DeferredMutex;
+    /// 把命令流回放到影子列表并提交（流模式的提交、或普通列表附带的命令流）
+    void SubmitStreamReplay(class D3D12CommandList* src, const RHICommandList& stream);
 
     /// 异步计算的队列交接：把计算列表记下的交接转换（图形专用状态 → 计算可用状态）录到一条
     /// 小的图形列表上，提交到图形队列并打围栏，再让计算队列在 GPU 侧等待它完成

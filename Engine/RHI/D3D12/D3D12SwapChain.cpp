@@ -3,6 +3,7 @@
 // ============================================================================
 #include "D3D12SwapChain.h"
 #include "D3D12Device.h"
+#include "RHI/SubmitRouter.h"   // 模式 2：呈现交给提交路由
 #include "D3D12Converters.h"
 #include <cstdio>
 #include <cstdlib>
@@ -115,17 +116,45 @@ void D3D12SwapChain::Resize(u32 width, u32 height) {
 
 bool D3D12SwapChain::AcquireNextImage() {
     if (!m_SwapChain) return false;
-    m_Index = m_SwapChain->GetCurrentBackBufferIndex();
+    if (!m_PresentRouted) m_Index = m_SwapChain->GetCurrentBackBufferIndex();
     return true;
 }
 
+u32 D3D12SwapChain::RecordIndex() const {
+    if (m_PresentRouted || !m_SwapChain) return m_Index;
+    return m_SwapChain->GetCurrentBackBufferIndex();
+}
+
+// ---------------------------------------------------------------------------
+//  Present（渲染线程）
+//  模式 2 下真正的呈现在 RHI 线程上执行。渲染线程在这里记下本帧的后缓冲序号与状态，
+//  并立刻把自己的记录推进到下一帧（序号 +1、状态回到 PRESENT），之后录制下一帧时不再依赖
+//  RHI 线程何时呈现。D3D12 没有呈现信号量，状态借 RoutePresent 的 waitSemaphore 参数传过去。
+// ---------------------------------------------------------------------------
 void D3D12SwapChain::Present(bool vsync) {
     { static int s=0; if (s<4) { ++s; HE_CORE_INFO("[步骤] Present #{}", s); } }
+    if (!m_SwapChain) return;
+    if (m_Device) m_Device->FlushRetired();   // 回收延迟释放的资源（会 WaitIdle，只能在渲染线程做）
+    const u32 index = RecordIndex();
+    const D3D12_RESOURCE_STATES before = m_BackBufferState;
+    m_BackBufferState = D3D12_RESOURCE_STATE_PRESENT;
+    ISubmitRouter* router = m_Device ? m_Device->GetSubmitRouter() : nullptr;
+    if (router && router->RoutePresent(this, index, reinterpret_cast<void*>(static_cast<uintptr_t>(before)), vsync)) {
+        m_PresentRouted = true;
+        m_Index = (index + 1) % m_BufferCount;   // 翻转模型按顺序轮换后缓冲
+        return;
+    }
+    m_PresentRouted = false;
+    PresentNow(index, before, vsync);
+    m_Index = m_SwapChain->GetCurrentBackBufferIndex();
+}
+
+void D3D12SwapChain::PresentNow(u32 index, D3D12_RESOURCE_STATES before, bool vsync) {
     if (!m_SwapChain) return;
 
     // 帧计数 & 截图（截图必须在 Present 之前，见 CaptureIfRequested 的注释）
     ++m_FrameCount;
-    CaptureIfRequested();
+    CaptureIfRequested(index, before);
 
     // 帧计数日志：确认 D3D12 后端在真正出帧（每 60 帧打一次，避免刷屏）
     static u64 s_frames = 0;
@@ -135,8 +164,8 @@ void D3D12SwapChain::Present(bool vsync) {
     }
     const UINT flags = vsync ? 0u : DXGI_PRESENT_ALLOW_TEARING;
     // 【Present 前必须切回 PRESENT】否则下一次以 RTV 使用同一缓冲会被判非法
-    if (m_BackBufferState != D3D12_RESOURCE_STATE_PRESENT) {
-        ID3D12Resource* bb = GetCurrentBackBufferResource();
+    if (before != D3D12_RESOURCE_STATE_PRESENT) {
+        ID3D12Resource* bb = index < m_Buffers.size() ? m_Buffers[index].Get() : nullptr;
         ID3D12CommandQueue* q = m_Device ? m_Device->GetQueue() : nullptr;
         ID3D12Device* dev = m_Device ? m_Device->GetDevice() : nullptr;
         // 首次使用时创建常驻的分配器 / 列表 / 围栏
@@ -168,7 +197,7 @@ void D3D12SwapChain::Present(bool vsync) {
                 tb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
                 tb.Transition.pResource   = bb;
                 tb.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-                tb.Transition.StateBefore = m_BackBufferState;
+                tb.Transition.StateBefore = before;
                 tb.Transition.StateAfter  = D3D12_RESOURCE_STATE_PRESENT;
                 l->ResourceBarrier(1, &tb);
                 l->Close();
@@ -178,7 +207,6 @@ void D3D12SwapChain::Present(bool vsync) {
                 q->Signal(m_PresentFence.Get(), m_PresentNextValue++);
             }
         }
-        m_BackBufferState = D3D12_RESOURCE_STATE_PRESENT;
     }
 
     // 诊断开关每帧都要判断：只在首次读一次环境变量
@@ -192,7 +220,6 @@ void D3D12SwapChain::Present(bool vsync) {
         static int s_n = 0;
         if (++s_n == 60) m_Device->PassStatsRead("第60帧的全部索引绘制");   // 只读一次
     }
-    if (m_Device) m_Device->FlushRetired();   // 每帧回收上一帧延迟释放的资源
     const HRESULT hr = m_SwapChain->Present(vsync ? 1u : 0u, flags);
     if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
         m_Device->ReportDeviceRemoved("SwapChain::Present");
@@ -205,7 +232,7 @@ void D3D12SwapChain::Present(bool vsync) {
 
 void* D3D12SwapChain::GetCurrentBackBufferView() const {
     if (!m_SwapChain || !m_RtvHeap) return nullptr;
-    const u32 idx = m_SwapChain->GetCurrentBackBufferIndex();
+    const u32 idx = RecordIndex();
     if (idx >= m_Buffers.size()) return nullptr;
     D3D12_CPU_DESCRIPTOR_HANDLE h = m_RtvHeap->GetCPUDescriptorHandleForHeapStart();
     h.ptr += static_cast<SIZE_T>(idx) * m_RtvSize;
@@ -214,8 +241,16 @@ void* D3D12SwapChain::GetCurrentBackBufferView() const {
 
 ID3D12Resource* D3D12SwapChain::GetCurrentBackBufferResource() const {
     if (!m_SwapChain) return nullptr;
-    const u32 idx = m_SwapChain->GetCurrentBackBufferIndex();
+    const u32 idx = RecordIndex();
     return idx < m_Buffers.size() ? m_Buffers[idx].Get() : nullptr;
+}
+
+D3D12_CPU_DESCRIPTOR_HANDLE D3D12SwapChain::GetRtv(u32 index) const {
+    D3D12_CPU_DESCRIPTOR_HANDLE h{};
+    if (!m_RtvHeap || index >= m_Buffers.size()) return h;
+    h = m_RtvHeap->GetCPUDescriptorHandleForHeapStart();
+    h.ptr += static_cast<SIZE_T>(index) * m_RtvSize;
+    return h;
 }
 
 D3D12_CPU_DESCRIPTOR_HANDLE D3D12SwapChain::GetCurrentRtv() const {
@@ -225,7 +260,7 @@ D3D12_CPU_DESCRIPTOR_HANDLE D3D12SwapChain::GetCurrentRtv() const {
     // 结果是「画到缓冲 0、呈现缓冲 1」⇒ 屏幕全黑。
     D3D12_CPU_DESCRIPTOR_HANDLE h = m_RtvHeap->GetCPUDescriptorHandleForHeapStart();
     if (!m_SwapChain || !m_RtvHeap) return h;
-    const u32 idx = m_SwapChain->GetCurrentBackBufferIndex();
+    const u32 idx = RecordIndex();   // 模式 2 下为渲染线程推进的序号
     h.ptr += static_cast<SIZE_T>(idx) * m_RtvSize;
     return h;
 }
@@ -279,7 +314,7 @@ bool SaveRgbaToPng(const wchar_t* path, const unsigned char* rgba, u32 w, u32 h)
 
 } // namespace
 
-void D3D12SwapChain::CaptureIfRequested() {
+void D3D12SwapChain::CaptureIfRequested(u32 index, D3D12_RESOURCE_STATES state) {
     if (!m_CaptureInit) {
         m_CaptureInit = true;
         if (const char* v = std::getenv("HE_CAPTURE_FRAME")) m_CaptureAt = std::atoi(v);
@@ -288,7 +323,7 @@ void D3D12SwapChain::CaptureIfRequested() {
     if (m_CaptureAt <= 0 || static_cast<int>(m_FrameCount) != m_CaptureAt) return;
 
     ID3D12Device* dev = m_Device ? m_Device->GetDevice() : nullptr;
-    const u32 liveIdx = m_SwapChain ? m_SwapChain->GetCurrentBackBufferIndex() : m_Index;
+    const u32 liveIdx = index;   // 本次要呈现的后缓冲（模式 2 下在 RHI 线程上执行，序号由渲染线程登记）
     if (!dev || liveIdx >= m_Buffers.size() || !m_Buffers[liveIdx]) return;
 
     // 【做法】后缓冲 → 回读**缓冲**（不是回读纹理），用 CopyTextureRegion
@@ -344,7 +379,7 @@ void D3D12SwapChain::CaptureIfRequested() {
     b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     b.Transition.pResource   = m_Buffers[liveIdx].Get();
     b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    b.Transition.StateBefore = m_BackBufferState;    // 真实状态（PRESENT 或 RENDER_TARGET）
+    b.Transition.StateBefore = state;    // 真实状态（PRESENT 或 RENDER_TARGET）
     b.Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_SOURCE;
     list->ResourceBarrier(1, &b);
 
@@ -366,7 +401,7 @@ void D3D12SwapChain::CaptureIfRequested() {
     list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
 
     b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
-    b.Transition.StateAfter  = m_BackBufferState;    // 恢复
+    b.Transition.StateAfter  = state;    // 恢复
     list->ResourceBarrier(1, &b);
     list->Close();
 

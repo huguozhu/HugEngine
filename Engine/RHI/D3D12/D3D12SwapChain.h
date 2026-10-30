@@ -29,7 +29,11 @@ public:
     u32   GetWidth()  const override { return m_Width; }
     u32   GetHeight() const override { return m_Height; }
     bool  AcquireNextImage() override;
+    /// 呈现（渲染线程）：记下当前后缓冲序号与状态，有提交路由时交给 RHI 线程，否则就地 PresentNow
     void  Present(bool vsync) override;
+    /// 真正呈现（提交线程或就地）：把后缓冲 index 从 before 转到 PRESENT，再 IDXGISwapChain::Present。
+    /// 只用参数里的序号与状态，不读渲染线程正在改的 m_BackBufferState
+    void  PresentNow(u32 index, D3D12_RESOURCE_STATES before, bool vsync);
     void* GetCurrentBackBufferView() const override;
     void* GetDepthBufferView()       const override { return nullptr; }
     u32   GetBackendFormat()    const override { return static_cast<u32>(m_Format); }
@@ -37,6 +41,11 @@ public:
 
     /// 供命令列表使用：拿到当前后缓冲的 RTV（CPU 句柄）
     D3D12_CPU_DESCRIPTOR_HANDLE GetCurrentRtv() const;
+    /// 按序号取后缓冲的 RTV / 资源（命令流回放用录制时登记的序号，见 D3D12CommandList::SetRenderPassHint）
+    D3D12_CPU_DESCRIPTOR_HANDLE GetRtv(u32 index) const;
+    ID3D12Resource*             GetBackBuffer(u32 index) const { return index < m_Buffers.size() ? m_Buffers[index].Get() : nullptr; }
+    /// 录制用的后缓冲序号（模式 2 下为渲染线程推进的序号）
+    u32 GetRecordIndex() const { return RecordIndex(); }
     /// 当前后缓冲的资源与状态（命令列表做 PRESENT<->RENDER_TARGET 屏障时要用）
     ID3D12Resource*      GetCurrentBackBufferResource() const;
     D3D12_RESOURCE_STATES GetBackBufferState() const { return m_BackBufferState; }
@@ -49,7 +58,8 @@ public:
 
     /// 【调试】按环境变量 HE_CAPTURE_FRAME=N 在第 N 帧把后缓冲存成 PNG。
     /// 必须在 **Present 之前** 调用：FLIP_DISCARD 交换链在 Present 之后内容未定义。
-    void CaptureIfRequested();
+    /// index / state：要截的后缓冲序号及其当前状态（由 PresentNow 传入，不读 m_BackBufferState）
+    void CaptureIfRequested(u32 index, D3D12_RESOURCE_STATES state);
 
 private:
     u64  m_FrameCount  = 0;
@@ -66,6 +76,11 @@ private:
     D3D12Device* m_Device = nullptr;
     u32 m_Width = 0, m_Height = 0;
     u32 m_Index = 0;
+    /// 呈现是否经提交路由（模式 2）：此时 DXGI 的实时序号要等 RHI 线程呈现后才更新，
+    /// 渲染线程改用自己推进的 m_Index（翻转模型的后缓冲按顺序轮换）
+    bool m_PresentRouted = false;
+    /// 录制用的后缓冲序号：路由时取 m_Index，否则取 DXGI 实时序号
+    u32  RecordIndex() const;
     u32 m_BufferCount = 2;
     UINT m_RtvSize = 0;
     Format m_Format = Format::BGRA8_UNORM;

@@ -7,6 +7,9 @@
 #include "D3D12Resources.h"
 #include "D3D12BindlessHeap.h"
 #include "D3D12Converters.h"   // ToDxgiFormat（SupportsStorageImage 用）
+#include "RHI/SubmitRouter.h"     // 提交路由（模式 2）
+#include "RHI/RHICommandReplay.h" // 命令流回放
+#include "RHI/ThreadAffinity.h"   // 判断当前线程是否为提交线程
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
@@ -701,6 +704,9 @@ std::unique_ptr<IRHIPipelineState> D3D12Device::CreatePipelineState(const Pipeli
 
 void D3D12Device::WaitIdle() {
     if (!m_Queue || !m_Device) return;
+    // 模式 2：先把提交路由排空（已录制、尚在 RHI 线程队列里的提交还没进 GPU 队列）。
+    // 提交线程自己调用时跳过，否则会等待自己的队列
+    if (m_SubmitRouter && !GetThreadAffinity().IsSubmitter()) m_SubmitRouter->FlushAndWait();
     // 用一个临时围栏等待队列清空
     ComPtr<ID3D12Fence> fence;
     if (FAILED(m_Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)))) return;
@@ -791,27 +797,80 @@ void D3D12Device::WaitFenceOnQueue(QueueType queue, RHIFenceHandle fence, u64 va
     if (e.fence) GetQueue(queue)->Wait(e.fence.Get(), value);   // 指定队列在 GPU 侧等待
 }
 
+// ---------------------------------------------------------------------------
+//  提交
+//  Submit（渲染线程）：先在本线程上把这次录制的提交数据打包（流模式取下本次的命令流），
+//  再交给提交路由；没有路由或路由不接管时就地执行 ExecuteSubmit。
+//  ExecuteSubmit（提交线程）：流模式回放到影子列表后提交；普通列表取出提交包提交。
+// ---------------------------------------------------------------------------
 void D3D12Device::Submit(IRHICommandList* cmdList, RHICommandList* stream) {
-    (void)stream;
-    if (TraceEnabled()) { std::printf("[TRACE] Submit\n"); std::fflush(stdout); }
     if (!cmdList || !m_Queue) return;
-    CollectDeferredReleases();   // 顺带释放 GPU 已用完的延迟对象（析构的命令列表等）
     auto* cl = static_cast<D3D12CommandList*>(cmdList);
-    ID3D12CommandList* lists[1] = { cl->GetNativeCommandList() };
-    if (!lists[0]) return;
+    if (cl->IsStreamMode()) {
+        if (!stream) stream = cl->GetRecordedStream();   // 必须在渲染线程上取：下一帧 Begin 会轮换命令流
+        // 命令流不交给 RHI 线程回放（原因见 D3D12CommandList::EnableCommandStream）。提交路由在本帧录制
+        // 期间才装上时会走到这里：先排空路由保证提交顺序，再在本线程就地回放提交
+        if (m_SubmitRouter) {
+            m_SubmitRouter->FlushAndWait();
+            ExecuteSubmit(cmdList, stream);
+            return;
+        }
+    } else {
+        cl->PackSubmission();
+    }
+    if (m_SubmitRouter && m_SubmitRouter->RouteSubmit(cmdList, stream)) return;
+    ExecuteSubmit(cmdList, stream);
+}
+
+void D3D12Device::ExecuteSubmit(IRHICommandList* cmdList, RHICommandList* stream) {
+    if (!cmdList) return;
+    auto* cl = static_cast<D3D12CommandList*>(cmdList);
+    if (cl->IsStreamMode()) {
+        if (stream) SubmitStreamReplay(cl, *stream);
+        return;
+    }
+    SubmitNow(cl);
+    // A-1：普通列表附带的命令流。列表已关闭、不能再往里录，回放到影子列表并紧随其后提交
+    if (stream) SubmitStreamReplay(cl, *stream);
+}
+
+void D3D12Device::SubmitStreamReplay(D3D12CommandList* src, const RHICommandList& stream) {
+    D3D12CommandList* replay = src ? src->GetReplayList() : nullptr;
+    if (!replay) return;
+    replay->SetSwapChain(src->GetSwapChain());   // 后缓冲相关的 pass 依赖交换链
+    replay->Begin();
+    ReplayCommandStream(stream, *replay);
+    replay->End();
+    replay->PackSubmission();
+    SubmitNow(replay);
+}
+
+void D3D12Device::ExecutePresent(IRHISwapChain* swapChain, u32 imageIndex, void* waitSemaphore, bool vsync) {
+    if (!swapChain) return;
+    const auto before = static_cast<D3D12_RESOURCE_STATES>(reinterpret_cast<uintptr_t>(waitSemaphore));
+    static_cast<D3D12SwapChain*>(swapChain)->PresentNow(imageIndex, before, vsync);
+}
+
+void D3D12Device::SubmitNow(D3D12CommandList* cl) {
+    if (TraceEnabled()) { std::printf("[TRACE] Submit\n"); std::fflush(stdout); }
+    if (!cl || !m_Queue) return;
+    D3D12CommandList::SubmitPacket packet;
+    if (!cl->TakeSubmission(packet) || !packet.native) return;
+    std::lock_guard<std::mutex> lock(m_SubmitMutex);
+    CollectDeferredReleases();   // 顺带释放 GPU 已用完的延迟对象（析构的命令列表等）
+    ID3D12CommandList* lists[1] = { packet.native };
     static const bool s_LogSubmit = (std::getenv("HE_SUBSEQ") != nullptr);   // 每帧调用，只读一次环境变量
     if (s_LogSubmit) HE_CORE_ERROR("[SUB] list={} draws={}", (void*)cl, cl->GetTotalDraws());
     // 按列表类型选队列：计算列表进计算队列（与图形队列并行），其余进图形队列
     ID3D12CommandQueue* queue = GetQueue(cl->GetQueueType());
     // 计算列表录制时遇到图形专用状态的纹理：先在图形队列上把它们转到计算可用状态
-    if (!cl->GetQueueHandoffs().empty()) {
-        if (cl->GetQueueType() == QueueType::Compute) SubmitQueueHandoff(cl->GetQueueHandoffs());
-        cl->ClearQueueHandoffs();
-    }
-    cl->ApplyTimelineWaits();         // 本次提交要等的时间线值：先于命令执行
+    if (!packet.handoffs.empty() && cl->GetQueueType() == QueueType::Compute) SubmitQueueHandoff(packet.handoffs);
+    // 本次提交要等的时间线值：先于命令执行
+    for (const auto& [f, v] : packet.waits) WaitFenceOnQueue(cl->GetQueueType(), f, v);
     queue->ExecuteCommandLists(1, lists);
-    cl->OnSubmitted(queue);           // 记录该列表当前帧槽位的完成围栏
-    cl->ApplyTimelineSignals();       // 本次提交的时间线信号：命令执行完之后才到达
+    cl->OnSubmitted(queue, packet);   // 记录该包所在帧槽位的完成围栏
+    // 本次提交的时间线信号：命令执行完之后才到达
+    for (const auto& [f, v] : packet.signals) SignalFenceOnQueue(cl->GetQueueType(), f, v);
     // 每帧输出一次调试层的 ERROR（VS 的「输出」窗口内容进不了日志，这里补上）
     if (m_InfoQueue) {
         UINT64 n = m_InfoQueue->GetNumStoredMessages();
@@ -1249,6 +1308,7 @@ bool D3D12Device::EnsureDescriptorHeaps() {
 }
 
 void D3D12Device::RegisterViewResource(UINT64 handle, ID3D12Resource* res) {
+    std::lock_guard<std::mutex> lock(m_StateMutex);
     if (!handle || !res) return;
     m_ViewResources[handle] = ViewInfo{ res, 0, 0, false };
     if (m_ResStates.find(res) == m_ResStates.end())
@@ -1256,6 +1316,7 @@ void D3D12Device::RegisterViewResource(UINT64 handle, ID3D12Resource* res) {
 }
 
 void D3D12Device::RegisterSubresourceView(UINT64 handle, ID3D12Resource* res, u32 mip, u32 layer) {
+    std::lock_guard<std::mutex> lock(m_StateMutex);
     if (!handle || !res) return;
     m_ViewResources[handle] = ViewInfo{ res, mip, layer, true };
     if (m_ResStates.find(res) == m_ResStates.end())
@@ -1325,6 +1386,7 @@ void D3D12Device::ShutdownDGC() {
 
 void D3D12Device::UnregisterViewResource(UINT64 handle) {
     if (!handle) return;
+    std::lock_guard<std::mutex> lock(m_StateMutex);
     const auto it = m_ViewResources.find(handle);
     if (it == m_ViewResources.end()) return;
     // 只有「整资源」视图随纹理一起注销时才清掉状态记录；子资源视图（逐 mip / 逐层）可能在
@@ -1335,22 +1397,27 @@ void D3D12Device::UnregisterViewResource(UINT64 handle) {
 }
 
 ID3D12Resource* D3D12Device::FindViewResource(UINT64 handle) const {
+    std::lock_guard<std::mutex> lock(m_StateMutex);
     const auto it = m_ViewResources.find(handle);
     return it == m_ViewResources.end() ? nullptr : it->second.res;
 }
 
 const D3D12Device::ViewInfo* D3D12Device::FindViewInfo(UINT64 handle) const {
+    std::lock_guard<std::mutex> lock(m_StateMutex);
     const auto it = m_ViewResources.find(handle);
     return it == m_ViewResources.end() ? nullptr : &it->second;
 }
 
 D3D12_RESOURCE_STATES D3D12Device::GetResourceState(ID3D12Resource* res) const {
+    std::lock_guard<std::mutex> lock(m_StateMutex);
     const auto it = m_ResStates.find(res);
     return it == m_ResStates.end() ? D3D12_RESOURCE_STATE_COMMON : it->second;
 }
 
 void D3D12Device::SetResourceState(ID3D12Resource* res, D3D12_RESOURCE_STATES st) {
-    if (res) m_ResStates[res] = st;
+    if (!res) return;
+    std::lock_guard<std::mutex> lock(m_StateMutex);
+    m_ResStates[res] = st;
 }
 
 
@@ -1766,10 +1833,12 @@ void D3D12Device::UnregisterCommandList(D3D12CommandList* cl) {
 
 void D3D12Device::DeferRelease(ComPtr<ID3D12Fence> fence, u64 value, std::vector<ComPtr<IUnknown>> objects) {
     if (!fence || fence->GetCompletedValue() >= value) return;   // GPU 已执行完：objects 随参数析构即释放
+    std::lock_guard<std::mutex> lock(m_DeferredMutex);
     m_DeferredReleases.push_back({ std::move(fence), value, std::move(objects) });
 }
 
 void D3D12Device::CollectDeferredReleases() {
+    std::lock_guard<std::mutex> lock(m_DeferredMutex);
     m_DeferredReleases.erase(
         std::remove_if(m_DeferredReleases.begin(), m_DeferredReleases.end(),
                        [](const DeferredRelease& d) { return d.fence->GetCompletedValue() >= d.value; }),
@@ -1813,6 +1882,13 @@ void* D3D12Device::CreateImGuiDescriptorPool() {
 void* D3D12Device::GetImGuiCommandBuffer(IRHICommandList* cmd) const {
     auto* cl = static_cast<D3D12CommandList*>(cmd);
     if (!cl) return nullptr;
+    if (cl->IsStreamMode()) {
+        // 流模式：命令在提交时才回放，外部代码无法直接往原生列表录制；ImGui 的绘制数据也在
+        // 下一帧 NewFrame 后失效，不能推迟回放 ⇒ 本模式下不绘制 ImGui
+        static bool s_Warned = false;
+        if (!s_Warned) { s_Warned = true; HE_CORE_WARN("[D3D12] 命令流模式下不绘制 ImGui（HE_RHI_COMMAND_STREAM=1）"); }
+        return nullptr;
+    }
     cl->PrepareForExternalRendering();
     return cl->GetNativeCommandList();
 }

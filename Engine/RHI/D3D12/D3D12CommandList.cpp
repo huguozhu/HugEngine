@@ -24,6 +24,7 @@ D3D12CommandList::~D3D12CommandList() {
     // 取各槽位最后一次提交的围栏值，未完成就交给设备延迟到围栏到达后再释放
     std::vector<ComPtr<IUnknown>> keep;
     if (m_List) keep.emplace_back(m_List);
+    for (auto& l : m_Lists) if (l) keep.emplace_back(l);
     for (auto& a : m_Allocators) if (a) keep.emplace_back(a);
     for (auto& [key, sig] : m_CmdSigs) if (sig) keep.emplace_back(sig);
     for (auto& slot : m_TempResources) for (auto& r : slot) if (r) keep.emplace_back(r);
@@ -63,17 +64,21 @@ bool D3D12CommandList::Initialize(D3D12Device* device, QueueType queue) {
                         "CreateFence(CommandList)")) {
         return false;
     }
-    if (!HE_D3D12_CHECK(dev->CreateCommandList(0, type, m_Allocator.Get(), nullptr,
-                                               IID_PPV_ARGS(&m_List)),
-                        "CreateCommandList")) {
-        return false;
+    // 每个帧槽位一个原生列表（见 m_Lists 的说明）
+    for (u32 i = 0; i < kMaxFramesInFlight; ++i) {
+        if (!HE_D3D12_CHECK(dev->CreateCommandList(0, type, m_Allocators[i].Get(), nullptr,
+                                                   IID_PPV_ARGS(&m_Lists[i])),
+                            "CreateCommandList")) {
+            return false;
+        }
+        // 命名：DRED 报告与 RenderDoc 里据此区分图形 / 计算列表
+        m_Lists[i]->SetName(m_QueueType == QueueType::Compute ? L"HugEngine 计算命令列表" : L"HugEngine 图形命令列表");
+        // 创建后默认是开着的，先关掉，等 Begin() 再 Reset
+        m_Lists[i]->Close();
     }
+    m_List = m_Lists[0];
     m_List.As(&m_List6);   // 网格着色器绘制用（取不到时 DrawMeshTasks* 忽略）
     m_Device->RegisterCommandList(this);   // DRED 报告据此把面包屑对应回事件名
-    // 命名：DRED 报告与 RenderDoc 里据此区分图形 / 计算列表
-    m_List->SetName(m_QueueType == QueueType::Compute ? L"HugEngine 计算命令列表" : L"HugEngine 图形命令列表");
-    // 创建后默认是开着的，先关掉，等 Begin() 再 Reset
-    m_List->Close();
     return true;
 }
 
@@ -129,6 +134,7 @@ void D3D12CommandList::BeginSecondary(IRHIPipelineState* pso) {
 }
 
 void D3D12CommandList::ExecuteSecondary(IRHICommandList* secondary) {
+    if (m_StreamMode) { Stream().Enqueue(RHICommandType::ExecuteSecondary, RHICommandExecuteSecondary{ secondary }); return; }
     auto* b = static_cast<D3D12CommandList*>(secondary);
     if (!m_List || !m_Recording || !m_Device || !b || !b->m_IsBundle || !b->m_List) return;
     // 1. 资源状态：bundle 里不能发屏障，按它记下的每次绘制的管线 + 绑定集，在主列表上补状态转换
@@ -169,10 +175,23 @@ void D3D12CommandList::ExecuteSecondary(IRHICommandList* secondary) {
 }
 
 void D3D12CommandList::Begin() {
+    if (m_StreamMode) {
+        // 流模式：不碰原生列表与分配器（由影子列表负责），只轮换到下一份命令流并清空
+        m_StreamSlot = (m_StreamSlot + 1) % kMaxFramesInFlight;
+        if (!m_Streams[m_StreamSlot]) m_Streams[m_StreamSlot] = std::make_unique<RHICommandList>();
+        m_Streams[m_StreamSlot]->Reset();
+        m_Recording = true;
+        return;
+    }
     if (!m_List || !m_Allocator) return;
-    // 轮换到下一个帧槽位，并等待该槽位上一次提交的命令在 GPU 上执行完，再复用其分配器
+    // 轮换到下一个帧槽位，并等待该槽位上一次提交的命令在 GPU 上执行完，再复用其分配器与原生列表
     m_FrameSlot = (m_FrameSlot + 1) % kMaxFramesInFlight;
     m_Allocator = m_Allocators[m_FrameSlot];
+    if (m_Lists[m_FrameSlot]) {
+        m_List = m_Lists[m_FrameSlot];
+        m_List6.Reset();
+        m_List.As(&m_List6);
+    }
     if (m_SlotFence && m_SlotFence->GetCompletedValue() < m_SlotFenceValues[m_FrameSlot]) {
         HANDLE ev = CreateEventEx(nullptr, nullptr, 0, EVENT_ALL_ACCESS);
         if (ev) {
@@ -235,20 +254,45 @@ void D3D12CommandList::ResetRecordingState() {
     }
 }
 
-void D3D12CommandList::OnSubmitted(ID3D12CommandQueue* queue) {
+void D3D12CommandList::PackSubmission() {
+    SubmitPacket p;
+    p.native           = m_List.Get();
+    p.slot             = m_FrameSlot;
+    p.waits            = std::move(m_PendingWaits);
+    p.signals          = std::move(m_PendingSignals);
+    p.handoffs         = std::move(m_QueueHandoffs);
+    p.queries          = std::move(m_PendingQueries);
+    p.bundles          = std::move(m_ExecutedBundles);
+    p.setRingChunkMask = m_SetRingChunkMask;
+    m_PendingWaits.clear();
+    m_PendingSignals.clear();
+    m_QueueHandoffs.clear();
+    m_PendingQueries.clear();
+    m_ExecutedBundles.clear();
+    m_SetRingChunkMask = 0;
+    std::lock_guard<std::mutex> lock(m_SubmitPacketMutex);
+    m_SubmitPackets.push_back(std::move(p));
+}
+
+bool D3D12CommandList::TakeSubmission(SubmitPacket& out) {
+    std::lock_guard<std::mutex> lock(m_SubmitPacketMutex);
+    if (m_SubmitPackets.empty()) return false;
+    out = std::move(m_SubmitPackets.front());
+    m_SubmitPackets.pop_front();
+    return true;
+}
+
+void D3D12CommandList::OnSubmitted(ID3D12CommandQueue* queue, const SubmitPacket& packet) {
     if (!queue || !m_SlotFence) return;
     const u64 v = m_NextFenceValue++;
     queue->Signal(m_SlotFence.Get(), v);
-    m_SlotFenceValues[m_FrameSlot] = v;
+    m_SlotFenceValues[packet.slot] = v;
     // 本次录制用过的描述符集快照块：围栏到达 v 前不能被覆盖
-    if (m_Device && m_SetRingChunkMask) m_Device->MarkSetRingChunks(m_SetRingChunkMask, m_SlotFence.Get(), v);
-    m_SetRingChunkMask = 0;
+    if (m_Device && packet.setRingChunkMask) m_Device->MarkSetRingChunks(packet.setRingChunkMask, m_SlotFence.Get(), v);
     // 本次提交写过的查询：围栏到达 v 后结果可读
-    for (const auto& [pool, idx] : m_PendingQueries) pool->MarkSubmitted(idx, m_SlotFence.Get(), v);
-    m_PendingQueries.clear();
+    for (const auto& [pool, idx] : packet.queries) pool->MarkSubmitted(idx, m_SlotFence.Get(), v);
     // 本次提交执行过的 bundle：其该槽位的分配器要等围栏到达 v 才能复用
-    for (const auto& [bundle, slot] : m_ExecutedBundles) bundle->m_BundleSlotUses[slot] = { m_SlotFence, v };
-    m_ExecutedBundles.clear();
+    for (const auto& [bundle, slot] : packet.bundles) bundle->m_BundleSlotUses[slot] = { m_SlotFence, v };
 }
 
 // ── 调试标签 ──
@@ -259,6 +303,7 @@ constexpr UINT kPixEventUnicode = 0;
 }
 
 void D3D12CommandList::BeginDebugLabel(const char* name, const float*) {
+    if (m_StreamMode) { StreamLabel(RHICommandType::CmdBeginDebugLabel, name); return; }
     if (!m_List || !m_Recording) return;
     const std::wstring w = Utf8ToWide(name ? name : "");
     m_List->BeginEvent(kPixEventUnicode, w.c_str(), static_cast<UINT>((w.size() + 1) * sizeof(wchar_t)));
@@ -267,12 +312,14 @@ void D3D12CommandList::BeginDebugLabel(const char* name, const float*) {
 }
 
 void D3D12CommandList::EndDebugLabel() {
+    if (m_StreamMode) { Stream().Enqueue(RHICommandType::CmdEndDebugLabel, u32{0}); return; }
     if (!m_List || !m_Recording || m_LabelDepth == 0) return;   // 不配对的 End 直接忽略（D3D12 会判非法）
     m_List->EndEvent();
     --m_LabelDepth;
 }
 
 void D3D12CommandList::InsertDebugLabel(const char* name, const float*) {
+    if (m_StreamMode) { StreamLabel(RHICommandType::CmdInsertDebugLabel, name); return; }
     if (!m_List || !m_Recording || !name || !*name) return;
     const std::wstring w = Utf8ToWide(name);
     m_List->SetMarker(kPixEventUnicode, w.c_str(), static_cast<UINT>((w.size() + 1) * sizeof(wchar_t)));
@@ -286,7 +333,9 @@ bool D3D12CommandList::DredEventLogEnabled() {
 
 bool D3D12CommandList::FindEventNames(const ID3D12CommandList* native, u32 beginCount, u32 markerCount,
                                       std::vector<std::string>& begins, std::vector<std::string>& markers) const {
-    if (!native || native != static_cast<const ID3D12CommandList*>(m_List.Get())) return false;
+    bool mine = native && native == static_cast<const ID3D12CommandList*>(m_List.Get());
+    for (const auto& l : m_Lists) mine = mine || (native && native == static_cast<const ID3D12CommandList*>(l.Get()));
+    if (!mine) return false;
     for (const auto& log : m_EventLogs) {
         if (log.begins.size() == beginCount && log.markers.size() == markerCount && (beginCount || markerCount)) {
             begins = log.begins;
@@ -298,6 +347,7 @@ bool D3D12CommandList::FindEventNames(const ID3D12CommandList* native, u32 begin
 }
 
 void D3D12CommandList::SetDrawDebugLabel(const char* name, const float*) {
+    if (m_StreamMode) { StreamLabel(RHICommandType::SetDrawDebugLabel, name); return; }
     // 空标签视为清除，避免残留到下一个绘制
     if (!name || !*name) { m_DrawLabelSet = false; return; }
     m_DrawLabel    = name;
@@ -305,6 +355,7 @@ void D3D12CommandList::SetDrawDebugLabel(const char* name, const float*) {
 }
 
 void D3D12CommandList::ClearDrawDebugLabel() {
+    if (m_StreamMode) { Stream().Enqueue(RHICommandType::CmdClearDrawDebugLabel, u32{0}); return; }
     m_DrawLabelSet = false;
 }
 
@@ -322,6 +373,7 @@ void D3D12CommandList::EmitDrawLabel() {
 
 // ── GPU 查询（时间戳 / 管线统计）──
 void D3D12CommandList::WriteTimestamp(IRHIQueryPool* pool, u32 queryIndex) {
+    if (m_StreamMode) { Stream().Enqueue(RHICommandType::CmdWriteTimestamp, RHICommandQuery{ pool, queryIndex, 0u }); return; }
     auto* qp = static_cast<D3D12QueryPool*>(pool);
     if (!m_List || !qp || queryIndex >= qp->GetQueryCount() || qp->GetQueryType() != QueryType::Timestamp) return;
     m_List->EndQuery(qp->GetHeap(), D3D12_QUERY_TYPE_TIMESTAMP, queryIndex);
@@ -332,6 +384,7 @@ void D3D12CommandList::WriteTimestamp(IRHIQueryPool* pool, u32 queryIndex) {
 }
 
 void D3D12CommandList::BeginQuery(IRHIQueryPool* pool, u32 queryIndex) {
+    if (m_StreamMode) { Stream().Enqueue(RHICommandType::CmdBeginQuery, RHICommandQuery{ pool, queryIndex, 0u }); return; }
     auto* qp = static_cast<D3D12QueryPool*>(pool);
     if (!m_List || !qp || queryIndex >= qp->GetQueryCount() ||
         qp->GetQueryType() != QueryType::PipelineStatistics) return;
@@ -339,6 +392,7 @@ void D3D12CommandList::BeginQuery(IRHIQueryPool* pool, u32 queryIndex) {
 }
 
 void D3D12CommandList::EndQuery(IRHIQueryPool* pool, u32 queryIndex) {
+    if (m_StreamMode) { Stream().Enqueue(RHICommandType::CmdEndQuery, RHICommandQuery{ pool, queryIndex, 0u }); return; }
     auto* qp = static_cast<D3D12QueryPool*>(pool);
     if (!m_List || !qp || queryIndex >= qp->GetQueryCount() ||
         qp->GetQueryType() != QueryType::PipelineStatistics) return;
@@ -349,6 +403,7 @@ void D3D12CommandList::EndQuery(IRHIQueryPool* pool, u32 queryIndex) {
 }
 
 void D3D12CommandList::ResetQueryPool(IRHIQueryPool* pool) {
+    if (m_StreamMode) { Stream().Enqueue(RHICommandType::CmdResetQueryPool, RHICommandQuery{ pool, 0u, 0u }); return; }
     // D3D12 的查询不需要 GPU 端重置；只清 CPU 侧可用标记（对应 vkCmdResetQueryPool 后结果不可用）
     if (auto* qp = static_cast<D3D12QueryPool*>(pool)) qp->ResetAll();
 }
@@ -396,6 +451,7 @@ bool D3D12CommandList::ReadQueryResults(IRHIQueryPool* pool, u32 first, u32 coun
 }
 
 void D3D12CommandList::PrepareForExternalRendering() {
+    if (m_StreamMode) return;   // 流模式下没有可直接录制的原生列表（见 D3D12Device::GetImGuiCommandBuffer）
     if (!m_List || !m_Device || !m_Device->EnsureDescriptorHeaps()) return;
     ID3D12DescriptorHeap* heaps[2] = { m_Device->GetCbvSrvUavHeap(), m_Device->GetSetSamplerHeap() };
     if (heaps[0] && heaps[1]) {
@@ -408,6 +464,7 @@ void D3D12CommandList::PrepareForExternalRendering() {
 
 void D3D12CommandList::End() {
     if (TraceEnabled()) { std::printf("[TRACE] End\n"); std::fflush(stdout); }
+    if (m_StreamMode) { m_Recording = false; return; }   // 流模式：回放与 Close 由影子列表完成
 
     if (!m_List || !m_Recording) return;
     // 引擎若漏调 EndDebugLabel，未闭合的事件会让 Close 失败：这里补齐
@@ -421,6 +478,30 @@ void D3D12CommandList::End() {
 void D3D12CommandList::BeginRenderPass(u32 colorCount, Format colorFormat,
                                        Format depthFormat, const ClearValue* clear,
                                        LoadOp loadOp) {
+    if (m_StreamMode) {
+        // 后缓冲在渲染线程上确定：记下本帧的序号与当前状态并编码进 renderPass 字段（回放侧经
+        // SetRenderPassHint 交还），再按「已转到渲染目标」更新交换链的状态记录（Present 据此做屏障）
+        if (!m_SwapChain && m_Device) m_SwapChain = m_Device->GetSwapChainPtr();
+        uintptr_t hint = 0;
+        if (m_SwapChain) {
+            auto* sc = static_cast<D3D12SwapChain*>(m_SwapChain);
+            hint = (static_cast<uintptr_t>(sc->GetBackBufferState()) << 32) | (sc->GetRecordIndex() + 1u);
+            sc->MarkBackBufferRendered();
+        }
+        // 清屏值放 arena（本后端只读 clear[0]）
+        RHICommandBeginRenderPass p{};
+        p.renderPass = reinterpret_cast<void*>(hint);
+        p.colorCount = colorCount; p.colorFormat = static_cast<u32>(colorFormat);
+        p.depthFormat = static_cast<u32>(depthFormat); p.loadOp = static_cast<u32>(loadOp);
+        if (clear) {
+            void* dst = Stream().AllocArena(sizeof(ClearValue), 16);
+            std::memcpy(dst, clear, sizeof(ClearValue));
+            p.clearOffset = Stream().ArenaOffsetOf(dst);
+            p.clearCount  = 1u;
+        }
+        Stream().Enqueue(RHICommandType::CmdBeginRenderPass, p);
+        return;
+    }
     if (!m_List) return;
 
     // 后缓冲的 RTV：从交换链取（引擎传的 colorFormat 是后缓冲格式）
@@ -432,12 +513,17 @@ void D3D12CommandList::BeginRenderPass(u32 colorCount, Format colorFormat,
     if (!m_SwapChain && m_Device && m_Device->GetSwapChainPtr()) {
         m_SwapChain = m_Device->GetSwapChainPtr();
     }
+    // 命令流回放：用录制时登记的后缓冲序号与状态（见 m_BackBufferHint），不查交换链当前记录
+    const uintptr_t hint = m_BackBufferHint;
+    m_BackBufferHint = 0;
+    const bool hinted = (hint & 0xFFFFFFFFu) != 0;
+    const u32  hintIndex = static_cast<u32>(hint & 0xFFFFFFFFu) - 1u;
     if (m_SwapChain) {
         // 引擎的 IRHISwapChain 只有 D3D12 交换链会走到这里；
         // 用 static_cast 而不是 dynamic_cast，避免依赖 RTTI。
         auto* d3dSc = static_cast<D3D12SwapChain*>(m_SwapChain);
-        rtv = d3dSc->GetCurrentRtv();
-        hasRtv = true;
+        rtv = hinted ? d3dSc->GetRtv(hintIndex) : d3dSc->GetCurrentRtv();
+        hasRtv = rtv.ptr != 0;
     }
 
     // 【交换链后缓冲必须显式屏障】D3D12 不会把 PRESENT 隐式提升为 RENDER_TARGET，
@@ -445,13 +531,15 @@ void D3D12CommandList::BeginRenderPass(u32 colorCount, Format colorFormat,
     // 这也是 02.Cube 画面全黑的根因）。
     if (hasRtv && m_SwapChain) {
         auto* sc = static_cast<D3D12SwapChain*>(m_SwapChain);
-        ID3D12Resource* bb = sc->GetCurrentBackBufferResource();
-        if (bb && sc->GetBackBufferState() != D3D12_RESOURCE_STATE_RENDER_TARGET) {
+        ID3D12Resource* bb = hinted ? sc->GetBackBuffer(hintIndex) : sc->GetCurrentBackBufferResource();
+        const D3D12_RESOURCE_STATES bbState =
+            hinted ? static_cast<D3D12_RESOURCE_STATES>(static_cast<u64>(hint) >> 32) : sc->GetBackBufferState();
+        if (bb && bbState != D3D12_RESOURCE_STATE_RENDER_TARGET) {
             D3D12_RESOURCE_BARRIER tb{};
             tb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
             tb.Transition.pResource   = bb;
             tb.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-            tb.Transition.StateBefore = sc->GetBackBufferState();
+            tb.Transition.StateBefore = bbState;
             tb.Transition.StateAfter  = D3D12_RESOURCE_STATE_RENDER_TARGET;
             m_List->ResourceBarrier(1, &tb);
         }
@@ -459,8 +547,9 @@ void D3D12CommandList::BeginRenderPass(u32 colorCount, Format colorFormat,
 
     m_List->OMSetRenderTargets(colorCount, hasRtv ? &rtv : nullptr, FALSE, nullptr);
     m_HasRtv = hasRtv;
-    // 告诉交换链：后缓冲现在处于 RENDER_TARGET 状态（截图做屏障时要用真实状态）
-    if (hasRtv && m_SwapChain) {
+    // 告诉交换链：后缓冲现在处于 RENDER_TARGET 状态（截图做屏障时要用真实状态）。
+    // 回放时这一步已在录制侧（渲染线程）做过，交换链的状态记录只归渲染线程写
+    if (hasRtv && m_SwapChain && !hinted) {
         static_cast<D3D12SwapChain*>(m_SwapChain)->MarkBackBufferRendered();
     }
 
@@ -490,6 +579,7 @@ void D3D12CommandList::BeginRenderPass(u32 colorCount, Format colorFormat,
 }
 
 void D3D12CommandList::EndRenderPass() {
+    if (m_StreamMode) { Stream().Enqueue(RHICommandType::CmdEndRenderPass, u32{0}); return; }
     if (TraceEnabled()) { std::printf("[TRACE] EndRenderPass\n"); std::fflush(stdout); }
 
     // D3D12 没有 pass 结束的概念；资源状态转换由显式 PipelineBarrier 负责
@@ -500,6 +590,19 @@ void D3D12CommandList::BeginOffscreenPass(void* colorImageView, void* depthImage
                                           u32 width, u32 height,
                                           const ClearValue* clear,
                                           bool allowSecondary) {
+    if (m_StreamMode) { // 清屏值放 arena（本后端只读 clear 的第一个元素：颜色与深度都在里面）
+        RHICommandBeginOffscreenPass p{};
+        p.colorImageView = colorImageView; p.depthImageView = depthImageView;
+        p.width = width; p.height = height; p.allowSecondary = allowSecondary ? 1u : 0u;
+        if (clear) {
+            void* dst = Stream().AllocArena(sizeof(ClearValue), 16);
+            std::memcpy(dst, clear, sizeof(ClearValue));
+            p.clearOffset = Stream().ArenaOffsetOf(dst);
+            p.clearCount  = 1u;
+        }
+        Stream().Enqueue(RHICommandType::CmdBeginOffscreenPass, p);
+        return;
+    }
     (void)allowSecondary;
     if (!m_List) return;
 
@@ -671,6 +774,25 @@ void D3D12CommandList::BeginOffscreenPassMRT(void* const* colorImageViews, u32 c
                                              void* depthImageView, u32 width, u32 height,
                                              const ClearValue* clears,
                                              bool allowSecondary) {
+    if (m_StreamMode) { // 附件视图数组与清屏值都放 arena（本后端读 clears[0 .. colorCount)，深度取 clears[0]）
+        RHICommandBeginOffscreenPassMRT p{};
+        p.depthImageView = depthImageView; p.colorCount = colorCount;
+        p.width = width; p.height = height; p.allowSecondary = allowSecondary ? 1u : 0u;
+        if (colorCount && colorImageViews) {
+            void* dst = Stream().AllocArena(sizeof(void*) * colorCount, 16);
+            std::memcpy(dst, colorImageViews, sizeof(void*) * colorCount);
+            p.colorViewsOffset = Stream().ArenaOffsetOf(dst);
+        }
+        if (clears) {
+            const u32 n = colorCount ? colorCount : 1u;
+            void* dst = Stream().AllocArena(sizeof(ClearValue) * n, 16);
+            std::memcpy(dst, clears, sizeof(ClearValue) * n);
+            p.clearOffset = Stream().ArenaOffsetOf(dst);
+            p.clearCount  = n;
+        }
+        Stream().Enqueue(RHICommandType::CmdBeginOffscreenPassMRT, p);
+        return;
+    }
     (void)allowSecondary;
     if (!m_List || colorCount == 0) return;
 
@@ -756,6 +878,7 @@ void D3D12CommandList::BeginOffscreenPassMRT(void* const* colorImageViews, u32 c
 }
 
 void D3D12CommandList::EndOffscreenPass() {
+    if (m_StreamMode) { Stream().Enqueue(RHICommandType::CmdEndOffscreenPass, u32{0}); return; }
     ClearPassAttachments();   // pass 结束：附件之后可以被转成可读状态
 }
 
@@ -784,6 +907,7 @@ void D3D12CommandList::ClearPassAttachments() {
 }
 
 void D3D12CommandList::SetPipeline(IRHIPipelineState* pso) {
+    if (m_StreamMode) { Stream().Enqueue(RHICommandType::SetPipeline, RHICommandSetPipeline{ pso }); return; }
     // 计算列表不能设置图形管线（COMPUTE 列表上 SetGraphicsRootSignature 非法）。异步计算 pass
     // 结尾常为主列表「恢复」图形 PSO（如 GPU_Cull 末尾的 SetPipeline(GBuffer PSO)），这里忽略
     if (IsComputeQueueList() && pso && !static_cast<D3D12PipelineState*>(pso)->IsCompute()) return;
@@ -823,6 +947,7 @@ void D3D12CommandList::SetPipeline(IRHIPipelineState* pso) {
 }
 
 void D3D12CommandList::SetVertexBuffer(IRHIBuffer* buffer, u32 binding) {
+    if (m_StreamMode) { Stream().Enqueue(RHICommandType::SetVertexBuffer, RHICommandSetVertexBuffer{ buffer, binding, 0u }); return; }
     if (TraceEnabled()) { std::printf("[TRACE] SetVertexBuffer\n"); std::fflush(stdout); }
     if (!m_List || !buffer) return;
     auto* b = static_cast<D3D12Buffer*>(buffer);
@@ -841,6 +966,7 @@ void D3D12CommandList::SetVertexBuffer(IRHIBuffer* buffer, u32 binding) {
 }
 
 void D3D12CommandList::SetIndexBuffer(IRHIBuffer* buffer, u32 offset) {
+    if (m_StreamMode) { Stream().Enqueue(RHICommandType::SetIndexBuffer, RHICommandSetIndexBuffer{ buffer, offset, 0u }); return; }
     if (TraceEnabled()) { std::printf("[TRACE] SetIndexBuffer\n"); std::fflush(stdout); }
     if (!m_List || !buffer) return;
     auto* b = static_cast<D3D12Buffer*>(buffer);
@@ -851,6 +977,7 @@ void D3D12CommandList::SetIndexBuffer(IRHIBuffer* buffer, u32 offset) {
 }
 
 void D3D12CommandList::SetViewport(const Viewport& vp) {
+    if (m_StreamMode) { Stream().Enqueue(RHICommandType::SetViewport, RHICommandSetViewport{ vp.x, vp.y, vp.width, vp.height, vp.minDepth, vp.maxDepth }); return; }
     if (TraceEnabled()) { std::printf("[TRACE] SetViewport\n"); std::fflush(stdout); }
     if (!m_List) return;
     D3D12_VIEWPORT v{};
@@ -871,6 +998,7 @@ void D3D12CommandList::SetViewport(const Viewport& vp) {
 }
 
 void D3D12CommandList::SetScissor(const ScissorRect& sc) {
+    if (m_StreamMode) { Stream().Enqueue(RHICommandType::SetScissor, RHICommandSetScissor{ sc.x, sc.y, sc.width, sc.height }); return; }
     if (TraceEnabled()) { std::printf("[TRACE] SetScissor\n"); std::fflush(stdout); }
     if (!m_List) return;
     D3D12_RECT r{};
@@ -894,6 +1022,7 @@ void D3D12CommandList::SetFullscreenViewport(u32 width, u32 height) {
 }
 
 void D3D12CommandList::BindDescriptorSet(u32 setIndex, DescriptorSetHandle set) {
+    if (m_StreamMode) { Stream().Enqueue(RHICommandType::SetDescriptorSet, RHICommandSetDescriptorSet{ setIndex, 0u, static_cast<u64>(set) }); return; }
     if (!m_List || !m_Device || set == kInvalidSet || setIndex >= 8) return;
     if (!m_Device->EnsureDescriptorHeaps()) return;
     m_Device->FlushPendingBindlessBuffers();   // 补写初始化早期被丢弃的 bindless 缓冲描述符
@@ -1101,7 +1230,8 @@ void D3D12CommandList::SetRootTable(u32 param, D3D12_GPU_DESCRIPTOR_HANDLE handl
     m_RootArgsDirty = true;
 }
 
-void D3D12CommandList::BufferBarrier(IRHIBuffer* buffer, ResourceState, ResourceState dstState) {
+void D3D12CommandList::BufferBarrier(IRHIBuffer* buffer, ResourceState srcState, ResourceState dstState) {
+    if (m_StreamMode) { Stream().Enqueue(RHICommandType::CmdBufferBarrier, RHICommandBufferBarrier{ buffer, static_cast<u32>(srcState), static_cast<u32>(dstState) }); return; }
     if (!m_List || !buffer) return;
     TransitionBuffer(static_cast<D3D12Buffer*>(buffer)->GetResource(), ToD3D12ResourceState(dstState, false));
 }
@@ -1139,6 +1269,17 @@ void D3D12CommandList::FlushRootArgs() {
 }
 
 void D3D12CommandList::SetPushConstants(u32 offset, u32 size, const void* data) {
+    if (m_StreamMode) { // 调用方的数据可能在栈上：拷进命令流 arena
+        RHICommandSetPushConstants pc{};
+        pc.size = size; pc.offset = offset;
+        if (size && data) {
+            void* dst = Stream().AllocArena(size, 16);
+            std::memcpy(dst, data, size);
+            pc.arenaOffset = Stream().ArenaOffsetOf(dst);
+            Stream().Enqueue(RHICommandType::SetPushConstants, pc);
+        }
+        return;
+    }
     if (!m_List || !m_Device || !data) return;
 
     // 【累积式推送】引擎一次"常量集"可能分多次推送：先 offset=0 推相机/帧常量，
@@ -1180,6 +1321,7 @@ void D3D12CommandList::SetPushConstants(u32 offset, u32 size, const void* data) 
 }
 
 void D3D12CommandList::Draw(u32 vertexCount, u32 instanceCount, u32 firstVertex, u32 firstInstance) {
+    if (m_StreamMode) { Stream().Enqueue(RHICommandType::CmdDraw, RHICommandDraw{ vertexCount, instanceCount, firstVertex, firstInstance }); return; }
     // 诊断：每 60 次绘制打印一次（D3D12 的 GraphicsCommandList 没有 Get* 查询接口，
     // 所以这里打印我们自己记录的状态）
     if (TraceEnabled()) {
@@ -1204,6 +1346,7 @@ void D3D12CommandList::Draw(u32 vertexCount, u32 instanceCount, u32 firstVertex,
 
 void D3D12CommandList::DrawIndexed(u32 indexCount, u32 instanceCount, u32 firstIndex,
                                    i32 vertexOffset, u32 firstInstance) {
+    if (m_StreamMode) { Stream().Enqueue(RHICommandType::DrawIndexed, RHICommandDrawIndexed{ indexCount, firstIndex, vertexOffset, instanceCount, firstInstance }); return; }
     static const bool s_NoDraw = (std::getenv("HE_D3D12_NO_DRAW") != nullptr);   // 实验开关：跳过实际绘制（只读一次环境变量）
     if (s_NoDraw) return;
     if (!m_List) return;
@@ -1247,6 +1390,7 @@ ID3D12CommandSignature* D3D12CommandList::GetCommandSignature(D3D12_INDIRECT_ARG
 }
 
 void D3D12CommandList::DrawIndexedIndirect(IRHIBuffer* buffer, u64 offset, u32 drawCount, u32 stride) {
+    if (m_StreamMode) { Stream().Enqueue(RHICommandType::CmdDrawIndexedIndirect, RHICommandDrawIndexedIndirect{ buffer, offset, drawCount, stride }); return; }
     if (!m_List || !buffer) return;
     auto* b = static_cast<D3D12Buffer*>(buffer);
     ID3D12CommandSignature* sig = GetCommandSignature(D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED, stride);
@@ -1263,6 +1407,7 @@ void D3D12CommandList::DrawIndexedIndirect(IRHIBuffer* buffer, u64 offset, u32 d
 void D3D12CommandList::DrawIndexedIndirectCount(IRHIBuffer* buffer, u64 offset,
                                                 IRHIBuffer* countBuffer, u64 countOffset,
                                                 u32 maxDrawCount, u32 stride) {
+    if (m_StreamMode) { Stream().Enqueue(RHICommandType::CmdDrawIndexedIndirectCount, RHICommandDrawIndexedIndirectCount{ buffer, countBuffer, offset, countOffset, maxDrawCount, stride }); return; }
     if (!m_List || !buffer || !countBuffer) return;
     auto* b  = static_cast<D3D12Buffer*>(buffer);
     auto* cb = static_cast<D3D12Buffer*>(countBuffer);
@@ -1288,6 +1433,14 @@ void D3D12CommandList::DrawIndexedIndirectCount(IRHIBuffer* buffer, u64 offset,
 //  序列数取 min(maxSequenceCount, maxDrawCount)：Vulkan 的 maxDrawCount 也是本次绘制数的上限。
 // ---------------------------------------------------------------------------
 void D3D12CommandList::ExecuteGeneratedCommands(const DGCExecuteDesc& desc) {
+    if (m_StreamMode) { RHICommandExecuteGeneratedCommands p{};
+        p.indirectCommandsLayout = desc.indirectCommandsLayout; p.indirectExecutionSet = desc.indirectExecutionSet;
+        p.sequencesBufferAddr = desc.sequencesBufferAddr;       p.sequenceCountAddr = desc.sequenceCountAddr;
+        p.preprocessBufferAddr = desc.preprocessBufferAddr;     p.preprocessBufferSize = desc.preprocessBufferSize;
+        p.maxSequenceCount = desc.maxSequenceCount;             p.maxDrawCount = desc.maxDrawCount;
+        Stream().Enqueue(RHICommandType::CmdExecuteGeneratedCommands, p);
+        return;
+    }
     if (!m_List || !m_Device || IsComputeQueueList()) return;
     auto* sig = static_cast<ID3D12CommandSignature*>(desc.indirectCommandsLayout);
     auto* pso = static_cast<IRHIPipelineState*>(desc.indirectExecutionSet);
@@ -1323,6 +1476,7 @@ void D3D12CommandList::ExecuteGeneratedCommands(const DGCExecuteDesc& desc) {
 //  与普通绘制同一套前置：补资源状态、下发根参数；之后标记常量槽已消费
 // ---------------------------------------------------------------------------
 void D3D12CommandList::DrawMeshTasks(u32 groupCountX, u32 groupCountY, u32 groupCountZ) {
+    if (m_StreamMode) { Stream().Enqueue(RHICommandType::CmdDrawMeshTasks, RHICommandDrawMeshTasks{ groupCountX, groupCountY, groupCountZ, 0u }); return; }
     if (!m_List || !m_List6 || IsComputeQueueList()) return;
     if (!m_Pipeline || !m_Pipeline->IsMesh()) {
         HE_CORE_WARN("D3D12CommandList::DrawMeshTasks: 当前未绑定网格管线，已忽略");
@@ -1336,6 +1490,7 @@ void D3D12CommandList::DrawMeshTasks(u32 groupCountX, u32 groupCountY, u32 group
 }
 
 void D3D12CommandList::DrawMeshTasksIndirect(IRHIBuffer* buffer, u64 offset, u32 drawCount, u32 stride) {
+    if (m_StreamMode) { Stream().Enqueue(RHICommandType::CmdDrawMeshTasksIndirect, RHICommandDrawIndexedIndirect{ buffer, offset, drawCount, stride }); return; }
     if (!m_List || !m_List6 || !buffer || IsComputeQueueList()) return;
     if (!m_Pipeline || !m_Pipeline->IsMesh()) {
         HE_CORE_WARN("D3D12CommandList::DrawMeshTasksIndirect: 当前未绑定网格管线，已忽略");
@@ -1354,6 +1509,7 @@ void D3D12CommandList::DrawMeshTasksIndirect(IRHIBuffer* buffer, u64 offset, u32
 
 void D3D12CommandList::DrawMeshTasksIndirectCount(IRHIBuffer* buffer, u64 offset, IRHIBuffer* countBuffer,
                                                   u64 countOffset, u32 maxDrawCount, u32 stride) {
+    if (m_StreamMode) { Stream().Enqueue(RHICommandType::CmdDrawMeshTasksIndirectCount, RHICommandDrawIndexedIndirectCount{ buffer, countBuffer, offset, countOffset, maxDrawCount, stride }); return; }
     if (!m_List || !m_List6 || !buffer || !countBuffer || IsComputeQueueList()) return;
     if (!m_Pipeline || !m_Pipeline->IsMesh()) {
         HE_CORE_WARN("D3D12CommandList::DrawMeshTasksIndirectCount: 当前未绑定网格管线，已忽略");
@@ -1374,6 +1530,7 @@ void D3D12CommandList::DrawMeshTasksIndirectCount(IRHIBuffer* buffer, u64 offset
 }
 
 void D3D12CommandList::Dispatch(u32 x, u32 y, u32 z) {
+    if (m_StreamMode) { Stream().Enqueue(RHICommandType::CmdDispatch, RHICommandDispatch{ x, y, z, 0u }); return; }
     if (!m_List) return;
     EnsureBoundResourceStates();
     FlushRootArgs();
@@ -1383,6 +1540,7 @@ void D3D12CommandList::Dispatch(u32 x, u32 y, u32 z) {
 }
 
 void D3D12CommandList::DispatchIndirect(IRHIBuffer* buffer, u64 offset) {
+    if (m_StreamMode) { Stream().Enqueue(RHICommandType::CmdDispatchIndirect, RHICommandDispatchIndirect{ buffer, offset }); return; }
     if (!m_List || !buffer) return;
     auto* b = static_cast<D3D12Buffer*>(buffer);
     // 此前签名传空指针：ExecuteIndirect 要求有效的命令签名（派发参数 = 3 个 u32）
@@ -1396,8 +1554,12 @@ void D3D12CommandList::DispatchIndirect(IRHIBuffer* buffer, u64 offset) {
     m_PushDirty = true;   // 同 Draw：常量槽已被本次派发消费
 }
 
-void D3D12CommandList::PipelineBarrier(PipelineStage, PipelineStage,
-                                       ResourceState, ResourceState) {
+void D3D12CommandList::PipelineBarrier(PipelineStage srcStage, PipelineStage dstStage,
+                                       ResourceState srcState, ResourceState dstState) {
+    if (m_StreamMode) { Stream().Enqueue(RHICommandType::CmdPipelineBarrier, RHICommandPipelineBarrier{ static_cast<u32>(srcStage),
+            static_cast<u32>(dstStage), static_cast<u32>(srcState), static_cast<u32>(dstState) });
+        return;
+    }
     // 无资源参数的全局屏障：D3D12 要求屏障绑定到具体资源，
     // 引擎里这种调用通常用于「pass 之间的全局同步」，D3D12 下由 UAV 屏障近似。
     if (!m_List || m_IsBundle) return;   // bundle 不能发屏障
@@ -1408,9 +1570,13 @@ void D3D12CommandList::PipelineBarrier(PipelineStage, PipelineStage,
     m_List->ResourceBarrier(1, &b);
 }
 
-void D3D12CommandList::PipelineBarrier(PipelineStage, PipelineStage,
+void D3D12CommandList::PipelineBarrier(PipelineStage srcStage, PipelineStage dstStage,
                                        ResourceState srcState, ResourceState dstState,
                                        IRHITexture* texture) {
+    if (m_StreamMode) { Stream().Enqueue(RHICommandType::CmdPipelineBarrierTexture, RHICommandPipelineBarrierTexture{ texture,
+            static_cast<u32>(srcStage), static_cast<u32>(dstStage), static_cast<u32>(srcState), static_cast<u32>(dstState) });
+        return;
+    }
     if (!m_List || !texture || m_IsBundle) return;   // bundle 不能发屏障
     auto* t = static_cast<D3D12Texture*>(texture);
     ActivateAliasedTexture(t->GetResource());   // 瞬态纹理首次使用：先激活
@@ -1455,6 +1621,7 @@ void D3D12CommandList::PipelineBarrier(PipelineStage, PipelineStage,
 
 void D3D12CommandList::CopyBuffer(IRHIBuffer* src, IRHIBuffer* dst, u64 size,
                                   u64 srcOffset, u64 dstOffset) {
+    if (m_StreamMode) { Stream().Enqueue(RHICommandType::CmdCopyBuffer, RHICommandCopyBuffer{ src, dst, size, srcOffset, dstOffset }); return; }
     if (!m_List || !src || !dst) return;
     auto* s = static_cast<D3D12Buffer*>(src);
     auto* d = static_cast<D3D12Buffer*>(dst);
@@ -1585,6 +1752,7 @@ void D3D12CommandList::TransitionBuffer(ID3D12Resource* res, D3D12_RESOURCE_STAT
 }
 
 void D3D12CommandList::CopyTextureToTexture(IRHITexture* src, IRHITexture* dst) {
+    if (m_StreamMode) { Stream().Enqueue(RHICommandType::CmdCopyTextureToTexture, RHICommandCopyTextureToTexture{ src, dst }); return; }
     if (!m_List || !src || !dst) return;
     auto* s = static_cast<D3D12Texture*>(src);
     auto* d = static_cast<D3D12Texture*>(dst);
@@ -1621,6 +1789,7 @@ void D3D12CommandList::CopyTextureToTexture(IRHITexture* src, IRHITexture* dst) 
 // D3D12 只能通过 DSV 清深度：先按设备登记的状态把资源转到 DEPTH_WRITE，再 ClearDepthStencilView。
 // 清除后资源留在 DEPTH_WRITE，正好供随后的深度测试 pass 使用（与 Vulkan 版末尾转到附件布局一致）。
 void D3D12CommandList::ClearDepthStencil(IRHITexture* texture, float depth) {
+    if (m_StreamMode) { Stream().Enqueue(RHICommandType::CmdClearDepthStencil, RHICommandClearDepthStencil{ texture, depth, 0u }); return; }
     if (!m_List || !texture || m_IsBundle) return;   // bundle 不能发屏障与清除
     if (IsComputeQueueList()) {   // DEPTH_WRITE 与 ClearDepthStencilView 只能在图形列表上使用
         HE_CORE_WARN("D3D12CommandList::ClearDepthStencil: 计算列表上不能清除深度，已忽略");
@@ -1656,6 +1825,7 @@ void D3D12CommandList::ClearDepthStencil(IRHITexture* texture, float depth) {
 
 void D3D12CommandList::CopyTextureToBuffer(IRHITexture* src, IRHIBuffer* dst, u32 x, u32 y,
                                            u32 width, u32 height, u64 bufferOffset) {
+    if (m_StreamMode) { Stream().Enqueue(RHICommandType::CmdCopyTextureToBuffer, RHICommandCopyTextureToBuffer{ src, dst, x, y, width, height, 0u, bufferOffset }); return; }
     if (!m_List || !m_Device || !m_Device->GetDevice() || !src || !dst) return;
     auto* t = static_cast<D3D12Texture*>(src);
     auto* b = static_cast<D3D12Buffer*>(dst);
@@ -1756,26 +1926,58 @@ void D3D12CommandList::CopyTextureToBuffer(IRHITexture* src, IRHIBuffer* dst, u3
 // 等它的一方（帧转储读回等）以为拷贝已完成 ⇒ 读到全 0。改为记下来，由 Device::Submit 在
 // ExecuteCommandLists 前后执行。
 void D3D12CommandList::SetTimelineSignal(RHIFenceHandle fence, u64 value) {
+    if (m_StreamMode) { Stream().Enqueue(RHICommandType::CmdTimelineSignal, RHICommandTimeline{ static_cast<u64>(fence), value }); return; }
     m_PendingSignals.emplace_back(fence, value);
 }
 
 void D3D12CommandList::SetTimelineWait(RHIFenceHandle fence, u64 value) {
+    if (m_StreamMode) { Stream().Enqueue(RHICommandType::CmdTimelineWait, RHICommandTimeline{ static_cast<u64>(fence), value }); return; }
     m_PendingWaits.emplace_back(fence, value);
 }
 
-void D3D12CommandList::ApplyTimelineWaits() {
-    if (m_Device) for (const auto& [f, v] : m_PendingWaits) m_Device->WaitFenceOnQueue(m_QueueType, f, v);   // 在本列表所在队列上等待
-    m_PendingWaits.clear();
-}
-
-void D3D12CommandList::ApplyTimelineSignals() {
-    if (m_Device) for (const auto& [f, v] : m_PendingSignals) m_Device->SignalFenceOnQueue(m_QueueType, f, v);   // 在本列表所在队列上发信号
-    m_PendingSignals.clear();
-}
-
+// 列表自己的 Submit 是「就地提交」（与 Vulkan 的 VulkanCommandList::Submit 一致，不走提交路由）：
+// RenderGraph 的异步计算列表提交后随即析构，不能交给 RHI 线程稍后执行
 void D3D12CommandList::Submit() {
     if (TraceEnabled()) { std::printf("[TRACE] Submit\n"); std::fflush(stdout); }
-    if (m_Device) m_Device->Submit(this, nullptr);
+    if (!m_Device) return;
+    if (m_StreamMode) { m_Device->ExecuteSubmit(this, GetRecordedStream()); return; }
+    PackSubmission();
+    m_Device->SubmitNow(this);
+}
+
+// ---------------------------------------------------------------------------
+//  命令流模式
+// ---------------------------------------------------------------------------
+void D3D12CommandList::EnableCommandStream() {
+    // 只有图形队列的主列表支持（bundle 与计算列表永远真实录制）
+    const char* e = std::getenv("HE_RHI_COMMAND_STREAM");
+    m_StreamMode = (e && e[0] == '1') && !m_IsBundle && m_QueueType == QueueType::Graphics;
+    // 【模式 2 下不开流】有提交路由时回放在 RHI 线程上、落后渲染线程最多两帧，而描述符集内容不按帧
+    // 分版本：回放时拍的快照、按集内容推导的资源状态转换都已是后面帧写入的内容（实测 06.GILab
+    // 约 10 帧后 GPU 挂起）。要支持需在录制时拍快照并解析资源状态，此处先退回直接录制
+    if (m_StreamMode && m_Device && m_Device->GetSubmitRouter()) {
+        m_StreamMode = false;
+        static bool s_Warned = false;
+        if (!s_Warned) {
+            s_Warned = true;
+            HE_CORE_WARN("[D3D12] 提交路由（模式 2）下暂不支持命令流模式，帧主列表改为直接录制");
+        }
+    }
+    if (m_StreamMode && !m_Streams[m_StreamSlot]) m_Streams[m_StreamSlot] = std::make_unique<RHICommandList>();
+}
+
+D3D12CommandList* D3D12CommandList::GetReplayList() {
+    if (!m_ReplayList && m_Device) {
+        auto r = std::make_unique<D3D12CommandList>();
+        if (r->Initialize(m_Device, m_QueueType)) m_ReplayList = std::move(r);
+    }
+    return m_ReplayList.get();
+}
+
+void D3D12CommandList::StreamLabel(RHICommandType type, const char* name) {
+    RHICommandSetDebugLabel l{};
+    if (name) std::strncpy(l.text, name, sizeof(l.text) - 1);
+    Stream().Enqueue(type, l);
 }
 
 } // namespace he::rhi::d3d12

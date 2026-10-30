@@ -16,7 +16,11 @@
 #if defined(_WIN32)
 
 #include "D3D12Common.h"
+#include "RHI/RHICommandList.h"   // 命令流模式：录制成纯数据流，提交时回放
 #include <vector>
+#include <deque>
+#include <mutex>
+#include <memory>
 
 namespace he::rhi::d3d12 {
 
@@ -58,6 +62,9 @@ public:
                                bool allowSecondary = false) override;
     void EndOffscreenPass() override;
     void SetSwapChain(IRHISwapChain* sc) override { m_SwapChain = sc; }
+    /// 命令流回放侧在 BeginRenderPass 之前调用：hint 是录制时编码的后缓冲序号与状态
+    ///（见 BeginRenderPass 的流模式分支），回放列表据此使用录制时的那张后缓冲
+    void SetRenderPassHint(void* hint) override { m_BackBufferHint = reinterpret_cast<uintptr_t>(hint); }
 
     // ---- 管线与资源绑定 ----
     void SetPipeline(IRHIPipelineState* pso) override;
@@ -138,8 +145,40 @@ public:
 
     /// 供 Device::Submit 使用
     ID3D12GraphicsCommandList* GetNativeCommandList() const { return m_List.Get(); }
-    /// 提交到队列后调用：在队列上打一个围栏，标记当前帧槽位的分配器何时可以复用
-    void OnSubmitted(ID3D12CommandQueue* queue);
+
+    // ---- 提交包 ----
+    //  一次录制在提交时要用到的全部数据（原生列表、帧槽位、时间线等待 / 信号、队列交接、
+    //  写过的查询、执行过的 bundle、描述符集快照块）。提交路由（模式 2）下真正的提交在 RHI 线程上
+    //  执行，那时渲染线程可能已经开始录下一帧、清掉了列表上的这些记录 ⇒ 必须在渲染线程上打包入队，
+    //  RHI 线程按先进先出取用（RHI 线程按提交顺序执行，与入队顺序一致）。
+    struct SubmitPacket {
+        ID3D12CommandList*                                 native = nullptr;
+        u32                                                slot   = 0;
+        std::vector<std::pair<RHIFenceHandle, u64>>        waits;
+        std::vector<std::pair<RHIFenceHandle, u64>>        signals;
+        std::vector<D3D12_RESOURCE_BARRIER>                handoffs;
+        std::vector<std::pair<class D3D12QueryPool*, u32>> queries;
+        std::vector<std::pair<D3D12CommandList*, u32>>     bundles;
+        u32                                                setRingChunkMask = 0;
+    };
+    /// 渲染线程（录制结束后）：把本次录制的提交数据打包入队
+    void PackSubmission();
+    /// 提交线程：取出最早入队的提交包；没有时返回 false
+    bool TakeSubmission(SubmitPacket& out);
+    /// 提交到队列后调用：在队列上打一个围栏，标记该包所在帧槽位的分配器何时可以复用，
+    /// 并给描述符集快照块、查询、bundle 挂上这次提交的围栏值
+    void OnSubmitted(ID3D12CommandQueue* queue, const SubmitPacket& packet);
+
+    // ---- 命令流模式（L4-3，HE_RHI_COMMAND_STREAM=1 时由帧主列表开启）----
+    //  录制调用不碰原生列表，只追加进纯数据命令流；提交时由设备把流回放到本列表的影子列表上
+    //  （真实录制者）再提交。流按帧槽位轮换：提交路由下 RHI 线程可能还在回放上一帧的流。
+    void EnableCommandStream() override;
+    bool IsStreamMode() const { return m_StreamMode; }
+    /// 本次录制的命令流（提交时在渲染线程上取下，交给执行端）
+    RHICommandList* GetRecordedStream() { return m_StreamMode ? m_Streams[m_StreamSlot].get() : nullptr; }
+    /// 回放用的影子列表（懒创建，与本列表同队列类型）
+    D3D12CommandList* GetReplayList();
+    IRHISwapChain* GetSwapChain() const { return m_SwapChain; }
 
     // ---- 调试标签（PIX 事件格式：RenderDoc / PIX 显示为分组与标记，DRED 报告据此给出所在 pass）----
     void BeginDebugLabel(const char* name, const float color[4] = nullptr) override;
@@ -148,14 +187,9 @@ public:
     /// 记下标签，下一次绘制 / 派发前插入一次瞬时标记（与 Vulkan 一致，受 r.Debug.DrawMarker 控制）
     void SetDrawDebugLabel(const char* name, const float color[4] = nullptr) override;
     void ClearDrawDebugLabel() override;
-    /// 提交前 / 后调用：执行录制期记下的时间线等待 / 信号（见 SetTimelineWait / SetTimelineSignal）
-    void ApplyTimelineWaits();
-    void ApplyTimelineSignals();
     /// 计算列表遇到处于图形专用状态的纹理时记下的「交接转换」（图形专用状态 → 计算可用状态）。
     /// 计算列表上不能做涉及 PIXEL_SHADER_RESOURCE / RENDER_TARGET / DEPTH_* 的转换，
     /// 由设备在提交本列表前先在图形队列上执行这些转换，计算队列等它完成后再执行本列表
-    const std::vector<D3D12_RESOURCE_BARRIER>& GetQueueHandoffs() const { return m_QueueHandoffs; }
-    void ClearQueueHandoffs() { m_QueueHandoffs.clear(); }
     /// 外部代码（ImGui）直接往原生列表录制前调用：绑定引擎的描述符堆；
     /// 外部会改根签名与 PSO，因此之后的绘制必须重新 SetPipeline 并下发根参数
     void PrepareForExternalRendering();
@@ -209,9 +243,26 @@ private:
     u64                               m_SlotFenceValues[kMaxFramesInFlight]{};   // 各槽位最后一次提交的围栏值
     u64                               m_NextFenceValue = 1;
     u32                               m_FrameSlot = 0;
+    /// 每个帧槽位一个原生列表：提交路由下 RHI 线程可能还没提交上一帧的列表，渲染线程就已开始
+    /// 录下一帧，共用一个原生列表会把排队中的录制内容 Reset 掉。m_List 指向当前槽位的列表
+    ComPtr<ID3D12GraphicsCommandList> m_Lists[kMaxFramesInFlight];
     ComPtr<ID3D12GraphicsCommandList> m_List;
     /// 同一列表的 6 号接口（DispatchMesh），运行时不支持时为空
     ComPtr<ID3D12GraphicsCommandList6> m_List6;
+    /// 待提交的提交包（渲染线程入队、提交线程出队）
+    std::deque<SubmitPacket>          m_SubmitPackets;
+    std::mutex                        m_SubmitPacketMutex;
+    /// 命令流模式：开关、按帧槽位轮换的命令流、回放用的影子列表
+    bool                              m_StreamMode = false;
+    std::unique_ptr<RHICommandList>   m_Streams[kMaxFramesInFlight];
+    u32                               m_StreamSlot = 0;
+    std::unique_ptr<D3D12CommandList> m_ReplayList;
+    /// 回放用的后缓冲提示：低 32 位 = 序号 + 1（0 表示无提示），高 32 位 = 录制时的后缓冲状态。
+    /// 模式 2 下回放在 RHI 线程上进行，那时交换链的录制序号与状态都已属于后面的帧，不能再查
+    uintptr_t                         m_BackBufferHint = 0;
+    RHICommandList& Stream() { return *m_Streams[m_StreamSlot]; }
+    /// 流模式下记录一条带文本的标签命令（文本超长截断）
+    void StreamLabel(RHICommandType type, const char* name);
     ComPtr<ID3D12RootSignature>       m_PushRootSig;   // 阶段 0 占位，阶段 2 由 PSO 提供
     D3D12Device*      m_Device = nullptr;
     IRHISwapChain*    m_SwapChain = nullptr;
