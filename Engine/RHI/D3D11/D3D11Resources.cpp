@@ -417,6 +417,23 @@ bool D3D11Texture::Initialize(D3D11Device* device, const TextureDesc& desc) {
     }
 
     ID3D11Device5* dev = device->GetDevice();
+    // 【mip 链】引擎只给 mip 0 的初始数据（Vulkan 后端上传后 blit 生成其余级，D3D12 后端在 CPU 上生成）。
+    // 只传 mip 0 时其余级是未初始化显存，远处 / 斜视表面采样到低级 mip 会发黑（03.Sponza 的墙体）。
+    // D3D11 有原生 GenerateMips：需要 RENDER_TARGET 绑定与 GENERATE_MIPS 标志，格式要支持自动生成
+    const bool wantMips = desc.initialData && m_MipLevels > 1 && m_Depth == 1 && !m_IsDepth && m_SampleCount == 1;
+    bool genMips = false;
+    if (wantMips) {
+        UINT support = 0;
+        genMips = SUCCEEDED(dev->CheckFormatSupport(m_SrvFormat, &support)) && (support & D3D11_FORMAT_SUPPORT_MIP_AUTOGEN)
+               && m_RtvFormat != DXGI_FORMAT_UNKNOWN;
+        if (genMips) {
+            bind |= D3D11_BIND_RENDER_TARGET;
+        } else {
+            HE_CORE_WARN("[D3D11] 格式 {} 不支持自动生成 mip，只上传 mip 0（{}x{}）",
+                         static_cast<u32>(desc.format), m_Width, m_Height);
+        }
+    }
+
     HRESULT hr = E_FAIL;
     if (m_Depth > 1) {
         D3D11_TEXTURE3D_DESC td{};
@@ -438,6 +455,7 @@ bool D3D11Texture::Initialize(D3D11Device* device, const TextureDesc& desc) {
         td.Usage     = D3D11_USAGE_DEFAULT;
         td.BindFlags = bind;
         td.MiscFlags = (m_IsCube && m_ArrayLayers % 6 == 0) ? D3D11_RESOURCE_MISC_TEXTURECUBE : 0u;
+        if (genMips) td.MiscFlags |= D3D11_RESOURCE_MISC_GENERATE_MIPS;
         ComPtr<ID3D11Texture2D> tex;
         hr = dev->CreateTexture2D(&td, nullptr, &tex);
         m_Resource = tex;
@@ -450,13 +468,18 @@ bool D3D11Texture::Initialize(D3D11Device* device, const TextureDesc& desc) {
     }
 
     if (desc.initialData) UploadInitialData(desc);
+    if (genMips) {
+        if (ID3D11ShaderResourceView* srv = GetSrv(0, 0, false)) m_Device->GetContext()->GenerateMips(srv);
+    }
+    // 默认视图按引擎声明的用途选：为生成 mip 才加的 RENDER_TARGET 不算渲染目标
+    const bool isRenderTarget = !m_IsDepth && HasAny(desc.usage, TextureUsage::RenderTarget);
 
     // 默认视图：渲染目标 → RTV，深度 → DSV，其余 → 整资源 SRV（见类说明）。
     // 默认视图在登记表里标为「整资源」（single=false）：引擎把它交给 UpdateDescriptorSetWithImageView
     // 采样时，含义与 Vulkan 的整图 ImageView 相同（全部 mip / 层），而不只是 mip 0 / 层 0
     D3D11ViewInfo::Type defaultType = D3D11ViewInfo::Type::SRV;
-    if (m_IsDepth)                            { m_DefaultView = GetDsv(0, 0); defaultType = D3D11ViewInfo::Type::DSV; }
-    else if (bind & D3D11_BIND_RENDER_TARGET) { m_DefaultView = GetRtv(0, 0); defaultType = D3D11ViewInfo::Type::RTV; }
+    if (m_IsDepth)           { m_DefaultView = GetDsv(0, 0); defaultType = D3D11ViewInfo::Type::DSV; }
+    else if (isRenderTarget) { m_DefaultView = GetRtv(0, 0); defaultType = D3D11ViewInfo::Type::RTV; }
     else                                      { m_DefaultView = GetSrv(0, 0, false); }
     m_Device->RegisterView(m_DefaultView, { this, defaultType, 0, 0, false });
 
@@ -464,8 +487,8 @@ bool D3D11Texture::Initialize(D3D11Device* device, const TextureDesc& desc) {
     if (m_ArrayLayers > 1) {
         m_FaceViews.resize(m_ArrayLayers, nullptr);
         for (u32 l = 0; l < m_ArrayLayers; ++l) {
-            if (m_IsDepth)                            m_FaceViews[l] = GetDsv(0, l);
-            else if (bind & D3D11_BIND_RENDER_TARGET) m_FaceViews[l] = GetRtv(0, l);
+            if (m_IsDepth)           m_FaceViews[l] = GetDsv(0, l);
+            else if (isRenderTarget) m_FaceViews[l] = GetRtv(0, l);
             else                                      m_FaceViews[l] = GetSrv(0, l, true);
         }
     }
