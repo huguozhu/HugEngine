@@ -1161,7 +1161,9 @@ int main() {
         }   // end if (imgui.IsInitialized())
 
         // GPU Profiler 面板（按 F1 切换）
-        if (ImGui::IsKeyPressed(ImGuiKey_F1))
+        // 只在 ImGui 已初始化时查按键：没有 UI 后端时（如 D3D11 尚未接入 ImGui）没有 ImGui 上下文，
+        // 直接调用 ImGui::IsKeyPressed 会访问空上下文而崩溃
+        if (imgui.IsInitialized() && ImGui::IsKeyPressed(ImGuiKey_F1))
             pipeline.GetProfilerPanel().Toggle();
         pipeline.GetProfilerPanel().Draw();
 
