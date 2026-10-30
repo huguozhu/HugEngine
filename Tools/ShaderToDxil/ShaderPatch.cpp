@@ -604,6 +604,26 @@ static uint32_t ParseArrayCount(const std::string& declPart) {
     return static_cast<uint32_t>(std::strtoul(declPart.c_str() + k, nullptr, 10));
 }
 
+void PatchBranchesFxc(std::string& s) {
+    std::vector<size_t> insertAt;
+    for (size_t p = 0; (p = s.find("if", p)) != std::string::npos; p += 2) {
+        // 必须是独立的关键字 if，后面（跳过空白）紧跟 '('
+        if (p > 0 && (IsIdentChar(s[p - 1]) || s[p - 1] == '#')) continue;
+        if (p + 2 < s.size() && IsIdentChar(s[p + 2])) continue;
+        size_t k = p + 2;
+        while (k < s.size() && (s[k] == ' ' || s[k] == '\t')) ++k;
+        if (k >= s.size() || s[k] != '(') continue;
+        // 往前看：已有属性（`]`）或是 else if 的就跳过
+        size_t b = p;
+        while (b > 0 && isspace(static_cast<unsigned char>(s[b - 1]))) --b;
+        if (b > 0 && s[b - 1] == ']') continue;
+        if (b >= 4 && s.compare(b - 4, 4, "else") == 0 && (b == 4 || !IsIdentChar(s[b - 5]))) continue;
+        insertAt.push_back(p);
+    }
+    // 从后往前插入，前面的位置不受影响
+    for (auto it = insertAt.rbegin(); it != insertAt.rend(); ++it) s.insert(*it, "[branch] ");
+}
+
 // ---------------------------------------------------------------------------
 //  结构化缓冲里的矩阵（fxc 一律按行主序读，见 ShaderPatch.h）
 // ---------------------------------------------------------------------------

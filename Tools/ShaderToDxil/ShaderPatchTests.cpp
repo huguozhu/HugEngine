@@ -304,12 +304,42 @@ static void TestStructuredMatrices() {
     }
 }
 
+// ---------------------------------------------------------------------------
+//  用例 6：if 语句加 [branch]（fxc 的 flattened side effect 重试用）
+// ---------------------------------------------------------------------------
+static void TestBranches() {
+    std::fprintf(stderr, "用例 6：分支属性\n");
+    std::string hlsl =
+        "#if defined(X)\n"
+        "void f(uint i)\n"
+        "{\n"
+        "    if(i > 0u) { u_Out[i] = 1u; }\n"
+        "    else if (i == 0u) { u_Out[0] = 2u; }\n"
+        "    [flatten] if (i > 5u) { }\n"
+        "    uint gif = elif(i);\n"
+        "}\n"
+        "#endif\n";
+    const std::string want =
+        "#if defined(X)\n"
+        "void f(uint i)\n"
+        "{\n"
+        "    [branch] if(i > 0u) { u_Out[i] = 1u; }\n"
+        "    else if (i == 0u) { u_Out[0] = 2u; }\n"
+        "    [flatten] if (i > 5u) { }\n"
+        "    uint gif = elif(i);\n"
+        "}\n"
+        "#endif\n";
+    PatchBranchesFxc(hlsl);
+    CheckText("用例 6 HLSL", hlsl, want);
+}
+
 int main() {
     TestPixelRegisters();
     TestRegisterErrors();
     TestLoops();
     TestBindTableRoundTrip();
     TestStructuredMatrices();
+    TestBranches();
     if (g_Failures == 0) {
         std::fprintf(stderr, "ShaderPatchTests：全部通过\n");
         return 0;

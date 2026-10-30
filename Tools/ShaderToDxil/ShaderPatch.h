@@ -56,6 +56,12 @@ struct LoopSite {
 /// 必须展开（如分支内带隐式导数采样的定长循环），见 main.cpp 的逐循环重试
 void PatchLoopsFxc(std::string& s, bool insertLoop = true, const std::vector<LoopSite>* skip = nullptr);
 
+/// 给 `if` 语句加 `[branch]`（不加在 `#if`、`else if` 与已带属性的 if 上）。
+/// fxc 会把含 UAV 写入 / 原子操作的分支展平成无条件执行，遇到无法展平的副作用就报
+/// "internal error: flattened side effect"（或展平后判为写竞争 X3694）；强制按动态分支编译即可避免。
+/// 只在首次编译报这个错时使用（见 main.cpp），其余着色器的 DXBC 不受影响
+void PatchBranchesFxc(std::string& s);
+
 /// fxc 对 (RW)StructuredBuffer 元素里的矩阵**总是按行主序**解释内存，忽略
 /// `#pragma pack_matrix(column_major)` 与 `column_major` 修饰（DXC 会遵守）。引擎写入的矩阵是
 /// 列主序（与 Vulkan / D3D12 一致），fxc 读出来就成了转置。这里把只读结构化缓冲的每处

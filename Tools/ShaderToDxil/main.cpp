@@ -100,10 +100,12 @@ static int RunDxbc(const char* input, const char* entry, const char* stage,
     // 补丁（insertLoop 决定是否给最外层循环加 [loop]）+ 寄存器重新分配；寄存器问题直接失败
     const std::string hlslPath = std::string(output) + ".hlsl";
     std::vector<LoopSite> noLoopSites;   // fxc 报 X3531 的循环：这些位置不加 [loop]
+    bool forceBranch = false;            // fxc 报 flattened side effect 后：所有 if 加 [branch] 重编
     auto buildPatched = [&](bool insertLoop, D3D11RegisterResult& regs) -> bool {
         std::string patched = InjectSemantics(src, st == "vs");
         PatchUint8(patched);
         PatchLoopsFxc(patched, insertLoop, &noLoopSites);
+        if (forceBranch) PatchBranchesFxc(patched);
         if (st == "vs") PatchInstanceId(patched);
         // fxc 按行主序读结构化缓冲里的矩阵：读取处补 transpose（无法修正的情况只告警）
         for (const std::string& p : PatchStructuredMatricesFxc(patched)) {
@@ -160,30 +162,42 @@ static int RunDxbc(const char* input, const char* entry, const char* stage,
     D3D11RegisterResult regs;
     ID3DBlob* code = nullptr;
     bool ok = false;
-    // 【逐循环重试】给最外层循环加 [loop] 是为了挡住 fxc 对动态边界循环的强制展开（X3511）；
-    // 但循环体里有隐式导数采样（Sample）且处在分支内的定长循环，fxc 必须展开它才能算导数，
-    // [loop] 反而让它报 X3531。每次把报 X3531 的循环位置加入「不加 [loop]」名单重编，
-    // 其余循环保留 [loop]，直到编过或不再出现新的 X3531 位置
-    for (int attempt = 0; attempt < 16; ++attempt) {
-        if (!buildPatched(true, regs)) return 1;
-        ok = compile(regs.hlsl, code);
-        if (ok) break;
-        const std::vector<LoopSite> sites = x3531Sites();
-        size_t added = 0;
-        for (const LoopSite& site : sites) {
-            bool known = false;
-            for (const LoopSite& k : noLoopSites) known = known || (k.line == site.line && k.file == site.file);
-            if (!known) { noLoopSites.push_back(site); ++added; }
+    // 整个重试流程最多跑两轮：第二轮只在第一轮报 flattened side effect 或 X3694 时进行（所有 if 加 [branch]）。
+    // 两者都是 fxc 把带 UAV 写入的分支展平造成的：前者无法展平而内部报错，后者展平后
+    // `if (线程号 == 0) 写同一地址` 变成所有线程都写，被判为写竞争
+    for (int round = 0; round < 2 && !ok; ++round) {
+        if (round == 1) {
+            if (diagnostics.find("flattened side effect") == std::string::npos &&
+                diagnostics.find("X3694") == std::string::npos) break;
+            std::fprintf(stderr, "ShaderToDxil --dxbc: %s 报 flattened side effect / X3694，所有 if 加 [branch] 后重编\n", input);
+            forceBranch = true;
+            noLoopSites.clear();
         }
-        if (added == 0) break;
-        std::fprintf(stderr, "ShaderToDxil --dxbc: %s 有 %zu 个循环必须展开（X3531），这些循环不加 [loop] 后重编\n",
-                     input, added);
-    }
-    // 兜底：仍然报 X3531（报错位置对不上插入的 [loop]）时，整个着色器都不加 [loop] 再试一次
-    if (!ok && diagnostics.find("X3531") != std::string::npos) {
-        std::fprintf(stderr, "ShaderToDxil --dxbc: %s 仍报 X3531，改为整体不加 [loop] 重编\n", input);
-        if (!buildPatched(false, regs)) return 1;
-        ok = compile(regs.hlsl, code);
+        // 【逐循环重试】给最外层循环加 [loop] 是为了挡住 fxc 对动态边界循环的强制展开（X3511）；
+        // 但循环体里有隐式导数采样（Sample）且处在分支内的定长循环，fxc 必须展开它才能算导数，
+        // [loop] 反而让它报 X3531。每次把报 X3531 的循环位置加入「不加 [loop]」名单重编，
+        // 其余循环保留 [loop]，直到编过或不再出现新的 X3531 位置
+        for (int attempt = 0; attempt < 16; ++attempt) {
+            if (!buildPatched(true, regs)) return 1;
+            ok = compile(regs.hlsl, code);
+            if (ok) break;
+            const std::vector<LoopSite> sites = x3531Sites();
+            size_t added = 0;
+            for (const LoopSite& site : sites) {
+                bool known = false;
+                for (const LoopSite& k : noLoopSites) known = known || (k.line == site.line && k.file == site.file);
+                if (!known) { noLoopSites.push_back(site); ++added; }
+            }
+            if (added == 0) break;
+            std::fprintf(stderr, "ShaderToDxil --dxbc: %s 有 %zu 个循环必须展开（X3531），这些循环不加 [loop] 后重编\n",
+                         input, added);
+        }
+        // 兜底：仍然报 X3531（报错位置对不上插入的 [loop]）时，整个着色器都不加 [loop] 再试一次
+        if (!ok && diagnostics.find("X3531") != std::string::npos) {
+            std::fprintf(stderr, "ShaderToDxil --dxbc: %s 仍报 X3531，改为整体不加 [loop] 重编\n", input);
+            if (!buildPatched(false, regs)) return 1;
+            ok = compile(regs.hlsl, code);
+        }
     }
     // 失败时是错误，成功时是警告；都原样打印（每行就是「文件(行,列): 消息」）
     if (!diagnostics.empty()) std::fprintf(stderr, "%s", diagnostics.c_str());
