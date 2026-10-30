@@ -18,7 +18,7 @@
 //   实例变换 t1024、可见实例索引 t1280、骨骼矩阵 t1536、材质 t1792（各 256 个；此前各 64 个，
 //   缓冲句柄超过 64 就越界写进相邻区间）
 // 之前纹理只有 64 个，Sponza 这类场景纹理句柄达四百多，越界后落到后面的缓冲区间，采样到错误资源。
-#if defined(HE_SHADER_D3D12)
+#if defined(HE_SHADER_HLSL)   // D3D 后端（D3D11 / D3D12）用定长数组；D3D11 的 bindless 替代方案见 D3D11 后端实现规划 M3
   #define HE_BINDLESS_DIM 1024
   #define HE_BINDLESS_SSBO_DIM 256
 #else

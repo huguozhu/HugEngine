@@ -55,9 +55,9 @@ struct PBRVertexInput {
 
 // 实例号语义：Vulkan 下 Slang 把 SV_InstanceID 编成 gl_InstanceIndex - gl_BaseInstance（不含 firstInstance），
 // 而本引擎用 firstInstance 传对象号 / 簇号（GPU 剔除、Nanite），需要含 firstInstance 的 gl_InstanceIndex（SV_VulkanInstanceID）。
-// D3D12 仍写 SV_InstanceID，由 ShaderToDxil 改为读逐实例序号缓冲（同样含起始实例）
+// D3D 后端（D3D11 / D3D12，定义了 HE_SHADER_HLSL）仍写 SV_InstanceID，由 ShaderToDxil 改为读逐实例序号缓冲（同样含起始实例）
 #ifndef HE_SV_INSTANCE
-#if defined(HE_SHADER_D3D12)
+#if defined(HE_SHADER_HLSL)
 #define HE_SV_INSTANCE SV_InstanceID
 #else
 #define HE_SV_INSTANCE SV_VulkanInstanceID
