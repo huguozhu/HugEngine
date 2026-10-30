@@ -157,7 +157,7 @@ void main(
     //   `kSoftStatDiag*` 完全同一手法（那里也是 `gid.x == 0 && tid.x == 0`）。
     //   【为什么用非原子写而不是原子累加】它是"原样回读"，语义是**赋值**而不是计数；
     //   多个工作组写同一个槽反而会让结果取决于执行顺序。只让 0 号线程写 ⇒ 无竞态。
-    if (gid.x == 0u && tid == 0u) {
+    if (naniteRasterSlot(gid) == 0u && tid == 0u) {   // 只由第 0 个工作组的 0 号线程写
         u_Stats[kHardStatDiagScreenW]   = screenWidth;
         u_Stats[kHardStatDiagScreenH]   = screenHeight;
         u_Stats[kHardStatDiagMaxTri]    = maxTriangles;
@@ -171,7 +171,7 @@ void main(
     ClusterRef ref;
     SoftRasterClusterView view;
     float3 translation;
-    uint triangleCount = hardRasterSelectCluster(gid.x, ref, view, translation);
+    uint triangleCount = hardRasterSelectCluster(naniteRasterSlot(gid), ref, view, translation);   // 二维派发展开成槽位
     NaniteCluster cluster = view.cluster;
 
     // 逐**角点**展开：三角形 `t` 用输出顶点 `3t / 3t+1 / 3t+2`。整个入口只调用这一次

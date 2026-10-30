@@ -57,7 +57,7 @@
 void main(uint3 tid : SV_GroupThreadID, uint3 gid : SV_GroupID) {
     // ── ① 与第 1 趟 / 第 2 趟**逐字相同**的取簇逻辑（三趟口径一致是等值复检成立的前提）──
     uint visibleCount = u_VisibleClusterCount[0];
-    uint slot = gid.x;
+    uint slot = naniteRasterSlot(gid);   // 二维派发展开成可见簇槽位
     if (slot >= visibleCount) return;
 
     ClusterRef ref = u_VisibleClusters[slot];

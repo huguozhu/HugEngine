@@ -80,6 +80,12 @@ struct InstanceObject {
 [[vk::binding(6, 0)]] RWStructuredBuffer<uint>               u_DepthKey;
 [[vk::binding(7, 0)]] RWStructuredBuffer<uint>               u_Stats;
 [[vk::binding(12, 0)]] StructuredBuffer<NaniteMaterialRecord> u_Materials;
+// 软 / 硬光栅「每个可见簇一个工作组」按**二维**派发：D3D12 单维线程组数上限 65535（网格着色器的
+// 组数在 D3D12 与 Vulkan 下同样受限），可见簇容量 2^20 超出（调试层 id=1497，派发无效）。
+// 组号按 kNaniteRasterDispatchWidth 列展开成可见簇列表槽位；该值必须与 C++ 的同名常量一致（NaniteTypes.h）
+static const uint kNaniteRasterDispatchWidth = 1024u;
+uint naniteRasterSlot(uint3 gid) { return gid.x + gid.y * kNaniteRasterDispatchWidth; }
+
 // 13/14 是 bindless 纹理 / 采样器数组（与 GBuffer 路径同一个堆、同一套下标）。
 // 【D3D12 必须显式写寄存器】未写 register 的无界数组会被 dxc 自动分到 t0,space1 / s0,space2：
 //   space1 是别的描述符集（本模块只绑 set 0），读到错误资源或未初始化的根参数。这里与 common.slang 的

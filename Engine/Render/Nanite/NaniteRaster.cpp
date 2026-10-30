@@ -1271,7 +1271,10 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_SoftDepthSet);
     cmd->SetPushConstants(0, (u32)sizeof(NaniteSoftRasterParams), &paramsEff);
     cmd->SetDrawDebugLabel("Nanite_SoftRasterDepth (atomic depth key)");
-    cmd->Dispatch(visibleCapacity, 1, 1);
+    // 二维派发（宽 kNaniteRasterDispatchWidth）：单维不能超过 65535，着色器按 gid.x + gid.y × 宽 换算槽位
+    const u32 rasterGroupsX = std::min(visibleCapacity, kNaniteRasterDispatchWidth);
+    const u32 rasterGroupsY = (visibleCapacity + kNaniteRasterDispatchWidth - 1u) / kNaniteRasterDispatchWidth;
+    cmd->Dispatch(rasterGroupsX, rasterGroupsY, 1);
 
     // ── ④ A → B：深度键的 RAW（全局内存屏障）──
     cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
@@ -1285,7 +1288,7 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_SoftColorSet);
     cmd->SetPushConstants(0, (u32)sizeof(NaniteSoftRasterParams), &paramsEff);
     cmd->SetDrawDebugLabel("Nanite_SoftRasterWinner (deterministic winner id)");
-    cmd->Dispatch(visibleCapacity, 1, 1);
+    cmd->Dispatch(rasterGroupsX, rasterGroupsY, 1);   // 同 A 趟的二维派发
 
     // ── ⑥ B → C：赢家候选号的 RAW（全局内存屏障）──
     cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
@@ -1296,7 +1299,7 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_SoftColorSet);
     cmd->SetPushConstants(0, (u32)sizeof(NaniteSoftRasterParams), &paramsEff);
     cmd->SetDrawDebugLabel("Nanite_SoftRaster (equality test -> GBuffer)");
-    cmd->Dispatch(visibleCapacity, 1, 1);
+    cmd->Dispatch(rasterGroupsX, rasterGroupsY, 1);   // 同 A 趟的二维派发
 
     // ── ⑧ C 趟 → 深度解析：深度键 UAV → 只读；4 张颜色 UAV → 可采样（Lighting 要读）──
     cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::FragmentShader,
@@ -1642,7 +1645,9 @@ void NaniteRaster::RecordHardRasterPass(rhi::IRHICommandList* cmd,
     // 任务数 = 可见簇容量（与软光栅同一条既有口径：可见计数是**同一帧 GPU 刚写出**的、CPU 读不到，
     // 读回会破坏无停顿）⇒ 由 shader 按 `slot >= visibleCount` 与分流判据早退收口。
     cmd->SetDrawDebugLabel("Nanite_HardRaster (mesh, triangleCount > maxTriangles)");
-    cmd->DrawMeshTasks(visibleCapacity, 1u, 1u);
+    // 二维派发（同软光栅）：网格着色器组数单维同样不能超过 65535
+    cmd->DrawMeshTasks(std::min(visibleCapacity, kNaniteRasterDispatchWidth),
+                       (visibleCapacity + kNaniteRasterDispatchWidth - 1u) / kNaniteRasterDispatchWidth, 1u);
     cmd->EndOffscreenPass();
 
     // ── ④ 画完转回可采样（Lighting / Decal 等下游按帧图模型把它们当 ShaderResource）──
