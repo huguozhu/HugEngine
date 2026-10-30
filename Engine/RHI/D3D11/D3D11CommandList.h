@@ -139,6 +139,8 @@ private:
     bool PrepareDrawOrDispatch(bool compute);
     /// 按当前 PSO 的绑定槽位，把已绑定描述符集里的资源绑到 D3D11 槽位
     void FlushBindings();
+    /// 冲突解绑（规划 3.7）：这些 UAV 的资源若仍以 SRV 绑着，先清掉那些 SRV 槽
+    void UnbindSrvsOfUavs(ID3D11UnorderedAccessView* const* uavs, u32 count);
     /// 一次绑定缺资源时打印（同一 PSO + binding 只打一次，避免每帧刷屏）
     void ReportMissing(u32 set, u32 binding, const char* what);
     /// bindless 替代绑定（kBindingNB*）：按 SetNonBindlessHandle 记下的句柄从 bindless 堆取资源。

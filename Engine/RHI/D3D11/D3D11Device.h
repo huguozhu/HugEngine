@@ -199,6 +199,17 @@ public:
     class D3D11CommandList* GetContextOwner() const { return m_ContextOwner; }
     void SetContextOwner(class D3D11CommandList* cl) { m_ContextOwner = cl; }
 
+    // ---- 资源冲突解绑（规划 3.7）----
+    //  D3D11 运行时会把同时作为输出（RTV / DSV / UAV）与输入（SRV）绑定的资源静默解绑并告警。
+    //  这里记录 immediate context 上各阶段 SRV 槽位当前指向的资源（上下文是所有命令列表共用的，
+    //  所以放在设备上）；绑定输出之前先把仍以 SRV 挂着同一资源的槽位清空。
+    static constexpr u32 kSrvStageCount = 3;   // 与 D3D11PipelineState::Stage 的 VS / PS / CS 一致
+    static constexpr u32 kSrvSlotCount  = D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT;
+    /// 记录 stage 阶段 [slot, slot + count) 新绑定的 SRV（命令列表每次下发 SRV 后调用）
+    void TrackSrvs(u32 stage, u32 slot, u32 count, ID3D11ShaderResourceView* const* views);
+    /// 把所有阶段里以 SRV 绑着 resources 中任一资源的槽位置空（绑定 RTV / DSV / UAV 前调用）
+    void UnbindSrvsOf(ID3D11Resource* const* resources, u32 count);
+
     /// 全零顶点缓冲（步长 0）：着色器声明了、引擎顶点布局未提供的属性从这里读 0
     ID3D11Buffer* GetZeroVertexBuffer();
     /// 实例序号缓冲：第 i 个 u32 为 i，供顶点着色器取含起始实例的实例号（见 D3D11PipelineState）
@@ -254,6 +265,9 @@ private:
     ComPtr<ID3D11Buffer>         m_ZeroVertexBuffer;      // 懒创建
     ComPtr<ID3D11Buffer>         m_InstanceIndexBuffer;   // 懒创建
     class D3D11CommandList*      m_ContextOwner = nullptr;
+    // 各阶段 SRV 槽位当前指向的资源（只作比较，不持有引用）与可能非空的槽位上界
+    ID3D11Resource*              m_SrvResources[kSrvStageCount][kSrvSlotCount] = {};
+    u32                          m_SrvHigh[kSrvStageCount] = {};
     static constexpr u32         kRecentPsoCount = 32;
     const char*                  m_RecentPsos[kRecentPsoCount] = {};
     u32                          m_RecentCursor = 0;

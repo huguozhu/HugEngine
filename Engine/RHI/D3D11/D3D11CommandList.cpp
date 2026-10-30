@@ -87,6 +87,17 @@ void D3D11CommandList::ApplyRenderTargets() {
     const bool readOnly = m_Pipeline && !m_Pipeline->IsCompute() && !m_Pipeline->GetDepthWrite();
     ID3D11DepthStencilView* dsv = m_DepthTexture ? m_DepthTexture->GetDsv(m_DepthMip, m_DepthLayer, readOnly) : nullptr;
     m_DepthReadOnly = readOnly;
+    // 冲突解绑（规划 3.7）：要作渲染目标 / 可写深度的资源若仍以 SRV 绑着（上一个 pass 采样过它），
+    // 先清掉那些 SRV 槽，否则运行时会强制置空并告警。只读 DSV 与同一深度图的 SRV 可以共存
+    ID3D11Resource* outputs[kMaxColorAttachments + 1] = {};
+    u32 outputCount = 0;
+    for (u32 i = 0; i < m_RtvCount; ++i) {
+        if (!m_Rtvs[i]) continue;
+        m_Rtvs[i]->GetResource(&outputs[outputCount]);
+        if (outputs[outputCount]) outputs[outputCount++]->Release();   // 只取指针作比较
+    }
+    if (m_DepthTexture && !readOnly) outputs[outputCount++] = m_DepthTexture->GetResource();
+    if (outputCount) m_Device->UnbindSrvsOf(outputs, outputCount);
     m_Device->GetContext()->OMSetRenderTargets(m_RtvCount, m_RtvCount ? m_Rtvs : nullptr, dsv);
 }
 
@@ -416,6 +427,7 @@ void D3D11CommandList::FlushBindings() {
                     if (stage == D3D11PipelineState::VS)      ctx->VSSetShaderResources(b.slot, b.count, views.data());
                     else if (stage == D3D11PipelineState::PS) ctx->PSSetShaderResources(b.slot, b.count, views.data());
                     else                                      ctx->CSSetShaderResources(b.slot, b.count, views.data());
+                    m_Device->TrackSrvs(stage, b.slot, b.count, views.data());   // 冲突解绑要知道 SRV 指向谁
                     break;
                 }
                 case DxbcBindType::UAV: {
@@ -445,6 +457,7 @@ void D3D11CommandList::FlushBindings() {
                     }
                     if (!views[0] && !byHandle) ReportMissing(b.set, b.binding, "可写资源");
                     if (compute) {
+                        UnbindSrvsOfUavs(views.data(), b.count);
                         ctx->CSSetUnorderedAccessViews(b.slot, b.count, views.data(), nullptr);
                     } else {
                         for (u32 i = 0; i < b.count && b.slot + i < dxbc::kDxbcMaxUAVSlots; ++i) {
@@ -492,10 +505,22 @@ void D3D11CommandList::FlushBindings() {
 
     if (graphicsUavMax > graphicsUavMin) {
         // 保留当前渲染目标，只设置 UAV（像素着色器的 UAV 已由 ShaderToDxil 平移到 u8 之后）
+        UnbindSrvsOfUavs(graphicsUavs + graphicsUavMin, graphicsUavMax - graphicsUavMin);
         ctx->OMSetRenderTargetsAndUnorderedAccessViews(D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL, nullptr, nullptr,
                                                        graphicsUavMin, graphicsUavMax - graphicsUavMin,
                                                        graphicsUavs + graphicsUavMin, nullptr);
     }
+}
+
+void D3D11CommandList::UnbindSrvsOfUavs(ID3D11UnorderedAccessView* const* uavs, u32 count) {
+    std::vector<ID3D11Resource*> resources;
+    for (u32 i = 0; i < count; ++i) {
+        if (!uavs[i]) continue;
+        ID3D11Resource* r = nullptr;
+        uavs[i]->GetResource(&r);
+        if (r) { resources.push_back(r); r->Release(); }   // 只取指针作比较
+    }
+    if (!resources.empty()) m_Device->UnbindSrvsOf(resources.data(), static_cast<u32>(resources.size()));
 }
 
 bool D3D11CommandList::PrepareDrawOrDispatch(bool compute) {

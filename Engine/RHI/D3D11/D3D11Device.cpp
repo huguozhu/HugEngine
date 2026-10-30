@@ -155,6 +155,44 @@ void D3D11Device::OnGpuTimeout() {
 }
 
 // ---------------------------------------------------------------------------
+//  资源冲突解绑（规划 3.7）
+// ---------------------------------------------------------------------------
+/// 视图所属的资源（只取指针作比较：GetResource 会加引用，取到后立即释放）
+static ID3D11Resource* ResourceOf(ID3D11View* view) {
+    if (!view) return nullptr;
+    ID3D11Resource* r = nullptr;
+    view->GetResource(&r);
+    if (r) r->Release();
+    return r;
+}
+
+void D3D11Device::TrackSrvs(u32 stage, u32 slot, u32 count, ID3D11ShaderResourceView* const* views) {
+    if (stage >= kSrvStageCount) return;
+    for (u32 i = 0; i < count && slot + i < kSrvSlotCount; ++i) {
+        ID3D11Resource* r = ResourceOf(views[i]);
+        m_SrvResources[stage][slot + i] = r;
+        if (r) m_SrvHigh[stage] = std::max(m_SrvHigh[stage], slot + i + 1);
+    }
+}
+
+void D3D11Device::UnbindSrvsOf(ID3D11Resource* const* resources, u32 count) {
+    ID3D11ShaderResourceView* none = nullptr;
+    for (u32 stage = 0; stage < kSrvStageCount; ++stage) {
+        for (u32 slot = 0; slot < m_SrvHigh[stage]; ++slot) {
+            ID3D11Resource* bound = m_SrvResources[stage][slot];
+            if (!bound) continue;
+            bool hit = false;
+            for (u32 i = 0; i < count && !hit; ++i) hit = (resources[i] == bound);
+            if (!hit) continue;
+            if (stage == 0)      m_Context->VSSetShaderResources(slot, 1, &none);
+            else if (stage == 1) m_Context->PSSetShaderResources(slot, 1, &none);
+            else                 m_Context->CSSetShaderResources(slot, 1, &none);
+            m_SrvResources[stage][slot] = nullptr;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 //  调试层消息
 // ---------------------------------------------------------------------------
 void D3D11Device::DrainDebugMessages() {
