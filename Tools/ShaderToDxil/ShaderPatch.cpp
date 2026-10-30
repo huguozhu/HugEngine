@@ -310,6 +310,13 @@ static void CollectConstants(const std::vector<std::string>& lines, std::map<std
 static bool ResolveInt(const std::string& token, const std::string& srcPath, int& out) {
     const std::string t = Trim(token);
     if (t.empty()) return false;
+    // 「常量 + 偏移」形式（如 kGPUBinding_NB_MaterialTextures + 1）：逐项解析后求和
+    if (const size_t plus = t.find('+'); plus != std::string::npos) {
+        int a = 0, b = 0;
+        if (!ResolveInt(t.substr(0, plus), srcPath, a) || !ResolveInt(t.substr(plus + 1), srcPath, b)) return false;
+        out = a + b;
+        return true;
+    }
     if (isdigit(static_cast<unsigned char>(t[0]))) { out = std::atoi(t.c_str()); return true; }
 
     static std::map<std::string, std::map<std::string, int>> s_tables;

@@ -30,11 +30,44 @@
 #define kGPUBinding_BindlessSSBO_hlsl     t1792
 #define kGPUDescSet_Bindless_hlsl         space2
 
+#if defined(HE_SHADER_D3D11)
+// ---- D3D11（SM 5.0）：不能用运行时句柄索引资源数组（D3D11 后端实现规划 3.2）----
+// 材质的 4 张纹理 / 4 个采样器绑在固定槽位，由渲染层每次绘制前用
+// SetNonBindlessHandle(kGPUBinding_NB_MaterialTextures, 材质纹理基址) 指定；
+// 材质参数缓冲同理（kGPUBinding_NB_Materials）。
+[[vk::binding(kGPUBinding_NB_MaterialTextures + 0, kGPUDescSet_PerFrame)]] Texture2D<float4> u_MatTex0;
+[[vk::binding(kGPUBinding_NB_MaterialTextures + 1, kGPUDescSet_PerFrame)]] Texture2D<float4> u_MatTex1;
+[[vk::binding(kGPUBinding_NB_MaterialTextures + 2, kGPUDescSet_PerFrame)]] Texture2D<float4> u_MatTex2;
+[[vk::binding(kGPUBinding_NB_MaterialTextures + 3, kGPUDescSet_PerFrame)]] Texture2D<float4> u_MatTex3;
+[[vk::binding(kGPUBinding_NB_MaterialSamplers + 0, kGPUDescSet_PerFrame)]] SamplerState u_MatSmp0;
+[[vk::binding(kGPUBinding_NB_MaterialSamplers + 1, kGPUDescSet_PerFrame)]] SamplerState u_MatSmp1;
+[[vk::binding(kGPUBinding_NB_MaterialSamplers + 2, kGPUDescSet_PerFrame)]] SamplerState u_MatSmp2;
+[[vk::binding(kGPUBinding_NB_MaterialSamplers + 3, kGPUDescSet_PerFrame)]] SamplerState u_MatSmp3;
+[[vk::binding(kGPUBinding_NB_Materials, kGPUDescSet_PerFrame)]] StructuredBuffer<GPUMaterialData> u_Materials;
+
+/// 材质第 slot 张纹理采样（slot 在调用点是编译期常量，内联后 switch 被折叠成单次采样）
+float4 HE_D3D11_SampleMaterial(uint slot, float2 uv) {
+    switch (slot) {
+        case 0:  return u_MatTex0.Sample(u_MatSmp0, uv);
+        case 1:  return u_MatTex1.Sample(u_MatSmp1, uv);
+        case 2:  return u_MatTex2.Sample(u_MatSmp2, uv);
+        default: return u_MatTex3.Sample(u_MatSmp3, uv);
+    }
+}
+// base 在 D3D11 下不参与寻址（基址已经由渲染层交给后端）
+#define HE_MAT_SAMPLE(base, slot, uv) HE_D3D11_SampleMaterial(slot, uv)
+#define HE_TEX_SAMPLE(handle, uv)     u_MatTex0.Sample(u_MatSmp0, uv)
+#else
 [[vk::binding(kGPUBinding_BindlessTextures, kGPUDescSet_PerFrame)]] Texture2D<float4> u_Textures[HE_BINDLESS_DIM] : register(kGPUBinding_BindlessTextures_hlsl, kGPUDescSet_Bindless_hlsl);
 [[vk::binding(kGPUBinding_BindlessSamplers, kGPUDescSet_PerFrame)]] SamplerState      u_Samplers[HE_BINDLESS_DIM] : register(kGPUBinding_BindlessSamplers_hlsl, kGPUDescSet_Bindless_hlsl);
 
 // Bindless 材质 SSBO 数组（StructuredBuffer<GPUMaterialData>，binding 30，per-material 数据）
 // 索引 = materialID >> 2（每材质占 4 个纹理槽）
 [[vk::binding(kGPUBinding_BindlessSSBO, kGPUDescSet_PerFrame)]] StructuredBuffer<GPUMaterialData> u_Materials[HE_BINDLESS_SSBO_DIM] : register(kGPUBinding_BindlessSSBO_hlsl, kGPUDescSet_Bindless_hlsl);
+
+// 材质纹理采样：展开后与原写法逐字相同（u_Textures[基址 + 槽位].Sample(u_Samplers[基址 + 槽位], uv)）
+#define HE_MAT_SAMPLE(base, slot, uv) u_Textures[base + slot].Sample(u_Samplers[base + slot], uv)
+#define HE_TEX_SAMPLE(handle, uv)     u_Textures[handle].Sample(u_Samplers[handle], uv)
+#endif
 
 #endif // HUGENGINE_COMMON_SLANG
