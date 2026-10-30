@@ -118,15 +118,15 @@ float SampleShadowPCF(float3 worldPos, float3 worldNormal, float3 lightDir,
     if (cascade == 0u) {
         for (int x = -1; x <= 1; x++)
             for (int y = -1; y <= 1; y++)
-                shadow += (depth <= shadowMap0.Sample(shadowSampler, uv + float2(x, y) * texelSize)) ? 1.0 : 0.0;
+                shadow += (depth <= HE_SAMPLE_L0(shadowMap0, shadowSampler, uv + float2(x, y) * texelSize)) ? 1.0 : 0.0;
     } else if (cascade == 1u) {
         for (int x = -1; x <= 1; x++)
             for (int y = -1; y <= 1; y++)
-                shadow += (depth <= shadowMap1.Sample(shadowSampler, uv + float2(x, y) * texelSize)) ? 1.0 : 0.0;
+                shadow += (depth <= HE_SAMPLE_L0(shadowMap1, shadowSampler, uv + float2(x, y) * texelSize)) ? 1.0 : 0.0;
     } else {
         for (int x = -1; x <= 1; x++)
             for (int y = -1; y <= 1; y++)
-                shadow += (depth <= shadowMap2.Sample(shadowSampler, uv + float2(x, y) * texelSize)) ? 1.0 : 0.0;
+                shadow += (depth <= HE_SAMPLE_L0(shadowMap2, shadowSampler, uv + float2(x, y) * texelSize)) ? 1.0 : 0.0;
     }
     return shadow / 9.0;
 }
@@ -150,7 +150,7 @@ float SamplePointShadow(float3 worldPos, float3 lightPos, float lightRange,
         return 1.0;
 
     // 深度采样（方向向量直接用作 Cubemap 纹理坐标）
-    float shadowDepth = shadowCube.Sample(shadowSampler, dir).r;
+    float shadowDepth = HE_SAMPLE_L0(shadowCube, shadowSampler, dir).r;
 
     // 归一化距离用于比较：世界空间距离 / 光源范围
     float normalizedDist = dist / lightRange;

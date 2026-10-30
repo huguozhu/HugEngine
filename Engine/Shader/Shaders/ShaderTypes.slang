@@ -38,6 +38,15 @@
     #else
         #define HE_BINDLESS_BUF(name, handle) name[handle]
     #endif
+
+    // 单 mip 纹理（阴影贴图、RSM 等渲染目标）的采样：D3D11（fxc / SM 5.0）不允许隐式导数采样
+    // 出现在动态次数的循环里（光源循环里的 PCF 等，报 X3511 / X3531），对只有 1 级 mip 的
+    // 纹理改用 SampleLevel(…, 0) 结果完全相同；其它后端展开后与原写法逐字相同
+    #if defined(HE_SHADER_D3D11)
+        #define HE_SAMPLE_L0(tex, smp, uv) tex.SampleLevel(smp, uv, 0)
+    #else
+        #define HE_SAMPLE_L0(tex, smp, uv) tex.Sample(smp, uv)
+    #endif
 #endif
 
 // ============================================================

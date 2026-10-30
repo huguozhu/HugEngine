@@ -161,7 +161,7 @@ float3 ShadeWithLight(GPULight light, float3 worldPos, float3 N, float3 V,
             if (spotUv.x > 0.0 && spotUv.x < 1.0 && spotUv.y > 0.0 && spotUv.y < 1.0) {
                 for (int sx = -1; sx <= 1; sx++)
                     for (int sy = -1; sy <= 1; sy++)
-                        spotShadow += (spotZ <= u_SpotShadowMap.Sample(u_SpotShadowSampler, spotUv + float2(sx, sy) * ts)) ? 1.0 : 0.0;
+                        spotShadow += (spotZ <= HE_SAMPLE_L0(u_SpotShadowMap, u_SpotShadowSampler, spotUv + float2(sx, sy) * ts)) ? 1.0 : 0.0;
                 shadow = spotShadow / 9.0;
             }
             shadow = lerp(1.0, shadow, sm.shadowParams.z);
@@ -177,7 +177,7 @@ float3 ShadeWithLight(GPULight light, float3 worldPos, float3 N, float3 V,
             if (rectUv.x > 0.0 && rectUv.x < 1.0 && rectUv.y > 0.0 && rectUv.y < 1.0) {
                 for (int sx = -2; sx <= 2; sx++)
                     for (int sy = -2; sy <= 2; sy++)
-                        rectShadow += (rectZ <= u_RectShadowMap.Sample(u_RectShadowSampler, rectUv + float2(sx, sy) * ts)) ? 1.0 : 0.0;
+                        rectShadow += (rectZ <= HE_SAMPLE_L0(u_RectShadowMap, u_RectShadowSampler, rectUv + float2(sx, sy) * ts)) ? 1.0 : 0.0;
                 shadow = rectShadow / 25.0;
             }
             shadow = lerp(1.0, shadow, sm.shadowParams.z);
@@ -228,9 +228,9 @@ float3 FwdSampleRSMIndirect(float3 worldPos, float3 N) {
     for (int dx = -2; dx <= 2; dx++) {
         for (int dy = -2; dy <= 2; dy++) {
             float2 uv = saturate(rsmCoord + float2(dx, dy) * rsmRadius);
-            float4 posSample  = u_RSMPositionMap.Sample(u_RSMSampler, uv);
-            float3 sampleN    = normalize(u_RSMNormalMap.Sample(u_RSMSampler, uv).rgb * 2.0 - 1.0);
-            float3 vplRad     = u_RSMRadianceMap.Sample(u_RSMSampler, uv).rgb;
+            float4 posSample  = HE_SAMPLE_L0(u_RSMPositionMap, u_RSMSampler, uv);
+            float3 sampleN    = normalize(HE_SAMPLE_L0(u_RSMNormalMap, u_RSMSampler, uv).rgb * 2.0 - 1.0);
+            float3 vplRad     = HE_SAMPLE_L0(u_RSMRadianceMap, u_RSMSampler, uv).rgb;
             float3 dir        = posSample.xyz - worldPos;
             float  dist2      = max(dot(dir, dir), 0.01);
             float  cosDir     = max(dot(sampleN, -normalize(dir)), 0.0);
