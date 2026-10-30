@@ -1302,8 +1302,11 @@ void ForwardPipeline::RenderScene(rhi::IRHICommandList* cmd, const CameraData& c
         });
         drawCount = totalDraws;
     } else {
-        // ExecuteIndirect 路径（仅当 Batch 已构建且 GPU Culling 有结果）
+        // ExecuteIndirect 路径（仅当 Batch 已构建且 GPU Culling 有结果）。
+        // 一次间接绘制覆盖多个材质，材质纹理只能靠 bindless 按物体取：没有 bindless 的后端（D3D11）
+        // 走下面的逐物体绘制（D3D11 后端实现规划 3.2 的 C 类）
         bool useIndirect = m_UseExecuteIndirect && m_BatchBuilt && m_GPUCulling.enabled
+                        && m_Device->GetCaps().maxBindlessResources > 0
                         && m_MeshBatcher.GetTotalIndexCount() > 0
                         && m_GPUCulling.GetLastVisibleCount() > 0;
         if (useIndirect) {
