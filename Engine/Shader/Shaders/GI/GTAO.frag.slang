@@ -13,6 +13,7 @@
 //
 // 输入：深度 + 法线（GBuffer）；输出：单通道 AO
 
+#include "ShaderTypes.slang"    // HE_SAMPLE_L0（循环内对单 mip 纹理采样，D3D11 用 SampleLevel）
 #include "FullscreenVS.slang"   // VSOutput / VSOutputWorldDir（接口唯一出处）
 
 [[vk::binding(0, 0)]] Texture2D<float>  u_Depth;
@@ -108,7 +109,7 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
                 float2 suv;
                 if (!ProjectToUV(sp, suv)) break;
 
-                const float gDepth = u_Depth.Sample(u_PointSampler, suv).r;
+                const float gDepth = HE_SAMPLE_L0(u_Depth, u_PointSampler, suv).r;
                 if (gDepth >= 1.0) continue;                  // 采样到天空 → 该方向开阔
                 const float3 geoPos = ReconstructViewPos(suv, gDepth);
 

@@ -9,6 +9,7 @@
 // 像素原样透出，而 `center` 的 alpha 也是 1.0，等于伪造有效性。
 //
 // 注：SSGI 的输出 alpha 恒为 +1（无负值语义），故本改动对 SSGI 行为等价。
+#include "ShaderTypes.slang"    // HE_SAMPLE_L0（循环内对单 mip 纹理采样，D3D11 用 SampleLevel）
 #include "FullscreenVS.slang"   // VSOutput / VSOutputWorldDir（接口唯一出处）
 
 [[vk::binding(0,0)]] Texture2D<float4> u_Input;      // SSGI/SSR 输出
@@ -31,10 +32,10 @@ float4 fragmentMain(VSOutput input):SV_Target0{
     for(int y=-2;y<=2;y++){
         for(int x=-2;x<=2;x++){
             float2 suv=uv+float2(x,y)*texelSize;
-            float4 s=u_Input.Sample(u_Sampler,suv);
+            float4 s=HE_SAMPLE_L0(u_Input, u_Sampler, suv);
             if(s.a<0.0)continue;                    // 无效样本：不参与（保住符号语义）
-            float sd=u_Depth.Sample(u_Sampler,suv).r;
-            float3 sn=u_Normal.Sample(u_Sampler,suv).rgb*2.0-1.0;
+            float sd=HE_SAMPLE_L0(u_Depth, u_Sampler, suv).r;
+            float3 sn=HE_SAMPLE_L0(u_Normal, u_Sampler, suv).rgb*2.0-1.0;
 
             float dW=exp(-abs(centerDepth-sd)*depthSigma);
             float nW=pow(max(0,dot(centerN,sn)),normalSigma);
