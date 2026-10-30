@@ -14,6 +14,9 @@
 namespace he::rhi::d3d11 {
 
 D3D11Device::~D3D11Device() {
+    // 先停下 PSO 预编译线程（它在用设备创建对象）
+    m_PrecompileStop.store(true, std::memory_order_release);
+    if (m_PrecompileThread.joinable()) m_PrecompileThread.join();
     if (m_Context) {
         m_Context->ClearState();
         m_Context->Flush();
@@ -162,6 +165,55 @@ void D3D11Device::QueryCaps() {
 
 void* D3D11Device::GetImGuiCommandBuffer(IRHICommandList* cmd) const {
     return cmd ? static_cast<D3D11CommandList*>(cmd)->PrepareExternalRendering() : nullptr;
+}
+
+// ---------------------------------------------------------------------------
+//  PSO 预编译（M4.4）
+// ---------------------------------------------------------------------------
+void D3D11Device::PrecompileQueuePSO(const PipelineStateDesc& desc) {
+    auto item = std::make_unique<PrecompileItem>();
+    item->desc = desc;
+    // 着色器字节码深拷贝：调用方传的往往是栈上 / 临时对象，后台创建时早已失效
+    ShaderBytecode** slots[] = { &item->desc.vertexShader, &item->desc.pixelShader, &item->desc.computeShader,
+                                 &item->desc.meshShader, &item->desc.amplificationShader };
+    for (ShaderBytecode** slot : slots) {
+        if (!*slot) continue;
+        item->shaders.push_back(std::make_unique<ShaderBytecode>(**slot));
+        *slot = item->shaders.back().get();
+    }
+    std::lock_guard<std::mutex> lock(m_PrecompileMutex);
+    m_PrecompileQueue.push_back(std::move(item));
+    m_PrecompileTotal.store(static_cast<u32>(m_PrecompileQueue.size()), std::memory_order_release);
+}
+
+void D3D11Device::StartPSOPrecompile() {
+    if (m_PrecompileThread.joinable()) return;   // 已在运行 / 已跑完
+    {
+        std::lock_guard<std::mutex> lock(m_PrecompileMutex);
+        if (m_PrecompileQueue.empty()) return;
+    }
+    m_PrecompileThread = std::thread([this]() {
+        size_t i = 0;
+        while (!m_PrecompileStop.load(std::memory_order_acquire)) {
+            PrecompileItem* item = nullptr;
+            {
+                std::lock_guard<std::mutex> lock(m_PrecompileMutex);
+                if (i >= m_PrecompileQueue.size()) break;
+                item = m_PrecompileQueue[i++].get();
+            }
+            // 只用 ID3D11Device 的创建接口（线程安全），不碰 immediate context；对象建好即丢弃
+            D3D11PipelineState pso;
+            pso.Initialize(this, item->desc);
+            m_PrecompileDone.fetch_add(1, std::memory_order_acq_rel);
+        }
+        HE_CORE_INFO("[D3D11] PSO 预编译完成：{} / {}", m_PrecompileDone.load(), m_PrecompileTotal.load());
+    });
+}
+
+float D3D11Device::GetPSOPrecompileProgress() const {
+    const u32 total = m_PrecompileTotal.load(std::memory_order_acquire);
+    if (total == 0) return 1.0f;
+    return static_cast<float>(m_PrecompileDone.load(std::memory_order_acquire)) / static_cast<float>(total);
 }
 
 void D3D11Device::BeginDisjoint() {

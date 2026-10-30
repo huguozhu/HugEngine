@@ -16,7 +16,10 @@
 #include "D3D11BindlessHeap.h"
 #include "RHI/RHIHandles.h"
 
+#include <atomic>
 #include <memory>
+#include <mutex>
+#include <thread>   // PSO 后台预编译线程
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -153,6 +156,13 @@ public:
     /// 提交时调用：把持久映射缓冲里 GPU 写过的内容回读
     void RefreshOpenMaps();
 
+    // ---- PSO 预编译（M4.4）----
+    //  D3D11 没有 PSO 缓存块：后台线程按队列提前建一遍着色器与状态对象（ID3D11Device 的创建接口
+    //  线程安全），让驱动的着色器编译缓存先命中；建好的对象随即丢弃，主线程之后照常创建
+    void  PrecompileQueuePSO(const PipelineStateDesc& desc) override;
+    void  StartPSOPrecompile() override;
+    float GetPSOPrecompileProgress() const override;
+
     // ---- 查询（M3.7）----
     std::unique_ptr<IRHIQueryPool> CreateQueryPool(u32 queryCount, QueryType type = QueryType::Timestamp) override;
     /// 时间戳一个刻度的纳秒数：由 TIMESTAMP_DISJOINT 查询给出的频率换算（初始化时测一次，之后随帧更新）
@@ -281,6 +291,17 @@ private:
     // 各阶段 SRV 槽位当前指向的资源（只作比较，不持有引用）与可能非空的槽位上界
     ID3D11Resource*              m_SrvResources[kSrvStageCount][kSrvSlotCount] = {};
     u32                          m_SrvHigh[kSrvStageCount] = {};
+    // PSO 预编译队列（描述里的着色器字节码已深拷贝，调用方的临时对象失效后仍可用）
+    struct PrecompileItem {
+        PipelineStateDesc                            desc;
+        std::vector<std::unique_ptr<ShaderBytecode>> shaders;
+    };
+    std::vector<std::unique_ptr<PrecompileItem>> m_PrecompileQueue;
+    std::mutex                        m_PrecompileMutex;
+    std::thread                       m_PrecompileThread;
+    std::atomic<u32>                  m_PrecompileDone{ 0 };
+    std::atomic<u32>                  m_PrecompileTotal{ 0 };
+    std::atomic<bool>                 m_PrecompileStop{ false };
     // 时间戳的 disjoint 查询环（见 OnPresent）
     static constexpr u32              kDisjointCount = 4;
     ComPtr<ID3D11Query>               m_Disjoint[kDisjointCount];
