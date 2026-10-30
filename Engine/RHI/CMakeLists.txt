@@ -148,10 +148,23 @@ endif()
     # ========================================================================
     #  D3D11 后端（Windows 专用，实现中）
     #
-    #  由根 CMakeLists 的 HUGENGINE_RHI_D3D11 选项控制；实现放在 Engine/RHI/D3D11/。
-    #  目前只定义 HE_RHI_D3D11，CreateDevice(Backend::D3D11) 会提示“尚未实现”并退出。
+    #  由根 CMakeLists 的 HUGENGINE_RHI_D3D11 选项控制；实现放在 Engine/RHI/D3D11/，
+    #  由 CreateDevice(Backend::D3D11) 选择（HE_RHI_BACKEND=d3d11）。
     # ========================================================================
     if(WIN32 AND HUGENGINE_RHI_D3D11)
+        set(RHI_D3D11_SOURCES
+            D3D11/D3D11Common.h
+            D3D11/D3D11BindlessHeap.h
+            D3D11/D3D11Device.h
+            D3D11/D3D11Device.cpp
+            D3D11/D3D11Resources.h
+            D3D11/D3D11SwapChain.h
+            D3D11/D3D11CommandList.h
+        )
+        target_sources(HugEngineRHI PRIVATE ${RHI_D3D11_SOURCES})
+        huge_source_group(${RHI_D3D11_SOURCES})
+        # d3d11 / dxgi：设备与交换链；dxguid：调试名等 GUID；d3dcompiler：D3DReflect 反射 DXBC 输入签名
+        target_link_libraries(HugEngineRHI PUBLIC d3d11 dxgi dxguid d3dcompiler)
         target_compile_definitions(HugEngineRHI PUBLIC HE_RHI_D3D11)
         message(STATUS "D3D11 backend: ENABLED (实现中)")
     endif()

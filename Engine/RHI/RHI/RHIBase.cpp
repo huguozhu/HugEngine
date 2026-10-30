@@ -10,6 +10,9 @@
 #if defined(HE_RHI_D3D12)
 #include "D3D12/D3D12Device.h"
 #endif
+#if defined(HE_RHI_D3D11)
+#include "D3D11/D3D11Device.h"
+#endif
 
 namespace he::rhi {
 
@@ -81,9 +84,14 @@ std::unique_ptr<IRHIDevice> CreateDevice(Backend backend) {
     }
 #endif
 #if defined(HE_RHI_D3D11)
-    // D3D11 后端：实现中（见 docs/计划实现功能/D3D11后端实现规划.md 的 M2）
+    // D3D11 后端：不满足最低运行环境时 Initialize 返回 false，原因已打日志
     if (backend == Backend::D3D11) {
-        FailCreateDevice(backend, "D3D11 后端尚未实现");
+        auto device = std::make_unique<d3d11::D3D11Device>();
+        if (!device->Initialize()) {
+            FailCreateDevice(backend, "设备初始化失败（原因见上方日志）");
+        }
+        GetThreadAffinity().Claim();
+        return device;
     }
 #endif
 #if defined(HE_RHI_VULKAN)
