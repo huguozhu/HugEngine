@@ -8,8 +8,10 @@
 // 着色器字节码
 #include "SSAO.vert.spv.h"
 #include "SSAO.vert.dxil.h"              // 复用通用全屏三角形顶点着色器
+#include "SSAO.vert.dxbc.h"
 #include "GaussianBlur.frag.spv.h"
 #include "GaussianBlur.frag.dxil.h"
+#include "GaussianBlur.frag.dxbc.h"
 
 namespace he::render {
 
@@ -36,12 +38,14 @@ bool GaussianBlurPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
     vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
     vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
     vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+    vs.dxbc.assign(std::begin(k_SSAO_vert_dxbc), std::end(k_SSAO_vert_dxbc));
     vs.entryPoint = "vertexMain";
     fs.stage = rhi::ShaderStage::Pixel;
     fs.spirv = k_GaussianBlur_frag_spv;
     fs.dxil.assign(std::begin(k_GaussianBlur_frag_dxil), std::end(k_GaussianBlur_frag_dxil));
     fs.dxil.assign(std::begin(k_GaussianBlur_frag_dxil), std::end(k_GaussianBlur_frag_dxil));
     fs.dxil.assign(std::begin(k_GaussianBlur_frag_dxil), std::end(k_GaussianBlur_frag_dxil));
+    fs.dxbc.assign(std::begin(k_GaussianBlur_frag_dxbc), std::end(k_GaussianBlur_frag_dxbc));
     fs.entryPoint = "fragmentMain";
 
     // Push constant：texelSize (float2)

@@ -6,6 +6,7 @@
 #include "Core/CVar.h"
 #include "AutoExposure.comp.spv.h"
 #include "AutoExposure.comp.dxil.h"
+#include "AutoExposure.comp.dxbc.h"
 #include <algorithm>
 
 namespace he::render {
@@ -40,6 +41,7 @@ bool AutoExposurePass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
     m_CS.dxil.assign(std::begin(k_AutoExposure_comp_dxil), std::end(k_AutoExposure_comp_dxil));
     m_CS.dxil.assign(std::begin(k_AutoExposure_comp_dxil), std::end(k_AutoExposure_comp_dxil));
     m_CS.dxil.assign(std::begin(k_AutoExposure_comp_dxil), std::end(k_AutoExposure_comp_dxil));
+    m_CS.dxbc.assign(std::begin(k_AutoExposure_comp_dxbc), std::end(k_AutoExposure_comp_dxbc));
     m_CS.entryPoint = "main";
     rhi::PushConstantRange pc;
     pc.stageMask = rhi::kStageMaskCompute;

@@ -5,8 +5,10 @@
 #include "Pipeline/Camera.h"
 #include "Shadow.vert.spv.h"
 #include "Shadow.vert.dxil.h"
+#include "Shadow.vert.dxbc.h"
 #include "Shadow.frag.spv.h"
 #include "Shadow.frag.dxil.h"
+#include "Shadow.frag.dxbc.h"
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
 #include "Scene/MeshComponent.h"
@@ -36,12 +38,14 @@ bool PointShadowTechnique::Initialize(rhi::IRHIDevice* device){
     m_ShadowVS.dxil.assign(std::begin(k_Shadow_vert_dxil), std::end(k_Shadow_vert_dxil));
     m_ShadowVS.dxil.assign(std::begin(k_Shadow_vert_dxil), std::end(k_Shadow_vert_dxil));
     m_ShadowVS.dxil.assign(std::begin(k_Shadow_vert_dxil), std::end(k_Shadow_vert_dxil));
+    m_ShadowVS.dxbc.assign(std::begin(k_Shadow_vert_dxbc), std::end(k_Shadow_vert_dxbc));
     m_ShadowVS.entryPoint="main";
     m_ShadowFS.stage=rhi::ShaderStage::Pixel;
     m_ShadowFS.spirv=k_Shadow_frag_spv;
     m_ShadowFS.dxil.assign(std::begin(k_Shadow_frag_dxil), std::end(k_Shadow_frag_dxil));
     m_ShadowFS.dxil.assign(std::begin(k_Shadow_frag_dxil), std::end(k_Shadow_frag_dxil));
     m_ShadowFS.dxil.assign(std::begin(k_Shadow_frag_dxil), std::end(k_Shadow_frag_dxil));
+    m_ShadowFS.dxbc.assign(std::begin(k_Shadow_frag_dxbc), std::end(k_Shadow_frag_dxbc));
     m_ShadowFS.entryPoint="main";
     rhi::TextureDesc d;
     d.format=rhi::Format::D32_FLOAT;

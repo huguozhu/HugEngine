@@ -11,10 +11,13 @@
 // ReSTIR 着色器 SPIR-V
 #include "ReSTIR_Init.comp.spv.h"
 #include "ReSTIR_Init.comp.dxil.h"
+#include "ReSTIR_Init.comp.dxbc.h"
 #include "ReSTIR_Temporal.comp.spv.h"
 #include "ReSTIR_Temporal.comp.dxil.h"
+#include "ReSTIR_Temporal.comp.dxbc.h"
 #include "ReSTIR_Spatial.comp.spv.h"
 #include "ReSTIR_Spatial.comp.dxil.h"
+#include "ReSTIR_Spatial.comp.dxbc.h"
 
 #include <glm/gtc/type_ptr.hpp>
 #include <cstring>

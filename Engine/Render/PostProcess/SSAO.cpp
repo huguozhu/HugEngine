@@ -6,14 +6,19 @@
 #include "Core/Assert.h"
 #include "SSAO.vert.spv.h"
 #include "SSAO.vert.dxil.h"
+#include "SSAO.vert.dxbc.h"
 #include "SSAO.frag.spv.h"
 #include "SSAO.frag.dxil.h"
+#include "SSAO.frag.dxbc.h"
 #include "GTAO.frag.spv.h"
 #include "GTAO.frag.dxil.h"   // GTAO 模式（M6.3）
+#include "GTAO.frag.dxbc.h"
 #include "SSAO_Blur.vert.spv.h"
 #include "SSAO_Blur.vert.dxil.h"
+#include "SSAO_Blur.vert.dxbc.h"
 #include "SSAO_Blur.frag.spv.h"
 #include "SSAO_Blur.frag.dxil.h"
+#include "SSAO_Blur.frag.dxbc.h"
 #include <glm/gtc/matrix_transform.hpp>
 #include <random>
 #include <cstring>
@@ -132,12 +137,14 @@ bool SSAO::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         m_SSAO_VS.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
         m_SSAO_VS.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
         m_SSAO_VS.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+        m_SSAO_VS.dxbc.assign(std::begin(k_SSAO_vert_dxbc), std::end(k_SSAO_vert_dxbc));
         m_SSAO_VS.entryPoint = "vertexMain";
         m_SSAO_FS.stage = rhi::ShaderStage::Pixel;
         m_SSAO_FS.spirv = k_SSAO_frag_spv;
         m_SSAO_FS.dxil.assign(std::begin(k_SSAO_frag_dxil), std::end(k_SSAO_frag_dxil));
         m_SSAO_FS.dxil.assign(std::begin(k_SSAO_frag_dxil), std::end(k_SSAO_frag_dxil));
         m_SSAO_FS.dxil.assign(std::begin(k_SSAO_frag_dxil), std::end(k_SSAO_frag_dxil));
+        m_SSAO_FS.dxbc.assign(std::begin(k_SSAO_frag_dxbc), std::end(k_SSAO_frag_dxbc));
         m_SSAO_FS.entryPoint = "fragmentMain";
 
         rhi::PipelineStateDesc d;
@@ -164,6 +171,7 @@ bool SSAO::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         m_GTAO_FS.dxil.assign(std::begin(k_GTAO_frag_dxil), std::end(k_GTAO_frag_dxil));
         m_GTAO_FS.dxil.assign(std::begin(k_GTAO_frag_dxil), std::end(k_GTAO_frag_dxil));
         m_GTAO_FS.dxil.assign(std::begin(k_GTAO_frag_dxil), std::end(k_GTAO_frag_dxil));
+        m_GTAO_FS.dxbc.assign(std::begin(k_GTAO_frag_dxbc), std::end(k_GTAO_frag_dxbc));
         m_GTAO_FS.entryPoint = "fragmentMain";
 
         rhi::PipelineStateDesc d;
@@ -194,12 +202,14 @@ bool SSAO::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         m_Blur_VS.dxil.assign(std::begin(k_SSAO_Blur_vert_dxil), std::end(k_SSAO_Blur_vert_dxil));
         m_Blur_VS.dxil.assign(std::begin(k_SSAO_Blur_vert_dxil), std::end(k_SSAO_Blur_vert_dxil));
         m_Blur_VS.dxil.assign(std::begin(k_SSAO_Blur_vert_dxil), std::end(k_SSAO_Blur_vert_dxil));
+        m_Blur_VS.dxbc.assign(std::begin(k_SSAO_Blur_vert_dxbc), std::end(k_SSAO_Blur_vert_dxbc));
         m_Blur_VS.entryPoint = "vertexMain";
         m_Blur_FS.stage = rhi::ShaderStage::Pixel;
         m_Blur_FS.spirv = k_SSAO_Blur_frag_spv;
         m_Blur_FS.dxil.assign(std::begin(k_SSAO_Blur_frag_dxil), std::end(k_SSAO_Blur_frag_dxil));
         m_Blur_FS.dxil.assign(std::begin(k_SSAO_Blur_frag_dxil), std::end(k_SSAO_Blur_frag_dxil));
         m_Blur_FS.dxil.assign(std::begin(k_SSAO_Blur_frag_dxil), std::end(k_SSAO_Blur_frag_dxil));
+        m_Blur_FS.dxbc.assign(std::begin(k_SSAO_Blur_frag_dxbc), std::end(k_SSAO_Blur_frag_dxbc));
         m_Blur_FS.entryPoint = "fragmentMain";
 
         rhi::PipelineStateDesc d;

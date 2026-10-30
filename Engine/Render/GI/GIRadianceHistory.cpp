@@ -7,8 +7,10 @@
 #include "Core/Log.h"
 #include "Fullscreen.vert.spv.h"
 #include "Fullscreen.vert.dxil.h"
+#include "Fullscreen.vert.dxbc.h"
 #include "FullscreenCopy.frag.spv.h"
 #include "FullscreenCopy.frag.dxil.h"
+#include "FullscreenCopy.frag.dxbc.h"
 
 namespace he::render {
 
@@ -48,12 +50,14 @@ bool GIRadianceHistory::Initialize(rhi::IRHIDevice* device, u32 width, u32 heigh
     vs.dxil.assign(std::begin(k_Fullscreen_vert_dxil), std::end(k_Fullscreen_vert_dxil));
     vs.dxil.assign(std::begin(k_Fullscreen_vert_dxil), std::end(k_Fullscreen_vert_dxil));
     vs.dxil.assign(std::begin(k_Fullscreen_vert_dxil), std::end(k_Fullscreen_vert_dxil));
+    vs.dxbc.assign(std::begin(k_Fullscreen_vert_dxbc), std::end(k_Fullscreen_vert_dxbc));
     vs.entryPoint = "vertexMain";
     fs.stage      = rhi::ShaderStage::Pixel;
     fs.spirv      = k_FullscreenCopy_frag_spv;
     fs.dxil.assign(std::begin(k_FullscreenCopy_frag_dxil), std::end(k_FullscreenCopy_frag_dxil));
     fs.dxil.assign(std::begin(k_FullscreenCopy_frag_dxil), std::end(k_FullscreenCopy_frag_dxil));
     fs.dxil.assign(std::begin(k_FullscreenCopy_frag_dxil), std::end(k_FullscreenCopy_frag_dxil));
+    fs.dxbc.assign(std::begin(k_FullscreenCopy_frag_dxbc), std::end(k_FullscreenCopy_frag_dxbc));
     fs.entryPoint = "fragmentMain";
 
     rhi::PipelineStateDesc pd;

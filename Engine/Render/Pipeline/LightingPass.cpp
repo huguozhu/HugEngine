@@ -12,8 +12,10 @@
 // SPIR-V 嵌入头文件
 #include "DeferredLighting.vert.spv.h"
 #include "DeferredLighting.vert.dxil.h"
+#include "DeferredLighting.vert.dxbc.h"
 #include "DeferredLighting.frag.spv.h"
 #include "DeferredLighting.frag.dxil.h"
+#include "DeferredLighting.frag.dxbc.h"
 
 namespace he::render {
 
@@ -435,12 +437,14 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
     lVS.dxil.assign(std::begin(k_DeferredLighting_vert_dxil), std::end(k_DeferredLighting_vert_dxil));
     lVS.dxil.assign(std::begin(k_DeferredLighting_vert_dxil), std::end(k_DeferredLighting_vert_dxil));
     lVS.dxil.assign(std::begin(k_DeferredLighting_vert_dxil), std::end(k_DeferredLighting_vert_dxil));
+    lVS.dxbc.assign(std::begin(k_DeferredLighting_vert_dxbc), std::end(k_DeferredLighting_vert_dxbc));
     lVS.entryPoint = "main";
     lFS.stage = rhi::ShaderStage::Pixel;
     lFS.spirv = k_DeferredLighting_frag_spv;
     lFS.dxil.assign(std::begin(k_DeferredLighting_frag_dxil), std::end(k_DeferredLighting_frag_dxil));
     lFS.dxil.assign(std::begin(k_DeferredLighting_frag_dxil), std::end(k_DeferredLighting_frag_dxil));
     lFS.dxil.assign(std::begin(k_DeferredLighting_frag_dxil), std::end(k_DeferredLighting_frag_dxil));
+    lFS.dxbc.assign(std::begin(k_DeferredLighting_frag_dxbc), std::end(k_DeferredLighting_frag_dxbc));
     lFS.entryPoint = "main";
 
     rhi::PushConstantRange lpc;

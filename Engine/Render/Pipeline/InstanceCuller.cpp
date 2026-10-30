@@ -13,6 +13,7 @@
 
 #include "InstancedCull.comp.spv.h"
 #include "InstancedCull.comp.dxil.h"
+#include "InstancedCull.comp.dxbc.h"
 
 #include <cstdio>
 #include <cstring>
@@ -60,6 +61,7 @@ bool InstanceCuller::Initialize(rhi::IRHIDevice* device) {
     m_CS.dxil.assign(std::begin(k_InstancedCull_comp_dxil), std::end(k_InstancedCull_comp_dxil));
     m_CS.dxil.assign(std::begin(k_InstancedCull_comp_dxil), std::end(k_InstancedCull_comp_dxil));
     m_CS.dxil.assign(std::begin(k_InstancedCull_comp_dxil), std::end(k_InstancedCull_comp_dxil));
+    m_CS.dxbc.assign(std::begin(k_InstancedCull_comp_dxbc), std::end(k_InstancedCull_comp_dxbc));
     m_CS.entryPoint = "main";
 
     rhi::PushConstantRange pc;

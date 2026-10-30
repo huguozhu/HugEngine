@@ -6,6 +6,7 @@
 #include "Subsystem/RenderSubsystem.h"
 #include "DDGI.comp.spv.h"
 #include "DDGI.comp.dxil.h"
+#include "DDGI.comp.dxbc.h"
 #include <cstring>
 #include <cstdio>
 
@@ -140,6 +141,7 @@ bool GI_DDGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     cs.dxil.assign(std::begin(k_DDGI_comp_dxil), std::end(k_DDGI_comp_dxil));
     cs.dxil.assign(std::begin(k_DDGI_comp_dxil), std::end(k_DDGI_comp_dxil));
     cs.dxil.assign(std::begin(k_DDGI_comp_dxil), std::end(k_DDGI_comp_dxil));
+    cs.dxbc.assign(std::begin(k_DDGI_comp_dxbc), std::end(k_DDGI_comp_dxbc));
     cs.entryPoint = "main";
 
     rhi::PipelineStateDesc psoDesc;

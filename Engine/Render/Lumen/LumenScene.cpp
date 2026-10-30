@@ -8,8 +8,10 @@
 
 #include "SSAO.vert.spv.h"
 #include "SSAO.vert.dxil.h"            // 全屏三角顶点着色（与 SSGI/AO 等 pass 共用）
+#include "SSAO.vert.dxbc.h"
 #include "Lumen_Skeleton.frag.spv.h"
 #include "Lumen_Skeleton.frag.dxil.h"  // 骨架阶段的常量输出
+#include "Lumen_Skeleton.frag.dxbc.h"
 
 namespace he::render {
 
@@ -128,12 +130,14 @@ void LumenScene::CreateSkeletonPipeline() {
     vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
     vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
     vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+    vs.dxbc.assign(std::begin(k_SSAO_vert_dxbc), std::end(k_SSAO_vert_dxbc));
     vs.entryPoint = "vertexMain";
     fs.stage      = rhi::ShaderStage::Pixel;
     fs.spirv      = k_Lumen_Skeleton_frag_spv;
     fs.dxil.assign(std::begin(k_Lumen_Skeleton_frag_dxil), std::end(k_Lumen_Skeleton_frag_dxil));
     fs.dxil.assign(std::begin(k_Lumen_Skeleton_frag_dxil), std::end(k_Lumen_Skeleton_frag_dxil));
     fs.dxil.assign(std::begin(k_Lumen_Skeleton_frag_dxil), std::end(k_Lumen_Skeleton_frag_dxil));
+    fs.dxbc.assign(std::begin(k_Lumen_Skeleton_frag_dxbc), std::end(k_Lumen_Skeleton_frag_dxbc));
     fs.entryPoint = "fragmentMain";
 
     rhi::PushConstantRange pcr;

@@ -13,12 +13,16 @@
 // 着色器字节码（slangc → SPIR-V → .spv.h）
 #include "SSAO.vert.spv.h"
 #include "SSAO.vert.dxil.h"                    // 顶点着色器（全屏三角形，共享）
+#include "SSAO.vert.dxbc.h"
 #include "SMAA_EdgeDetect.frag.spv.h"
 #include "SMAA_EdgeDetect.frag.dxil.h"         // Pass 1
+#include "SMAA_EdgeDetect.frag.dxbc.h"
 #include "SMAA_BlendWeight.frag.spv.h"
 #include "SMAA_BlendWeight.frag.dxil.h"        // Pass 2
+#include "SMAA_BlendWeight.frag.dxbc.h"
 #include "SMAA_Neighborhood.frag.spv.h"
 #include "SMAA_Neighborhood.frag.dxil.h"       // Pass 3
+#include "SMAA_Neighborhood.frag.dxbc.h"
 
 namespace he::render {
 
@@ -265,12 +269,14 @@ void AA_SMAA::CreateEdgePSO() {
     vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
     vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
     vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+    vs.dxbc.assign(std::begin(k_SSAO_vert_dxbc), std::end(k_SSAO_vert_dxbc));
     vs.entryPoint = "vertexMain";
     fs.stage      = rhi::ShaderStage::Pixel;
     fs.spirv      = k_SMAA_EdgeDetect_frag_spv;
     fs.dxil.assign(std::begin(k_SMAA_EdgeDetect_frag_dxil), std::end(k_SMAA_EdgeDetect_frag_dxil));
     fs.dxil.assign(std::begin(k_SMAA_EdgeDetect_frag_dxil), std::end(k_SMAA_EdgeDetect_frag_dxil));
     fs.dxil.assign(std::begin(k_SMAA_EdgeDetect_frag_dxil), std::end(k_SMAA_EdgeDetect_frag_dxil));
+    fs.dxbc.assign(std::begin(k_SMAA_EdgeDetect_frag_dxbc), std::end(k_SMAA_EdgeDetect_frag_dxbc));
     fs.entryPoint = "fragmentMain";
 
     rhi::PushConstantRange pcr;
@@ -311,12 +317,14 @@ void AA_SMAA::CreateBlendPSO() {
     vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
     vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
     vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+    vs.dxbc.assign(std::begin(k_SSAO_vert_dxbc), std::end(k_SSAO_vert_dxbc));
     vs.entryPoint = "vertexMain";
     fs.stage      = rhi::ShaderStage::Pixel;
     fs.spirv      = k_SMAA_BlendWeight_frag_spv;
     fs.dxil.assign(std::begin(k_SMAA_BlendWeight_frag_dxil), std::end(k_SMAA_BlendWeight_frag_dxil));
     fs.dxil.assign(std::begin(k_SMAA_BlendWeight_frag_dxil), std::end(k_SMAA_BlendWeight_frag_dxil));
     fs.dxil.assign(std::begin(k_SMAA_BlendWeight_frag_dxil), std::end(k_SMAA_BlendWeight_frag_dxil));
+    fs.dxbc.assign(std::begin(k_SMAA_BlendWeight_frag_dxbc), std::end(k_SMAA_BlendWeight_frag_dxbc));
     fs.entryPoint = "fragmentMain";
 
     rhi::PushConstantRange pcr;
@@ -362,12 +370,14 @@ void AA_SMAA::CreateNeighborPSO() {
     vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
     vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
     vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+    vs.dxbc.assign(std::begin(k_SSAO_vert_dxbc), std::end(k_SSAO_vert_dxbc));
     vs.entryPoint = "vertexMain";
     fs.stage      = rhi::ShaderStage::Pixel;
     fs.spirv      = k_SMAA_Neighborhood_frag_spv;
     fs.dxil.assign(std::begin(k_SMAA_Neighborhood_frag_dxil), std::end(k_SMAA_Neighborhood_frag_dxil));
     fs.dxil.assign(std::begin(k_SMAA_Neighborhood_frag_dxil), std::end(k_SMAA_Neighborhood_frag_dxil));
     fs.dxil.assign(std::begin(k_SMAA_Neighborhood_frag_dxil), std::end(k_SMAA_Neighborhood_frag_dxil));
+    fs.dxbc.assign(std::begin(k_SMAA_Neighborhood_frag_dxbc), std::end(k_SMAA_Neighborhood_frag_dxbc));
     fs.entryPoint = "fragmentMain";
 
     rhi::PushConstantRange pcr;

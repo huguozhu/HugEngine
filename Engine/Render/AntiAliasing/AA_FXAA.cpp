@@ -7,8 +7,10 @@
 // 着色器
 #include "FXAA.vert.spv.h"
 #include "FXAA.vert.dxil.h"
+#include "FXAA.vert.dxbc.h"
 #include "FXAA.frag.spv.h"
 #include "FXAA.frag.dxil.h"
+#include "FXAA.frag.dxbc.h"
 
 namespace he::render {
 
@@ -96,12 +98,14 @@ void AA_FXAA::CreatePSO() {
     vs.dxil.assign(std::begin(k_FXAA_vert_dxil), std::end(k_FXAA_vert_dxil));
     vs.dxil.assign(std::begin(k_FXAA_vert_dxil), std::end(k_FXAA_vert_dxil));
     vs.dxil.assign(std::begin(k_FXAA_vert_dxil), std::end(k_FXAA_vert_dxil));
+    vs.dxbc.assign(std::begin(k_FXAA_vert_dxbc), std::end(k_FXAA_vert_dxbc));
     vs.entryPoint="vertexMain";
     fs.stage=rhi::ShaderStage::Pixel;
     fs.spirv=k_FXAA_frag_spv;
     fs.dxil.assign(std::begin(k_FXAA_frag_dxil), std::end(k_FXAA_frag_dxil));
     fs.dxil.assign(std::begin(k_FXAA_frag_dxil), std::end(k_FXAA_frag_dxil));
     fs.dxil.assign(std::begin(k_FXAA_frag_dxil), std::end(k_FXAA_frag_dxil));
+    fs.dxbc.assign(std::begin(k_FXAA_frag_dxbc), std::end(k_FXAA_frag_dxbc));
     fs.entryPoint="fragmentMain";
 
     rhi::PushConstantRange pcr;

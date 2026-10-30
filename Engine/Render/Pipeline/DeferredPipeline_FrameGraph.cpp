@@ -27,8 +27,10 @@
 #include <unordered_set>
 #include "DeferredLighting.vert.spv.h"
 #include "DeferredLighting.vert.dxil.h"
+#include "DeferredLighting.vert.dxbc.h"
 #include "DeferredLighting.frag.spv.h"
 #include "DeferredLighting.frag.dxil.h"
+#include "DeferredLighting.frag.dxbc.h"
 
 // DGC 开关（编译期常量，默认 false 保留传统 ExecuteIndirect 回退）
 // 语义与落点详见 DeferredPipeline.cpp 的同名常量：true = GPU 生成绘制命令

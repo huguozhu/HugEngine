@@ -15,13 +15,16 @@
 #include "Editor/ImGuiIntegration.h"
 #include "Triangle.vert.spv.h"
 #include "Triangle.vert.dxil.h"
+#include "Triangle.vert.dxbc.h"
 #include "Triangle.frag.spv.h"
 #include "Triangle.frag.dxil.h"
+#include "Triangle.frag.dxbc.h"
 #include "RT_Triangle.rgen.spv.h"
 #include "RT_Background.rmiss.spv.h"
 #include "Triangle.mesh.spv.h"
 #include "TriangleMesh.frag.spv.h"
 #include "TriangleMesh.frag.dxil.h"
+#include "TriangleMesh.frag.dxbc.h"
 #include "imgui.h"
 
 #include <cstring>
@@ -75,8 +78,8 @@ int main() {
         .initialData = kVertices, .stride = sizeof(Vertex),
     });
 
-    he::rhi::ShaderBytecode vertShader = he::rhi::MakeShaderBytecode(he::rhi::ShaderStage::Vertex, k_Triangle_vert_spv, k_Triangle_vert_dxil, "main");
-    he::rhi::ShaderBytecode fragShader = he::rhi::MakeShaderBytecode(he::rhi::ShaderStage::Pixel, k_Triangle_frag_spv, k_Triangle_frag_dxil, "main");
+    he::rhi::ShaderBytecode vertShader = he::rhi::MakeShaderBytecode(he::rhi::ShaderStage::Vertex, k_Triangle_vert_spv, k_Triangle_vert_dxil, k_Triangle_vert_dxbc, "main");
+    he::rhi::ShaderBytecode fragShader = he::rhi::MakeShaderBytecode(he::rhi::ShaderStage::Pixel, k_Triangle_frag_spv, k_Triangle_frag_dxil, k_Triangle_frag_dxbc, "main");
 
     auto pipeline = device->CreatePipelineState({
         .vertexShader = &vertShader, .pixelShader = &fragShader,
@@ -161,7 +164,7 @@ int main() {
 
     if (meshSupported) {
         he::rhi::ShaderBytecode meshShader = he::rhi::MakeShaderBytecode(he::rhi::ShaderStage::Mesh, k_Triangle_mesh_spv, nullptr, "main");
-        he::rhi::ShaderBytecode meshFrag = he::rhi::MakeShaderBytecode(he::rhi::ShaderStage::Pixel, k_TriangleMesh_frag_spv, k_TriangleMesh_frag_dxil, "main");
+        he::rhi::ShaderBytecode meshFrag = he::rhi::MakeShaderBytecode(he::rhi::ShaderStage::Pixel, k_TriangleMesh_frag_spv, k_TriangleMesh_frag_dxil, k_TriangleMesh_frag_dxbc, "main");
 
         meshPSO = device->CreatePipelineState({
             .pixelShader = &meshFrag,

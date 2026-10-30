@@ -28,8 +28,10 @@
 #include <unordered_set>
 #include "Fullscreen.vert.spv.h"
 #include "Fullscreen.vert.dxil.h"
+#include "Fullscreen.vert.dxbc.h"
 #include "FullscreenCopy.frag.spv.h"
 #include "FullscreenCopy.frag.dxil.h"
+#include "FullscreenCopy.frag.dxbc.h"
 
 // ── DGC 开关（Device Generated Commands，VK_EXT_device_generated_commands）──
 // 语义：`true` = 让 **GPU 自己生成绘制命令**（GPU-driven 绘制）——GPU 侧的实例剔除与

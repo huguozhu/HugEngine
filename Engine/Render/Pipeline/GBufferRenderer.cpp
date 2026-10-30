@@ -14,8 +14,10 @@
 // SPIR-V 嵌入头文件
 #include "GBuffer.vert.spv.h"
 #include "GBuffer.vert.dxil.h"
+#include "GBuffer.vert.dxbc.h"
 #include "GBuffer.frag.spv.h"
 #include "GBuffer.frag.dxil.h"
+#include "GBuffer.frag.dxbc.h"
 
 namespace he::render {
 
@@ -220,12 +222,14 @@ void GBufferRenderer::CreatePSO(rhi::IRHIDevice* device) {
     gbVS.dxil.assign(std::begin(k_GBuffer_vert_dxil), std::end(k_GBuffer_vert_dxil));
     gbVS.dxil.assign(std::begin(k_GBuffer_vert_dxil), std::end(k_GBuffer_vert_dxil));
     gbVS.dxil.assign(std::begin(k_GBuffer_vert_dxil), std::end(k_GBuffer_vert_dxil));
+    gbVS.dxbc.assign(std::begin(k_GBuffer_vert_dxbc), std::end(k_GBuffer_vert_dxbc));
     gbVS.entryPoint = "main";
     gbFS.stage = rhi::ShaderStage::Pixel;
     gbFS.spirv = k_GBuffer_frag_spv;
     gbFS.dxil.assign(std::begin(k_GBuffer_frag_dxil), std::end(k_GBuffer_frag_dxil));
     gbFS.dxil.assign(std::begin(k_GBuffer_frag_dxil), std::end(k_GBuffer_frag_dxil));
     gbFS.dxil.assign(std::begin(k_GBuffer_frag_dxil), std::end(k_GBuffer_frag_dxil));
+    gbFS.dxbc.assign(std::begin(k_GBuffer_frag_dxbc), std::end(k_GBuffer_frag_dxbc));
     gbFS.entryPoint = "main";
 
     // 顶点布局
