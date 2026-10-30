@@ -143,6 +143,10 @@ void D3D11Device::QueryCaps() {
                  th.DriverCommandLists ? "是" : "否");
 }
 
+void* D3D11Device::GetImGuiCommandBuffer(IRHICommandList* cmd) const {
+    return cmd ? static_cast<D3D11CommandList*>(cmd)->PrepareExternalRendering() : nullptr;
+}
+
 void D3D11Device::OnGpuTimeout() {
     if (m_TimeoutReported) return;
     m_TimeoutReported = true;

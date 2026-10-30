@@ -58,6 +58,8 @@ public:
     std::unique_ptr<IRHISampler>       CreateSampler(const SamplerDesc& desc) override;
     std::unique_ptr<IRHIPipelineState> CreatePipelineState(const PipelineStateDesc& desc) override;
     IRHIBindlessHeap*                  GetBindlessHeap() override { return &m_BindlessHeap; }
+    /// ImGui 的 D3D11 后端直接往 immediate context 里画：返回已应用该命令列表状态的上下文
+    void* GetImGuiCommandBuffer(IRHICommandList* cmd) const override;
 
     // ---- 句柄式资源（A-3）：不覆盖的话默认实现返回空句柄，引擎的句柄式资源全都拿不到 ----
     RHIBufferHandle        CreateBufferHandle(const BufferDesc& desc) override;

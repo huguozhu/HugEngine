@@ -367,6 +367,11 @@ void D3D11CommandList::Submit() {
     m_PendingSignals.clear();
 }
 
+ID3D11DeviceContext4* D3D11CommandList::PrepareExternalRendering() {
+    EnsureOwner();
+    return m_Device->GetContext();
+}
+
 void D3D11CommandList::ReportMissing(u32 set, u32 binding, const char* what) {
     std::string key = std::string(m_Pipeline->GetName()) + "#" + std::to_string(set) + "." + std::to_string(binding);
     if (key == m_LastMissing) return;

@@ -132,6 +132,10 @@ public:
     /// 下发录制期记下的时间线信号（由 D3D11Device::Submit 调用）
     void Submit() override;
 
+    /// 供外部渲染器（ImGui 的 D3D11 后端）直接往上下文里画：先确保上下文装的是本列表的状态
+    /// （渲染目标、视口等），返回 immediate context
+    ID3D11DeviceContext4* PrepareExternalRendering();
+
 private:
     /// 当前 PSO 用到推送常量时：数据有改动或常量环换过内存就写进新槽，再绑定到 b0
     void BindPushConstants();
