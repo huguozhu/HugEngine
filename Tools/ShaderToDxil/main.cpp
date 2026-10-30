@@ -469,6 +469,35 @@ static std::string PatchRegisters(const std::string& src) {
 // ---------------------------------------------------------------------------
 //  生成 C++ 头文件
 // ---------------------------------------------------------------------------
+/// 网格着色器入口参数修正：Slang 生成的 HLSL 在输出数组参数上多带一个 inout
+///（如 `out vertices inout T verts[N]`、`out indices inout uint3 prims[M]`），有时连
+/// `out vertices` 都缺失（只剩 `inout T verts[N]`），dxc 报 "duplicate HLSL parameter usages"。
+/// 这里只在入口函数的参数列表内修正：去掉多余的 inout，缺修饰的数组参数补成 `out vertices`
+static void PatchMeshSignature(std::string& s, const std::string& entry) {
+    const std::string key = "void " + entry + "(";
+    const size_t start = s.find(key);
+    if (start == std::string::npos) return;
+    const size_t open  = start + key.size();
+    // 按括号配对找参数列表的结尾：数组维度里有 int(N) 这样的括号
+    size_t close = std::string::npos;
+    for (size_t i = open, depth = 1; i < s.size(); ++i) {
+        if (s[i] == '(') ++depth;
+        else if (s[i] == ')' && --depth == 0) { close = i; break; }
+    }
+    if (close == std::string::npos) return;
+    std::string params = s.substr(open, close - open);
+    ReplaceAll(params, "out vertices inout ",   "out vertices ");
+    ReplaceAll(params, "out indices inout ",    "out indices ");
+    ReplaceAll(params, "out primitives inout ", "out primitives ");
+    // 剩下的 inout 数组参数只可能是顶点输出（图元索引 / 逐图元属性都带了修饰）
+    size_t p = 0;
+    while ((p = params.find("inout ", p)) != std::string::npos) {
+        params.replace(p, 6, "out vertices ");
+        p += 13;
+    }
+    s.replace(open, close - open, params);
+}
+
 static std::string MakeHeader(const std::vector<unsigned char>& data, const char* symbol) {
     std::string h;
     h += "// 本文件由 Tools/ShaderToDxil 自动生成，请勿手改。\n";
@@ -521,6 +550,7 @@ int main(int argc, char** argv) {
     // 正确的做法是保留着色器自己的寄存器分配（b0/b1/...），根签名用 root CBV 覆盖 b0..b7。
     PatchLoops(patched);
     if (std::string(stage) == "vs") PatchInstanceId(patched);
+    if (std::string(stage) == "ms") PatchMeshSignature(patched, entry);   // 修正网格着色器输出参数修饰
     // 寄存器按 vk::binding 重排，与 D3D12 后端的「register = binding、space = set」约定一致
     patched = PatchRegisters(patched);
 

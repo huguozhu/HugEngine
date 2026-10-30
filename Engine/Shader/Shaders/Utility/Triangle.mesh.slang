@@ -44,6 +44,10 @@ void main(
         float3(0.2, 0.2, 1.0),  // 顶点 2：蓝色
     };
 
+    // 设置输出数量：必须在写任何输出之前调用（D3D12 要求该调用支配所有输出写入；
+    // Vulkan 要求所有线程调用且参数一致）
+    SetMeshOutputCounts(3, 1);  // 3 个顶点，1 个三角形
+
     // 每个线程输出其对应的顶点
     verts[tid].position = float4(positions[tid], 0.0, 1.0);
     verts[tid].color    = colors[tid];
@@ -54,6 +58,4 @@ void main(
         prims[0] = uint3(0, 1, 2);  // 三角形由顶点 0→1→2 组成（顺时针）
     }
 
-    // 设置输出数量（Vulkan 要求所有线程调用且参数一致）
-    SetMeshOutputCounts(3, 1);  // 3 个顶点，1 个三角形
 }

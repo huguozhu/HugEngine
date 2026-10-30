@@ -466,6 +466,20 @@ if(SLANGC)
         foreach(SRC ${COMP_SLANG})
             list(APPEND _dxil_pairs "${SRC}|main|compute|cs")
         endforeach()
+        # 网格 / 任务着色器（*.mesh.slang / *.task.slang）：入口与 SPIR-V 一致为 main，
+        # dxc 目标分别为 ms_6_6 / as_6_6（任务着色器在 D3D12 叫放大着色器）
+        foreach(SRC ${MESH_SLANG})
+            # GBuffer.mesh 是未写任何输出的桩（TODO），DXIL 校验要求写满 SV_Position 而拒收；
+            # 它也没有 D3D12 侧的使用者，跳过
+            if(SRC MATCHES "GBuffer\\.mesh\\.slang$")
+                continue()
+            endif()
+            if(SRC MATCHES "\\.task\\.slang$")
+                list(APPEND _dxil_pairs "${SRC}|main|amplification|as")
+            else()
+                list(APPEND _dxil_pairs "${SRC}|main|mesh|ms")
+            endif()
+        endforeach()
 
         foreach(_pair ${_dxil_pairs})
             string(REPLACE "|" ";" _parts "${_pair}")

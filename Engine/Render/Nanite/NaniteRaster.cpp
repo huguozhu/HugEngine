@@ -36,7 +36,7 @@
 #include "Nanite_TestWrite.comp.spv.h"
 #include "Nanite_TestWrite.comp.dxil.h"   // k_Nanite_TestWrite_comp_spv（§14.8 任务 4 的 UAV 自证通道）
 #include "Nanite_MeshTest.mesh.spv.h"
-// (该着色器暂无 DXIL：Nanite_MeshTest.mesh)    // k_Nanite_MeshTest_mesh_spv（§14.8 任务 6 的 mesh 通道）
+#include "Nanite_MeshTest.mesh.dxil.h"    // k_Nanite_MeshTest_mesh_dxil（§14.8 任务 6 的 mesh 通道）
 #include "Nanite_MeshTest.frag.spv.h"
 #include "Nanite_MeshTest.frag.dxil.h"    // k_Nanite_MeshTest_frag_spv
 // 【§14.8 任务 18】软光栅三趟：深度键 / 写 GBuffer / 深度解析
@@ -55,7 +55,7 @@
 #include "Nanite_GBufferClear.comp.dxil.h"     // k_Nanite_GBufferClear_comp_spv（compute 清屏 8 张颜色目标）
 // 【§14.8 任务 22】硬光栅（mesh shader 分流）
 #include "Nanite_HardRaster.mesh.spv.h"
-// (该着色器暂无 DXIL：Nanite_HardRaster.mesh)       // k_Nanite_HardRaster_mesh_spv
+#include "Nanite_HardRaster.mesh.dxil.h"       // k_Nanite_HardRaster_mesh_dxil
 #include "Nanite_HardRaster.frag.spv.h"
 #include "Nanite_HardRaster.frag.dxil.h"       // k_Nanite_HardRaster_frag_spv
 #include "Nanite_DebugView.comp.spv.h"
@@ -578,6 +578,7 @@ bool NaniteRaster::EnsureMeshTestResources() {
     //   push constant 留空：mesh 分支会自动补一条 128B 的 Mesh|Task|Fragment 范围（既有行为）。
     m_MeshTestMS.stage      = rhi::ShaderStage::Mesh;
     m_MeshTestMS.spirv      = k_Nanite_MeshTest_mesh_spv;
+    m_MeshTestMS.dxil.assign(std::begin(k_Nanite_MeshTest_mesh_dxil), std::end(k_Nanite_MeshTest_mesh_dxil));   // D3D12 网格着色器
     m_MeshTestMS.entryPoint = "main";
     m_MeshTestFS.stage      = rhi::ShaderStage::Pixel;
     m_MeshTestFS.spirv      = k_Nanite_MeshTest_frag_spv;
@@ -1430,6 +1431,7 @@ bool NaniteRaster::EnsureHardRasterResources(const GBufferTargets& targets) {
     // ── 3. mesh PSO：8 个 GBuffer 颜色附件（Load + 只写 MRT0/1/4/7）+ D32 深度附件（Load + 测试 + 写）──
     m_HardRasterMS.stage      = rhi::ShaderStage::Mesh;
     m_HardRasterMS.spirv      = k_Nanite_HardRaster_mesh_spv;
+    m_HardRasterMS.dxil.assign(std::begin(k_Nanite_HardRaster_mesh_dxil), std::end(k_Nanite_HardRaster_mesh_dxil));   // D3D12 网格着色器
     m_HardRasterMS.entryPoint = "main";
     m_HardRasterFS.stage      = rhi::ShaderStage::Pixel;
     m_HardRasterFS.spirv      = k_Nanite_HardRaster_frag_spv;

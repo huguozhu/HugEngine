@@ -89,15 +89,57 @@ struct HardRasterVertexOut {
     nointerpolation uint instanceIndex  : TEXCOORD4;
 };
 
-// 两个"没有图元"的收尾（`SetMeshOutputCounts(0,0)` 之后立即返回）。
-// 【为什么必须由所有线程调用且参数一致】Vulkan 规范要求 `SetMeshOutputCounts` 在本工作组的
-//   所有调用里都执行、且两个参数逐位一致（`Nanite_MeshTest.mesh.slang:48-50` 已写明）。
-//   本函数只在**工作组一致**的条件上被调用（槽位/引用/簇记录/三角形数都只依赖 gid），
-//   因此分支是 uniform 的，合法。
-// 【为什么写成 `do { … } while (false)` 而不是 `while (0)`】Slang 对 `while (0)` 报
-//   `E30081 implicit conversion from 'int' to 'bool' is not recommended`（6 次调用 = 6 条警告）。
-//   写成 `false` 条件类型正确、展开语义一模一样（`if (cond) MACRO();` 仍是单条语句）。
-#define HARD_RASTER_BAILOUT() do { SetMeshOutputCounts(0u, 0u); return; } while (false)
+// 取簇与分流判据：返回本工作组要输出的三角形数，0 表示"没有图元"（多派发的组、越界引用、
+// 空实例、缺页、小簇不归硬光栅…）。
+// 【为什么拆成函数、只在入口调用一次 `SetMeshOutputCounts`】D3D12（DXIL 校验）要求
+//   `SetMeshOutputCounts` 在整个入口里**只调用一次**，且这次调用支配所有输出写入；此前每个
+//   早退点各调用一次 `SetMeshOutputCounts(0,0)`，Vulkan 接受但 dxc 报 "cannot be called
+//   multiple times"。这里把所有早退判据收拢成返回值，入口按它统一调用一次。
+//   所有判据只依赖 gid（工作组一致），满足 Vulkan "所有线程调用且参数一致" 的要求。
+uint hardRasterSelectCluster(uint slot, out ClusterRef ref, out SoftRasterClusterView view,
+                             out float3 translation)
+{
+    ref = (ClusterRef)0;
+    view = (SoftRasterClusterView)0;
+    translation = float3(0.0, 0.0, 0.0);
+
+    uint visibleCount = u_VisibleClusterCount[0];
+    if (slot >= visibleCount) return 0u;                    // 多派发的组（dispatch 按容量取整）
+
+    ref = u_VisibleClusters[slot];
+    if (ref.instance >= instanceCount) return 0u;           // 越界引用：不读实例表（防御性）
+    if (pagesEnabled != 0u) {
+        // 【任务 24】开启档：页映射的下标空间是**资产**簇下标 ⇒ 按资产簇数收口
+        //   （binding 0 这时绑的是页池，GETDIMENSIONS 的判据不适用，与软光栅两趟同一口径）
+        if (ref.cluster >= assetClusterCount) return 0u;
+    } else {
+        uint clusterCapacity = 0u;
+        uint clusterStride = 0u;
+        u_Clusters.GetDimensions(clusterCapacity, clusterStride);
+        if (ref.cluster >= clusterCapacity) return 0u;
+    }
+
+    InstanceObject instance = u_Instances[ref.instance];
+    if (instance.indexCount == 0u) return 0u;               // 空实例：与剔除链的规则一致
+    translation = instance.ltw3.xyz;
+
+    // ── 【任务 24】页解析（与软光栅两趟逐字相同的口径）──
+    //   缺页的簇在软光栅两趟里已被跳过（没有颜色也没有深度）⇒ 硬光栅也必须跳过它，
+    //   否则它会在一片空白上画出一个"流式关闭档不会出现"的像素（两档就不再逐位可比）。
+    view = softRasterResolveCluster(ref.cluster);
+    if (!view.valid) return 0u;
+    uint triangleCount = view.cluster.triangleCount;
+    if (triangleCount == 0u) return 0u;
+
+    // ── 分流：只有 `triangleCount > maxTriangles` 的簇归硬光栅 ──
+    // 【这就是 §5.2 的那一行判据，也是软光栅 `if (triangleCount > maxTriangles) return;` 的
+    //   镜像】两侧用的是**同一个 push constant 字段**与**同一份 triangleCount** ⇒ 并集全覆盖、
+    //   交集为空。判据的来源是软光栅的 `skipped_big`，这里的 `kHardStatClusters` 应当与它相等。
+    if (triangleCount <= maxTriangles) return 0u;
+    // 防御：即使资产异常（triangleCount 超过簇上限），也不越过输出数组（本设备未启用
+    // robustBufferAccess，但输出数组越界是 Vulkan 的未定义行为，必须自己钳）。
+    return min(triangleCount, kHardMaxPrimitives);
+}
 
 [numthreads(128, 1, 1)]
 [outputtopology("triangle")]
@@ -125,51 +167,21 @@ void main(
         u_Stats[kHardStatDiagPages]     = pagesEnabled;
     }
 
-    // ── ① 取簇：与软光栅第 1/2 趟**逐字相同**的取簇逻辑（同一条可见簇列表 + 同一份资产）──
-    uint visibleCount = u_VisibleClusterCount[0];
-    uint slot = gid.x;
-    if (slot >= visibleCount) HARD_RASTER_BAILOUT();          // 多派发的组（dispatch 按容量取整）
-
-    ClusterRef ref = u_VisibleClusters[slot];
-    if (ref.instance >= instanceCount) HARD_RASTER_BAILOUT();  // 越界引用：不读实例表（防御性）
-    if (pagesEnabled != 0u) {
-        // 【任务 24】开启档：页映射的下标空间是**资产**簇下标 ⇒ 按资产簇数收口
-        //   （binding 0 这时绑的是页池，GETDIMENSIONS 的判据不适用，与软光栅两趟同一口径）
-        if (ref.cluster >= assetClusterCount) HARD_RASTER_BAILOUT();
-    } else {
-        uint clusterCapacity = 0u;
-        uint clusterStride = 0u;
-        u_Clusters.GetDimensions(clusterCapacity, clusterStride);
-        if (ref.cluster >= clusterCapacity) HARD_RASTER_BAILOUT();
-    }
-
-    InstanceObject instance = u_Instances[ref.instance];
-    if (instance.indexCount == 0u) HARD_RASTER_BAILOUT();      // 空实例：与剔除链的规则一致
-    float3 translation = instance.ltw3.xyz;
-
-    // ── 【任务 24】页解析（与软光栅两趟逐字相同的口径）──
-    //   缺页的簇在软光栅两趟里已被跳过（没有颜色也没有深度）⇒ 硬光栅也必须跳过它，
-    //   否则它会在一片空白上画出一个"流式关闭档不会出现"的像素（两档就不再逐位可比）。
-    SoftRasterClusterView view = softRasterResolveCluster(ref.cluster);
-    if (!view.valid) HARD_RASTER_BAILOUT();
+    // ── ①② 取簇 + 分流：与软光栅第 1/2 趟**逐字相同**的取簇逻辑（同一条可见簇列表 + 同一份资产）──
+    ClusterRef ref;
+    SoftRasterClusterView view;
+    float3 translation;
+    uint triangleCount = hardRasterSelectCluster(gid.x, ref, view, translation);
     NaniteCluster cluster = view.cluster;
-    uint triangleCount = cluster.triangleCount;
-    if (triangleCount == 0u) HARD_RASTER_BAILOUT();
 
-    // ── ② 分流：只有 `triangleCount > maxTriangles` 的簇归硬光栅 ──
-    // 【这就是 §5.2 的那一行判据，也是软光栅 `if (triangleCount > maxTriangles) return;` 的
-    //   镜像】两侧用的是**同一个 push constant 字段**与**同一份 triangleCount** ⇒ 并集全覆盖、
-    //   交集为空。判据的来源是软光栅的 `skipped_big`，这里的 `kHardStatClusters` 应当与它相等。
-    if (triangleCount <= maxTriangles) HARD_RASTER_BAILOUT();
-    // 防御：即使资产异常（triangleCount 超过簇上限），也不越过输出数组（本设备未启用
-    // robustBufferAccess，但输出数组越界是 Vulkan 的未定义行为，必须自己钳）。
-    if (triangleCount > kHardMaxPrimitives) triangleCount = kHardMaxPrimitives;
-
-    // 逐**角点**展开：三角形 `t` 用输出顶点 `3t / 3t+1 / 3t+2`
+    // 逐**角点**展开：三角形 `t` 用输出顶点 `3t / 3t+1 / 3t+2`。整个入口只调用这一次
+    //（triangleCount 为 0 时即"没有图元"，下面 `tid >= triangleCount` 对所有线程成立而返回）。
+    // 【不要紧跟一个 `if (triangleCount == 0u) return;`】dxc 优化时会按该分支把本调用复制成
+    //   两份（0 与非 0 各一份），DXIL 校验报 "cannot be called multiple times"
     SetMeshOutputCounts(3u * triangleCount, triangleCount);
 
     // 读数：本簇真的被硬光栅接手 + 它输出了多少图元（只由 0 号线程记，避免重复计数）
-    if (tid == 0u) {
+    if (tid == 0u && triangleCount != 0u) {
         InterlockedAdd(u_Stats[kHardStatClusters], 1u);
         InterlockedAdd(u_Stats[kHardStatPrimitives], triangleCount);
     }
@@ -248,4 +260,3 @@ void main(
     prims[triLocal] = uint3(3u * triLocal + 0u, 3u * triLocal + 1u, 3u * triLocal + 2u);
 }
 
-#undef HARD_RASTER_BAILOUT
