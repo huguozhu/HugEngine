@@ -105,8 +105,9 @@ endif()
     #
     #  与 Vulkan 后端并列：同一份 IRHIDevice/IRHICommandList 接口，
     #  由 CreateDevice(Backend::D3D12) 选择。全部实现放在 Engine/RHI/D3D12/。
+    #  由根 CMakeLists 的 HUGENGINE_RHI_D3D12 选项控制。
     # ========================================================================
-    if(WIN32)
+    if(WIN32 AND HUGENGINE_RHI_D3D12)
         set(RHI_D3D12_SOURCES
             D3D12/D3D12Common.h
             D3D12/D3D12Converters.h

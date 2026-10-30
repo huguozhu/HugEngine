@@ -15,7 +15,7 @@
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_vulkan.h"
-#if defined(_WIN32)
+#if defined(HE_RHI_D3D12)
 #include "D3D12/D3D12Device.h"   // D3D12 原生句柄（imgui_impl_dx12 需要）
 #include "D3D12/D3D12Converters.h"   // ToDxgiFormat
 #include "imgui_impl_dx12.h"
@@ -36,7 +36,7 @@ void ImGuiIntegration::Initialize(GLFWwindow* window, rhi::IRHIDevice* device,
     // UI 代码，跳过只是没有 UI，渲染照常。注意不能对非 Vulkan 设备走 Vulkan 路径——
     // static_cast<VulkanDevice*> 会拿到垃圾指针，实测表现为进程死等、不出帧。
     m_IsD3D12 = device && device->GetBackend() == rhi::Backend::D3D12;
-#if !defined(_WIN32)
+#if !defined(HE_RHI_D3D12)
     m_IsD3D12 = false;
 #endif
     if (device && device->GetBackend() != rhi::Backend::Vulkan && !m_IsD3D12) {
@@ -85,7 +85,7 @@ void ImGuiIntegration::Initialize(GLFWwindow* window, rhi::IRHIDevice* device,
 
 void ImGuiIntegration::CreateImGuiResources(rhi::IRHIDevice* device,
                                              rhi::IRHISwapChain* swapchain) {
-#if defined(_WIN32)
+#if defined(HE_RHI_D3D12)
     if (m_IsD3D12) {
         // 字体 SRV 放在主 CBV_SRV_UAV 堆的保留槽位，渲染时与场景共用同一张堆
         auto* d3d = static_cast<rhi::d3d12::D3D12Device*>(device);
@@ -146,7 +146,7 @@ void ImGuiIntegration::DestroyImGuiResources(rhi::IRHIDevice* device) {
 void ImGuiIntegration::Shutdown() {
     if (!m_Initialized) return;
     m_Initialized = false;
-#if defined(_WIN32)
+#if defined(HE_RHI_D3D12)
     if (m_IsD3D12) {
         if (m_Device) m_Device->WaitIdle();   // ImGui 的顶点/索引缓冲可能仍被在飞帧使用
         ImGui_ImplDX12_Shutdown();
@@ -163,7 +163,7 @@ void ImGuiIntegration::Shutdown() {
 }
 
 void ImGuiIntegration::BeginFrame() {
-#if defined(_WIN32)
+#if defined(HE_RHI_D3D12)
     if (m_IsD3D12) ImGui_ImplDX12_NewFrame();
     else
 #endif
@@ -174,7 +174,7 @@ void ImGuiIntegration::BeginFrame() {
 
 void ImGuiIntegration::EndFrame(rhi::IRHICommandList* cmd) {
     ImGui::Render();
-#if defined(_WIN32)
+#if defined(HE_RHI_D3D12)
     if (m_IsD3D12) {
         // 返回原生列表前已绑定引擎的描述符堆（含 ImGui 字体 SRV 槽位）
         auto* list = static_cast<ID3D12GraphicsCommandList*>(m_Device->GetImGuiCommandBuffer(cmd));
