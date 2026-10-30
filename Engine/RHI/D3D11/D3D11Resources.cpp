@@ -157,8 +157,21 @@ void D3D11Buffer::ReadbackToShadow() {
     }
     ctx->CopyResource(m_Staging.Get(), m_Buffer.Get());
     D3D11_MAPPED_SUBRESOURCE ms{};
-    // 同步回读：Map(READ) 会等 GPU 执行完此前的命令（正确优先，性能问题记录不修）
-    if (SUCCEEDED(ctx->Map(m_Staging.Get(), 0, D3D11_MAP_READ, 0, &ms))) {
+    // 同步回读：等 GPU 执行完此前的命令（正确优先，性能问题记录不修）。
+    // 用 DO_NOT_WAIT 轮询并限时 5 秒：GPU 停住时明确报错并放弃本次回读，而不是让进程永久挂起
+    ctx->Flush();
+    const ULONGLONG start = GetTickCount64();
+    HRESULT hr;
+    while ((hr = ctx->Map(m_Staging.Get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &ms)) == DXGI_ERROR_WAS_STILL_DRAWING) {
+        if (GetTickCount64() - start > 5000) {
+            HE_CORE_ERROR("[D3D11] 回读缓冲（{} 字节）等待 GPU 超时 5 秒，放弃本次回读；GPU 可能停住了（reason=0x{:08x}）",
+                          m_AllocSize, static_cast<u32>(m_Device->GetDevice()->GetDeviceRemovedReason()));
+            m_Device->OnGpuTimeout();
+            return;
+        }
+        SwitchToThread();
+    }
+    if (SUCCEEDED(hr)) {
         std::memcpy(m_Shadow.data(), ms.pData, m_AllocSize);
         ctx->Unmap(m_Staging.Get(), 0);
     }

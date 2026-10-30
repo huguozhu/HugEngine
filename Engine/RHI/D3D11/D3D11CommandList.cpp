@@ -469,12 +469,14 @@ bool D3D11CommandList::PrepareDrawOrDispatch(bool compute) {
 // ---------------------------------------------------------------------------
 void D3D11CommandList::Draw(u32 vertexCount, u32 instanceCount, u32 firstVertex, u32 firstInstance) {
     if (!PrepareDrawOrDispatch(false)) return;
+    m_Device->NoteExecuted(m_Pipeline->GetName());   // 诊断：GPU 等待超时时打印最近的 PSO
     m_Device->GetContext()->DrawInstanced(vertexCount, instanceCount, firstVertex, firstInstance);
 }
 
 void D3D11CommandList::DrawIndexed(u32 indexCount, u32 instanceCount, u32 firstIndex,
                                    i32 vertexOffset, u32 firstInstance) {
     if (!PrepareDrawOrDispatch(false)) return;
+    m_Device->NoteExecuted(m_Pipeline->GetName());   // 诊断：GPU 等待超时时打印最近的 PSO
     m_Device->GetContext()->DrawIndexedInstanced(indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
 }
 
@@ -491,6 +493,7 @@ void D3D11CommandList::DrawIndexedIndirect(IRHIBuffer* buffer, u64 offset, u32 d
         return;
     }
     if (!PrepareDrawOrDispatch(false)) return;
+    m_Device->NoteExecuted(m_Pipeline->GetName());   // 诊断：GPU 等待超时时打印最近的 PSO
     ID3D11DeviceContext4* ctx = m_Device->GetContext();
     const u32 step = stride ? stride : static_cast<u32>(sizeof(IndirectDrawIndexedCommand));
     for (u32 i = 0; i < drawCount; ++i) {
@@ -507,6 +510,7 @@ void D3D11CommandList::DrawIndexedIndirectCount(IRHIBuffer*, u64, IRHIBuffer*, u
 
 void D3D11CommandList::Dispatch(u32 x, u32 y, u32 z) {
     if (!PrepareDrawOrDispatch(true)) return;
+    m_Device->NoteExecuted(m_Pipeline->GetName());   // 诊断：GPU 等待超时时打印最近的 PSO
     ID3D11DeviceContext4* ctx = m_Device->GetContext();
     ctx->Dispatch(x, y, z);
     // 派发后解绑 CS 的 UAV：同一资源下一步常被当 SRV 读，留着 UAV 绑定会被运行时强制解绑并告警
@@ -525,6 +529,7 @@ void D3D11CommandList::DispatchIndirect(IRHIBuffer* buffer, u64 offset) {
         return;
     }
     if (!PrepareDrawOrDispatch(true)) return;
+    m_Device->NoteExecuted(m_Pipeline->GetName());   // 诊断：GPU 等待超时时打印最近的 PSO
     ID3D11DeviceContext4* ctx = m_Device->GetContext();
     ctx->DispatchIndirect(args->GetBuffer(), static_cast<UINT>(offset));
     ID3D11UnorderedAccessView* nullUavs[dxbc::kDxbcMaxUAVSlots] = {};

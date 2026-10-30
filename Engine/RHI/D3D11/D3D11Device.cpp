@@ -142,6 +142,18 @@ void D3D11Device::QueryCaps() {
                  th.DriverCommandLists ? "是" : "否");
 }
 
+void D3D11Device::OnGpuTimeout() {
+    if (m_TimeoutReported) return;
+    m_TimeoutReported = true;
+    std::string list;
+    for (u32 i = 0; i < kRecentPsoCount; ++i) {
+        const char* n = m_RecentPsos[(m_RecentCursor + i) % kRecentPsoCount];
+        if (n) { list += "\n    "; list += n; }
+    }
+    HE_CORE_ERROR("[D3D11] GPU 等待超时前最近执行的绘制 / 派发（旧 → 新）：{}", list);
+    DrainDebugMessages();
+}
+
 // ---------------------------------------------------------------------------
 //  调试层消息
 // ---------------------------------------------------------------------------
@@ -415,8 +427,11 @@ bool D3D11Device::WaitForFence(RHIFenceHandle fence, u64 value, u64 timeout) {
     ID3D11Fence* f = FindFence(fence);
     if (!f) return false;
     // timeout 以纳秒计（与 Vulkan 一致）；0 表示只查询不等待
+    if (f->GetCompletedValue() >= value) return true;
     const DWORD ms = (timeout == UINT64_MAX) ? INFINITE : static_cast<DWORD>(timeout / 1000000ull);
-    if (timeout != UINT64_MAX) m_Context->Flush();   // 确保信号已提交给 GPU，否则可能等到超时
+    // 【必须先 Flush】immediate context 的 Signal 还在驱动的命令缓冲里、没交给 GPU 时，
+    // 不 Flush 就去等它会永远等不到（实测 02.Cube 跑几帧后 CPU 0%、进程卡死）
+    m_Context->Flush();
     return WaitFenceValue(f, value, ms);
 }
 
@@ -429,8 +444,10 @@ void D3D11Device::SignalFenceOnQueue(QueueType, RHIFenceHandle fence, u64 value)
     if (ID3D11Fence* f = FindFence(fence)) m_Context->Signal(f, value);
 }
 
-void D3D11Device::WaitFenceOnQueue(QueueType, RHIFenceHandle fence, u64 value) {
-    if (ID3D11Fence* f = FindFence(fence)) m_Context->Wait(f, value);
+void D3D11Device::WaitFenceOnQueue(QueueType, RHIFenceHandle, u64) {
+    // 只有一个按序执行的 immediate context：早于本次调用发出的信号必然排在前面，GPU 侧等待
+    // 不会带来任何额外顺序；而等的若是之后才发出的信号（异步计算的握手写法），GPU 会永久停住，
+    // 下一次阻塞式回读随之死锁（实测 02.Cube 跑几帧后 CPU 0%）。因此不下发 GPU 侧等待
 }
 
 // ---------------------------------------------------------------------------

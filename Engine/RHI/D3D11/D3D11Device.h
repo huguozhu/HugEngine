@@ -162,7 +162,7 @@ public:
     u32  GetQueueFamily(QueueType) const override { return 0; }
 
     // ---- 时间线围栏：ID3D11Fence（D3D11.4）----
-    // 只有一个 immediate context，队列参数被忽略；GPU 侧等待在单队列下必然已满足，仍照常下发
+    // 只有一个 immediate context，队列参数被忽略；GPU 侧等待在单队列下没有意义且可能死锁，不下发
     RHIFenceHandle CreateFence() override;
     void           DestroyFence(RHIFenceHandle fence) override;
     bool           WaitForFence(RHIFenceHandle fence, u64 value, u64 timeout = UINT64_MAX) override;
@@ -202,6 +202,11 @@ public:
     ID3D11Buffer* GetInstanceIndexBuffer();
     /// 实例序号缓冲容量（实例号上限）：覆盖对象号、Nanite 簇号与实例化网格的实例数（与 D3D12 一致）
     static constexpr u32 kInstanceIndexCount = 1u << 20;
+
+    /// 诊断：记下最近执行的绘制 / 派发所用的 PSO 名（环形 32 条，只存指针，开销可忽略）
+    void NoteExecuted(const char* psoName) { m_RecentPsos[m_RecentCursor++ % kRecentPsoCount] = psoName; }
+    /// GPU 等待超时时调用：打印一次最近执行过的 PSO，便于定位是哪个 pass 让 GPU 停住
+    void OnGpuTimeout();
 
     /// 把调试层（InfoQueue）里积累的消息写进日志并清空。ERROR / CORRUPTION 打错误，
     /// WARNING 打告警（同一消息 ID 只打前几次，避免每帧刷屏）。调试层未启用时什么都不做。
@@ -246,6 +251,10 @@ private:
     ComPtr<ID3D11Buffer>         m_ZeroVertexBuffer;      // 懒创建
     ComPtr<ID3D11Buffer>         m_InstanceIndexBuffer;   // 懒创建
     class D3D11CommandList*      m_ContextOwner = nullptr;
+    static constexpr u32         kRecentPsoCount = 32;
+    const char*                  m_RecentPsos[kRecentPsoCount] = {};
+    u32                          m_RecentCursor = 0;
+    bool                         m_TimeoutReported = false;
     D3D11BindlessHeap            m_BindlessHeap;  // 引擎会无条件解引用它
     DeviceCaps                   m_Caps{};
 
