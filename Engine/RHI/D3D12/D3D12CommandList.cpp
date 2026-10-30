@@ -219,6 +219,7 @@ void D3D12CommandList::ResetRecordingState() {
     m_PendingWaits.clear();     // 上一次录制若未提交，残留的等待 / 信号作废
     m_PendingSignals.clear();
     m_ExecutedBundles.clear();  // 上一次录制执行过的 bundle 已在提交时处理
+    m_QueueHandoffs.clear();    // 上一次录制若未提交，残留的交接转换作废
     ClearPassAttachments();
     // 缓冲在每次提交执行完后衰减回 COMMON：新录制从全 COMMON 开始
     m_BufferStates.clear();
@@ -777,7 +778,9 @@ void D3D12CommandList::ClearPassAttachments() {
 }
 
 void D3D12CommandList::SetPipeline(IRHIPipelineState* pso) {
-
+    // 计算列表不能设置图形管线（COMPUTE 列表上 SetGraphicsRootSignature 非法）。异步计算 pass
+    // 结尾常为主列表「恢复」图形 PSO（如 GPU_Cull 末尾的 SetPipeline(GBuffer PSO)），这里忽略
+    if (IsComputeQueueList() && pso && !static_cast<D3D12PipelineState*>(pso)->IsCompute()) return;
     m_Pipeline = static_cast<D3D12PipelineState*>(pso);
     if (!m_List || !m_Pipeline) return;
     m_IsComputePipeline = m_Pipeline->IsCompute();
@@ -793,6 +796,8 @@ void D3D12CommandList::SetPipeline(IRHIPipelineState* pso) {
     // 否则后面 SetComputeRootDescriptorTable 没有根签名可用，D3D12 会静默卡死。
     if (m_IsComputePipeline) {
         m_List->SetComputeRootSignature(m_Pipeline->GetRootSignature());
+        m_RootArgsDirty = true;
+        return;   // 计算管线不涉及输入装配（计算列表上调用 IA* 非法，调试层 id=932）
     } else {
         m_List->SetGraphicsRootSignature(m_Pipeline->GetRootSignature());
     }
@@ -825,6 +830,7 @@ void D3D12CommandList::SetVertexBuffer(IRHIBuffer* buffer, u32 binding) {
         return;
     }
     D3D12_VERTEX_BUFFER_VIEW vbv = b->GetVbv(stride);
+    if (IsComputeQueueList()) return;   // 计算列表没有输入装配阶段
     m_List->IASetVertexBuffers(binding, 1, &vbv);
 }
 
@@ -834,6 +840,7 @@ void D3D12CommandList::SetIndexBuffer(IRHIBuffer* buffer, u32 offset) {
     auto* b = static_cast<D3D12Buffer*>(buffer);
     D3D12_INDEX_BUFFER_VIEW ibv = b->GetIbv();
     ibv.BufferLocation += offset;
+    if (IsComputeQueueList()) return;   // 计算列表没有输入装配阶段
     m_List->IASetIndexBuffer(&ibv);
 }
 
@@ -853,7 +860,7 @@ void D3D12CommandList::SetViewport(const Viewport& vp) {
         v.Height   = -vp.height;
     }
     m_LastVp = v;
-    if (m_IsBundle) return;   // bundle 不能设视口（继承执行它的主列表）
+    if (m_IsBundle || IsComputeQueueList()) return;   // bundle 继承主列表的视口；计算列表没有光栅阶段
     m_List->RSSetViewports(1, &v);
 }
 
@@ -865,7 +872,7 @@ void D3D12CommandList::SetScissor(const ScissorRect& sc) {
     r.top    = sc.y;
     r.right  = sc.x + static_cast<i32>(sc.width);
     r.bottom = sc.y + static_cast<i32>(sc.height);
-    if (m_IsBundle) return;   // bundle 不能设裁剪矩形（继承执行它的主列表）
+    if (m_IsBundle || IsComputeQueueList()) return;   // bundle 继承主列表的裁剪；计算列表没有光栅阶段
     m_List->RSSetScissorRects(1, &r);
 }
 
@@ -950,8 +957,8 @@ void D3D12CommandList::EnsureBoundResourceStates() {
             m_BundleUsages.push_back(u);
         return;
     }
-    constexpr D3D12_RESOURCE_STATES kRead =
-        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    // 可读状态按队列取：计算列表上不能出现 PIXEL_SHADER_RESOURCE（见 ShaderReadState）
+    const D3D12_RESOURCE_STATES kRead = ShaderReadState();
     m_BarrierScratch.clear();
     const bool gfxPso = !m_IsComputePipeline;
 
@@ -998,7 +1005,7 @@ void D3D12CommandList::EnsureBoundResourceStates() {
             if (u.read && u.uavWhole) { uavWins.push_back(res); continue; }
             if (!u.read || u.uavWhole || u.uavSub == D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES) continue;
             if (std::find(m_PassAttachments.begin(), m_PassAttachments.end(), res) != m_PassAttachments.end()) continue;
-            const D3D12_RESOURCE_STATES cur = m_Device->GetResourceState(res);
+            const D3D12_RESOURCE_STATES cur = UsableTextureState(res);   // 计算列表：图形专用状态先交接
             D3D12_RESOURCE_BARRIER b{};
             b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
             b.Transition.pResource = res;
@@ -1034,7 +1041,7 @@ void D3D12CommandList::EnsureBoundResourceStates() {
             continue;
         }
         // 缓冲按本列表的记录（起始为 COMMON），纹理按设备级记录（纹理不会衰减）
-        const D3D12_RESOURCE_STATES cur  = isBuffer ? GetBufferState(res) : m_Device->GetResourceState(res);
+        const D3D12_RESOURCE_STATES cur  = isBuffer ? GetBufferState(res) : UsableTextureState(res);
         const D3D12_RESOURCE_STATES want = use.uav ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS : kRead;
         if (cur == want || (!use.uav && (cur & kRead) == kRead)) continue;   // 已满足（含额外的只读位）
         // 【缓冲首次使用走隐式提升】缓冲在每个列表开头都是 COMMON，且可以从 COMMON 隐式提升到
@@ -1307,8 +1314,11 @@ void D3D12CommandList::PipelineBarrier(PipelineStage, PipelineStage,
                                        IRHITexture* texture) {
     if (!m_List || !texture || m_IsBundle) return;   // bundle 不能发屏障
     auto* t = static_cast<D3D12Texture*>(texture);
-    const D3D12_RESOURCE_STATES from = ToD3D12ResourceState(srcState, t->IsDepth());
-    const D3D12_RESOURCE_STATES to   = ToD3D12ResourceState(dstState, t->IsDepth());
+    D3D12_RESOURCE_STATES from = ToD3D12ResourceState(srcState, t->IsDepth());
+    D3D12_RESOURCE_STATES to   = ToD3D12ResourceState(dstState, t->IsDepth());
+    // 计算列表：目标状态去掉图形专用位；去不掉（转成渲染目标 / 深度）说明这次转换属于图形队列，跳过
+    if (!FilterStateForQueue(to)) return;
+    FilterStateForQueue(from);
     // 【UAV → UAV 必须是 UAV 屏障】引擎在相互依赖的计算派发之间发「UAV → UAV」屏障（如 SDF 的清空 → 散射 →
     // 逐轮洪泛），Vulkan 下它是内存屏障。此前状态相同就直接返回、什么都不做：前后派发在 GPU 上可以重叠执行，
     // 后一次读到前一次未写完的数据（实测 Lumen 逐 mesh 距离场在 D3D12 下大片未写入 / 误差偏大）
@@ -1332,7 +1342,7 @@ void D3D12CommandList::PipelineBarrier(PipelineStage, PipelineStage,
         // 【用我们登记的真实状态做屏障】引擎传的 srcState 未必等于资源的实际状态（它与引擎自己的跟踪有关，D3D12 侧未必一致），直接照用会让 ResourceBarrier 被判非法（调试层 id=527，实测 3600 条），屏障无效。 这里以登记状态为准。
         ID3D12Resource* bres = t->GetResource();
         const D3D12_RESOURCE_STATES actualFrom =
-            m_Device ? m_Device->GetResourceState(bres) : from;
+            m_Device ? UsableTextureState(bres) : from;   // 计算列表：图形专用状态先交接
         if (actualFrom == to) {
             if (to == D3D12_RESOURCE_STATE_UNORDERED_ACCESS) uavBarrier();   // 已是 UAV：仍要同步前后派发
             return;
@@ -1353,6 +1363,71 @@ void D3D12CommandList::CopyBuffer(IRHIBuffer* src, IRHIBuffer* dst, u64 size,
     TransitionBuffer(s->GetResource(), D3D12_RESOURCE_STATE_COPY_SOURCE);
     TransitionBuffer(d->GetResource(), D3D12_RESOURCE_STATE_COPY_DEST);
     m_List->CopyBufferRegion(d->GetResource(), dstOffset, s->GetResource(), srcOffset, size);
+}
+
+// ---------------------------------------------------------------------------
+//  异步计算列表的资源状态
+//
+//  COMPUTE 类型的列表上，屏障的前后状态都不能含图形专用位（PIXEL_SHADER_RESOURCE /
+//  RENDER_TARGET / DEPTH_* 等），否则调试层报错。设备级的纹理状态跟踪不区分队列，
+//  纹理常停在图形状态（如上一帧被当作 PIXEL | NON_PIXEL 采样、或是渲染目标）。
+//  处理方式：
+//    · 目标状态：去掉 PIXEL_SHADER_RESOURCE 位，只读状态在计算列表上即 NON_PIXEL_SHADER_RESOURCE；
+//    · 起始状态：若含图形专用位，记一条「交接转换」（图形专用状态 → 去掉图形位后的状态，
+//      全去光则为 COMMON），由设备在提交本列表前放到图形队列上执行，计算队列等它完成后再执行本列表
+//      （见 D3D12Device::Submit）。交接后设备登记的状态随之更新，同一资源在本次录制中只交接一次。
+//  前提：交接转换在提交时才执行，假定异步计算 pass 用到的资源不会被「已录制、尚未提交」的
+//  图形命令改变状态（RenderGraph 只把只读上一帧数据的计算 pass 放到异步队列，满足这一点）。
+// ---------------------------------------------------------------------------
+namespace {
+/// 计算列表上不允许出现的图形专用状态位
+constexpr D3D12_RESOURCE_STATES kGraphicsOnlyStates =
+    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_RENDER_TARGET |
+    D3D12_RESOURCE_STATE_DEPTH_WRITE | D3D12_RESOURCE_STATE_DEPTH_READ |
+    D3D12_RESOURCE_STATE_STREAM_OUT | D3D12_RESOURCE_STATE_RESOLVE_DEST |
+    D3D12_RESOURCE_STATE_RESOLVE_SOURCE | D3D12_RESOURCE_STATE_SHADING_RATE_SOURCE;
+} // namespace
+
+D3D12_RESOURCE_STATES D3D12CommandList::ShaderReadState() const {
+    return IsComputeQueueList()
+        ? D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
+        : (D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+}
+
+bool D3D12CommandList::FilterStateForQueue(D3D12_RESOURCE_STATES& state) const {
+    if (!IsComputeQueueList()) return true;
+    const D3D12_RESOURCE_STATES original = state;
+    state &= ~D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    // 只剩 PIXEL 位的只读请求在计算列表上等价于 NON_PIXEL 读
+    if (state == D3D12_RESOURCE_STATE_COMMON && original != D3D12_RESOURCE_STATE_COMMON)
+        state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    if ((state & kGraphicsOnlyStates) != 0) {
+        static bool s_Warned = false;   // 只提示一次，避免每帧刷屏
+        if (!s_Warned) {
+            s_Warned = true;
+            HE_CORE_WARN("D3D12CommandList: 计算列表上请求转到图形专用状态 0x{:x}，已跳过（应在图形队列上转换）",
+                         static_cast<u32>(original));
+        }
+        return false;
+    }
+    return true;
+}
+
+D3D12_RESOURCE_STATES D3D12CommandList::UsableTextureState(ID3D12Resource* res) {
+    if (!m_Device || !res) return D3D12_RESOURCE_STATE_COMMON;
+    const D3D12_RESOURCE_STATES cur = m_Device->GetResourceState(res);
+    if (!IsComputeQueueList() || (cur & kGraphicsOnlyStates) == 0) return cur;
+    // 去掉图形专用位（PIXEL | NON_PIXEL → NON_PIXEL；渲染目标 / 深度 → COMMON）
+    D3D12_RESOURCE_STATES usable = cur & ~kGraphicsOnlyStates;
+    D3D12_RESOURCE_BARRIER b{};
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    b.Transition.pResource   = res;
+    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    b.Transition.StateBefore = cur;
+    b.Transition.StateAfter  = usable;
+    m_QueueHandoffs.push_back(b);
+    m_Device->SetResourceState(res, usable);
+    return usable;
 }
 
 void D3D12CommandList::TransitionBuffer(ID3D12Resource* res, D3D12_RESOURCE_STATES want) {
@@ -1384,8 +1459,9 @@ void D3D12CommandList::CopyTextureToTexture(IRHITexture* src, IRHITexture* dst) 
     if (!sr || !dr || sr == dr || !m_Device) return;
     // CopyResource 要求源 / 目标分别处于 COPY_SOURCE / COPY_DEST：临时转过去，拷完转回原状态
     //（设备级状态记录不变）。此前不做转换，渲染目标等状态下直接拷贝属非法调用
-    const D3D12_RESOURCE_STATES ss = m_Device->GetResourceState(sr);
-    const D3D12_RESOURCE_STATES ds = m_Device->GetResourceState(dr);
+    // 计算列表：图形专用状态先交接到计算可用状态（拷完转回的也是交接后的状态）
+    const D3D12_RESOURCE_STATES ss = UsableTextureState(sr);
+    const D3D12_RESOURCE_STATES ds = UsableTextureState(dr);
     D3D12_RESOURCE_BARRIER b[2]{};
     UINT nb = 0;
     auto add = [&](ID3D12Resource* r, D3D12_RESOURCE_STATES from, D3D12_RESOURCE_STATES to) {
@@ -1412,6 +1488,10 @@ void D3D12CommandList::CopyTextureToTexture(IRHITexture* src, IRHITexture* dst) 
 // 清除后资源留在 DEPTH_WRITE，正好供随后的深度测试 pass 使用（与 Vulkan 版末尾转到附件布局一致）。
 void D3D12CommandList::ClearDepthStencil(IRHITexture* texture, float depth) {
     if (!m_List || !texture || m_IsBundle) return;   // bundle 不能发屏障与清除
+    if (IsComputeQueueList()) {   // DEPTH_WRITE 与 ClearDepthStencilView 只能在图形列表上使用
+        HE_CORE_WARN("D3D12CommandList::ClearDepthStencil: 计算列表上不能清除深度，已忽略");
+        return;
+    }
     auto* t = static_cast<D3D12Texture*>(texture);
     ID3D12Resource* res = t->GetResource();
     const D3D12_CPU_DESCRIPTOR_HANDLE dsv = t->GetDsv();
@@ -1492,7 +1572,7 @@ void D3D12CommandList::CopyTextureToBuffer(IRHITexture* src, IRHIBuffer* dst, u3
     m_TempResources[m_FrameSlot].push_back(staging);
 
     // 纹理临时转到 COPY_SOURCE，拷完转回原状态（设备级记录不变）
-    const D3D12_RESOURCE_STATES texState = m_Device->GetResourceState(texRes);
+    const D3D12_RESOURCE_STATES texState = UsableTextureState(texRes);   // 计算列表：图形专用状态先交接
     D3D12_RESOURCE_BARRIER tb{};
     tb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     tb.Transition.pResource   = texRes;

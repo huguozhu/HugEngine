@@ -144,6 +144,11 @@ public:
     /// 提交前 / 后调用：执行录制期记下的时间线等待 / 信号（见 SetTimelineWait / SetTimelineSignal）
     void ApplyTimelineWaits();
     void ApplyTimelineSignals();
+    /// 计算列表遇到处于图形专用状态的纹理时记下的「交接转换」（图形专用状态 → 计算可用状态）。
+    /// 计算列表上不能做涉及 PIXEL_SHADER_RESOURCE / RENDER_TARGET / DEPTH_* 的转换，
+    /// 由设备在提交本列表前先在图形队列上执行这些转换，计算队列等它完成后再执行本列表
+    const std::vector<D3D12_RESOURCE_BARRIER>& GetQueueHandoffs() const { return m_QueueHandoffs; }
+    void ClearQueueHandoffs() { m_QueueHandoffs.clear(); }
     /// 外部代码（ImGui）直接往原生列表录制前调用：绑定引擎的描述符堆；
     /// 外部会改根签名与 PSO，因此之后的绘制必须重新 SetPipeline 并下发根参数
     void PrepareForExternalRendering();
@@ -171,6 +176,19 @@ private:
     void EnsureBoundResourceStates();
     /// 把 DEFAULT/CUSTOM 堆上的缓冲转到指定状态（并记入本次录制转换过的缓冲）
     void TransitionBuffer(ID3D12Resource* res, D3D12_RESOURCE_STATES want);
+
+    /// 是否计算队列上的列表（COMPUTE 类型列表只认计算可用的资源状态）
+    bool IsComputeQueueList() const { return m_QueueType == QueueType::Compute; }
+    /// 着色器可读状态：图形列表为 PIXEL | NON_PIXEL，计算列表只能用 NON_PIXEL_SHADER_RESOURCE
+    D3D12_RESOURCE_STATES ShaderReadState() const;
+    /// 把目标状态过滤成本列表可用的状态：计算列表去掉 PIXEL_SHADER_RESOURCE 位；
+    /// 过滤后仍含图形专用位（渲染目标 / 深度）时返回 false，调用方应跳过该转换
+    bool FilterStateForQueue(D3D12_RESOURCE_STATES& state) const;
+    /// 取纹理当前状态作为本列表屏障的 StateBefore：计算列表遇到图形专用状态时，
+    /// 记一条交接转换（见 m_QueueHandoffs），把设备登记的状态改为计算可用状态并返回它
+    D3D12_RESOURCE_STATES UsableTextureState(ID3D12Resource* res);
+    /// 本次录制累计的交接转换，由设备在提交前放到图形队列上执行
+    std::vector<D3D12_RESOURCE_BARRIER> m_QueueHandoffs;
 
     /// 每个飞行帧槽位一个分配器（同 Vulkan 的逐帧命令缓冲）：分配器在 GPU 执行完之前
     /// 不能 Reset，样例只建一个命令列表并每帧重录，单分配器会在 GPU 仍在执行上一帧时

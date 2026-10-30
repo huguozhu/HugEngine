@@ -705,6 +705,11 @@ void D3D12Device::Submit(IRHICommandList* cmdList, RHICommandList* stream) {
     if (s_LogSubmit) HE_CORE_ERROR("[SUB] list={} draws={}", (void*)cl, cl->GetTotalDraws());
     // 按列表类型选队列：计算列表进计算队列（与图形队列并行），其余进图形队列
     ID3D12CommandQueue* queue = GetQueue(cl->GetQueueType());
+    // 计算列表录制时遇到图形专用状态的纹理：先在图形队列上把它们转到计算可用状态
+    if (!cl->GetQueueHandoffs().empty()) {
+        if (cl->GetQueueType() == QueueType::Compute) SubmitQueueHandoff(cl->GetQueueHandoffs());
+        cl->ClearQueueHandoffs();
+    }
     cl->ApplyTimelineWaits();         // 本次提交要等的时间线值：先于命令执行
     queue->ExecuteCommandLists(1, lists);
     cl->OnSubmitted(queue);           // 记录该列表当前帧槽位的完成围栏
@@ -725,6 +730,51 @@ void D3D12Device::Submit(IRHICommandList* cmdList, RHICommandList* stream) {
         }
         m_InfoQueue->ClearStoredMessages();
     }
+}
+
+// ---------------------------------------------------------------------------
+// SubmitQueueHandoff —— 异步计算的队列交接
+// 计算列表不能做涉及图形专用状态的转换，这些转换由这里录到一条图形列表上：
+// 图形队列按提交顺序执行它（排在此前提交的图形工作之后），完成后打围栏；
+// 计算队列 Wait 该围栏，之后才执行计算列表，此时资源已处于计算可用状态。
+// ---------------------------------------------------------------------------
+void D3D12Device::SubmitQueueHandoff(const std::vector<D3D12_RESOURCE_BARRIER>& barriers) {
+    if (barriers.empty() || !m_Device || !m_Queue || !m_ComputeQueue) return;
+    if (!m_HandoffFence &&
+        FAILED(m_Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_HandoffFence)))) {
+        HE_CORE_ERROR("[D3D12] 队列交接围栏创建失败");
+        return;
+    }
+    // 取一条 GPU 已执行完的交接列表复用，没有就新建
+    const u64 completed = m_HandoffFence->GetCompletedValue();
+    HandoffList* slot = nullptr;
+    for (auto& h : m_HandoffLists) {
+        if (h.fenceValue <= completed) { slot = &h; break; }
+    }
+    if (!slot) {
+        HandoffList h;
+        if (FAILED(m_Device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&h.alloc))) ||
+            FAILED(m_Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, h.alloc.Get(), nullptr,
+                                               IID_PPV_ARGS(&h.list)))) {
+            HE_CORE_ERROR("[D3D12] 队列交接列表创建失败");
+            return;
+        }
+        h.list->Close();   // 新建的列表处于录制状态：先关上，下面统一 Reset
+        h.list->SetName(L"HugEngine 队列交接");
+        m_HandoffLists.push_back(std::move(h));
+        slot = &m_HandoffLists.back();
+    }
+    if (FAILED(slot->alloc->Reset()) || FAILED(slot->list->Reset(slot->alloc.Get(), nullptr))) {
+        HE_CORE_ERROR("[D3D12] 队列交接列表 Reset 失败");
+        return;
+    }
+    slot->list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
+    slot->list->Close();
+    ID3D12CommandList* lists[1] = { slot->list.Get() };
+    m_Queue->ExecuteCommandLists(1, lists);
+    slot->fenceValue = ++m_HandoffFenceValue;
+    m_Queue->Signal(m_HandoffFence.Get(), slot->fenceValue);
+    m_ComputeQueue->Wait(m_HandoffFence.Get(), slot->fenceValue);   // 计算队列等交接完成
 }
 
 void D3D12Device::SubmitAll(Span<IRHICommandList*> cmdLists) {

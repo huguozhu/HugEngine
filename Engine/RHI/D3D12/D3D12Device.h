@@ -582,6 +582,19 @@ private:   // register -> 元素字节数
     ComPtr<ID3D12Device>        m_Device;
     ComPtr<ID3D12CommandQueue>  m_Queue;
     ComPtr<ID3D12CommandQueue>  m_ComputeQueue;   // 异步计算队列（COMPUTE 类型，与图形队列并行执行）
+
+    /// 异步计算的队列交接：把计算列表记下的交接转换（图形专用状态 → 计算可用状态）录到一条
+    /// 小的图形列表上，提交到图形队列并打围栏，再让计算队列在 GPU 侧等待它完成
+    void SubmitQueueHandoff(const std::vector<D3D12_RESOURCE_BARRIER>& barriers);
+    /// 交接用的图形列表池：围栏到达 fenceValue 后即可复用
+    struct HandoffList {
+        ComPtr<ID3D12CommandAllocator>    alloc;
+        ComPtr<ID3D12GraphicsCommandList> list;
+        u64                               fenceValue = 0;
+    };
+    std::vector<HandoffList>    m_HandoffLists;
+    ComPtr<ID3D12Fence>         m_HandoffFence;
+    u64                         m_HandoffFenceValue = 0;
     ComPtr<ID3D12Debug>         m_Debug;
     ComPtr<ID3D12InfoQueue>     m_InfoQueue;
 
