@@ -80,8 +80,18 @@ struct InstanceObject {
 [[vk::binding(6, 0)]] RWStructuredBuffer<uint>               u_DepthKey;
 [[vk::binding(7, 0)]] RWStructuredBuffer<uint>               u_Stats;
 [[vk::binding(12, 0)]] StructuredBuffer<NaniteMaterialRecord> u_Materials;
+// 13/14 是 bindless 纹理 / 采样器数组（与 GBuffer 路径同一个堆、同一套下标）。
+// 【D3D12 必须显式写寄存器】未写 register 的无界数组会被 dxc 自动分到 t0,space1 / s0,space2：
+//   space1 是别的描述符集（本模块只绑 set 0），读到错误资源或未初始化的根参数。这里与 common.slang 的
+//   u_Textures / u_Samplers 同一约定：放进 space2 的 bindless 表、定长 1024（D3D12 后端每次绘制 /
+//   派发前都把 space2 的 SRV / 采样器表指向 bindless 堆）。Vulkan 仍是 set 0 的 binding 13/14 无界数组
+#if defined(HE_SHADER_D3D12)
+[[vk::binding(13, 0)]] Texture2D<float4>                     u_MaterialTextures[1024] : register(t0, space2);
+[[vk::binding(14, 0)]] SamplerState                          u_MaterialSamplers[1024] : register(s0, space2);
+#else
 [[vk::binding(13, 0)]] Texture2D<float4>                     u_MaterialTextures[];
 [[vk::binding(14, 0)]] SamplerState                          u_MaterialSamplers[];
+#endif
 
 // ── 【任务 24】LOD 流式的五 + 一个视图（bindings 15..20）──
 // 【口径：0/1/2 号槽一槽两用】流式开启时，binding 0/1/2 绑的是**页池**的簇段/顶点段/三角形段，
