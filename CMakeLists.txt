@@ -86,6 +86,8 @@ endif()
 # 「if(TARGET ShaderToDxil)」判断为假，DXIL 着色器不会被生成。
 if(WIN32)
     add_subdirectory(Tools/ShaderToDxil)
+    # D3D12 Agility SDK：下载运行时并提供 huge_enable_d3d12_agility()（样例 exe 调用）
+    include(cmake/AgilitySDK.cmake)
 endif()
 
 add_subdirectory(Engine)

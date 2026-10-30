@@ -305,6 +305,11 @@ bool D3D12Device::CreateDeviceAndQueue() {
     }
     if (!bestAdapter) {
         HE_CORE_ERROR("[D3D12] 找不到支持 D3D12 的适配器");
+        // exe 导出了 D3D12SDKVersion（Agility SDK）却缺少对应的 D3D12Core.dll 时，加载器不会退回
+        // 系统运行时，所有适配器的 D3D12CreateDevice 都失败：给出明确提示
+        if (GetProcAddress(GetModuleHandleW(nullptr), "D3D12SDKVersion") && !GetModuleHandleW(L"D3D12Core.dll"))
+            HE_CORE_ERROR("[D3D12] 本程序使用 Agility SDK 运行时，请确认 exe 同目录下的 D3D12 子目录里有 "
+                          "D3D12Core.dll 与 d3d12SDKLayers.dll（构建时自动复制）");
         return false;
     }
     {
@@ -332,6 +337,18 @@ bool D3D12Device::CreateDeviceAndQueue() {
     if (!HE_D3D12_CHECK(D3D12CreateDevice(bestAdapter.Get(), D3D_FEATURE_LEVEL_11_0,
                                           IID_PPV_ARGS(&m_Device)), "D3D12CreateDevice")) {
         return false;
+    }
+    // 实际加载的 D3D12 运行时：exe 导出了 D3D12SDKVersion 且 exe 旁的 D3D12 子目录下有对应 D3D12Core.dll 时
+    // 用的是 Agility SDK，否则是系统运行时（路径在 System32 下）
+    {
+        wchar_t corePath[MAX_PATH] = {};
+        HMODULE core = GetModuleHandleW(L"D3D12Core.dll");
+        if (core && GetModuleFileNameW(core, corePath, MAX_PATH)) {
+            const auto* exeVer = reinterpret_cast<const UINT*>(
+                GetProcAddress(GetModuleHandleW(nullptr), "D3D12SDKVersion"));
+            HE_CORE_INFO("[D3D12] 运行时: {}（exe 请求的 SDK 版本 {}）",
+                         Utf8FromWide(corePath).c_str(), exeVer ? *exeVer : 0u);
+        }
     }
 
     // 调试消息队列（只记录 ERROR 级，避免刷屏）

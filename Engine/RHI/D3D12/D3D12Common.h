@@ -54,6 +54,16 @@ inline std::wstring Utf8ToWide(const char* s) {
     return w;
 }
 
+/// UTF-16 → UTF-8：系统返回的宽字符路径等写进日志用
+inline std::string Utf8FromWide(const wchar_t* w) {
+    if (!w || !*w) return {};
+    const int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
+    if (n <= 1) return {};
+    std::string s(static_cast<size_t>(n - 1), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w, -1, s.data(), n, nullptr, nullptr);
+    return s;
+}
+
 /// D3D12 的 HRESULT 检查：失败时打印可读错误并返回 false
 /// 用法：HE_D3D12_CHECK(device->CreateBuffer(&bd, nullptr, &buf), "CreateBuffer");
 inline bool CheckHr(HRESULT hr, const char* what, const char* file, int line) {
