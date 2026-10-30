@@ -6,11 +6,15 @@
 #include "Pipeline/Material.h"   // ShaderTypes.slang（RTRayEffectPushConstant）
 
 #include "DDGI_Trace.rgen.spv.h"
+#include "DDGI_Trace.rgen.dxil.h"
 #include "RT_GI.rchit.spv.h"
+#include "RT_GI.rchit.dxil.h"
 // (该着色器暂无 DXIL：RT_GI.rchit)   // 命中点出射辐射度：与 RTGI 共用，保证两源量纲一致
 #include "RT_GI.rmiss.spv.h"
+#include "RT_GI.rmiss.dxil.h"
 // (该着色器暂无 DXIL：RT_GI.rmiss)   // 未命中只置 a=-1，回退在 rgen 里做（它绑着 IBL）
 
+#include <iterator>   // std::begin / std::end（填 dxil 字节码用）
 #include <cstring>
 
 namespace he::render {

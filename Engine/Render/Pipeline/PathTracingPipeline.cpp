@@ -10,6 +10,7 @@
 //   3. FXAA → BackBuffer 前通过 ToneMap PreBind 保证 RP 兼容。
 // ============================================================
 #include "Pipeline/PathTracingPipeline.h"
+#include <cstdlib>   // std::getenv（HE_PT_FXAA 调试开关）
 // 阶段 1 附录 E（E-2①）：注册点要读骨骼网格的缓冲与材质字段
 #include "Scene/SkeletalMeshComponent.h"
 #include "Pipeline/PTQualityCVars.h"
@@ -50,7 +51,14 @@ bool PathTracingPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 hei
 
     // ── 后处理（ToneMap → LDR → FXAA）──
     m_PostProcess.Initialize(device, m_Width, m_Height);
-    m_PostProcess.EnableFXAA(device, m_Width, m_Height, true);  // 终端 AA 保证 RP 状态正确
+    // FXAA：Vulkan 上默认开启（终端 AA，保证 RP 状态正确）。
+    // 【D3D12 例外】D3D12 后端的 FXAA pass（LDR → 后缓冲）实测渲染异常偏暗
+    // （后缓冲亮度 ~15/255，同帧 LDR 目标 ~111/255），关掉 FXAA 后两者一致。
+    // 该 pass 在 D3D12 上此前从未真正执行（PSO 与 RTV 格式不匹配，绘制一直被丢弃），
+    // 属既有后处理问题、与光追无关 ⇒ 默认只在 Vulkan 上开，HE_PT_FXAA=1 可强制打开复查。
+    const bool wantFXAA = (device->GetBackend() == rhi::Backend::Vulkan)
+                        || (std::getenv("HE_PT_FXAA") != nullptr);
+    m_PostProcess.EnableFXAA(device, m_Width, m_Height, wantFXAA);
 
     // ToneMap HDR 输入采样器（线性，与 LightingPass 的 HDR sampler 同款）
     {

@@ -10,9 +10,13 @@
 
 // RT 着色器 SPIR-V
 #include "PT_Full.rgen.spv.h"
+#include "PT_Full.rgen.dxil.h"
 #include "PT_Full.rchit.spv.h"
+#include "PT_Full.rchit.dxil.h"
 #include "PT_Full.rmiss.spv.h"
+#include "PT_Full.rmiss.dxil.h"
 
+#include <iterator>   // std::begin / std::end（填 dxil 字节码用）
 #include <glm/gtc/type_ptr.hpp>
 #include <cstring>
 #include <algorithm>
@@ -105,6 +109,7 @@ bool PTPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         rhi::ShaderBytecode bc;
         bc.stage = rhi::ShaderStage::RayGen;
         bc.spirv = k_PT_Full_rgen_spv;
+        bc.dxil.assign(std::begin(k_PT_Full_rgen_dxil), std::end(k_PT_Full_rgen_dxil));
         bc.entryPoint = "main";
         shaders.push_back(bc);
     }
@@ -112,6 +117,7 @@ bool PTPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         rhi::ShaderBytecode bc;
         bc.stage = rhi::ShaderStage::ClosestHit;
         bc.spirv = k_PT_Full_rchit_spv;
+        bc.dxil.assign(std::begin(k_PT_Full_rchit_dxil), std::end(k_PT_Full_rchit_dxil));
         bc.entryPoint = "main";
         shaders.push_back(bc);
     }
@@ -119,6 +125,7 @@ bool PTPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         rhi::ShaderBytecode bc;
         bc.stage = rhi::ShaderStage::Miss;
         bc.spirv = k_PT_Full_rmiss_spv;
+        bc.dxil.assign(std::begin(k_PT_Full_rmiss_dxil), std::end(k_PT_Full_rmiss_dxil));
         bc.entryPoint = "main";
         shaders.push_back(bc);
     }

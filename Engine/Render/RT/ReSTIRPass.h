@@ -81,9 +81,11 @@ private:
         rhi::DescriptorSetHandle       set    = rhi::kInvalidSet;
     };
     // 创建 compute PSO + set0 布局 + 描述符集
+    // dxil / dxilSize：D3D12 用的 DXIL 字节码（由 ReSTIR_*.comp.dxil.h 生成，D3D12 后端的计算 PSO 需要）
     bool CreatePipeline(ComputePipe& pipe,
                         const std::vector<rhi::DescriptorSetLayoutBinding>& bindings,
-                        const std::vector<u32>& spirv, StringView name);
+                        const std::vector<u32>& spirv,
+                        const unsigned char* dxil, size_t dxilSize, StringView name);
     void DestroyPipeline(ComputePipe& pipe);
 
     rhi::IRHIDevice* m_Device = nullptr;

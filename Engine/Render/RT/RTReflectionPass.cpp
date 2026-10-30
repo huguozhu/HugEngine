@@ -11,9 +11,13 @@
 
 // RT 着色器 SPIR-V
 #include "RT_Reflection.rgen.spv.h"
+#include "RT_Reflection.rgen.dxil.h"
 #include "RT_Reflection.rchit.spv.h"
+#include "RT_Reflection.rchit.dxil.h"
 #include "RT_Reflection.rmiss.spv.h"
+#include "RT_Reflection.rmiss.dxil.h"
 
+#include <iterator>   // std::begin / std::end（填 dxil 字节码用）
 #include <glm/gtc/type_ptr.hpp>
 #include <cstring>
 #include <algorithm>  // std::max / std::clamp
@@ -61,6 +65,7 @@ bool RTReflectionPass::Initialize(rhi::IRHIDevice* device, u32 fullWidth, u32 fu
         rhi::ShaderBytecode bc;
         bc.stage = rhi::ShaderStage::RayGen;
         bc.spirv = k_RT_Reflection_rgen_spv;
+        bc.dxil.assign(std::begin(k_RT_Reflection_rgen_dxil), std::end(k_RT_Reflection_rgen_dxil));
         bc.entryPoint = "main";
         shaders.push_back(bc);
     }
@@ -68,6 +73,7 @@ bool RTReflectionPass::Initialize(rhi::IRHIDevice* device, u32 fullWidth, u32 fu
         rhi::ShaderBytecode bc;
         bc.stage = rhi::ShaderStage::ClosestHit;
         bc.spirv = k_RT_Reflection_rchit_spv;
+        bc.dxil.assign(std::begin(k_RT_Reflection_rchit_dxil), std::end(k_RT_Reflection_rchit_dxil));
         bc.entryPoint = "main";
         shaders.push_back(bc);
     }
@@ -75,6 +81,7 @@ bool RTReflectionPass::Initialize(rhi::IRHIDevice* device, u32 fullWidth, u32 fu
         rhi::ShaderBytecode bc;
         bc.stage = rhi::ShaderStage::Miss;
         bc.spirv = k_RT_Reflection_rmiss_spv;
+        bc.dxil.assign(std::begin(k_RT_Reflection_rmiss_dxil), std::end(k_RT_Reflection_rmiss_dxil));
         bc.entryPoint = "main";
         shaders.push_back(bc);
     }

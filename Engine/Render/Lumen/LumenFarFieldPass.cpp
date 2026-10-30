@@ -7,9 +7,13 @@
 #include "Pipeline/Material.h"   // RTRayEffectPushConstant（与 rchit 共享）
 
 #include "Lumen_FarField.rgen.spv.h"
+#include "Lumen_FarField.rgen.dxil.h"
 #include "RT_GI.rchit.spv.h"
+#include "RT_GI.rchit.dxil.h"
 #include "RT_GI.rmiss.spv.h"
+#include "RT_GI.rmiss.dxil.h"
 
+#include <iterator>   // std::begin / std::end（填 dxil 字节码用）
 #include <cstring>
 
 namespace he::render {

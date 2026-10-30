@@ -11,9 +11,13 @@
 
 // RT 着色器 SPIR-V
 #include "RT_GI.rgen.spv.h"
+#include "RT_GI.rgen.dxil.h"
 #include "RT_GI.rchit.spv.h"
+#include "RT_GI.rchit.dxil.h"
 #include "RT_GI.rmiss.spv.h"
+#include "RT_GI.rmiss.dxil.h"
 
+#include <iterator>   // std::begin / std::end（填 dxil 字节码用）
 #include <glm/gtc/type_ptr.hpp>
 #include <cstring>
 #include <algorithm>  // std::max / std::clamp
@@ -66,6 +70,7 @@ bool RTGIPass::Initialize(rhi::IRHIDevice* device, u32 fullWidth, u32 fullHeight
         rhi::ShaderBytecode bc;
         bc.stage = rhi::ShaderStage::RayGen;
         bc.spirv = k_RT_GI_rgen_spv;
+        bc.dxil.assign(std::begin(k_RT_GI_rgen_dxil), std::end(k_RT_GI_rgen_dxil));
         bc.entryPoint = "main";
         shaders.push_back(bc);
     }
@@ -73,6 +78,7 @@ bool RTGIPass::Initialize(rhi::IRHIDevice* device, u32 fullWidth, u32 fullHeight
         rhi::ShaderBytecode bc;
         bc.stage = rhi::ShaderStage::ClosestHit;
         bc.spirv = k_RT_GI_rchit_spv;
+        bc.dxil.assign(std::begin(k_RT_GI_rchit_dxil), std::end(k_RT_GI_rchit_dxil));
         bc.entryPoint = "main";
         shaders.push_back(bc);
     }
@@ -80,6 +86,7 @@ bool RTGIPass::Initialize(rhi::IRHIDevice* device, u32 fullWidth, u32 fullHeight
         rhi::ShaderBytecode bc;
         bc.stage = rhi::ShaderStage::Miss;
         bc.spirv = k_RT_GI_rmiss_spv;
+        bc.dxil.assign(std::begin(k_RT_GI_rmiss_dxil), std::end(k_RT_GI_rmiss_dxil));
         bc.entryPoint = "main";
         shaders.push_back(bc);
     }

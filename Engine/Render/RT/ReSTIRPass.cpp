@@ -1,4 +1,4 @@
-﻿// ============================================================
+// ============================================================
 // ReSTIRPass.cpp — ReSTIR DI 时空重采样 Pass 实现
 // Init → Temporal → Spatial 三个 compute dispatch 顺序执行
 // ============================================================
@@ -61,7 +61,8 @@ static constexpr u32 kReSTIRSpatialBindBlueNoise      = 6;   // STBN 蓝噪声
 // ============================================================
 bool ReSTIRPass::CreatePipeline(ComputePipe& pipe,
                                 const std::vector<rhi::DescriptorSetLayoutBinding>& bindings,
-                                const std::vector<u32>& spirv, StringView name) {
+                                const std::vector<u32>& spirv,
+                                const unsigned char* dxil, size_t dxilSize, StringView name) {
     // set0 布局
     rhi::DescriptorSetLayoutDesc layout;
     layout.bindings = bindings;
@@ -80,6 +81,8 @@ bool ReSTIRPass::CreatePipeline(ComputePipe& pipe,
     rhi::ShaderBytecode cs;
     cs.stage = rhi::ShaderStage::Compute;
     cs.spirv = spirv;
+    // D3D12 用 DXIL 字节码（由 ReSTIR_*.comp.dxil.h 生成，与 SPIR-V 同源）
+    if (dxil && dxilSize) cs.dxil.assign(dxil, dxil + dxilSize);
     cs.entryPoint = "main";
     rhi::PushConstantRange pc;
     pc.stageMask = rhi::kStageMaskCompute;
@@ -126,7 +129,7 @@ bool ReSTIRPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
             {4, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskCompute},
             {5, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskCompute},
         };
-        if (!CreatePipeline(m_Init, bindings, k_ReSTIR_Init_comp_spv, "ReSTIR_Init")) return false;
+        if (!CreatePipeline(m_Init, bindings, k_ReSTIR_Init_comp_spv, k_ReSTIR_Init_comp_dxil, k_ReSTIR_Init_comp_dxil_size, "ReSTIR_Init")) return false;
     }
     // ── Temporal：b0=ptVel, b1=ptDepth, b2=ptNormal, b3=Initial, b4=History,
     //    b5=HistDepth, b6=HistNormal, b7=Temporal RW, b8=CurDepth RW,
@@ -147,7 +150,7 @@ bool ReSTIRPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
             {11, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskCompute},
             {12, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskCompute},
         };
-        if (!CreatePipeline(m_Temporal, bindings, k_ReSTIR_Temporal_comp_spv, "ReSTIR_Temporal")) return false;
+        if (!CreatePipeline(m_Temporal, bindings, k_ReSTIR_Temporal_comp_spv, k_ReSTIR_Temporal_comp_dxil, k_ReSTIR_Temporal_comp_dxil_size, "ReSTIR_Temporal")) return false;
     }
     // ── Spatial：b0=ptDepth, b1=ptNormal, b2=Temporal, b3=Final RW,
     //    b4=GPULight[], b5=ptAlbedo, b6=STBN 3D 蓝噪声 ──
@@ -161,7 +164,7 @@ bool ReSTIRPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
             {5, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskCompute},
             {6, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskCompute},
         };
-        if (!CreatePipeline(m_Spatial, bindings, k_ReSTIR_Spatial_comp_spv, "ReSTIR_Spatial")) return false;
+        if (!CreatePipeline(m_Spatial, bindings, k_ReSTIR_Spatial_comp_spv, k_ReSTIR_Spatial_comp_dxil, k_ReSTIR_Spatial_comp_dxil_size, "ReSTIR_Spatial")) return false;
     }
 
     // ── 蓄水池 SSBO（PTReservoir × W×H，32B/个）──
