@@ -101,13 +101,16 @@ public:
     void UpdateDescriptorSetWithImageView(DescriptorSetHandle set, u32 binding, DescriptorType type,
                                           void* imageView) override;
 
-    /// 描述符集里一个 binding 记录的资源（数组 binding 按元素下标存）
+    /// 描述符集里一个 binding 记录的资源（数组 binding 按元素下标存）。
+    /// 【写入时就持有 D3D11 视图】与 Vulkan 写描述符时拷走视图一致：引擎会在写入之后销毁纹理 /
+    /// 采样器的包装对象（如局部的占位纹理），这里持有 SRV / UAV / 采样器状态的 COM 引用，
+    /// 绑定时不会拿到悬空指针。缓冲的视图依赖着色器反射的步长，仍按裸指针记录、绑定时再建
     struct DescriptorEntry {
-        DescriptorType           type = DescriptorType::UniformBuffer;
-        std::vector<IRHIBuffer*>  buffers;    // 缓冲（数组时多个）
-        std::vector<IRHITexture*> textures;   // 纹理（整资源视图）
-        std::vector<IRHISampler*> samplers;   // 采样器（组合图像采样器或独立采样器）
-        void*                    view = nullptr;   // 经 UpdateDescriptorSetWithImageView 绑定的视图句柄
+        DescriptorType                                   type = DescriptorType::UniformBuffer;
+        std::vector<IRHIBuffer*>                         buffers;    // 缓冲（数组时多个）
+        std::vector<ComPtr<ID3D11ShaderResourceView>>    srvs;       // 纹理的 SRV（整资源或视图句柄指定的子资源）
+        std::vector<ComPtr<ID3D11UnorderedAccessView>>   uavs;       // 同一纹理的 UAV（纹理不可作 UAV 时为空）
+        std::vector<ComPtr<ID3D11SamplerState>>          samplers;   // 采样器（组合图像采样器或独立采样器）
     };
     struct DescriptorSet {
         std::unordered_map<u32, DescriptorEntry> entries;   // binding → 资源

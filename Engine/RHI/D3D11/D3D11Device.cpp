@@ -333,15 +333,30 @@ void D3D11Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, Desc
     e->buffers.assign(1, buffer);
 }
 
+/// 纹理的整资源 SRV / UAV（UAV 只对可作 UAV 的纹理建）：写入描述符集时取出并持有
+static void CaptureTextureViews(IRHITexture* texture, ComPtr<ID3D11ShaderResourceView>& srv,
+                                ComPtr<ID3D11UnorderedAccessView>& uav) {
+    auto* t = static_cast<D3D11Texture*>(texture);
+    srv = t ? t->GetSrv() : nullptr;
+    uav = (t && t->CanUav()) ? t->GetUav() : nullptr;
+}
+
+static ComPtr<ID3D11SamplerState> CaptureSampler(IRHISampler* sampler) {
+    return sampler ? ComPtr<ID3D11SamplerState>(static_cast<D3D11Sampler*>(sampler)->GetState()) : nullptr;
+}
+
 void D3D11Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, DescriptorType type,
                                       IRHITexture* texture, IRHISampler* sampler) {
     DescriptorEntry* e = EntryFor(set, binding);
     if (!e) return;
     e->type = type;
-    e->view = nullptr;
     // 独立采样器描述符只带采样器；其余带纹理（组合图像采样器同时带两者）
-    if (type != DescriptorType::Sampler) e->textures.assign(1, texture);
-    if (sampler || type == DescriptorType::Sampler) e->samplers.assign(1, sampler);
+    if (type != DescriptorType::Sampler) {
+        e->srvs.resize(1);
+        e->uavs.resize(1);
+        CaptureTextureViews(texture, e->srvs[0], e->uavs[0]);
+    }
+    if (sampler || type == DescriptorType::Sampler) e->samplers.assign(1, CaptureSampler(sampler));
 }
 
 void D3D11Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, DescriptorType type,
@@ -349,9 +364,15 @@ void D3D11Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, Desc
     DescriptorEntry* e = EntryFor(set, binding);
     if (!e) return;
     e->type = type;
-    e->view = nullptr;
-    if (textures) e->textures.assign(textures, textures + count);
-    if (samplers) e->samplers.assign(samplers, samplers + count);
+    if (textures) {
+        e->srvs.resize(count);
+        e->uavs.resize(count);
+        for (u32 i = 0; i < count; ++i) CaptureTextureViews(textures[i], e->srvs[i], e->uavs[i]);
+    }
+    if (samplers) {
+        e->samplers.resize(count);
+        for (u32 i = 0; i < count; ++i) e->samplers[i] = CaptureSampler(samplers[i]);
+    }
 }
 
 void D3D11Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, DescriptorType type,
@@ -367,8 +388,16 @@ void D3D11Device::UpdateDescriptorSetWithImageView(DescriptorSetHandle set, u32 
     DescriptorEntry* e = EntryFor(set, binding);
     if (!e) return;
     e->type = type;
-    e->view = imageView;   // 绑定时经视图登记表查回纹理与子资源
-    e->textures.clear();
+    // 经视图登记表查回纹理与子资源，现在就建好该子资源的 SRV / UAV 并持有
+    e->srvs.assign(1, nullptr);
+    e->uavs.assign(1, nullptr);
+    if (const D3D11ViewInfo* vi = FindView(imageView)) {
+        e->srvs[0] = vi->texture->GetSrv(vi->mip, vi->layer, vi->single);
+        if (vi->texture->CanUav()) e->uavs[0] = vi->texture->GetUav(vi->mip, vi->layer, vi->single);
+    } else if (imageView) {
+        HE_CORE_WARN("[D3D11] UpdateDescriptorSetWithImageView：未登记的视图句柄 {}（set {}, binding {}）",
+                     imageView, set, binding);
+    }
 }
 
 // ---------------------------------------------------------------------------

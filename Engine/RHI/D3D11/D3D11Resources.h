@@ -141,6 +141,8 @@ public:
     bool Is3D()    const { return m_Depth > 1; }
     u32  GetSampleCount() const { return m_SampleCount; }
     TextureUsage GetUsage() const { return m_Usage; }
+    /// 能否建 UAV（声明了 UnorderedAccess 且不是深度 / 多重采样纹理）
+    bool CanUav() const { return HasAny(m_Usage, TextureUsage::UnorderedAccess) && !m_IsDepth && m_SampleCount == 1; }
 
     /// 子资源视图（mip = 起始 mip；single = 只含这一个 mip / 层，否则为全部 mip / 层）
     ID3D11ShaderResourceView*  GetSrv(u32 mip = 0, u32 layer = 0, bool single = false);

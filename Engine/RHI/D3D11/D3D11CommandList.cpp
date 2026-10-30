@@ -42,6 +42,7 @@ void D3D11CommandList::Begin() {
     m_PushDirty = true;
     m_PushGeneration = 0;
     m_PendingSignals.clear();
+    m_NonBindless.clear();
     // 让下一次改动上下文时重新应用（即使上下文的上一个使用者就是本列表的上一轮录制）
     if (m_Device->GetContextOwner() == this) m_Device->SetContextOwner(nullptr);
 }
@@ -275,6 +276,43 @@ void D3D11CommandList::BindDescriptorSet(u32 setIndex, DescriptorSetHandle set) 
     if (setIndex < kMaxSets) m_Sets[setIndex] = set;
 }
 
+void D3D11CommandList::SetNonBindlessHandle(u32 binding, u32 handle) {
+    for (auto& [b, h] : m_NonBindless) {
+        if (b == binding) { h = handle; return; }
+    }
+    m_NonBindless.emplace_back(binding, handle);
+}
+
+bool D3D11CommandList::ResolveNonBindless(u32 binding, u32 element, ID3D11ShaderResourceView*& srv,
+                                          ID3D11SamplerState*& smp, D3D11Buffer*& buf) const {
+    auto find = [&](u32 b, u32& out) {
+        for (const auto& [k, h] : m_NonBindless) if (k == b) { out = h; return true; }
+        return false;
+    };
+    auto* heap = static_cast<D3D11BindlessHeap*>(m_Device->GetBindlessHeap());
+    u32 handle = 0;
+    // 材质纹理 / 采样器：都以「材质纹理基址」为准，第 k 个取 基址 + k
+    if (binding >= kBindingNBMaterialTextures && binding < kBindingNBMaterialTextures + kBindingNBMaterialSlots) {
+        if (find(kBindingNBMaterialTextures, handle)) {
+            srv = heap->GetTextureSrv(handle + (binding - kBindingNBMaterialTextures));
+        }
+        return true;
+    }
+    if (binding >= kBindingNBMaterialSamplers && binding < kBindingNBMaterialSamplers + kBindingNBMaterialSlots) {
+        if (find(kBindingNBMaterialTextures, handle)) {
+            smp = heap->GetTextureSampler(handle + (binding - kBindingNBMaterialSamplers));
+        }
+        return true;
+    }
+    // 其余替代绑定是缓冲：句柄即 bindless 堆里的缓冲句柄（数组元素按句柄依次往后取）；
+    // kNonBindlessNone 表示本次不用，绑空
+    if (find(binding, handle)) {
+        if (handle != kNonBindlessNone) buf = static_cast<D3D11Buffer*>(heap->GetBuffer(handle + element));
+        return true;
+    }
+    return false;
+}
+
 void D3D11CommandList::SetPushConstants(u32 offset, u32 size, const void* data) {
     if (!data || offset >= sizeof(m_PushData)) return;
     const u32 n = std::min<u32>(size, static_cast<u32>(sizeof(m_PushData)) - offset);
@@ -354,22 +392,27 @@ void D3D11CommandList::FlushBindings() {
             switch (type) {
                 case DxbcBindType::SRV: {
                     std::vector<ID3D11ShaderResourceView*> views(b.count, nullptr);
-                    for (u32 i = 0; i < b.count && e; ++i) {
+                    bool byHandle = false;   // 由 bindless 替代句柄决定（含有意不绑的 kNonBindlessNone）
+                    for (u32 i = 0; i < b.count; ++i) {
+                        ID3D11ShaderResourceView* nbSrv = nullptr; ID3D11SamplerState* nbSmp = nullptr; D3D11Buffer* nbBuf = nullptr;
+                        if (ResolveNonBindless(b.binding, i, nbSrv, nbSmp, nbBuf)) {
+                            byHandle = true;
+                            if (nbSrv) views[i] = nbSrv;
+                            else if (nbBuf) views[i] = b.rawBuffer ? nbBuf->GetSrv(D3D11Buffer::ViewKind::Raw, 0)
+                                                                   : nbBuf->GetSrv(D3D11Buffer::ViewKind::Structured, b.stride);
+                            continue;
+                        }
+                        if (!e) continue;
                         if (b.texture) {
-                            if (e->view) {
-                                if (const D3D11ViewInfo* vi = m_Device->FindView(e->view)) {
-                                    views[i] = vi->texture->GetSrv(vi->mip, vi->layer, vi->single);
-                                }
-                            } else if (i < e->textures.size() && e->textures[i]) {
-                                views[i] = static_cast<D3D11Texture*>(e->textures[i])->GetSrv();
-                            }
+                            if (i < e->srvs.size()) views[i] = e->srvs[i].Get();   // 写入描述符集时已建好并持有
                         } else if (i < e->buffers.size() && e->buffers[i]) {
                             auto* buf = static_cast<D3D11Buffer*>(e->buffers[i]);
                             views[i] = b.rawBuffer ? buf->GetSrv(D3D11Buffer::ViewKind::Raw, 0)
                                                    : buf->GetSrv(D3D11Buffer::ViewKind::Structured, b.stride);
                         }
                     }
-                    if (!views[0]) ReportMissing(b.set, b.binding, b.texture ? "纹理" : "缓冲");
+                    // 句柄决定的绑定为空是调用方的意图（如非实例化绘制不用实例变换），不报告
+                    if (!views[0] && !byHandle) ReportMissing(b.set, b.binding, b.texture ? "纹理" : "缓冲");
                     if (stage == D3D11PipelineState::VS)      ctx->VSSetShaderResources(b.slot, b.count, views.data());
                     else if (stage == D3D11PipelineState::PS) ctx->PSSetShaderResources(b.slot, b.count, views.data());
                     else                                      ctx->CSSetShaderResources(b.slot, b.count, views.data());
@@ -377,15 +420,21 @@ void D3D11CommandList::FlushBindings() {
                 }
                 case DxbcBindType::UAV: {
                     std::vector<ID3D11UnorderedAccessView*> views(b.count, nullptr);
-                    for (u32 i = 0; i < b.count && e; ++i) {
-                        if (b.texture) {
-                            if (e->view) {
-                                if (const D3D11ViewInfo* vi = m_Device->FindView(e->view)) {
-                                    views[i] = vi->texture->GetUav(vi->mip, vi->layer, vi->single);
-                                }
-                            } else if (i < e->textures.size() && e->textures[i]) {
-                                views[i] = static_cast<D3D11Texture*>(e->textures[i])->GetUav();
+                    bool byHandle = false;
+                    for (u32 i = 0; i < b.count; ++i) {
+                        ID3D11ShaderResourceView* nbSrv = nullptr; ID3D11SamplerState* nbSmp = nullptr; D3D11Buffer* nbBuf = nullptr;
+                        if (ResolveNonBindless(b.binding, i, nbSrv, nbSmp, nbBuf)) {
+                            byHandle = true;
+                            if (nbBuf) {
+                                views[i] = b.rawBuffer ? nbBuf->GetUav(D3D11Buffer::ViewKind::Raw, 0)
+                                                       : nbBuf->GetUav(D3D11Buffer::ViewKind::Structured, b.stride);
+                                if (views[i]) nbBuf->MarkGpuWritten();
                             }
+                            continue;
+                        }
+                        if (!e) continue;
+                        if (b.texture) {
+                            if (i < e->uavs.size()) views[i] = e->uavs[i].Get();   // 写入描述符集时已建好并持有
                         } else if (i < e->buffers.size() && e->buffers[i]) {
                             auto* buf = static_cast<D3D11Buffer*>(e->buffers[i]);
                             views[i] = b.rawBuffer ? buf->GetUav(D3D11Buffer::ViewKind::Raw, 0)
@@ -394,7 +443,7 @@ void D3D11CommandList::FlushBindings() {
                             if (views[i]) buf->MarkGpuWritten();
                         }
                     }
-                    if (!views[0]) ReportMissing(b.set, b.binding, "可写资源");
+                    if (!views[0] && !byHandle) ReportMissing(b.set, b.binding, "可写资源");
                     if (compute) {
                         ctx->CSSetUnorderedAccessViews(b.slot, b.count, views.data(), nullptr);
                     } else {
@@ -408,12 +457,18 @@ void D3D11CommandList::FlushBindings() {
                 }
                 case DxbcBindType::Sampler: {
                     std::vector<ID3D11SamplerState*> samplers(b.count, nullptr);
-                    for (u32 i = 0; i < b.count && e; ++i) {
-                        if (i < e->samplers.size() && e->samplers[i]) {
-                            samplers[i] = static_cast<D3D11Sampler*>(e->samplers[i])->GetState();
+                    bool byHandle = false;
+                    for (u32 i = 0; i < b.count; ++i) {
+                        ID3D11ShaderResourceView* nbSrv = nullptr; ID3D11SamplerState* nbSmp = nullptr; D3D11Buffer* nbBuf = nullptr;
+                        if (ResolveNonBindless(b.binding, i, nbSrv, nbSmp, nbBuf)) {
+                            byHandle = true;
+                            samplers[i] = nbSmp;
+                            continue;
                         }
+                        if (!e) continue;
+                        if (i < e->samplers.size()) samplers[i] = e->samplers[i].Get();
                     }
-                    if (!samplers[0]) ReportMissing(b.set, b.binding, "采样器");
+                    if (!samplers[0] && !byHandle) ReportMissing(b.set, b.binding, "采样器");
                     if (stage == D3D11PipelineState::VS)      ctx->VSSetSamplers(b.slot, b.count, samplers.data());
                     else if (stage == D3D11PipelineState::PS) ctx->PSSetSamplers(b.slot, b.count, samplers.data());
                     else                                      ctx->CSSetSamplers(b.slot, b.count, samplers.data());

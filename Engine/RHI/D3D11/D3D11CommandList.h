@@ -62,6 +62,8 @@ public:
     void SetFullscreenViewport(u32 width, u32 height) override;
     /// 只记录：真正的绑定在绘制 / 派发前按当前 PSO 下发（FlushBindings）
     void BindDescriptorSet(u32 setIndex, DescriptorSetHandle set) override;
+    /// 记录 bindless 替代绑定 → bindless 堆句柄（绘制 / 派发前由 FlushBindings 解析成资源）
+    void SetNonBindlessHandle(u32 binding, u32 handle) override;
     /// Vulkan 语义：同一块 256 字节数据按 offset 累加写入，直到被覆盖前一直有效。
     /// 只写 CPU 副本；绘制 / 派发前若有改动（或常量环换了内存）才写进常量环新槽（规划 3.5）
     void SetPushConstants(u32 offset, u32 size, const void* data) override;
@@ -139,6 +141,10 @@ private:
     void FlushBindings();
     /// 一次绑定缺资源时打印（同一 PSO + binding 只打一次，避免每帧刷屏）
     void ReportMissing(u32 set, u32 binding, const char* what);
+    /// bindless 替代绑定（kBindingNB*）：按 SetNonBindlessHandle 记下的句柄从 bindless 堆取资源。
+    /// 返回 true 表示该 binding 由句柄决定（取不到时输出为空）；false 表示走描述符集
+    bool ResolveNonBindless(u32 binding, u32 element, ID3D11ShaderResourceView*& srv,
+                            ID3D11SamplerState*& smp, class D3D11Buffer*& buf) const;
 
     /// 上下文被别的列表动过时，把本列表的完整状态重新应用，并把上下文标为本列表所有
     void EnsureOwner();
@@ -182,6 +188,7 @@ private:
     u64                 m_PushGeneration = 0;       // 该槽所属的常量环代次（0 = 还没写过）
 
     std::vector<std::pair<RHIFenceHandle, u64>> m_PendingSignals;   // 本次提交要发的时间线信号
+    std::vector<std::pair<u32, u32>> m_NonBindless;   // bindless 替代绑定 → bindless 堆句柄（条目很少，线性查找）
 
     u32                 m_LabelDepth = 0;           // 未配对的 BeginDebugLabel 层数（End 时补齐）
     std::string         m_LastMissing;              // 上一次报告缺资源的键（同一键不重复打印）
