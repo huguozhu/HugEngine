@@ -76,6 +76,7 @@ std::vector<DrawItem> SceneRenderer::Prepare(const FrameSceneSnapshot& snapshot,
         di.objectIndex = vi;
         di.bInstanced  = item.bInstanced;
         di.meshIndex   = item.meshIndex;   // 顶点/索引缓冲由消费侧按它查注册表
+        di.materialID  = item.object.materialID;   // 非 bindless 后端逐次绘制绑定材质纹理用
         result.push_back(di);
     }
     objectBuffer->Unmap();

@@ -1,4 +1,5 @@
 ﻿#include "Pipeline/ForwardPipeline.h"
+#include "Pipeline/NonBindless.h"   // 非 bindless 后端（D3D11）的逐绘制句柄交接
 #include <iterator>
 #include "PBR.vert.dxil.h"
 #include "PBR.vert.dxbc.h"
@@ -686,6 +687,7 @@ void ForwardPipeline::UploadMaterialBindless() {
         m_MaterialCount  = newCount;
         // 注册到 bindless 堆（binding 30 = u_Materials[]；当前仅 1 个材质 buffer → handle=0）
         u32 handle = m_Device->GetBindlessHeap()->RegisterBuffer(ResB(m_MaterialBuffer));
+        m_MaterialBindlessHandle = handle;
         HE_CORE_INFO("ForwardPipeline: 上传 {} 个材质到 bindless SSBO (handle={})", newCount, handle);
     }
 }
@@ -1132,6 +1134,7 @@ void ForwardPipeline::RenderScene(rhi::IRHICommandList* cmd, const CameraData& c
     // ——渲染期因此不再遍历世界、也不再读 `InstancedMeshComponent`。
     // ============================================================
     // 帧边界与逐实例剔除已在通道开始前由 PrepareInstances 完成
+    cmd->SetNonBindlessHandle(kGPUBinding_NB_Materials, m_MaterialBindlessHandle);   // 非 bindless 后端：材质参数缓冲
     {
         const u32 frameSlot = RenderFrameSlot() % rhi::kMaxFramesInFlight;
         for (const SnapshotInstance& si : FrameSnap().instances) {
@@ -1144,10 +1147,11 @@ void ForwardPipeline::RenderScene(rhi::IRHICommandList* cmd, const CameraData& c
 
             // 定位该条目的对象条目（objectIndex → 材质数据）：按 meshIndex（整数）对齐
             u32 objIndex = 0;
+            u32 matTexBase = 0;   // 非 bindless 后端：本次绘制的材质纹理基址
             bool found = false;
             for (auto& di : filteredItems) {
                 if (si.meshIndex != 0u && si.meshIndex == di.meshIndex) {
-                    objIndex = di.objectIndex; found = true; break;
+                    objIndex = di.objectIndex; matTexBase = di.materialID; found = true; break;
                 }
             }
             if (!found) continue;
@@ -1176,6 +1180,7 @@ void ForwardPipeline::RenderScene(rhi::IRHICommandList* cmd, const CameraData& c
             if (st->culledThisFrame) {
                 const u32 prevVisible = st->visibleInstanceCount;   // 上一轮 GPU 写入的可见数（统计用）
                 pc.instanceVisibleHandle = m_InstanceCuller.GetVisibleIndicesHandle(frameSlot);
+                SetDrawNonBindlessHandles(cmd, matTexBase, instHandle, pc.instanceVisibleHandle);
                 cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSets[RenderFrameSlot()]);
                 cmd->SetDrawDebugLabel("Forward InstancedMesh (逐实例剔除)");
                 cmd->SetPushConstants(0, sizeof(PushConstantData), &pc);
@@ -1192,6 +1197,7 @@ void ForwardPipeline::RenderScene(rhi::IRHICommandList* cmd, const CameraData& c
             }
 
             pc.instanceVisibleHandle = 0;
+            SetDrawNonBindlessHandles(cmd, matTexBase, instHandle, 0);
             cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSets[RenderFrameSlot()]);
             cmd->SetDrawDebugLabel("Forward InstancedMesh");
             cmd->SetPushConstants(0, sizeof(PushConstantData), &pc);
@@ -1231,9 +1237,10 @@ void ForwardPipeline::RenderScene(rhi::IRHICommandList* cmd, const CameraData& c
 
         // 定位对象条目（objectIndex → 材质数据）：按 meshIndex（整数）对齐
         u32 objIndex = 0;
+        u32 matTexBase = 0;   // 非 bindless 后端：本次绘制的材质纹理基址
         bool found = false;
         for (auto& di : filteredItems) {
-            if (it.meshIndex != 0u && it.meshIndex == di.meshIndex) { objIndex = di.objectIndex; found = true; break; }
+            if (it.meshIndex != 0u && it.meshIndex == di.meshIndex) { objIndex = di.objectIndex; matTexBase = di.materialID; found = true; break; }
         }
         if (!found) continue;
 
@@ -1242,6 +1249,7 @@ void ForwardPipeline::RenderScene(rhi::IRHICommandList* cmd, const CameraData& c
         pc.objectIndex       = objIndex;
         pc.useInstanceID     = 3;
         pc.instanceSSBOHandle = boneHandle;
+        SetDrawNonBindlessHandles(cmd, matTexBase, boneHandle, 0);
         cmd->SetPipeline(m_PBR_Skinned_PSO.get());
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSets[RenderFrameSlot()]);
         cmd->SetDrawDebugLabel("Forward SkeletalMesh");
@@ -1269,12 +1277,14 @@ void ForwardPipeline::RenderScene(rhi::IRHICommandList* cmd, const CameraData& c
             [&](rhi::IRHICommandList& secCmdRef, u32 start, u32 end) {
         auto* secCmd = &secCmdRef;
         secCmd->SetFullscreenViewport(static_cast<u32>(m_HDRWidth), static_cast<u32>(m_HDRHeight));
+        secCmd->SetNonBindlessHandle(kGPUBinding_NB_Materials, m_MaterialBindlessHandle);
 
                 for (u32 i = start; i < end; ++i) {
                     auto& di = filteredItems[i];
                     if (di.bInstanced) continue;   // 实例化网格由专用 Pass 绘制
                     PushConstantData pc = framePC;
                     pc.objectIndex = di.objectIndex;
+                    SetDrawNonBindlessHandles(secCmd, di.materialID);
                     secCmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSets[RenderFrameSlot()]);  // set=0: per-frame + bindless
                     // 不再需要 bind set=1 — 纹理采样通过 bindless u_Textures[] 访问
                     // DrawCall 调试 marker：标记当前绘制的物体（RenderDoc 定位用，每线程独立 CB 安全）
@@ -1315,6 +1325,7 @@ void ForwardPipeline::RenderScene(rhi::IRHICommandList* cmd, const CameraData& c
                 if (di.bInstanced) continue;   // 实例化网格由专用 Pass 绘制
                 PushConstantData pc = framePC;
                 pc.objectIndex = di.objectIndex;
+                SetDrawNonBindlessHandles(cmd, di.materialID);
                 cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSets[RenderFrameSlot()]);
                 // DrawCall 调试 marker：标记当前绘制的物体（RenderDoc 定位用）
                 char label[64];

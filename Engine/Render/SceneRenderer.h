@@ -25,6 +25,9 @@ struct DrawItem {
     /// 渲染侧 mesh 注册表索引（阶段 1 附录 E / E-3）：快照条目透传。
     /// 0 = 未注册（消费侧 `Find(0)` 返回空并跳过 —— 可见化，而不是指错资源）。
     u32 meshIndex = 0;
+    /// bindless 材质纹理基址（= GPUObjectData::materialID）。Vulkan / D3D12 由着色器从对象数据读取；
+    /// 非 bindless 后端（D3D11）需要渲染层逐次绘制交给命令列表（SetNonBindlessHandle）
+    u32 materialID = 0;
 };
 
 // ============================================================================

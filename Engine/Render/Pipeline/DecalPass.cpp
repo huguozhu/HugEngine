@@ -3,6 +3,7 @@
 // ============================================================
 
 #include "Pipeline/DecalPass.h"
+#include "Pipeline/NonBindless.h"   // kGPUBinding_NB_*（非 bindless 后端的贴花纹理句柄）
 #include "Pipeline/GBufferRenderer.h"
 #include "Pipeline/Camera.h"
 #include "Scene/DecalComponent.h"
@@ -294,6 +295,8 @@ void DecalPass::Render(rhi::IRHICommandList* cmd, const FrameSceneSnapshot& snap
         snprintf(label, sizeof(label), "Decal Project #%u", m_LastDecalCount);
         cmd->SetDrawDebugLabel(label);
         cmd->SetPushConstants(0, sizeof(pcs), &pcs);
+        // 非 bindless 后端：贴花纹理按句柄取（着色器用 HE_TEX_SAMPLE，取材质纹理槽 0）
+        cmd->SetNonBindlessHandle(kGPUBinding_NB_MaterialTextures, hasTex ? d.materialID : 0u);
         cmd->SetVertexBuffer(ResB(m_CubeVB), 0);
         cmd->SetIndexBuffer(ResB(m_CubeIB));
         cmd->DrawIndexed(36, 1, 0, 0);
