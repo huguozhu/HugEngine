@@ -92,6 +92,14 @@ enum class Backend : u8 {
     Count
 };
 
+/// 是否是 D3D 风格的视口 / 裁剪空间约定：视口高度不能为负，NDC 的 y=+1 恒落在第 0 行。
+/// Vulkan 用负高度视口翻转 Y；D3D11 / D3D12 无法这样做，需要在裁剪空间自行翻转 Y 才能
+/// 得到与 Vulkan 一致的渲染结果（如点光阴影立方体面）。按后端判断坐标约定时用它，
+/// 不要直接写 `== Backend::D3D12`，否则新增 D3D 后端时会漏改。
+constexpr bool IsD3DStyleClipSpace(Backend backend) {
+    return backend == Backend::D3D12 || backend == Backend::D3D11;
+}
+
 // --- Queue type ---
 enum class QueueType : u8 {
     Graphics   = 0,
