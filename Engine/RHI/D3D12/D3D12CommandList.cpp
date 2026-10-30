@@ -1407,6 +1407,38 @@ void D3D12CommandList::CopyTextureToTexture(IRHITexture* src, IRHITexture* dst) 
     if (nb) m_List->ResourceBarrier(nb, b);
 }
 
+// ClearDepthStencil —— 清除深度/模板纹理（对应 Vulkan 的 vkCmdClearDepthStencilImage）
+// D3D12 只能通过 DSV 清深度：先按设备登记的状态把资源转到 DEPTH_WRITE，再 ClearDepthStencilView。
+// 清除后资源留在 DEPTH_WRITE，正好供随后的深度测试 pass 使用（与 Vulkan 版末尾转到附件布局一致）。
+void D3D12CommandList::ClearDepthStencil(IRHITexture* texture, float depth) {
+    if (!m_List || !texture || m_IsBundle) return;   // bundle 不能发屏障与清除
+    auto* t = static_cast<D3D12Texture*>(texture);
+    ID3D12Resource* res = t->GetResource();
+    const D3D12_CPU_DESCRIPTOR_HANDLE dsv = t->GetDsv();
+    if (!res || !dsv.ptr) return;   // 没有 DSV 的纹理无法清深度
+
+    // 以设备登记的真实状态作屏障的 StateBefore（同 PipelineBarrier）
+    const D3D12_RESOURCE_STATES from =
+        m_Device ? m_Device->GetResourceState(res) : D3D12_RESOURCE_STATE_COMMON;
+    if (from != D3D12_RESOURCE_STATE_DEPTH_WRITE) {
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition.pResource   = res;
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = from;
+        b.Transition.StateAfter  = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+        m_List->ResourceBarrier(1, &b);
+        if (m_Device) m_Device->SetResourceState(res, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    }
+
+    // 带模板的格式同时清模板（与 Vulkan 版一致清成 0）
+    const Format fmt = t->GetFormat();
+    D3D12_CLEAR_FLAGS flags = D3D12_CLEAR_FLAG_DEPTH;
+    if (fmt == Format::D24_UNORM_S8_UINT || fmt == Format::D32_FLOAT_S8_UINT)
+        flags |= D3D12_CLEAR_FLAG_STENCIL;
+    m_List->ClearDepthStencilView(dsv, flags, depth, 0, 0, nullptr);
+}
+
 void D3D12CommandList::CopyTextureToBuffer(IRHITexture* src, IRHIBuffer* dst, u32 x, u32 y,
                                            u32 width, u32 height, u64 bufferOffset) {
     if (!m_List || !m_Device || !m_Device->GetDevice() || !src || !dst) return;

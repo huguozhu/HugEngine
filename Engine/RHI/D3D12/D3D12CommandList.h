@@ -97,6 +97,8 @@ public:
     void CopyBuffer(IRHIBuffer* src, IRHIBuffer* dst, u64 size,
                     u64 srcOffset = 0, u64 dstOffset = 0) override;
     void CopyTextureToTexture(IRHITexture* src, IRHITexture* dst) override;
+    /// 清除深度/模板纹理：先转到 DEPTH_WRITE，再用该纹理的 DSV 执行 ClearDepthStencilView
+    void ClearDepthStencil(IRHITexture* texture, float depth = 1.0f) override;
     /// 纹理 (mip 0, 层 0) 的矩形区域 → 缓冲（从 bufferOffset 起逐行紧密排列，与 Vulkan 的
     /// bufferRowLength=0 一致）。width / height 为 0 表示取满纹理
     void CopyTextureToBuffer(IRHITexture* src, IRHIBuffer* dst, u32 x = 0, u32 y = 0,
