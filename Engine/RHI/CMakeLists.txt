@@ -157,7 +157,10 @@ endif()
             D3D11/D3D11BindlessHeap.h
             D3D11/D3D11Device.h
             D3D11/D3D11Device.cpp
+            D3D11/D3D11Converters.h
+            D3D11/D3D11Converters.cpp
             D3D11/D3D11Resources.h
+            D3D11/D3D11Resources.cpp
             D3D11/D3D11SwapChain.h
             D3D11/D3D11CommandList.h
         )

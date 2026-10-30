@@ -180,15 +180,54 @@ std::unique_ptr<IRHICommandList> D3D11Device::CreateCommandList(QueueType) {
 }
 
 std::unique_ptr<IRHIBuffer> D3D11Device::CreateBuffer(const BufferDesc& desc) {
-    return std::make_unique<D3D11Buffer>(desc);
+    auto buffer = std::make_unique<D3D11Buffer>();
+    if (!buffer->Initialize(this, desc)) return nullptr;
+    return buffer;
 }
 
 std::unique_ptr<IRHITexture> D3D11Device::CreateTexture(const TextureDesc& desc) {
-    return std::make_unique<D3D11Texture>(desc);
+    auto texture = std::make_unique<D3D11Texture>();
+    if (!texture->Initialize(this, desc)) return nullptr;
+    return texture;
 }
 
-std::unique_ptr<IRHISampler> D3D11Device::CreateSampler(const SamplerDesc&) {
-    return std::make_unique<D3D11Sampler>();
+std::unique_ptr<IRHISampler> D3D11Device::CreateSampler(const SamplerDesc& desc) {
+    auto sampler = std::make_unique<D3D11Sampler>();
+    if (!sampler->Initialize(this, desc)) return nullptr;
+    return sampler;
+}
+
+// ---------------------------------------------------------------------------
+//  视图登记表与逐 mip 视图
+// ---------------------------------------------------------------------------
+void D3D11Device::UnregisterTextureViews(D3D11Texture* texture) {
+    for (auto it = m_Views.begin(); it != m_Views.end();) {
+        it = (it->second.texture == texture) ? m_Views.erase(it) : std::next(it);
+    }
+}
+
+void* D3D11Device::CreateTextureMipStorageView(IRHITexture* texture, u32 mipLevel, u32 arrayLayer) {
+    auto* tex = static_cast<D3D11Texture*>(texture);
+    if (!tex) return nullptr;
+    if (HasAny(tex->GetUsage(), TextureUsage::RenderTarget)) return tex->GetRtv(mipLevel, arrayLayer);
+    if (tex->IsDepth()) return tex->GetDsv(mipLevel, arrayLayer);
+    return tex->GetUav(mipLevel, arrayLayer, true);
+}
+
+void* D3D11Device::CreateTextureMipSampledView(IRHITexture* texture, u32 mipLevel, u32 arrayLayer) {
+    auto* tex = static_cast<D3D11Texture*>(texture);
+    return tex ? tex->GetSrv(mipLevel, arrayLayer, true) : nullptr;
+}
+
+// ---------------------------------------------------------------------------
+//  持久映射缓冲
+// ---------------------------------------------------------------------------
+void D3D11Device::FlushOpenMaps() {
+    for (D3D11Buffer* b : m_OpenMaps) b->FlushPersistentWrites();
+}
+
+void D3D11Device::RefreshOpenMaps() {
+    for (D3D11Buffer* b : m_OpenMaps) b->RefreshPersistentReads();
 }
 
 std::unique_ptr<IRHIPipelineState> D3D11Device::CreatePipelineState(const PipelineStateDesc&) {
@@ -238,6 +277,8 @@ DescriptorSetHandle D3D11Device::AllocateDescriptorSet(DescriptorSetLayoutHandle
 // ---------------------------------------------------------------------------
 void D3D11Device::Submit(IRHICommandList* cmdList, RHICommandList*) {
     if (cmdList) cmdList->Submit();
+    // 持久映射缓冲：把本次提交里 GPU 写过的内容取回影子内存，CPU 下一帧读到的就是它
+    RefreshOpenMaps();
     DrainDebugMessages();
 }
 
