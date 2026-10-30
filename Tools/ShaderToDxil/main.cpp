@@ -25,6 +25,9 @@
 
 #include "ShaderPatch.h"
 
+#include <windows.h>
+#include <d3dcompiler.h>   // D3DCompile：进程内生成 DXBC（d3dcompiler_47）
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -111,14 +114,42 @@ static int RunDxbc(const char* input, const char* entry, const char* stage,
         for (const auto& e : regs.errors) std::fprintf(stderr, "    %s\n", e.c_str());
         return 1;
     }
-    for (const auto& b : regs.bindings) {
-        std::fprintf(stderr, "    绑定 set=%u binding=%u type=%u -> slot %u (x%u)\n",
-                     b.set, b.binding, b.type, b.slot, b.count);
+    // 进程内调用 fxc（d3dcompiler_47）。
+    // 源文件名传补丁后的 HLSL 路径；HLSL 里保留了 Slang 生成的 `#line N "xxx.slang"`，
+    // 所以报错位置直接是 Slang 源文件与行号，不用再人工对照中间 HLSL。
+    // 不加 D3DCOMPILE_ENABLE_STRICTNESS：严格模式会强制展开带 break 的循环（X3511）。
+    const std::string profile = st + "_5_0";
+    ID3DBlob* code   = nullptr;
+    ID3DBlob* errors = nullptr;
+    const HRESULT hr = D3DCompile(regs.hlsl.data(), regs.hlsl.size(), hlslPath.c_str(),
+                                  nullptr, nullptr, entry, profile.c_str(),
+                                  D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &errors);
+    if (errors) {
+        // 失败时是错误，成功时是警告；都原样打印（每行就是「文件(行,列): 消息」）
+        std::fprintf(stderr, "%s", static_cast<const char*>(errors->GetBufferPointer()));
+        errors->Release();
+    }
+    if (FAILED(hr) || !code) {
+        std::fprintf(stderr, "ShaderToDxil --dxbc: fxc 编译失败（%s，hr=0x%08lx）\n", input,
+                     static_cast<unsigned long>(hr));
+        if (code) code->Release();
+        return 1;
     }
 
-    // TODO(M1.2)：进程内 D3DCompile 生成 DXBC，附上绑定表后写 C++ 头文件
-    (void)entry; (void)symbol;
-    std::fprintf(stderr, "ShaderToDxil --dxbc: 已生成补丁后的 HLSL %s（编译步骤尚未接入）\n", hlslPath.c_str());
+    // DXBC 容器之后附上绑定表（格式见 RHI/DxbcBindTable.h）
+    const auto* dxbcBegin = static_cast<const unsigned char*>(code->GetBufferPointer());
+    std::vector<unsigned char> bytes(dxbcBegin, dxbcBegin + code->GetBufferSize());
+    code->Release();
+    const size_t dxbcSize = bytes.size();
+    const std::vector<unsigned char> table = SerializeBindTable(regs.bindings);
+    bytes.insert(bytes.end(), table.begin(), table.end());
+
+    if (!WriteFile(output, MakeHeader(bytes, symbol))) {
+        std::fprintf(stderr, "ShaderToDxil: 无法写 %s\n", output);
+        return 1;
+    }
+    std::fprintf(stderr, "    DXBC: %s (%zu 字节 + 绑定表 %zu 项) -> %s\n",
+                 symbol, dxbcSize, regs.bindings.size(), output);
     return 0;
 }
 
