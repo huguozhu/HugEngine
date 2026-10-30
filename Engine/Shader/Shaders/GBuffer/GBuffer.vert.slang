@@ -16,9 +16,15 @@ struct VSInput {
 // GPUObjectData 定义来自 ShaderTypes.slang（C++/Slang 共享）
 
 [[vk::binding(kGPUBinding_ObjectData, kGPUDescSet_PerFrame)]] StructuredBuffer<GPUObjectData> u_Objects : register(t2, space0);
+#if defined(HE_SHADER_D3D11)
+// D3D11（SM 5.0）不能按句柄索引缓冲数组：换成单个缓冲，句柄由渲染层经 SetNonBindlessHandle 指定
+[[vk::binding(kGPUBinding_NB_InstanceTransforms, kGPUDescSet_PerFrame)]] StructuredBuffer<float4x4> u_InstanceTransforms;
+[[vk::binding(kGPUBinding_NB_VisibleInstances, kGPUDescSet_PerFrame)]] StructuredBuffer<uint>     u_VisibleInstanceIndices;
+#else
 // bindless SSBO 数组：实例化网格的实例变换 + 逐实例剔除的可见索引列表（任务 25）
 [[vk::binding(kGPUBinding_BindlessSSBO, kGPUDescSet_PerFrame)]] StructuredBuffer<float4x4> u_InstanceTransforms[256] : register(t1024, space2);
 [[vk::binding(kGPUBinding_BindlessSSBO, kGPUDescSet_PerFrame)]] StructuredBuffer<uint>     u_VisibleInstanceIndices[256] : register(t1280, space2);
+#endif
 
 // offset 0:  viewProjMatrix     (64B) — 当前帧 VP（含当前帧抖动）
 // offset 64: prevViewProjMatrix (64B) — 上一帧 VP（含**上帧**抖动，velocity 因此自带抖动差）
@@ -55,8 +61,8 @@ GBufferVSOutput vertexMain(VSInput input, uint instanceID : HE_SV_INSTANCE) {
         // 任务 25：可见列表非空时先查压缩后的实例下标（逐实例剔除的结果）
         uint instIdx = instanceID;
         if (instanceVisibleHandle != 0u)
-            instIdx = u_VisibleInstanceIndices[instanceVisibleHandle][instanceID];
-        worldMatrix = u_InstanceTransforms[instanceSSBOHandle][instIdx];
+            instIdx = HE_BINDLESS_BUF(u_VisibleInstanceIndices, instanceVisibleHandle)[instanceID];
+        worldMatrix = HE_BINDLESS_BUF(u_InstanceTransforms, instanceSSBOHandle)[instIdx];
     }
     float4 worldPos = mul(worldMatrix, float4(input.positionOS, 1.0));
 

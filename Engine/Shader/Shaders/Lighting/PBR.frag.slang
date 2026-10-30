@@ -276,7 +276,7 @@ float4 fragmentMain(PBRVSOutput input) : SV_Target0 {
     uint   texMask;                    // 纹理存在位掩码（bit=槽有真实纹理）
     float4 disneyA, disneyB; float disneyC;
     if (useBindlessMaterial != 0u) {
-        GPUMaterialData m = u_Materials[0][obj.materialID >> 2];  // [0]=材质 buffer，[materialID>>2]=buffer 内元素
+        GPUMaterialData m = HE_BINDLESS_BUF(u_Materials, 0)[obj.materialID >> 2];  // [0]=材质 buffer，[materialID>>2]=buffer 内元素
         baseColorF = m.baseColorFactor; emissiveF = m.emissiveFactor;
         metallicF = m.metallicFactor; roughnessF = m.roughnessFactor; aoF = m.aoFactor;
         alphaCutoffF = m.alphaCutoff; dielectricF0F = m.dielectricF0; matFlags = m.materialFlags;
@@ -292,7 +292,7 @@ float4 fragmentMain(PBRVSOutput input) : SV_Target0 {
 
     // 各纹理槽：有真实纹理才采样（无纹理用中性默认，避免占位纹理污染）
     float4 baseColorSample = (texMask & kGPUMaterialTexMask_BaseColor) != 0u
-        ? u_Textures[texBase + kGPUMaterialTexSlot_BaseColor].Sample(u_Samplers[texBase + kGPUMaterialTexSlot_BaseColor], input.uv)
+        ? HE_MAT_SAMPLE(texBase, kGPUMaterialTexSlot_BaseColor, input.uv)
         : float4(1.0);
     float3 albedo = baseColorF.rgb * baseColorSample.rgb;
         float alpha   = baseColorF.a * baseColorSample.a;
@@ -306,20 +306,20 @@ float4 fragmentMain(PBRVSOutput input) : SV_Target0 {
     // 导致 +Y 表面被下方光源照亮的穿透问题）时直接用几何法线
     float3 N = normalize(input.worldNormal);
     if ((texMask & kGPUMaterialTexMask_Normal) != 0u) {
-        float3 texNormal = u_Textures[texBase + kGPUMaterialTexSlot_Normal]
-            .Sample(u_Samplers[texBase + kGPUMaterialTexSlot_Normal], input.uv).rgb * 2.0 - 1.0;
+        float3 texNormal = HE_MAT_SAMPLE(texBase, kGPUMaterialTexSlot_Normal,
+            input.uv).rgb * 2.0 - 1.0;
         N = normalize(N + texNormal * 0.5);
     }
     float3 V = normalize(cameraPosition.xyz - input.worldPos);
 
     // 金属度/粗糙度/环境光遮蔽：无纹理时用因子本身
     float4 mrSample = (texMask & kGPUMaterialTexMask_MetallicRough) != 0u
-        ? u_Textures[texBase + kGPUMaterialTexSlot_MetallicRough].Sample(u_Samplers[texBase + kGPUMaterialTexSlot_MetallicRough], input.uv)
+        ? HE_MAT_SAMPLE(texBase, kGPUMaterialTexSlot_MetallicRough, input.uv)
         : float4(0.0, 1.0, 0.0, 1.0);   // 中性：g=1(rough 不动) b=0(metallic 不动)
     float metallic  = metallicF  * mrSample.b;
     float roughness = clamp(roughnessF * mrSample.g, 0.04, 1.0);
     float ao = aoF * (((texMask & kGPUMaterialTexMask_Occlusion) != 0u)
-        ? u_Textures[texBase + kGPUMaterialTexSlot_Occlusion].Sample(u_Samplers[texBase + kGPUMaterialTexSlot_Occlusion], input.uv).r
+        ? HE_MAT_SAMPLE(texBase, kGPUMaterialTexSlot_Occlusion, input.uv).r
         : 1.0);
 
     // BRDF LUT：用于直接光照的多重散射能量补偿，IBL 镜面项复用同一采样
