@@ -26,6 +26,7 @@
 
 #include "RHI/RHI.h"
 #include "Lumen/LumenFarFieldPass.h"
+#include "Lumen/LumenStatsReadback.h"   // GPU 原子累加统计的确定性回读
 #include "Lumen/LumenSDF.h"
 #include "Lumen/LumenTraceConfig.h"
 #include "Lumen/SurfaceCacheTypes.h"
@@ -351,10 +352,13 @@ public:
     /// 此前只有一块缓冲，CPU 在 GPU 正在写它的时候逐元素读（实测那一读要 12.95 ms）——
     /// 读到的内容取决于 GPU 当时写到哪了（实测同一配置两次运行请求数 8103/8115 不同），
     /// 这是一个**数据竞争**：算法没错，但读数不确定、画面也就不可复现。
-    static constexpr u32 kFeedbackSlots = 2;
+    // 反馈请求的槽位数 = 飞行帧数 + 1：本帧写 F % N，读 (F + 1) % N（即 kMaxFramesInFlight 帧前写的那份，
+    // 命令列表 Begin 时已等过那一帧的围栏 ⇒ 一定执行完）。此前只有 2 份、读上一帧：GPU 可能还在写，
+    // 读数取决于执行进度（实测 D3D12 请求 2040 条 / Vulkan 14 条）
+    static constexpr u32 kFeedbackSlots = rhi::kMaxFramesInFlight + 1u;
     rhi::RHIBufferHandle  m_CardBuf{}, m_ReqCountBuf{};   // A-3
     void* m_ReqCountMapped = nullptr;
-    void* m_ReqMapped[kFeedbackSlots] = {nullptr, nullptr};
+    void* m_ReqMapped[kFeedbackSlots] = {};
     rhi::DescriptorSetLayoutHandle m_FeedbackLayout = 0;
     rhi::DescriptorSetHandle       m_FeedbackSet    = 0;
     rhi::RHIPipelineStateHandle m_FeedbackPSO{};   // A-3
@@ -383,8 +387,7 @@ public:
     // ── 探针半球追踪（步骤 21）──
     LumenTraceConfig m_TraceConfig;
     rhi::RHIBufferHandle m_RayResultBuf{};   // A-3
-    rhi::RHIBufferHandle m_RayStatsBuf{};   // A-3
-    void* m_RayStatsMapped = nullptr;
+    LumenStatsReadback   m_RayStats;   // 探针追踪统计：命中 / 未命中 / 总数 / 半球内（确定性回读）
     rhi::DescriptorSetLayoutHandle m_TraceLayout = 0;
     rhi::DescriptorSetHandle       m_TraceSet    = 0;
     rhi::RHIPipelineStateHandle m_TracePSO{};   // A-3
@@ -394,8 +397,8 @@ public:
     // ── 命中点着色（步骤 22）──
     rhi::RHIBufferHandle m_RayHitPosBuf{}, m_ShadeOutBuf{};   // A-3
     rhi::RHIBufferHandle m_ShadeOutGbBuf{}, m_ShadeOutBestBuf{};   // A-3
-    rhi::RHIBufferHandle m_ShadeCardsBuf{}, m_ShadeStatsBuf{};   // A-3
-    void* m_ShadeStatsMapped = nullptr;
+    rhi::RHIBufferHandle m_ShadeCardsBuf{};   // A-3
+    LumenStatsReadback   m_ShadeStats;        // 着色统计（24 个 u32，见 shader），确定性回读
     rhi::DescriptorSetLayoutHandle m_ShadeLayout = 0;
     rhi::DescriptorSetHandle       m_ShadeSet    = 0;
     rhi::RHIPipelineStateHandle m_ShadePSO{};   // A-3
@@ -409,8 +412,7 @@ public:
     u32   m_ShadedAlbedoBestSamples = 0;
     // ── SH 投影（步骤 23）──
     rhi::RHIBufferHandle m_IrradShBuf{}, m_IrradRefBuf{};   // A-3
-    rhi::RHIBufferHandle m_SHStatsBuf{};   // A-3
-    void* m_SHStatsMapped = nullptr;
+    LumenStatsReadback   m_SHStats;    // SH 投影统计（4 个 u32，确定性回读）
     rhi::DescriptorSetLayoutHandle m_SHLayout = 0;
     rhi::DescriptorSetHandle       m_SHSet    = 0;
     rhi::RHIPipelineStateHandle m_SHPSO{};   // A-3
@@ -435,8 +437,7 @@ public:
     /// 历史资源来自统一池时用这两个（池持有，本类只借；为空表示池没给，退回自建）
     rhi::IRHIBuffer* m_ProbeHistFromPool[2] = {nullptr, nullptr};
     rhi::IRHIBuffer* m_CellHistFromPool[2]  = {nullptr, nullptr};
-    rhi::RHIBufferHandle m_ProbeFilterStatsBuf{};          // A-3：11 项统计（CPU 可读）
-    void* m_ProbeFilterStatsMapped = nullptr;
+    LumenStatsReadback   m_ProbeFilterStats;               // 探针滤波统计（16 个 u32），确定性回读
     bool  m_ProbeFilterBound = false;
     u32   m_ProbeFilterFrame = 0;
     u32   m_ProbeFilterHistIdx = 0;         // 当前作为"历史"的那一份（另一份写）
@@ -456,8 +457,7 @@ public:
     rhi::RHIPipelineStateHandle m_IrrPSO{};   // A-3
     rhi::RHIBufferHandle        m_CellProbeBuf{};   // A-3
     rhi::RHITextureHandle       m_IrradianceTex{};   // A-3
-    rhi::RHIBufferHandle        m_IrradianceStatsBuf{};   // A-3：0=覆盖像素 1=亮度定点累加 2=亮度定点最大
-    void* m_IrrStatsMapped = nullptr;
+    LumenStatsReadback          m_IrrStats;   // 0=覆盖像素 1=亮度定点累加 2=亮度定点最大，确定性回读
     bool m_IrrBound = false;
     u32  m_IrrFrame = 0;
     float m_IrradianceMean = 0.0f;
@@ -478,12 +478,10 @@ public:
     rhi::RHIPipelineStateHandle m_FarMergePSO{};   // A-3
     rhi::RHIBufferHandle m_RayFadeBuf{};      // A-3：步骤 27：每光线的副命中点 + 混合权重
     void* m_RayFadeMapped = nullptr;                    // 诊断：CPU 侧读 fade 缓冲
-    rhi::RHIBufferHandle m_FarMergeStatsBuf{}, m_DistBinBuf{};   // A-3
-    void* m_FarMergeStatsMapped = nullptr;
-    void* m_DistBinMapped = nullptr;
-    rhi::RHIBufferHandle m_FarCmpStatsBuf{}, m_FarCmpHistBuf{};   // A-3
-    void* m_FarCmpStatsMapped = nullptr;
-    void* m_FarCmpHistMapped  = nullptr;
+    LumenStatsReadback   m_FarMergeStats;   // 远场合并统计（8 个 u32）
+    LumenStatsReadback   m_DistBin;         // 距离分桶（32 个 u32：16 桶计数 + 16 桶亮度），着色 pass 写
+    LumenStatsReadback   m_FarCmpStats;     // 远场对照统计（24 个 u32）
+    LumenStatsReadback   m_FarCmpHist;      // 远场对照直方图（16 个 u32）
     float m_FarFieldThreshold = 50.0f;    // 远场阈值（重叠带的中心）
     float m_FarFieldOverlap   = 0.2f;     // 步骤 27：重叠带半宽（占阈值比例）；0 = 退化成硬切换
     u32   m_FadeSdfOnly = 0, m_FadeRtOnly = 0, m_FadeBlend = 0, m_FadeBlendedRays = 0;

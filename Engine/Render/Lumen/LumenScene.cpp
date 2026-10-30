@@ -110,8 +110,7 @@ void LumenScene::OnResize(u32 width, u32 height) {
         m_Device->DestroyBufferHandle(m_CellProbeHistBuf[k]);   m_CellProbeHistBuf[k]   = {};
     }
     m_Device->DestroyBufferHandle(m_ProbeFilteredBuf); m_ProbeFilteredBuf = {};
-    m_Device->DestroyBufferHandle(m_ProbeFilterStatsBuf); m_ProbeFilterStatsBuf = {};
-    m_ProbeFilterStatsMapped = nullptr;
+    m_ProbeFilterStats.Destroy();
     m_ProbeFilterBound = false;
     m_ProbeFilterHistoryReady = false;
     m_ProbeFilterHistIdx = 0;

@@ -622,9 +622,7 @@ void LumenScene::RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHIText
         // 统计槽：0=页命中 1=不在任何卡内 2=卡在但页无内容 3=总计 4=越界夹取（其余保留）
         // 统计槽：0..6 见 shader；7/8/9 = 重叠带内 / 真正混合 / 副点无材质
         // 统计槽：0..13 见 shader；14 = 命中但着色源未实现（步骤 28）
-        rhi::BufferDesc sb; sb.size = sizeof(u32) * 24u; sb.usage = rhi::BufferUsage::Storage; sb.cpuAccess = true;
-        m_ShadeStatsBuf = m_Device->CreateBufferHandle(sb);   // A-3
-        m_ShadeStatsMapped = ResB(m_ShadeStatsBuf)->Map();
+        m_ShadeStats.Create(m_Device, sizeof(u32) * 24u);   // 确定性回读（见 LumenStatsReadback）
 
         // 步骤 27：副命中点缓冲（远场合并写、着色读）在这里一并建好，避免"描述符声明了但还没绑"
         // 的窗口期（第一帧远场 pass 还没跑时着色已经在派发）。距离分桶同理。
@@ -632,10 +630,7 @@ void LumenScene::RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHIText
         fb.size  = (usize)kMaxScreenProbes * 16u * 2u * sizeof(float4);   // 每光线两个 float4
         fb.usage = rhi::BufferUsage::Storage;
         m_RayFadeBuf = m_Device->CreateBufferHandle(fb);
-        rhi::BufferDesc dbb;
-        dbb.size = sizeof(u32) * 32u; dbb.usage = rhi::BufferUsage::Storage; dbb.cpuAccess = true;
-        m_DistBinBuf = m_Device->CreateBufferHandle(dbb);
-        m_DistBinMapped = ResB(m_DistBinBuf)->Map();
+        m_DistBin.Create(m_Device, sizeof(u32) * 32u);
         m_DistBinCount.assign(16u, 0u);
         m_DistBinLum.assign(16u, 0u);
 
@@ -646,10 +641,10 @@ void LumenScene::RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHIText
         m_Device->UpdateDescriptorSet(m_ShadeSet, 3, rhi::DescriptorType::StorageBuffer, ResB(m_RayHitPosBuf));
         m_Device->UpdateDescriptorSet(m_ShadeSet, 5, rhi::DescriptorType::StorageBuffer, ResB(m_ShadeOutBuf));
         m_Device->UpdateDescriptorSet(m_ShadeSet, 6, rhi::DescriptorType::StorageBuffer, ResB(m_ShadeOutGbBuf));
-        m_Device->UpdateDescriptorSet(m_ShadeSet, 7, rhi::DescriptorType::StorageBuffer, ResB(m_ShadeStatsBuf));
+        m_Device->UpdateDescriptorSet(m_ShadeSet, 7, rhi::DescriptorType::StorageBuffer, m_ShadeStats.Live());
         m_Device->UpdateDescriptorSet(m_ShadeSet, 9, rhi::DescriptorType::StorageBuffer, ResB(m_ShadeOutBestBuf));
         m_Device->UpdateDescriptorSet(m_ShadeSet, 10, rhi::DescriptorType::StorageBuffer, ResB(m_RayFadeBuf));
-        m_Device->UpdateDescriptorSet(m_ShadeSet, 11, rhi::DescriptorType::StorageBuffer, ResB(m_DistBinBuf));
+        m_Device->UpdateDescriptorSet(m_ShadeSet, 11, rhi::DescriptorType::StorageBuffer, m_DistBin.Live());
         m_ShadeBound = true;
         return;
     }
@@ -661,17 +656,16 @@ void LumenScene::RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHIText
     // 才创建 ⇒ 这里按需绑定（绑 nullptr 会崩，这是本轮踩过三次的坑）。
     if (m_RayFadeBuf.IsValid())
         m_Device->UpdateDescriptorSet(m_ShadeSet, 10, rhi::DescriptorType::StorageBuffer, ResB(m_RayFadeBuf));
-    if (m_DistBinBuf.IsValid())
-        m_Device->UpdateDescriptorSet(m_ShadeSet, 11, rhi::DescriptorType::StorageBuffer, ResB(m_DistBinBuf));
+    if (m_DistBin.IsValid())
+        m_Device->UpdateDescriptorSet(m_ShadeSet, 11, rhi::DescriptorType::StorageBuffer, m_DistBin.Live());
     if (m_RayResultBuf.IsValid())
         m_Device->UpdateDescriptorSet(m_ShadeSet, 12, rhi::DescriptorType::StorageBuffer, ResB(m_RayResultBuf));
 
     const u32 total = m_ProbeCount * m_TraceConfig.traceRep;
 
     // ① 先读上一帧的统计与对照（同"先读后清"）
-    if (m_ShadeFrame >= 2 && m_ShadeStatsMapped) {
-        u32 st[24] = {0};
-        std::memcpy(st, m_ShadeStatsMapped, sizeof(st));
+    u32 st[24] = {0};
+    if (m_ShadeFrame >= 2 && m_ShadeStats.Read(st)) {   // 确定性回读（见 LumenStatsReadback）
         m_ShadedHits          = st[0];
         m_ShadedNoCard        = st[1];
         m_ShadedMissingPages  = st[2];
@@ -750,7 +744,7 @@ void LumenScene::RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHIText
     }
 
     // ② 清零统计并派发
-    if (m_ShadeStatsMapped) { u32 zero[24] = {0}; std::memcpy(m_ShadeStatsMapped, zero, sizeof(zero)); }
+    m_ShadeStats.RecordSnapshotAndClear(cmd);
     struct {
         u32 x, y, z, w;
         float4 vp0, vp1, vp2, vp3;
@@ -857,10 +851,7 @@ void LumenScene::RunProbeTrace(rhi::IRHICommandList* cmd) {
         m_RayResultBuf = m_Device->CreateBufferHandle(rb);   // A-3
         m_RayHitPosBuf = m_Device->CreateBufferHandle(rb);   // A-3
 
-        rhi::BufferDesc sb;
-        sb.size = sizeof(u32) * 4u; sb.usage = rhi::BufferUsage::Storage; sb.cpuAccess = true;
-        m_RayStatsBuf = m_Device->CreateBufferHandle(sb);   // A-3
-        m_RayStatsMapped = ResB(m_RayStatsBuf)->Map();
+        m_RayStats.Create(m_Device, sizeof(u32) * 4u);   // 确定性回读（见 LumenStatsReadback）
 
         m_Device->UpdateDescriptorSet(m_TraceSet, 0, rhi::DescriptorType::CombinedImageSampler,
                                       m_SDF.GetGlobalField(0), m_SDF.GetLinearSampler());
@@ -868,7 +859,7 @@ void LumenScene::RunProbeTrace(rhi::IRHICommandList* cmd) {
                                       m_SDF.GetGlobalField(1), m_SDF.GetLinearSampler());
         m_Device->UpdateDescriptorSet(m_TraceSet, 1, rhi::DescriptorType::StorageBuffer, ResB(m_ProbeBuf));
         m_Device->UpdateDescriptorSet(m_TraceSet, 2, rhi::DescriptorType::StorageBuffer, ResB(m_RayResultBuf));
-        m_Device->UpdateDescriptorSet(m_TraceSet, 3, rhi::DescriptorType::StorageBuffer, ResB(m_RayStatsBuf));
+        m_Device->UpdateDescriptorSet(m_TraceSet, 3, rhi::DescriptorType::StorageBuffer, m_RayStats.Live());
         m_Device->UpdateDescriptorSet(m_TraceSet, 4, rhi::DescriptorType::StorageBuffer, ResB(m_RayHitPosBuf));
         m_TraceBound = true;
         return;   // 新建资源当帧不用
@@ -876,9 +867,8 @@ void LumenScene::RunProbeTrace(rhi::IRHICommandList* cmd) {
     if (m_ProbeCount == 0u) return;
 
     // ① 先读上一帧的统计（同样"先读后清"）
-    if (m_TraceFrame >= 1 && m_RayStatsMapped) {
-        u32 st[4] = {0, 0, 0, 0};
-        std::memcpy(st, m_RayStatsMapped, sizeof(st));
+    u32 st[4] = {0, 0, 0, 0};
+    if (m_TraceFrame >= 1 && m_RayStats.Read(st)) {
         m_ProbeRayHits       = st[0];
         m_ProbeRayMisses     = st[1];
         m_ProbeRaysTotal     = st[2];
@@ -896,7 +886,7 @@ void LumenScene::RunProbeTrace(rhi::IRHICommandList* cmd) {
     }
 
     // ② 清零统计并派发
-    if (m_RayStatsMapped) { u32 zero[4] = {0, 0, 0, 0}; std::memcpy(m_RayStatsMapped, zero, sizeof(zero)); }
+    m_RayStats.RecordSnapshotAndClear(cmd);
 
     const u32 total = m_ProbeCount * m_TraceConfig.traceRep;
     struct {
@@ -1216,8 +1206,8 @@ void LumenScene::RunFeedback(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbWorl
 
     // ── ① 先处理**上一帧**的结果（每块一个槽位：完整且确定）──
     // 【为什么必须在清零之前读】计数由 GPU 原子加写入；若本帧先清零再读，读到的一定是 0
-    // （第一版就是这样：请求恒 0 条）。按"引擎在录 N+1 帧时 N 帧已执行完"的节拍，先读后清是对的。
-    if (m_FeedbackFrame >= 1) {
+    // （第一版就是这样：请求恒 0 条）。读槽位是 kFeedbackSlots - 1 帧前写的：前几帧它还没写过，内容未定义，跳过
+    if (m_FeedbackFrame >= (s_singleFeedbackSlot ? 1u : kFeedbackSlots - 1u)) {
         // 【步骤 37】RunFeedback 每帧要 13.1 ms（Lumen 计算 pass CPU 录制的 80%），
         // 而页表上传只占 0.008 ms ⇒ 必须把这一段再拆开才能定位。
         static const bool s_traceFb = (std::getenv("HE_CPU_PASSES") != nullptr);
@@ -1404,25 +1394,21 @@ void LumenScene::RunScreenProbeSHProject(rhi::IRHICommandList* cmd, bool furnace
         m_IrradShBuf  = m_Device->CreateBufferHandle(ib);   // A-3
         m_IrradRefBuf = m_Device->CreateBufferHandle(ib);   // A-3
 
-        rhi::BufferDesc sb;
-        sb.size = sizeof(u32) * 4u; sb.usage = rhi::BufferUsage::Storage; sb.cpuAccess = true;
-        m_SHStatsBuf = m_Device->CreateBufferHandle(sb);   // A-3
-        m_SHStatsMapped = ResB(m_SHStatsBuf)->Map();
+        m_SHStats.Create(m_Device, sizeof(u32) * 4u);   // 确定性回读（见 LumenStatsReadback）
 
         m_Device->UpdateDescriptorSet(m_SHSet, 0, rhi::DescriptorType::StorageBuffer, ResB(m_ProbeBuf));
         m_Device->UpdateDescriptorSet(m_SHSet, 1, rhi::DescriptorType::StorageBuffer, ResB(m_ShadeOutBuf));
         m_Device->UpdateDescriptorSet(m_SHSet, 2, rhi::DescriptorType::StorageBuffer, ResB(m_IrradShBuf));
         m_Device->UpdateDescriptorSet(m_SHSet, 3, rhi::DescriptorType::StorageBuffer, ResB(m_IrradRefBuf));
-        m_Device->UpdateDescriptorSet(m_SHSet, 4, rhi::DescriptorType::StorageBuffer, ResB(m_SHStatsBuf));
+        m_Device->UpdateDescriptorSet(m_SHSet, 4, rhi::DescriptorType::StorageBuffer, m_SHStats.Live());
         m_Device->UpdateDescriptorSet(m_SHSet, 5, rhi::DescriptorType::StorageBuffer, ResB(m_RayResultBuf));
         m_SHBound = true;
         return;   // 本帧只建资源；下一帧开始派发（"新建资源当帧使用"的教训见 §附二十）
     }
 
     // ① 先读上一帧的结果（同"先读后清"）
-    if (m_SHFrame >= 2 && m_SHStatsMapped) {
-        u32 st[4] = {0, 0, 0, 0};
-        std::memcpy(st, m_SHStatsMapped, sizeof(st));
+    u32 st[4] = {0, 0, 0, 0};
+    if (m_SHFrame >= 2 && m_SHStats.Read(st)) {
         m_SHProbes = st[0];
         m_SHRays   = st[1];
         if (st[0]) {
@@ -1478,7 +1464,7 @@ void LumenScene::RunScreenProbeSHProject(rhi::IRHICommandList* cmd, bool furnace
     }
 
     // ② 清零统计并派发
-    if (m_SHStatsMapped) { u32 zero[4] = {0, 0, 0, 0}; std::memcpy(m_SHStatsMapped, zero, sizeof(zero)); }
+    m_SHStats.RecordSnapshotAndClear(cmd);
     struct { u32 x, y, z, w; u32 mx, my, mz, mw; } pc{};
     pc.x = m_ProbeCount; pc.y = m_TraceConfig.traceRep;
     // 【随机种子必须与"当前躺在光线缓冲里的那批光线"一致】
