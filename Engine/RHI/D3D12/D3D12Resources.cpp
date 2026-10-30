@@ -658,7 +658,8 @@ D3D12Texture::~D3D12Texture() {
     }
 }
 
-bool D3D12Texture::Initialize(D3D12Device* device, const TextureDesc& desc, bool transient) {
+bool D3D12Texture::Initialize(D3D12Device* device, const TextureDesc& desc, bool transient,
+                              u32 firstPass, u32 lastPass) {
     m_OwnerDevice = device;
     if (!device || !device->GetDevice()) {
         HE_CORE_ERROR("D3D12Texture: 设备为空");
@@ -740,14 +741,22 @@ bool D3D12Texture::Initialize(D3D12Device* device, const TextureDesc& desc, bool
                  static_cast<u32>(rd.Format), rd.SampleDesc.Count, static_cast<u32>(rd.Flags));
     HRESULT crh = E_FAIL;
     if (transient) {
-        // 瞬态纹理：在本帧瞬态堆上线性放置（帧内不复用，帧槽位轮换回来时整堆重置）。
-        // 放置在复用内存上的渲染目标 / 深度内容未定义，使用方须先清除（RenderGraph 的瞬态资源都是本帧新写）
+        // 瞬态纹理：放在本帧瞬态堆上，生命周期不重叠的纹理共用内存（帧槽位轮换回来时整堆重置）。
+        // 所在内存可能刚被别的资源用过：登记「待激活」，命令列表首次使用时发别名屏障；渲染目标 /
+        // 深度还要 DiscardResource 初始化（D3D12 要求复用内存上的这两类资源先清除 / 丢弃再使用）
         ID3D12Heap* heap = nullptr;
         UINT64 offset = 0;
-        if (!device->AllocateTransient(rd, heap, offset)) return false;   // 堆不够：调用方回退普通纹理
+        if (!device->AllocateTransient(rd, heap, offset, firstPass, lastPass)) return false;   // 堆不够：调用方回退普通纹理
         crh = dev->CreatePlacedResource(heap, offset, &rd, initState, hasClear ? &clearValue : nullptr,
                                         IID_PPV_ARGS(&m_Resource));
-        if (SUCCEEDED(crh)) device->TrackTransient(m_Resource);   // 保活到堆重置（GPU 用完之后）
+        if (SUCCEEDED(crh)) {
+            device->TrackTransient(m_Resource);   // 保活到堆重置（GPU 用完之后）
+            const D3D12_RESOURCE_STATES discardState =
+                m_IsDepth ? D3D12_RESOURCE_STATE_DEPTH_WRITE
+                : (rd.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) ? D3D12_RESOURCE_STATE_RENDER_TARGET
+                : D3D12_RESOURCE_STATE_COMMON;
+            device->RegisterAliasActivation(m_Resource.Get(), discardState);
+        }
     } else {
         crh = dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, initState,
                                            hasClear ? &clearValue : nullptr,

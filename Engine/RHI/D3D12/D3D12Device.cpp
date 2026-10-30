@@ -585,6 +585,28 @@ std::unique_ptr<IRHITexture> D3D12Device::CreateTransientTexture(const TextureDe
     return t;
 }
 
+std::unique_ptr<IRHITexture> D3D12Device::CreateTransientTexture(const TextureDesc& desc, u32 firstPass, u32 lastPass) {
+    auto t = std::make_unique<D3D12Texture>();
+    if (!t->Initialize(this, desc, /*transient=*/true, firstPass, lastPass)) return nullptr;
+    return t;
+}
+
+void D3D12Device::RegisterAliasActivation(ID3D12Resource* res, D3D12_RESOURCE_STATES discardState) {
+    if (!res) return;
+    std::lock_guard<std::mutex> lock(m_AliasActivationMutex);
+    m_PendingAliasActivations[res] = discardState;
+}
+
+bool D3D12Device::TakeAliasActivation(ID3D12Resource* res, D3D12_RESOURCE_STATES& discardState) {
+    std::lock_guard<std::mutex> lock(m_AliasActivationMutex);
+    if (m_PendingAliasActivations.empty()) return false;   // 常见情况：没有瞬态纹理，快速返回
+    auto it = m_PendingAliasActivations.find(res);
+    if (it == m_PendingAliasActivations.end()) return false;
+    discardState = it->second;
+    m_PendingAliasActivations.erase(it);
+    return true;
+}
+
 void D3D12Device::AdvanceTransientResources() {
     if (!m_Device) return;
     if (m_ResourceHeapTier < 0) {
@@ -595,8 +617,14 @@ void D3D12Device::AdvanceTransientResources() {
     if (m_ResourceHeapTier < 2) return;   // Tier 1 的堆不能混放渲染目标与普通纹理：不启用瞬态纹理
     m_TransientSlot = (m_TransientSlot + 1) % kMaxFramesInFlight;
     TransientFrame& f = m_Transient[m_TransientSlot];
-    f.live.clear();   // 上一轮（kMaxFramesInFlight 帧前）放置的资源：GPU 已用完
-    f.offset = 0;
+    // 上一轮（kMaxFramesInFlight 帧前）放置的资源：GPU 已用完。没被用到的纹理留下的待激活登记一并清掉
+    //（资源释放后地址可能被复用）
+    if (!f.live.empty()) {
+        std::lock_guard<std::mutex> lock(m_AliasActivationMutex);
+        for (const auto& r : f.live) m_PendingAliasActivations.erase(r.Get());
+    }
+    f.live.clear();
+    f.regions.clear();
     // 首次使用或上一轮峰值超过堆大小：按峰值（留 25% 余量，64 MB 起步）重建堆
     constexpr UINT64 kMinHeap = 64ull << 20;
     if (!f.heap || f.peak > f.size) {
@@ -616,19 +644,42 @@ void D3D12Device::AdvanceTransientResources() {
     f.peak = 0;
 }
 
-bool D3D12Device::AllocateTransient(const D3D12_RESOURCE_DESC& rd, ID3D12Heap*& heapOut, UINT64& offsetOut) {
+// ---------------------------------------------------------------------------
+// AllocateTransient —— 瞬态堆上的区间分配（内存别名）
+// 只有生命周期与本次请求重叠的已分配区段才会占位；把它们按偏移排序后找第一个放得下的空隙
+//（first-fit）。生命周期不重叠的区段被视为空闲 ⇒ 后来的纹理可以与先前的纹理共用同一段内存，
+// 二者之间由命令列表在新纹理首次使用时发别名屏障衔接（见 D3D12CommandList::ActivateAliasedTexture）。
+// 未给生命周期的请求按 [0, ~0u] 处理，与所有区段重叠，即退化为不复用的线性分配。
+// ---------------------------------------------------------------------------
+bool D3D12Device::AllocateTransient(const D3D12_RESOURCE_DESC& rd, ID3D12Heap*& heapOut, UINT64& offsetOut,
+                                    u32 firstPass, u32 lastPass) {
     if (!m_Device || m_ResourceHeapTier < 2) return false;
     TransientFrame& f = m_Transient[m_TransientSlot];
     const D3D12_RESOURCE_ALLOCATION_INFO info = m_Device->GetResourceAllocationInfo(0, 1, &rd);
     if (info.SizeInBytes == UINT64_MAX) return false;   // 描述非法
     const UINT64 align = info.Alignment ? info.Alignment : D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
-    const UINT64 start = (f.offset + align - 1) & ~(align - 1);
-    const UINT64 end   = start + info.SizeInBytes;
+    if (firstPass > lastPass) { firstPass = 0; lastPass = ~0u; }   // 未使用 / 非法区间：按整帧存活处理
+
+    // 生命周期重叠的区段（它们的内存本次不能用），按偏移排序
+    std::vector<const TransientRegion*> busy;
+    for (const auto& r : f.regions)
+        if (!(r.lastPass < firstPass || r.firstPass > lastPass)) busy.push_back(&r);
+    std::sort(busy.begin(), busy.end(),
+              [](const TransientRegion* a, const TransientRegion* b) { return a->offset < b->offset; });
+
+    UINT64 start = 0;
+    for (const TransientRegion* r : busy) {
+        const UINT64 aligned = (start + align - 1) & ~(align - 1);
+        if (aligned + info.SizeInBytes <= r->offset) break;    // 这个空隙放得下
+        start = std::max(start, r->offset + r->size);
+    }
+    start = (start + align - 1) & ~(align - 1);
+    const UINT64 end = start + info.SizeInBytes;
     f.peak = std::max(f.peak, end);   // 失败的请求也计入峰值：下一轮按它扩容
     if (!f.heap || end > f.size) return false;
+    f.regions.push_back({ start, info.SizeInBytes, firstPass, lastPass });
     heapOut   = f.heap.Get();
     offsetOut = start;
-    f.offset  = end;
     return true;
 }
 

@@ -517,6 +517,7 @@ void D3D12CommandList::BeginOffscreenPass(void* colorImageView, void* depthImage
     if (m_Device) {
         if (hasRtv) {
             if (auto* res = m_Device->FindViewResource(static_cast<UINT64>(rtv.ptr))) {
+                ActivateAliasedTexture(res);   // 瞬态纹理首次使用：先激活
                 const auto from = m_Device->GetResourceState(res);
                 // 【只要不是目标状态就显式转换】此前只在「当前是着色器资源」时才转，
                 // 从 COMMON 依赖所谓隐式提升 —— 但调试层明确判定 COMMON 不能直接当
@@ -535,6 +536,7 @@ void D3D12CommandList::BeginOffscreenPass(void* colorImageView, void* depthImage
         }
         if (hasDsv) {
             if (auto* res = m_Device->FindViewResource(static_cast<UINT64>(dsv.ptr))) {
+                ActivateAliasedTexture(res);   // 瞬态纹理首次使用：先激活
                 const auto from = m_Device->GetResourceState(res);
                 if (from != D3D12_RESOURCE_STATE_DEPTH_WRITE) {
                     D3D12_RESOURCE_BARRIER b{};
@@ -685,6 +687,7 @@ void D3D12CommandList::BeginOffscreenPassMRT(void* const* colorImageViews, u32 c
     for (u32 i = 0; i < n; ++i) {
         if (!colorImageViews[i] || !m_Device) continue;
         if (ID3D12Resource* res = m_Device->FindViewResource(static_cast<UINT64>(rtvs[i].ptr))) {
+            ActivateAliasedTexture(res);   // 瞬态纹理首次使用：先激活
             const auto from = m_Device->GetResourceState(res);
             if (from != D3D12_RESOURCE_STATE_RENDER_TARGET) {
                 D3D12_RESOURCE_BARRIER tb{};
@@ -700,6 +703,7 @@ void D3D12CommandList::BeginOffscreenPassMRT(void* const* colorImageViews, u32 c
     }
     if (hasDsv && m_Device) {
         if (ID3D12Resource* dres = m_Device->FindViewResource(static_cast<UINT64>(dsv.ptr))) {
+            ActivateAliasedTexture(dres);   // 瞬态纹理首次使用：先激活
             const auto from = m_Device->GetResourceState(dres);
             if (from != D3D12_RESOURCE_STATE_DEPTH_WRITE) {
                 D3D12_RESOURCE_BARRIER tb{};
@@ -1409,6 +1413,7 @@ void D3D12CommandList::PipelineBarrier(PipelineStage, PipelineStage,
                                        IRHITexture* texture) {
     if (!m_List || !texture || m_IsBundle) return;   // bundle 不能发屏障
     auto* t = static_cast<D3D12Texture*>(texture);
+    ActivateAliasedTexture(t->GetResource());   // 瞬态纹理首次使用：先激活
     D3D12_RESOURCE_STATES from = ToD3D12ResourceState(srcState, t->IsDepth());
     D3D12_RESOURCE_STATES to   = ToD3D12ResourceState(dstState, t->IsDepth());
     // 计算列表：目标状态去掉图形专用位；去不掉（转成渲染目标 / 深度）说明这次转换属于图形队列，跳过
@@ -1508,8 +1513,42 @@ bool D3D12CommandList::FilterStateForQueue(D3D12_RESOURCE_STATES& state) const {
     return true;
 }
 
+// ---------------------------------------------------------------------------
+//  瞬态纹理的激活（内存别名）
+//  瞬态纹理与生命周期不重叠的其他瞬态纹理共用内存。在本纹理首次被使用前：
+//    1. 别名屏障，Before 为空（= 该段内存上之前的任何资源），After 为本纹理 ⇒ 之前资源的写入
+//       完成后才轮到本纹理，GPU 缓存也随之失效；
+//    2. 渲染目标 / 深度：转到 RENDER_TARGET / DEPTH_WRITE 后 DiscardResource，初始化压缩元数据
+//      （复用内存上的这两类资源内容未定义，D3D12 要求先 Clear / Discard / 整体拷贝再使用）。
+//  Discard 只能在图形列表上做：计算列表上只发别名屏障（渲染目标 / 深度本就不会先在计算列表上用）。
+// ---------------------------------------------------------------------------
+void D3D12CommandList::ActivateAliasedTexture(ID3D12Resource* res) {
+    if (!m_List || !m_Device || !res || m_IsBundle) return;   // bundle 不能发屏障
+    D3D12_RESOURCE_STATES discardState = D3D12_RESOURCE_STATE_COMMON;
+    if (!m_Device->TakeAliasActivation(res, discardState)) return;
+    D3D12_RESOURCE_BARRIER b{};
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
+    b.Aliasing.pResourceBefore = nullptr;
+    b.Aliasing.pResourceAfter  = res;
+    m_List->ResourceBarrier(1, &b);
+    if (discardState == D3D12_RESOURCE_STATE_COMMON || IsComputeQueueList()) return;
+    const D3D12_RESOURCE_STATES cur = m_Device->GetResourceState(res);
+    if (cur != discardState) {
+        D3D12_RESOURCE_BARRIER t{};
+        t.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        t.Transition.pResource   = res;
+        t.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        t.Transition.StateBefore = cur;
+        t.Transition.StateAfter  = discardState;
+        m_List->ResourceBarrier(1, &t);
+        m_Device->SetResourceState(res, discardState);
+    }
+    m_List->DiscardResource(res, nullptr);
+}
+
 D3D12_RESOURCE_STATES D3D12CommandList::UsableTextureState(ID3D12Resource* res) {
     if (!m_Device || !res) return D3D12_RESOURCE_STATE_COMMON;
+    ActivateAliasedTexture(res);   // 瞬态纹理首次使用：先激活（所有取纹理屏障起始状态的路径都经过这里）
     const D3D12_RESOURCE_STATES cur = m_Device->GetResourceState(res);
     if (!IsComputeQueueList() || (cur & kGraphicsOnlyStates) == 0) return cur;
     // 去掉图形专用位（PIXEL | NON_PIXEL → NON_PIXEL；渲染目标 / 深度 → COMMON）
@@ -1591,6 +1630,7 @@ void D3D12CommandList::ClearDepthStencil(IRHITexture* texture, float depth) {
     ID3D12Resource* res = t->GetResource();
     const D3D12_CPU_DESCRIPTOR_HANDLE dsv = t->GetDsv();
     if (!res || !dsv.ptr) return;   // 没有 DSV 的纹理无法清深度
+    ActivateAliasedTexture(res);    // 瞬态纹理首次使用：先激活
 
     // 以设备登记的真实状态作屏障的 StateBefore（同 PipelineBarrier）
     const D3D12_RESOURCE_STATES from =

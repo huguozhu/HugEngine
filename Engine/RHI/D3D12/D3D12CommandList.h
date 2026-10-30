@@ -196,6 +196,9 @@ private:
     D3D12_RESOURCE_STATES UsableTextureState(ID3D12Resource* res);
     /// 本次录制累计的交接转换，由设备在提交前放到图形队列上执行
     std::vector<D3D12_RESOURCE_BARRIER> m_QueueHandoffs;
+    /// 瞬态纹理首次使用时的激活：别名屏障（所在内存之前可能属于别的资源）+ 渲染目标 / 深度的
+    /// DiscardResource。没有待激活登记时立即返回（见 D3D12Device::RegisterAliasActivation）
+    void ActivateAliasedTexture(ID3D12Resource* res);
 
     /// 每个飞行帧槽位一个分配器（同 Vulkan 的逐帧命令缓冲）：分配器在 GPU 执行完之前
     /// 不能 Reset，样例只建一个命令列表并每帧重录，单分配器会在 GPU 仍在执行上一帧时

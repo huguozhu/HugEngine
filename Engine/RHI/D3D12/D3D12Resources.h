@@ -75,7 +75,9 @@ public:
     ~D3D12Texture() override;
 
     /// transient = true：资源放在设备的逐帧瞬态堆上（placed resource），堆空间不足时返回 false
-    bool Initialize(D3D12Device* device, const TextureDesc& desc, bool transient = false);
+    /// firstPass / lastPass：瞬态纹理的生命周期（pass 序号闭区间），用于与其他瞬态纹理做内存别名
+    bool Initialize(D3D12Device* device, const TextureDesc& desc, bool transient = false,
+                    u32 firstPass = 0, u32 lastPass = ~0u);
 
     u32    GetWidth()  const override { return m_Width; }
     u32    GetHeight() const override { return m_Height; }

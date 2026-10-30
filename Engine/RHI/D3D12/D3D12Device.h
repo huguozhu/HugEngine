@@ -427,11 +427,20 @@ public:
     // ---- 瞬态纹理（IRHIDevice 接口）----
     /// 在本帧瞬态堆上创建纹理（placed resource）；不支持或堆空间不足时返回空，调用方回退普通纹理
     std::unique_ptr<IRHITexture> CreateTransientTexture(const TextureDesc& desc) override;
+    /// 带生命周期的版本：生命周期（pass 序号闭区间）不重叠的瞬态纹理放在同一段内存上（内存别名）
+    std::unique_ptr<IRHITexture> CreateTransientTexture(const TextureDesc& desc, u32 firstPass, u32 lastPass) override;
     /// 帧首调用：轮换到下一帧槽位的瞬态堆。该堆上一次的使用者是 kMaxFramesInFlight 帧之前，
     /// 主命令列表 Begin 已等过那一帧的围栏，可以整堆重置；上一轮峰值超过堆大小时按峰值扩容
     void AdvanceTransientResources() override;
-    /// 在当前帧瞬态堆上为资源分配一段（按资源对齐），空间不足时记下所需峰值并返回 false
-    bool AllocateTransient(const D3D12_RESOURCE_DESC& rd, ID3D12Heap*& heapOut, UINT64& offsetOut);
+    /// 在当前帧瞬态堆上为资源分配一段（按资源对齐）：只避开与 [firstPass, lastPass] 生命周期重叠的
+    /// 已分配区段，不重叠的区段可以复用（内存别名）。空间不足时记下所需峰值并返回 false
+    bool AllocateTransient(const D3D12_RESOURCE_DESC& rd, ID3D12Heap*& heapOut, UINT64& offsetOut,
+                           u32 firstPass = 0, u32 lastPass = ~0u);
+    /// 登记瞬态纹理的「待激活」：它所在内存可能刚被别的资源用过，首次使用前要发别名屏障；
+    /// discardState 非 0（渲染目标 / 深度）时还要转到该状态并 DiscardResource 初始化元数据
+    void RegisterAliasActivation(ID3D12Resource* res, D3D12_RESOURCE_STATES discardState);
+    /// 取走待激活登记（命令列表首次使用该纹理时调用）：有登记返回 true 并给出 discardState
+    bool TakeAliasActivation(ID3D12Resource* res, D3D12_RESOURCE_STATES& discardState);
     /// 瞬态资源保活到其所在堆被重置（纹理对象可能在 GPU 用完之前就被销毁）
     void TrackTransient(ComPtr<ID3D12Resource> res);
 
@@ -460,14 +469,24 @@ private:
     std::vector<DeferredRelease> m_DeferredReleases;
 
     // ---- 瞬态纹理堆（每飞行帧一个）----
+    /// 瞬态堆上已分配的一段：内存范围 + 使用它的资源的生命周期（pass 序号闭区间）
+    struct TransientRegion {
+        UINT64 offset = 0;
+        UINT64 size   = 0;
+        u32    firstPass = 0;
+        u32    lastPass  = ~0u;
+    };
     struct TransientFrame {
         ComPtr<ID3D12Heap>                   heap;
         UINT64                               size   = 0;   // 堆大小
-        UINT64                               offset = 0;   // 本帧线性分配游标
+        std::vector<TransientRegion>         regions;      // 本帧已分配的区段
         UINT64                               peak   = 0;   // 本帧所需峰值（含分配失败的请求），用于扩容
         std::vector<ComPtr<ID3D12Resource>>  live;         // 本帧放置的资源：堆重置时释放
     };
     TransientFrame m_Transient[kMaxFramesInFlight];
+    /// 待激活的瞬态纹理 → 激活时要转到并 Discard 的状态（0 表示只发别名屏障）。多线程录制时加锁
+    std::unordered_map<ID3D12Resource*, D3D12_RESOURCE_STATES> m_PendingAliasActivations;
+    std::mutex                                                 m_AliasActivationMutex;
     u32            m_TransientSlot = 0;
     int            m_ResourceHeapTier = -1;   // -1 = 未查询；瞬态堆混放纹理需要资源堆 Tier 2
 
