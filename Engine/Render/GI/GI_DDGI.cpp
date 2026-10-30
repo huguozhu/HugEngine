@@ -393,11 +393,15 @@ void GI_DDGI::FitGridToBounds(const float3& mn, const float3& mx) {
     // 拟合规则在 GI/GIProbeGrid.h（纯几何、有单元测试）；这里只负责应用与记账
     const auto fit = FitProbeGridToBounds(mn, mx, fitCellsMax);
     if (!fit) return;   // 退化包围盒（无几何 / NaN）：保持原参数不动
+    // 每帧都会按场景包围盒重新拟合：参数没变时不重复打印（此前每帧一行）
+    const bool changed = gridX != fit->countX || gridY != fit->countY || gridZ != fit->countZ ||
+                         cellSize != fit->cellSize || gridOrigin != fit->origin;
     gridX = fit->countX;
     gridY = fit->countY;
     gridZ = fit->countZ;
     cellSize   = fit->cellSize;
     gridOrigin = fit->origin;
+    if (!changed) return;
 
     // 步骤 32：把**原点**也打出来 —— 网格对齐伪影的分析（`build/verify/grid_artifact.py`）需要它，
     // 而"拟合参数复核"也需要肉眼能对：最后一颗探针 = 原点 + (count-1)×格距 应当覆盖到包围盒的 max。

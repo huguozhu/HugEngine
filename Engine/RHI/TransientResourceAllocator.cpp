@@ -225,7 +225,8 @@ void TransientResourceAllocator::AdvanceFrame() {
     m_CurrentHeap = nextHeap;
     m_FrameIndex++;
 
-    HE_CORE_INFO("TransientAllocator: Frame {} — 切换到 Heap{} (峰值使用 {:.1f}MB / {:.0f}MB)",
+    // 每帧都会切换：用 TRACE 级别，避免刷日志
+    HE_CORE_TRACE("TransientAllocator: Frame {} — 切换到 Heap{} (峰值使用 {:.1f}MB / {:.0f}MB)",
         m_FrameIndex, m_CurrentHeap,
         double(m_PeakUsedMemory) / (1024.0 * 1024.0),
         double(m_HeapSize) / (1024.0 * 1024.0));

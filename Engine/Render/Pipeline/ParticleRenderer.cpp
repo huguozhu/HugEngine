@@ -568,7 +568,7 @@ void ParticleRenderer::DispatchCompute(rhi::IRHICommandList* cmd, u32 id, float 
     }
 
     // ── Step 0: 读回上帧 GPU 执行结果（在 CPU 清零 counters 之前缓存 renderCount）──
-    DebugDumpState(id, "Dispatch-Start(prev-frame-GPU-result)");
+    if (verbose) DebugDumpState(id, "Dispatch-Start(prev-frame-GPU-result)");   // 只在前几帧打，避免每帧刷日志
     {
         ParticleCounters prevCtrs;
         void* prevMap = cs.counters->Map();
@@ -682,7 +682,7 @@ void ParticleRenderer::DispatchCompute(rhi::IRHICommandList* cmd, u32 id, float 
             cmd->PipelineBarrier(rhi::PipelineStage::Transfer, rhi::PipelineStage::ComputeShader,
                                  rhi::ResourceState::CopyDst, rhi::ResourceState::UnorderedAccess);
         }
-        HE_CORE_INFO("    GpuEmitParam size={} maxPushConst={}", (u32)sizeof(GpuEmitParam), (u32)sizeof(GpuEmitParam) > 128 ? "OVER!" : "OK");
+        if (verbose) HE_CORE_INFO("    GpuEmitParam size={} maxPushConst={}", (u32)sizeof(GpuEmitParam), (u32)sizeof(GpuEmitParam) > 128 ? "OVER!" : "OK");   // 只在前几帧打
 
         cmd->SetPipeline(m_EmitPSO.get());
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, cs.emitSet);
@@ -838,7 +838,7 @@ void ParticleRenderer::Render(rhi::IRHICommandList* cmd, u32 id,
     }
 
     if (renderCount > 0) {
-        HE_CORE_INFO("  >>> DRAW: 6 vertices x {} instances <<<", renderCount);
+        if (verbose) HE_CORE_INFO("  >>> DRAW: 6 vertices x {} instances <<<", renderCount);   // 只在前几帧打
         // 6 顶点 Billboard × N 实例
         cmd->Draw(6, renderCount, 0, 0);
     } else {

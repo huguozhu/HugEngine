@@ -886,7 +886,8 @@ bool D3D12Texture::Initialize(D3D12Device* device, const TextureDesc& desc, bool
         UploadInitialData(device, desc, initState);
     }
 
-    if (m_Width >= 1920) HE_CORE_ERROR("[TEX-BIG] res={} {}x{} dxgi={} depth={} rtvPtr={}",
+    // 大纹理创建的诊断：引擎运行期会频繁创建全屏目标，用 TRACE 级别避免刷日志（此前误用 ERROR）
+    if (m_Width >= 1920) HE_CORE_TRACE("[TEX-BIG] res={} {}x{} dxgi={} depth={} rtvPtr={}",
         (void*)m_Resource.Get(), m_Width, m_Height, (u32)rd.Format, m_IsDepth ? 1 : 0, (void*)m_Rtv.ptr);
     HE_CORE_INFO("D3D12Texture: 创建 {}x{} mip={} layers={} fmt={}{}",
                  m_Width, m_Height, m_MipLevels, m_ArrayLayers, static_cast<u32>(fmt),
