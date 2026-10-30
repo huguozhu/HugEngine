@@ -17,6 +17,7 @@
 #include <atomic>
 #include <unordered_map>
 #include <map>     // 缓冲 GPU 地址登记（按起始地址有序查找）
+#include <deque>   // PSO 创建限流队列
 #include <memory>
 
 namespace he::rhi::d3d12 {
@@ -328,6 +329,18 @@ public:
     IRHITexture*           ResolveTexture(RHITextureHandle handle) const override;
 
     RHIPipelineStateHandle CreatePipelineStateHandle(const PipelineStateDesc& desc) override;
+
+    // ---- PSO 创建限流 ----
+    //  帧循环里不直接创建 PSO（编译可能耗时数十毫秒），先入队，由 ProcessPSOCreateQueue
+    //  每帧取若干个创建。句柄版先登记一个载荷为空的占位句柄，创建后再填充；
+    //  填充前 ResolvePipelineState 返回 nullptr，调用方据此判断「尚未就绪」。
+    //  创建走 CreatePipelineState，命中 PSO 缓存块时驱动直接取编译结果。
+    void EnqueuePSOCreate(const PipelineStateDesc& desc) override;
+    RHIPipelineStateHandle EnqueuePSOCreateHandle(const PipelineStateDesc& desc) override;
+    std::vector<std::unique_ptr<IRHIPipelineState>> ProcessPSOCreateQueue(u32 maxPerFrame) override;
+    u32 GetPendingPSOCreateCount() const override {
+        return static_cast<u32>(m_PendingPsoCreates.size() + m_PendingPsoHandleCreates.size());
+    }
     void                   DestroyPipelineStateHandle(RHIPipelineStateHandle handle) override;
     IRHIPipelineState*     ResolvePipelineState(RHIPipelineStateHandle handle) const override;
 
@@ -371,6 +384,16 @@ private:
             if (index == 0 || index >= slots.size()) return nullptr;
             if (slots[index].generation != generation) return nullptr;   // 过期句柄
             return slots[index].object.get();
+        }
+        /// 句柄是否仍有效（代数一致）：占位句柄（载荷为空）也算有效
+        bool IsCurrent(u32 index, u32 generation) const {
+            return index != 0 && index < slots.size() && slots[index].generation == generation;
+        }
+        /// 给占位句柄填入载荷；句柄已失效（期间被释放）时返回 false，obj 原样丢弃
+        bool Fill(u32 index, u32 generation, std::unique_ptr<T> obj) {
+            if (!IsCurrent(index, generation)) return false;
+            slots[index].object = std::move(obj);
+            return true;
         }
         void Release(u32 index, u32 generation) {
             if (index == 0 || index >= slots.size()) return;
@@ -597,6 +620,9 @@ private:   // register -> 元素字节数
     HandleTable<IRHIBuffer>        m_Buffers;
     HandleTable<IRHITexture>       m_Textures;
     HandleTable<IRHIPipelineState> m_PipelineStates;
+    /// PSO 限流队列：普通版（创建后交给调用方持有）与句柄版（创建后填充占位句柄）
+    std::deque<PipelineStateDesc>                                     m_PendingPsoCreates;
+    std::deque<std::pair<RHIPipelineStateHandle, PipelineStateDesc>> m_PendingPsoHandleCreates;
     HandleTable<IRHISampler>       m_Samplers;
 
     /// 创建设备、队列、围栏（Initialize 的分解步骤，便于早退）

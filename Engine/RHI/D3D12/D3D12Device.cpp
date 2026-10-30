@@ -881,6 +881,41 @@ RHIPipelineStateHandle D3D12Device::CreatePipelineStateHandle(const PipelineStat
     return h;
 }
 
+void D3D12Device::EnqueuePSOCreate(const PipelineStateDesc& desc) {
+    m_PendingPsoCreates.push_back(desc);
+}
+
+RHIPipelineStateHandle D3D12Device::EnqueuePSOCreateHandle(const PipelineStateDesc& desc) {
+    // 占位：登记一个空载荷的槽位，句柄立即可返回
+    RHIPipelineStateHandle h{};
+    h.index = m_PipelineStates.Acquire(nullptr, h.generation);
+    m_PendingPsoHandleCreates.emplace_back(h, desc);
+    return h;
+}
+
+std::vector<std::unique_ptr<IRHIPipelineState>> D3D12Device::ProcessPSOCreateQueue(u32 maxPerFrame) {
+    std::vector<std::unique_ptr<IRHIPipelineState>> created;
+    u32 processed = 0;
+    // 先处理句柄版：创建成功填充占位句柄；创建失败回收占位，避免留下永远为空的槽位
+    while (processed < maxPerFrame && !m_PendingPsoHandleCreates.empty()) {
+        auto [handle, desc] = std::move(m_PendingPsoHandleCreates.front());
+        m_PendingPsoHandleCreates.pop_front();
+        // 排队期间句柄已被调用方销毁：不必再创建（不计入本帧配额）
+        if (!m_PipelineStates.IsCurrent(handle.index, handle.generation)) continue;
+        auto pso = CreatePipelineState(desc);
+        if (pso) m_PipelineStates.Fill(handle.index, handle.generation, std::move(pso));
+        else     m_PipelineStates.Release(handle.index, handle.generation);
+        ++processed;
+    }
+    while (processed < maxPerFrame && !m_PendingPsoCreates.empty()) {
+        PipelineStateDesc desc = std::move(m_PendingPsoCreates.front());
+        m_PendingPsoCreates.pop_front();
+        created.push_back(CreatePipelineState(desc));   // 失败时为空指针，与 Vulkan 一致交给调用方判断
+        ++processed;
+    }
+    return created;
+}
+
 void D3D12Device::DestroyPipelineStateHandle(RHIPipelineStateHandle handle) {
     m_PipelineStates.Release(handle.index, handle.generation);
 }
