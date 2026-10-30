@@ -511,6 +511,62 @@ if(SLANGC)
         message(STATUS "D3D12 shader path: DXIL enabled")
     endif()
 
+    # ========================================================================
+    #  D3D11：DXBC 字节码（SM 5.0，与 SPIR-V / DXIL 并列生成）
+    #
+    #  链路：slangc -target hlsl -DHE_SHADER_HLSL -DHE_SHADER_D3D11
+    #        →  ShaderToDxil --dxbc（补丁 + 寄存器重新分配 + D3DCompile）
+    #        →  DXBC + 绑定表  →  *.dxbc.h（C++ 字节数组）
+    #
+    #  每个着色器由 cmake/CompileDxbc.cmake 生成：**失败不阻塞构建**，失败的着色器得到
+    #  占位头文件（不是 DXBC，运行时判定为不可用）。每次构建后 cmake/DxbcReport.cmake
+    #  汇总通过 / 失败清单到 generated_dxbc/dxbc_report.md。
+    #  入口与阶段与 DXIL 完全相同（_dxil_pairs），不含光追 / 网格着色器（D3D11 不支持）。
+    # ========================================================================
+    if(WIN32 AND HUGENGINE_RHI_D3D11 AND TARGET ShaderToDxil)
+        set(DXBC_OUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated_dxbc")
+        set(DXBC_HEADERS "")
+
+        foreach(_pair ${_dxil_pairs})
+            string(REPLACE "|" ";" _parts "${_pair}")
+            list(GET _parts 0 SRC)
+            list(GET _parts 1 ENTRY)
+            list(GET _parts 2 SLANG_STAGE)
+            list(GET _parts 3 DXBC_STAGE)
+
+            get_filename_component(FNAME ${SRC} NAME)
+            string(REGEX REPLACE "\\.slang$" "" NAME "${FNAME}")
+            string(REPLACE "." "_" SYM "${NAME}")
+
+            set(DXBC_H "${DXBC_OUT_DIR}/${NAME}.dxbc.h")
+            add_custom_command(
+                OUTPUT ${DXBC_H}
+                COMMAND ${CMAKE_COMMAND}
+                        -DSLANGC=${SLANGC}
+                        -DSHADER_TO_DXIL=$<TARGET_FILE:ShaderToDxil>
+                        -DSRC=${SRC} -DNAME=${NAME} -DENTRY=${ENTRY}
+                        -DSLANG_STAGE=${SLANG_STAGE} -DSTAGE=${DXBC_STAGE}
+                        -DSYM=k_${SYM}_dxbc -DSHADER_DIR=${SHADER_DIR} -DOUT_DIR=${DXBC_OUT_DIR}
+                        -P ${CMAKE_SOURCE_DIR}/cmake/CompileDxbc.cmake
+                DEPENDS ${SRC} ${SLANG_INCLUDES} ShaderToDxil ${CMAKE_SOURCE_DIR}/cmake/CompileDxbc.cmake
+                COMMENT "Slang -> DXBC (D3D11): ${NAME}"
+            )
+            list(APPEND DXBC_HEADERS ${DXBC_H})
+        endforeach()
+
+        add_custom_target(CompileShadersDxbc ALL
+            DEPENDS ${DXBC_HEADERS}
+            # 汇总报告：每次构建都重新统计（只读 *.dxbc.status，开销很小）
+            COMMAND ${CMAKE_COMMAND} -DOUT_DIR=${DXBC_OUT_DIR} -P ${CMAKE_SOURCE_DIR}/cmake/DxbcReport.cmake
+            COMMENT "D3D11 着色器编译报告"
+        )
+        add_dependencies(HugEngineShader CompileShadersDxbc)
+
+        # 让引擎与样例能 include 到 *.dxbc.h
+        target_include_directories(HugEngineShader INTERFACE ${DXBC_OUT_DIR})
+        message(STATUS "D3D11 shader path: DXBC enabled")
+    endif()
+
     add_custom_target(CompileShaders ALL
         DEPENDS ${SPV_HEADERS}
         SOURCES ${SHADER_IDE_SOURCES}   # IDE 视图：SOURCES 只影响工程文件，不构成构建依赖
