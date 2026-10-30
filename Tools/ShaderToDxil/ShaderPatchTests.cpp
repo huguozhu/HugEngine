@@ -253,11 +253,63 @@ static void TestBindTableRoundTrip() {
     CHECK(he::rhi::dxbc::FindDxbcBindTable(blob.data(), blob.size() - 4, &entries) == nullptr);
 }
 
+// ---------------------------------------------------------------------------
+//  用例 5：结构化缓冲里的矩阵在读取处补 transpose（fxc 忽略 column_major）
+// ---------------------------------------------------------------------------
+static void TestStructuredMatrices() {
+    std::fprintf(stderr, "用例 5：结构化缓冲矩阵修正\n");
+    std::string hlsl =
+        "struct Inner_0\n"
+        "{\n"
+        "    float4x4  m_0[int(2)];\n"
+        "};\n"
+        "struct Obj_0\n"
+        "{\n"
+        "    float4x4 world_0;\n"
+        "    Inner_0 inner_0;\n"
+        "    float4 color_0;\n"
+        "};\n"
+        "struct Plain_0\n"
+        "{\n"
+        "    float4 a_0;\n"
+        "};\n"
+        "StructuredBuffer<Obj_0 > u_Objs_0 : register(t2);\n"
+        "StructuredBuffer<Plain_0 > u_Plain_0 : register(t3);\n"
+        "StructuredBuffer<uint > u_Idx_0 : register(t4);\n"
+        "float4 f(uint i) { return mul(u_Objs_0.Load(u_Idx_0.Load(i)).world_0, u_Plain_0.Load(i).a_0) + u_Objs_0[i].color_0; }\n";
+    const std::string want =
+        "struct Inner_0\n"
+        "{\n"
+        "    float4x4  m_0[int(2)];\n"
+        "}; Inner_0 HE_FxcMat_Inner_0(Inner_0 v) { v.m_0[0] = transpose(v.m_0[0]); v.m_0[1] = transpose(v.m_0[1]); return v; }\n"
+        "struct Obj_0\n"
+        "{\n"
+        "    float4x4 world_0;\n"
+        "    Inner_0 inner_0;\n"
+        "    float4 color_0;\n"
+        "}; Obj_0 HE_FxcMat_Obj_0(Obj_0 v) { v.world_0 = transpose(v.world_0); v.inner_0 = HE_FxcMat_Inner_0(v.inner_0); return v; }\n"
+        "struct Plain_0\n"
+        "{\n"
+        "    float4 a_0;\n"
+        "};\n"
+        "StructuredBuffer<Obj_0 > u_Objs_0 : register(t2);\n"
+        "StructuredBuffer<Plain_0 > u_Plain_0 : register(t3);\n"
+        "StructuredBuffer<uint > u_Idx_0 : register(t4);\n"
+        "float4 f(uint i) { return mul(HE_FxcMat_Obj_0(u_Objs_0.Load(u_Idx_0.Load(i))).world_0, u_Plain_0.Load(i).a_0) + HE_FxcMat_Obj_0(u_Objs_0[i]).color_0; }\n";
+    const auto problems = PatchStructuredMatricesFxc(hlsl);
+    CheckText("用例 5 HLSL", hlsl, want);
+    if (!problems.empty()) {
+        std::fprintf(stderr, "  用例 5：不应有无法修正的情况，实际 %zu 条\n", problems.size());
+        ++g_Failures;
+    }
+}
+
 int main() {
     TestPixelRegisters();
     TestRegisterErrors();
     TestLoops();
     TestBindTableRoundTrip();
+    TestStructuredMatrices();
     if (g_Failures == 0) {
         std::fprintf(stderr, "ShaderPatchTests：全部通过\n");
         return 0;

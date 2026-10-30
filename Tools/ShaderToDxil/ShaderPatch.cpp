@@ -4,6 +4,7 @@
 
 #include "ShaderPatch.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -601,6 +602,198 @@ static uint32_t ParseArrayCount(const std::string& declPart) {
     while (k < declPart.size() && !isdigit(static_cast<unsigned char>(declPart[k])) && declPart[k] != ']') ++k;
     if (k >= declPart.size() || declPart[k] == ']') return 0;
     return static_cast<uint32_t>(std::strtoul(declPart.c_str() + k, nullptr, 10));
+}
+
+// ---------------------------------------------------------------------------
+//  结构化缓冲里的矩阵（fxc 一律按行主序读，见 ShaderPatch.h）
+// ---------------------------------------------------------------------------
+
+/// 类型名是否为矩阵（float4x4 / uint3x3 …）；是则给出行列数
+static bool ParseMatrixType(const std::string& type, int& rows, int& cols) {
+    static const char* kScalars[] = { "float", "half", "double", "int", "uint", "min16float", "bool" };
+    for (const char* sc : kScalars) {
+        const size_t n = std::strlen(sc);
+        if (type.size() == n + 3 && type.compare(0, n, sc) == 0 &&
+            isdigit(static_cast<unsigned char>(type[n])) && type[n + 1] == 'x' &&
+            isdigit(static_cast<unsigned char>(type[n + 2]))) {
+            rows = type[n] - '0';
+            cols = type[n + 2] - '0';
+            return true;
+        }
+    }
+    return false;
+}
+
+std::vector<std::string> PatchStructuredMatricesFxc(std::string& s) {
+    std::vector<std::string> problems;
+
+    // 1) 收集结构体成员：名字 → [(类型, 成员名, 数组长度)]（Slang 输出的结构体不嵌套花括号）
+    struct Member { std::string type, name; uint32_t count = 1; };
+    std::map<std::string, std::vector<Member>> structs;
+    std::vector<std::string> structOrder;   // 定义顺序（嵌套结构总是先定义）
+    std::map<std::string, size_t> structEnd; // 结构体定义末尾（`};` 之后）的位置：修正函数插在这里
+    for (size_t p = 0; (p = s.find("struct ", p)) != std::string::npos; p += 7) {
+        if (p > 0 && IsIdentChar(s[p - 1])) continue;
+        size_t k = p + 7;
+        while (k < s.size() && isspace(static_cast<unsigned char>(s[k]))) ++k;
+        const size_t nameBeg = k;
+        while (k < s.size() && IsIdentChar(s[k])) ++k;
+        const std::string name = s.substr(nameBeg, k - nameBeg);
+        while (k < s.size() && isspace(static_cast<unsigned char>(s[k]))) ++k;
+        if (name.empty() || k >= s.size() || s[k] != '{') continue;
+        const size_t close = s.find('}', k);
+        if (close == std::string::npos) break;
+        std::vector<Member> members;
+        std::istringstream body(s.substr(k + 1, close - k - 1));
+        std::string stmt;
+        while (std::getline(body, stmt, ';')) {
+            // 去掉语义（`: TEXCOORD0`），取最后两个记号：类型 名字[数组]
+            const size_t colon = stmt.find(':');
+            if (colon != std::string::npos) stmt.resize(colon);
+            std::istringstream toks(stmt);
+            std::vector<std::string> t;
+            for (std::string w; toks >> w;) t.push_back(w);
+            // 数组长度写成 `[int(3)]` 时中间无空格；有空格时把尾部拼回名字
+            while (t.size() > 2 && t.back().find('[') == std::string::npos && t.back().find(']') != std::string::npos) {
+                t[t.size() - 2] += t.back();
+                t.pop_back();
+            }
+            if (t.size() < 2) continue;
+            Member m;
+            m.type = t[t.size() - 2];
+            const std::string& decl = t.back();
+            m.name  = decl.substr(0, decl.find('['));
+            m.count = ParseArrayCount(decl);
+            members.push_back(m);
+        }
+        structs[name] = std::move(members);
+        structOrder.push_back(name);
+        size_t endPos = close + 1;
+        if (endPos < s.size() && s[endPos] == ';') ++endPos;
+        structEnd[name] = endPos;
+    }
+
+    // 2) 哪些结构体需要修正（直接或经嵌套成员含方阵）
+    std::map<std::string, bool> needFix;
+    for (const std::string& name : structOrder) {
+        bool need = false;
+        for (const Member& m : structs[name]) {
+            int r = 0, c = 0;
+            if (ParseMatrixType(m.type, r, c)) need = true;
+            else if (needFix.count(m.type) && needFix[m.type]) need = true;
+        }
+        needFix[name] = need;
+    }
+
+    // 3) 找只读结构化缓冲的声明：元素是矩阵或需修正的结构体
+    struct Buffer { std::string name, elem; };
+    std::vector<Buffer> buffers;
+    for (size_t p = 0; (p = s.find("StructuredBuffer<", p)) != std::string::npos; p += 17) {
+        const bool rw = p >= 2 && s.compare(p - 2, 2, "RW") == 0;
+        const bool rasterOrdered = p >= 16 && s.compare(p - 16, 16, "RasterizerOrdered") == 0;
+        if (!rw && !rasterOrdered && p > 0 && IsIdentChar(s[p - 1])) continue;   // 如 AppendStructuredBuffer
+        const size_t gt = s.find('>', p);
+        if (gt == std::string::npos) break;
+        std::string elem = Trim(s.substr(p + 17, gt - p - 17));
+        size_t k = gt + 1;
+        while (k < s.size() && isspace(static_cast<unsigned char>(s[k]))) ++k;
+        const size_t nameBeg = k;
+        while (k < s.size() && IsIdentChar(s[k])) ++k;
+        const std::string name = s.substr(nameBeg, k - nameBeg);
+        int r = 0, c = 0;
+        const bool isMat = ParseMatrixType(elem, r, c);
+        const bool isFixStruct = needFix.count(elem) && needFix[elem];
+        if (name.empty() || (!isMat && !isFixStruct)) continue;
+        if (rw || rasterOrdered) {
+            problems.push_back("可写结构化缓冲 " + name + " 的元素含矩阵（fxc 按行主序读写，未修正）");
+            continue;
+        }
+        if (isMat && r != c) {
+            problems.push_back("结构化缓冲 " + name + " 的元素是非方阵 " + elem + "（无法用 transpose 修正）");
+            continue;
+        }
+        buffers.push_back({ name, elem });
+    }
+    if (buffers.empty()) return problems;
+
+    // 4) 只为缓冲用到的结构体（含嵌套）生成修正函数
+    std::map<std::string, bool> used;
+    std::vector<std::string> pending;
+    for (const Buffer& b : buffers) pending.push_back(b.elem);
+    while (!pending.empty()) {
+        const std::string t = pending.back();
+        pending.pop_back();
+        if (!needFix.count(t) || !needFix[t] || used[t]) continue;
+        used[t] = true;
+        for (const Member& m : structs[t]) pending.push_back(m.type);
+    }
+    // 修正函数写在结构体定义的 `};` 之后、同一行（不改变行号）；嵌套结构体先定义，函数也先出现
+    std::vector<std::pair<size_t, std::string>> funcs;   // (插入位置, 函数文本)
+    for (const std::string& name : structOrder) {
+        if (!used[name]) continue;
+        std::string body;
+        for (const Member& m : structs[name]) {
+            int r = 0, c = 0;
+            std::string fn;
+            if (ParseMatrixType(m.type, r, c)) {
+                if (r != c) {
+                    problems.push_back("结构体 " + name + " 的成员 " + m.name + " 是非方阵 " + m.type + "（未修正）");
+                    continue;
+                }
+                fn = "transpose";
+            } else if (needFix.count(m.type) && needFix[m.type]) {
+                fn = "HE_FxcMat_" + m.type;
+            } else {
+                continue;
+            }
+            if (m.count <= 1) {
+                body += " v." + m.name + " = " + fn + "(v." + m.name + ");";
+            } else {
+                for (uint32_t i = 0; i < m.count; ++i) {
+                    const std::string e = "v." + m.name + "[" + std::to_string(i) + "]";
+                    body += " " + e + " = " + fn + "(" + e + ");";
+                }
+            }
+        }
+        funcs.push_back({ structEnd[name], " " + name + " HE_FxcMat_" + name + "(" + name + " v) {" + body + " return v; }" });
+    }
+
+    // 5) 包装访问：`name.Load(...)` / `name[...]` → `修正(…)`。先收集再从后往前改，位置不互相影响
+    struct Wrap { size_t beg; std::string fn; };   // 访问表达式的起点 + 修正函数名
+    std::vector<Wrap> wraps;
+    for (const Buffer& b : buffers) {
+        int r = 0, c = 0;
+        const std::string fn = ParseMatrixType(b.elem, r, c) ? "transpose" : "HE_FxcMat_" + b.elem;
+        for (size_t p = 0; (p = s.find(b.name, p)) != std::string::npos; p += b.name.size()) {
+            if (p > 0 && IsIdentChar(s[p - 1])) continue;
+            size_t k = p + b.name.size();
+            if (k < s.size() && IsIdentChar(s[k])) continue;
+            if (s.compare(k, 6, ".Load(") != 0 && !(k < s.size() && s[k] == '[')) continue;
+            wraps.push_back({ p, fn });
+        }
+    }
+    // 外层包装可能含内层（如 a.Load(b.Load(i).x)）：按起点从后往前插入，内层先改不影响外层的起点
+    std::sort(wraps.begin(), wraps.end(), [](const Wrap& a, const Wrap& b) { return a.beg > b.beg; });
+    for (const Wrap& w : wraps) {
+        // 内层插入后外层的终点会后移：此时才按括号匹配找终点
+        size_t k = w.beg;
+        while (k < s.size() && IsIdentChar(s[k])) ++k;
+        const char open = s[k] == '[' ? '[' : '(';
+        const char closeCh = open == '[' ? ']' : ')';
+        if (open == '(') k += 5;   // 跳过 ".Load"
+        int depth = 0;
+        size_t e = k;
+        for (; e < s.size(); ++e) {
+            if (s[e] == open) ++depth;
+            else if (s[e] == closeCh && --depth == 0) break;
+        }
+        if (e >= s.size()) continue;
+        s.insert(e + 1, ")");
+        s.insert(w.beg, w.fn + "(");
+    }
+    // 结构体定义在所有访问之前，上面的改动不影响这些位置；从后往前插入
+    for (auto it = funcs.rbegin(); it != funcs.rend(); ++it) s.insert(it->first, it->second);
+    return problems;
 }
 
 static const char* BindTypeName(DxbcBindType t) {

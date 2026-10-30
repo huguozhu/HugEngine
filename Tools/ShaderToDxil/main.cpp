@@ -105,6 +105,10 @@ static int RunDxbc(const char* input, const char* entry, const char* stage,
         PatchUint8(patched);
         PatchLoopsFxc(patched, insertLoop, &noLoopSites);
         if (st == "vs") PatchInstanceId(patched);
+        // fxc 按行主序读结构化缓冲里的矩阵：读取处补 transpose（无法修正的情况只告警）
+        for (const std::string& p : PatchStructuredMatricesFxc(patched)) {
+            if (insertLoop) std::fprintf(stderr, "ShaderToDxil --dxbc: %s 警告：%s\n", input, p.c_str());
+        }
         regs = PatchRegistersD3D11(patched, st == "ps");
         if (!WriteFile(hlslPath.c_str(), regs.hlsl)) {
             std::fprintf(stderr, "ShaderToDxil: 无法写临时 HLSL %s\n", hlslPath.c_str());

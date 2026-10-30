@@ -56,6 +56,15 @@ struct LoopSite {
 /// 必须展开（如分支内带隐式导数采样的定长循环），见 main.cpp 的逐循环重试
 void PatchLoopsFxc(std::string& s, bool insertLoop = true, const std::vector<LoopSite>* skip = nullptr);
 
+/// fxc 对 (RW)StructuredBuffer 元素里的矩阵**总是按行主序**解释内存，忽略
+/// `#pragma pack_matrix(column_major)` 与 `column_major` 修饰（DXC 会遵守）。引擎写入的矩阵是
+/// 列主序（与 Vulkan / D3D12 一致），fxc 读出来就成了转置。这里把只读结构化缓冲的每处
+/// `buf.Load(...)` / `buf[...]` 包一层修正函数，对元素里的方阵成员（含数组与嵌套结构）做
+/// transpose，语义与 DXC 编出的 DXIL 一致。
+/// 修正函数与原声明写在同一行，不改变后续行号（#line 映射不受影响）。
+/// 返回无法修正的情况（非方阵、可写结构化缓冲里的矩阵）的说明；为空表示全部处理
+std::vector<std::string> PatchStructuredMatricesFxc(std::string& s);
+
 /// D3D11 寄存器分配的结果
 struct D3D11RegisterResult {
     std::string                                   hlsl;      // 改写后的 HLSL
