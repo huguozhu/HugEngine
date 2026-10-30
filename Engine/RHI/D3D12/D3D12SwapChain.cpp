@@ -1,4 +1,4 @@
-﻿// ============================================================================
+// ============================================================================
 //  D3D12SwapChain.cpp
 // ============================================================================
 #include "D3D12SwapChain.h"
@@ -23,12 +23,22 @@ bool D3D12SwapChain::Initialize(D3D12Device* device, const SwapChainDesc& desc) 
     m_Width  = desc.width;
     m_Height = desc.height;
     m_Vsync  = desc.vsync;
-    m_Format = desc.format;
     // FLIP 模型要求至少 2 个缓冲
     m_BufferCount = (desc.bufferCount >= 2) ? desc.bufferCount : 2;
 
     DXGI_FORMAT fmt = ToDxgiFormat(desc.format);
-    if (fmt == DXGI_FORMAT_UNKNOWN) fmt = DXGI_FORMAT_B8G8R8A8_UNORM;
+    // 【与 Vulkan 后端保持一致：后缓冲统一 BGRA8】
+    //   · DXGI 的 FLIP 模型对 BGRA8 支持最广（R8G8B8A8 在部分驱动 / 呈现路径上会被拒绝）；
+    //   · 引擎的后处理链按 BGRA8 写死（PostProcessChain 的 LDR 中间纹理、FXAA 的 PSO），
+    //     样例的 BeginRenderPass 也传 BGRA8。若后缓冲是 R8G8B8A8，D3D12 会因
+    //     「PSO 第 0 个渲染目标的格式与 RTV 不匹配」丢弃绘制（调试层 id=613，实测
+    //     05.Sponza-PathTracing 每帧两条：ToneMap→LDR 与 FXAA→后缓冲各一条）。
+    //   SwapChainDesc::format 的默认值是 RGBA8_UNORM，故这里把它当作「默认」改用 BGRA8。
+    if (fmt == DXGI_FORMAT_UNKNOWN || fmt == DXGI_FORMAT_R8G8B8A8_UNORM)
+        fmt = DXGI_FORMAT_B8G8R8A8_UNORM;
+    if (desc.hdr) fmt = DXGI_FORMAT_R10G10B10A2_UNORM;   // HDR10 输出
+    m_Format = (fmt == DXGI_FORMAT_R10G10B10A2_UNORM) ? Format::A2B10G10R10_UNORM_PACK32
+                                                      : Format::BGRA8_UNORM;
 
     DXGI_SWAP_CHAIN_DESC1 sd{};
     sd.Width  = desc.width;
@@ -445,13 +455,18 @@ void D3D12SwapChain::CaptureIfRequested(u32 index, D3D12_RESOURCE_STATES state) 
 
     std::vector<unsigned char> rgba(static_cast<size_t>(w) * h * 4);
     const unsigned char* base = static_cast<const unsigned char*>(mapped);
+    // 【通道顺序】WIC 的 GUID_WICPixelFormat32bppRGBA 编码器实际按 BGRA 解读数据后写 PNG
+    //（实测：BGRA 后缓冲 + 这里再交换 R/B ⇒ PNG 整体反色，蓝色横幅变成橙色）。
+    // 因此只在后缓冲确实是 R8G8B8A8 时交换；后缓冲是 BGRA8（Initialize 的默认选择）时
+    // 原样交给 WIC，PNG 才是正确颜色。
+    const bool swapRB = (bd.Format == DXGI_FORMAT_R8G8B8A8_UNORM);
     for (u32 y = 0; y < h; ++y) {
         const unsigned char* s = base + static_cast<size_t>(y) * rowPitch;
         unsigned char* d = rgba.data() + static_cast<size_t>(y) * w * 4;
         for (u32 x = 0; x < w; ++x) {
-            d[x*4+0] = s[x*4+2];   // B → R
-            d[x*4+1] = s[x*4+1];   // G
-            d[x*4+2] = s[x*4+0];   // R → B
+            d[x*4+0] = swapRB ? s[x*4+2] : s[x*4+0];
+            d[x*4+1] = s[x*4+1];
+            d[x*4+2] = swapRB ? s[x*4+0] : s[x*4+2];
             d[x*4+3] = 255;
         }
     }

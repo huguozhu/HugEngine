@@ -30,10 +30,15 @@
 
 // RT 着色器 SPIR-V（编译生成的内嵌头文件）
 #include "RT_Sponza.rgen.spv.h"
+#include "RT_Sponza.rgen.dxil.h"
 #include "RT_Sponza.rmiss.spv.h"
+#include "RT_Sponza.rmiss.dxil.h"
 #include "RT_Sponza.rchit.spv.h"
+#include "RT_Sponza.rchit.dxil.h"
 #include "RT_Bindless.rcall.spv.h"
+#include "RT_Bindless.rcall.dxil.h"
 
+#include <iterator>   // std::begin / std::end（填 dxil 字节码用）
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
@@ -461,11 +466,11 @@ int main() {
         rtLayout1 = device->CreateDescriptorSetLayout(rtSet1Desc);
 
         // 5.5.2 准备 Shader 字节码
-        rhi::ShaderBytecode rgen = he::rhi::MakeShaderBytecode(rhi::ShaderStage::RayGen, k_RT_Sponza_rgen_spv, nullptr, "main");
-        rhi::ShaderBytecode rmiss = he::rhi::MakeShaderBytecode(rhi::ShaderStage::Miss, k_RT_Sponza_rmiss_spv, nullptr, "main");
-        rhi::ShaderBytecode rchit = he::rhi::MakeShaderBytecode(rhi::ShaderStage::ClosestHit, k_RT_Sponza_rchit_spv, nullptr, "main");
+        rhi::ShaderBytecode rgen = he::rhi::MakeShaderBytecode(rhi::ShaderStage::RayGen, k_RT_Sponza_rgen_spv, k_RT_Sponza_rgen_dxil, "main");
+        rhi::ShaderBytecode rmiss = he::rhi::MakeShaderBytecode(rhi::ShaderStage::Miss, k_RT_Sponza_rmiss_spv, k_RT_Sponza_rmiss_dxil, "main");
+        rhi::ShaderBytecode rchit = he::rhi::MakeShaderBytecode(rhi::ShaderStage::ClosestHit, k_RT_Sponza_rchit_spv, k_RT_Sponza_rchit_dxil, "main");
         // Callable: bindless 纹理采样（Phase 5 测试 CallableKHR 是否绕过 slangc bug）
-        rhi::ShaderBytecode rcall = he::rhi::MakeShaderBytecode(rhi::ShaderStage::Callable, k_RT_Bindless_rcall_spv, nullptr, "main");
+        rhi::ShaderBytecode rcall = he::rhi::MakeShaderBytecode(rhi::ShaderStage::Callable, k_RT_Bindless_rcall_spv, k_RT_Bindless_rcall_dxil, "main");
 
         // 5.5.3 Shader Group 定义
         // Group 0=RayGen, 1=Miss, 2=Hit, 3=Callable（bindless 采样）

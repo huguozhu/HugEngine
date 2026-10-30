@@ -1,4 +1,4 @@
-﻿// ============================================================
+// ============================================================
 // 01.Triangle — HugEngine RHI 渲染三角形（光栅化 + Ray Tracing + Mesh Shader）
 //
 // 光栅化：   传统 VS→PS 管线，纯红色三角形
@@ -18,12 +18,16 @@
 #include "Triangle.frag.spv.h"
 #include "Triangle.frag.dxil.h"
 #include "RT_Triangle.rgen.spv.h"
+#include "RT_Triangle.rgen.dxil.h"
 #include "RT_Background.rmiss.spv.h"
+#include "RT_Background.rmiss.dxil.h"
 #include "Triangle.mesh.spv.h"
+#include "Triangle.mesh.dxil.h"
 #include "TriangleMesh.frag.spv.h"
 #include "TriangleMesh.frag.dxil.h"
 #include "imgui.h"
 
+#include <iterator>   // std::begin / std::end（填 dxil 字节码用）
 #include <cstring>
 
 using namespace he;
@@ -81,7 +85,10 @@ int main() {
     auto pipeline = device->CreatePipelineState({
         .vertexShader = &vertShader, .pixelShader = &fragShader,
         .vertexLayout = {.stride = sizeof(Vertex)},
-        .depthTest = false, .depthWrite = false, .debugName = "Triangle",
+        .depthTest = false, .depthWrite = false,
+        // 颜色附件必须是后缓冲的真实格式（D3D12 交换链为 BGRA8，默认值 RGBA8 会让绘制被丢弃）
+        .colorFormats = { swapchain->GetColorFormat() },
+        .debugName = "Triangle",
     });
 
     // ============================================================
@@ -94,8 +101,8 @@ int main() {
     rhi::DescriptorSetHandle       rtSet    = rhi::kInvalidSet;
 
     if (rtSupported) {
-        he::rhi::ShaderBytecode rgen = he::rhi::MakeShaderBytecode(he::rhi::ShaderStage::RayGen, k_RT_Triangle_rgen_spv, nullptr, "main");
-        he::rhi::ShaderBytecode rmiss = he::rhi::MakeShaderBytecode(he::rhi::ShaderStage::Miss, k_RT_Background_rmiss_spv, nullptr, "main");
+        he::rhi::ShaderBytecode rgen = he::rhi::MakeShaderBytecode(he::rhi::ShaderStage::RayGen, k_RT_Triangle_rgen_spv, k_RT_Triangle_rgen_dxil, "main");
+        he::rhi::ShaderBytecode rmiss = he::rhi::MakeShaderBytecode(he::rhi::ShaderStage::Miss, k_RT_Background_rmiss_spv, k_RT_Background_rmiss_dxil, "main");
 
         rhi::DescriptorSetLayoutDesc ldesc;
         ldesc.bindings = {{ 0, rhi::DescriptorType::StorageImage, 1, 0x100 }};
@@ -160,7 +167,7 @@ int main() {
     std::unique_ptr<he::rhi::IRHIPipelineState> meshPSO;
 
     if (meshSupported) {
-        he::rhi::ShaderBytecode meshShader = he::rhi::MakeShaderBytecode(he::rhi::ShaderStage::Mesh, k_Triangle_mesh_spv, nullptr, "main");
+        he::rhi::ShaderBytecode meshShader = he::rhi::MakeShaderBytecode(he::rhi::ShaderStage::Mesh, k_Triangle_mesh_spv, k_Triangle_mesh_dxil, "main");
         he::rhi::ShaderBytecode meshFrag = he::rhi::MakeShaderBytecode(he::rhi::ShaderStage::Pixel, k_TriangleMesh_frag_spv, k_TriangleMesh_frag_dxil, "main");
 
         meshPSO = device->CreatePipelineState({
@@ -168,6 +175,7 @@ int main() {
             .meshShader  = &meshShader,
             .depthTest   = false,
             .depthWrite  = false,
+            .colorFormats = { swapchain->GetColorFormat() },   // 同上：与后缓冲格式一致
             .debugName   = "TriangleMesh",
         });
 
@@ -237,19 +245,19 @@ int main() {
             cmdList->SetPipeline(pipeline.get());
 
             // RenderPass (LoadOp::Load 保留 BackBuffer 上的 RT 输出)
-            cmdList->BeginRenderPass(1, he::rhi::Format::RGBA8_UNORM, he::rhi::Format::Unknown,
+            cmdList->BeginRenderPass(1, swapchain->GetColorFormat(), he::rhi::Format::Unknown,
                                      nullptr, rhi::LoadOp::Load);
         } else if (renderMode == 2 && meshSupported && meshPSO) {
             // ── Mesh Shader 模式：三色渐变三角形，无 VB/IB ──
             cmdList->SetPipeline(meshPSO.get());
-            cmdList->BeginRenderPass(1, he::rhi::Format::RGBA8_UNORM);
+            cmdList->BeginRenderPass(1, swapchain->GetColorFormat());
             cmdList->SetViewport({0, 0, static_cast<float>(w), static_cast<float>(h), 0.0f, 1.0f});
             cmdList->SetScissor({0, 0, w, h});
             cmdList->DrawMeshTasks(1, 1, 1);  // 1 个工作组，3 个线程输出 1 个三角形
         } else {
             // 光栅化模式：红色三角形
             cmdList->SetPipeline(pipeline.get());
-            cmdList->BeginRenderPass(1, he::rhi::Format::RGBA8_UNORM);
+            cmdList->BeginRenderPass(1, swapchain->GetColorFormat());
             cmdList->SetViewport({0, 0, static_cast<float>(w), static_cast<float>(h), 0.0f, 1.0f});
             cmdList->SetScissor({0, 0, w, h});
             cmdList->SetVertexBuffer(vertexBuffer.get(), 0);
