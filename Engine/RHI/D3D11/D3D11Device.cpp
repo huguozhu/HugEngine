@@ -6,6 +6,7 @@
 #include "D3D11Resources.h"
 #include "D3D11SwapChain.h"
 
+#include <d3dcompiler.h>   // D3DCompile：内置的参数整形 CS
 #include <cstring>
 #include <cwchar>
 #include <unordered_map>
@@ -164,6 +165,102 @@ static ID3D11Resource* ResourceOf(ID3D11View* view) {
     view->GetResource(&r);
     if (r) r->Release();
     return r;
+}
+
+// ---------------------------------------------------------------------------
+//  间接参数整形（规划 3.3）
+// ---------------------------------------------------------------------------
+/// 序号 ≥ 计数的命令 instanceCount 置 0（DrawIndexed 命令的第 2 个 u32）
+static const char kClampIndirectCountCS[] = R"(
+cbuffer Params : register(b0) { uint argsOffset; uint stride; uint maxDraw; uint countOffset; };
+ByteAddressBuffer   CountBuf : register(t0);
+RWByteAddressBuffer Args     : register(u0);
+[numthreads(64, 1, 1)]
+void main(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= maxDraw) return;
+    if (id.x >= CountBuf.Load(countOffset)) Args.Store(argsOffset + id.x * stride + 4u, 0u);
+}
+)";
+
+bool D3D11Device::ClampIndirectCount(D3D11Buffer* countBuffer, u64 countOffset, ID3D11UnorderedAccessView* argsUav,
+                                     u64 argsOffset, u32 stride, u32 maxDraw) {
+    if (!countBuffer || !argsUav || maxDraw == 0) return false;
+    // 第一次用到时编译着色器、建常量缓冲
+    if (!m_ClampCS) {
+        if (m_ClampCSFailed) return false;
+        ComPtr<ID3DBlob> code, errors;
+        const HRESULT hr = D3DCompile(kClampIndirectCountCS, sizeof(kClampIndirectCountCS) - 1, "ClampIndirectCount",
+                                      nullptr, nullptr, "main", "cs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &errors);
+        if (FAILED(hr) || !HE_D3D11_CHECK(m_Device->CreateComputeShader(code->GetBufferPointer(), code->GetBufferSize(),
+                                                                         nullptr, &m_ClampCS), "CreateComputeShader(参数整形)")) {
+            HE_CORE_ERROR("[D3D11] 参数整形 CS 编译失败：{}",
+                          errors ? static_cast<const char*>(errors->GetBufferPointer()) : "（无错误信息）");
+            m_ClampCSFailed = true;
+            return false;
+        }
+        D3D11_BUFFER_DESC bd{};
+        bd.ByteWidth      = 16;
+        bd.Usage          = D3D11_USAGE_DYNAMIC;
+        bd.BindFlags      = D3D11_BIND_CONSTANT_BUFFER;
+        bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        if (!HE_D3D11_CHECK(m_Device->CreateBuffer(&bd, nullptr, &m_ClampParams), "CreateBuffer(参数整形常量)")) {
+            m_ClampCS.Reset();
+            m_ClampCSFailed = true;
+            return false;
+        }
+    }
+
+    // 计数所在的一段拷进暂存缓冲（结构化缓冲的拷贝区间要按步长对齐，所以拷整个元素）
+    const u32 align = countBuffer->GetStructStride() ? countBuffer->GetStructStride() : 4u;
+    const u64 begin = (countOffset / align) * align;
+    const u32 need  = (align + 15u) & ~15u;
+    if (m_CountScratchSize < need) {
+        m_CountScratch.Reset();
+        m_CountScratchSrv.Reset();
+        D3D11_BUFFER_DESC bd{};
+        bd.ByteWidth = need;
+        bd.Usage     = D3D11_USAGE_DEFAULT;
+        bd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
+        if (!HE_D3D11_CHECK(m_Device->CreateBuffer(&bd, nullptr, &m_CountScratch), "CreateBuffer(计数暂存)")) return false;
+        D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+        sd.Format                = DXGI_FORMAT_R32_TYPELESS;
+        sd.ViewDimension         = D3D11_SRV_DIMENSION_BUFFEREX;
+        sd.BufferEx.NumElements  = need / 4u;
+        sd.BufferEx.Flags        = D3D11_BUFFEREX_SRV_FLAG_RAW;
+        if (!HE_D3D11_CHECK(m_Device->CreateShaderResourceView(m_CountScratch.Get(), &sd, &m_CountScratchSrv),
+                            "CreateShaderResourceView(计数暂存)")) {
+            m_CountScratch.Reset();
+            return false;
+        }
+        m_CountScratchSize = need;
+    }
+    const D3D11_BOX box{ static_cast<UINT>(begin), 0, 0, static_cast<UINT>(begin + align), 1, 1 };
+    m_Context->CopySubresourceRegion(m_CountScratch.Get(), 0, 0, 0, 0, countBuffer->GetBuffer(), 0, &box);
+
+    D3D11_MAPPED_SUBRESOURCE ms{};
+    if (FAILED(m_Context->Map(m_ClampParams.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &ms))) return false;
+    const u32 params[4] = { static_cast<u32>(argsOffset), stride, maxDraw, static_cast<u32>(countOffset - begin) };
+    std::memcpy(ms.pData, params, sizeof(params));
+    m_Context->Unmap(m_ClampParams.Get(), 0);
+
+    // 派发：CS 阶段的状态被改动，结束后解绑并让命令列表重新应用自己的状态
+    ID3D11ShaderResourceView* srv = m_CountScratchSrv.Get();
+    ID3D11Buffer* cb = m_ClampParams.Get();
+    m_Context->CSSetShader(m_ClampCS.Get(), nullptr, 0);
+    m_Context->CSSetConstantBuffers(0, 1, &cb);
+    m_Context->CSSetShaderResources(0, 1, &srv);
+    m_Context->CSSetUnorderedAccessViews(0, 1, &argsUav, nullptr);
+    m_Context->Dispatch((maxDraw + 63u) / 64u, 1, 1);
+    ID3D11ShaderResourceView* noSrv = nullptr;
+    ID3D11UnorderedAccessView* noUav = nullptr;
+    ID3D11Buffer* noCb = nullptr;
+    m_Context->CSSetShaderResources(0, 1, &noSrv);
+    m_Context->CSSetUnorderedAccessViews(0, 1, &noUav, nullptr);
+    m_Context->CSSetConstantBuffers(0, 1, &noCb);
+    TrackSrvs(2, 0, 1, &noSrv);   // CS 的 t0 已置空
+    m_ContextOwner = nullptr;
+    return true;
 }
 
 void D3D11Device::TrackSrvs(u32 stage, u32 slot, u32 count, ID3D11ShaderResourceView* const* views) {

@@ -562,29 +562,43 @@ void D3D11CommandList::DrawIndexed(u32 indexCount, u32 instanceCount, u32 firstI
 
 void D3D11CommandList::DrawIndexedIndirect(IRHIBuffer* buffer, u64 offset, u32 drawCount, u32 stride) {
     auto* args = static_cast<D3D11Buffer*>(buffer);
-    if (!args) return;
-    // 既是 Storage（CS 写入）又是 Indirect 的缓冲不能直接作间接参数（D3D11 的参数缓冲不能是结构化缓冲），
-    // 需要 M3.5 的参数整形 CS；在那之前跳过并提示一次
-    if (HasAny(args->GetUsage(), BufferUsage::Storage)) {
-        if (!m_WarnedIndirectStorage) {
-            m_WarnedIndirectStorage = true;
-            HE_CORE_WARN("[D3D11] 由计算着色器写入的间接参数缓冲暂不支持（M3.5 实现参数整形），间接绘制被跳过");
+    if (!args || drawCount == 0) return;
+    const u32 step = stride ? stride : static_cast<u32>(sizeof(IndirectDrawIndexedCommand));
+    // 由计算着色器写入的参数缓冲先拷进影子参数缓冲（规划 3.3）；拷贝在 PrepareDrawOrDispatch 之前，
+    // 不影响已下发的绘制状态
+    ID3D11Buffer* argBuf = args->PrepareIndirectArgs(offset, u64(drawCount - 1) * step + sizeof(IndirectDrawIndexedCommand));
+    if (!argBuf || !PrepareDrawOrDispatch(false)) return;
+    m_Device->NoteExecuted(m_Pipeline->GetName());   // 诊断：GPU 等待超时时打印最近的 PSO
+    // D3D11 一次只能画一条间接命令：逐条调用
+    ID3D11DeviceContext4* ctx = m_Device->GetContext();
+    for (u32 i = 0; i < drawCount; ++i) {
+        ctx->DrawIndexedInstancedIndirect(argBuf, static_cast<UINT>(offset + u64(i) * step));
+    }
+}
+
+void D3D11CommandList::DrawIndexedIndirectCount(IRHIBuffer* buffer, u64 offset, IRHIBuffer* countBuffer,
+                                                u64 countOffset, u32 maxDrawCount, u32 stride) {
+    auto* args  = static_cast<D3D11Buffer*>(buffer);
+    auto* count = static_cast<D3D11Buffer*>(countBuffer);
+    if (!args || !count || maxDrawCount == 0) return;
+    const u32 step = stride ? stride : static_cast<u32>(sizeof(IndirectDrawIndexedCommand));
+    // 参数整形（规划 3.3）：拷进影子参数缓冲，再由内置 CS 把序号 ≥ GPU 计数的命令 instanceCount 置 0，
+    // 然后逐条画满 maxDrawCount 条（多出来的是空绘制）。整形 CS 会改动 CS 阶段状态，
+    // 所以放在 PrepareDrawOrDispatch 之前，后者会重新应用本列表的状态
+    ID3D11Buffer* argBuf = args->PrepareIndirectArgs(offset, u64(maxDrawCount - 1) * step + sizeof(IndirectDrawIndexedCommand));
+    if (!argBuf) return;
+    if (!m_Device->ClampIndirectCount(count, countOffset, args->GetIndirectArgsUav(), offset, step, maxDrawCount)) {
+        if (!m_WarnedIndirectCount) {
+            m_WarnedIndirectCount = true;
+            HE_CORE_WARN("[D3D11] DrawIndexedIndirectCount 的参数整形失败（计数缓冲或影子参数缓冲不可用），间接绘制被跳过");
         }
         return;
     }
     if (!PrepareDrawOrDispatch(false)) return;
     m_Device->NoteExecuted(m_Pipeline->GetName());   // 诊断：GPU 等待超时时打印最近的 PSO
     ID3D11DeviceContext4* ctx = m_Device->GetContext();
-    const u32 step = stride ? stride : static_cast<u32>(sizeof(IndirectDrawIndexedCommand));
-    for (u32 i = 0; i < drawCount; ++i) {
-        ctx->DrawIndexedInstancedIndirect(args->GetBuffer(), static_cast<UINT>(offset + u64(i) * step));
-    }
-}
-
-void D3D11CommandList::DrawIndexedIndirectCount(IRHIBuffer*, u64, IRHIBuffer*, u64, u32, u32) {
-    if (!m_WarnedIndirectCount) {
-        m_WarnedIndirectCount = true;
-        HE_CORE_WARN("[D3D11] DrawIndexedIndirectCount 需要 M3.5 的参数整形，暂时跳过");
+    for (u32 i = 0; i < maxDrawCount; ++i) {
+        ctx->DrawIndexedInstancedIndirect(argBuf, static_cast<UINT>(offset + u64(i) * step));
     }
 }
 
@@ -601,17 +615,13 @@ void D3D11CommandList::Dispatch(u32 x, u32 y, u32 z) {
 void D3D11CommandList::DispatchIndirect(IRHIBuffer* buffer, u64 offset) {
     auto* args = static_cast<D3D11Buffer*>(buffer);
     if (!args) return;
-    if (HasAny(args->GetUsage(), BufferUsage::Storage)) {
-        if (!m_WarnedIndirectStorage) {
-            m_WarnedIndirectStorage = true;
-            HE_CORE_WARN("[D3D11] 由计算着色器写入的间接参数缓冲暂不支持（M3.5 实现参数整形），间接派发被跳过");
-        }
-        return;
-    }
+    // 由计算着色器写入的参数缓冲先拷进影子参数缓冲（规划 3.3）
+    ID3D11Buffer* argBuf = args->PrepareIndirectArgs(offset, 3u * sizeof(u32));
+    if (!argBuf) return;
     if (!PrepareDrawOrDispatch(true)) return;
     m_Device->NoteExecuted(m_Pipeline->GetName());   // 诊断：GPU 等待超时时打印最近的 PSO
     ID3D11DeviceContext4* ctx = m_Device->GetContext();
-    ctx->DispatchIndirect(args->GetBuffer(), static_cast<UINT>(offset));
+    ctx->DispatchIndirect(argBuf, static_cast<UINT>(offset));
     ID3D11UnorderedAccessView* nullUavs[dxbc::kDxbcMaxUAVSlots] = {};
     ctx->CSSetUnorderedAccessViews(0, dxbc::kDxbcMaxUAVSlots, nullUavs, nullptr);
 }

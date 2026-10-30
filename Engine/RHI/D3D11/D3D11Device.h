@@ -210,6 +210,13 @@ public:
     /// 把所有阶段里以 SRV 绑着 resources 中任一资源的槽位置空（绑定 RTV / DSV / UAV 前调用）
     void UnbindSrvsOf(ID3D11Resource* const* resources, u32 count);
 
+    // ---- 间接参数整形（规划 3.3）----
+    /// DrawIndexedIndirectCount 用：影子参数缓冲里从 argsOffset 起的 maxDraw 条命令，序号 ≥ 计数缓冲
+    /// countOffset 处的值的，instanceCount 置 0（内置小 CS，在 GPU 上完成，不回读计数）。
+    /// 会改动 CS 阶段的着色器与绑定：调用后清空上下文所有者，命令列表下次使用时重新应用自己的状态
+    bool ClampIndirectCount(D3D11Buffer* countBuffer, u64 countOffset, ID3D11UnorderedAccessView* argsUav,
+                            u64 argsOffset, u32 stride, u32 maxDraw);
+
     /// 全零顶点缓冲（步长 0）：着色器声明了、引擎顶点布局未提供的属性从这里读 0
     ID3D11Buffer* GetZeroVertexBuffer();
     /// 实例序号缓冲：第 i 个 u32 为 i，供顶点着色器取含起始实例的实例号（见 D3D11PipelineState）
@@ -268,6 +275,13 @@ private:
     // 各阶段 SRV 槽位当前指向的资源（只作比较，不持有引用）与可能非空的槽位上界
     ID3D11Resource*              m_SrvResources[kSrvStageCount][kSrvSlotCount] = {};
     u32                          m_SrvHigh[kSrvStageCount] = {};
+    // 参数整形 CS 及其资源（第一次用到时创建）
+    ComPtr<ID3D11ComputeShader>       m_ClampCS;
+    bool                              m_ClampCSFailed = false;    // 编译失败过就不再重试
+    ComPtr<ID3D11Buffer>              m_ClampParams;              // 16 字节动态常量缓冲
+    ComPtr<ID3D11Buffer>              m_CountScratch;             // 计数所在的一段（原始视图可读）
+    ComPtr<ID3D11ShaderResourceView>  m_CountScratchSrv;
+    u32                               m_CountScratchSize = 0;
     static constexpr u32         kRecentPsoCount = 32;
     const char*                  m_RecentPsos[kRecentPsoCount] = {};
     u32                          m_RecentCursor = 0;

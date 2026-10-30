@@ -85,7 +85,7 @@ bool D3D11Buffer::CreateGpuBuffer(u32 structStride, const void* initial) {
         } else if (HasAny(m_Usage, BufferUsage::Storage)) {
             bd.MiscFlags |= D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
         }
-        // 间接参数缓冲不能同时是结构化缓冲；既是 Storage 又是 Indirect 的缓冲由 M3.5 的影子参数缓冲处理
+        // 间接参数缓冲不能同时是结构化缓冲；既是 Storage 又是 Indirect 的缓冲另建影子参数缓冲（PrepareIndirectArgs）
         if (HasAny(m_Usage, BufferUsage::Indirect) && structStride == 0 && !HasAny(m_Usage, BufferUsage::Storage)) {
             bd.MiscFlags |= D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS;
         }
@@ -110,6 +110,8 @@ bool D3D11Buffer::CreateGpuBuffer(u32 structStride, const void* initial) {
     m_StructStride = structStride;
     m_Staging.Reset();
     m_ConstantMirror.Reset();
+    m_ArgsShadow.Reset();      // 大小可能变了，下次用到时按新大小重建
+    m_ArgsShadowUav.Reset();
     m_Srvs.clear();
     m_Uavs.clear();
     if (!m_Shadow.empty()) m_Shadow.resize(alloc, 0);
@@ -129,6 +131,43 @@ ID3D11Buffer* D3D11Buffer::GetConstantBuffer() {
         HE_D3D11_CHECK(m_Device->GetDevice()->CreateBuffer(&bd, &init, &m_ConstantMirror), "CreateBuffer(常量缓冲镜像)");
     }
     return m_ConstantMirror.Get();
+}
+
+ID3D11Buffer* D3D11Buffer::PrepareIndirectArgs(u64 offset, u64 size) {
+    if (!HasAny(m_Usage, BufferUsage::Storage)) return m_Buffer.Get();   // 创建时已带 DRAWINDIRECT_ARGS
+    if (!m_ArgsShadow) {
+        D3D11_BUFFER_DESC bd{};
+        bd.ByteWidth = m_AllocSize;
+        bd.Usage     = D3D11_USAGE_DEFAULT;
+        bd.BindFlags = D3D11_BIND_UNORDERED_ACCESS;   // 参数整形 CS 要改写它
+        bd.MiscFlags = D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS | D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
+        if (!HE_D3D11_CHECK(m_Device->GetDevice()->CreateBuffer(&bd, nullptr, &m_ArgsShadow), "CreateBuffer(影子参数缓冲)")) {
+            return nullptr;
+        }
+    }
+    // 结构化缓冲的拷贝区间必须按步长对齐：向外扩到步长边界（影子缓冲与主缓冲同样大小，按原偏移拷贝）
+    const u64 align = m_StructStride ? m_StructStride : 4u;
+    const u64 begin = (offset / align) * align;
+    const u64 end   = std::min<u64>(((offset + size + align - 1) / align) * align, m_AllocSize);
+    if (end <= begin) return m_ArgsShadow.Get();
+    const D3D11_BOX box{ static_cast<UINT>(begin), 0, 0, static_cast<UINT>(end), 1, 1 };
+    m_Device->GetContext()->CopySubresourceRegion(m_ArgsShadow.Get(), 0, static_cast<UINT>(begin), 0, 0,
+                                                  m_Buffer.Get(), 0, &box);
+    return m_ArgsShadow.Get();
+}
+
+ID3D11UnorderedAccessView* D3D11Buffer::GetIndirectArgsUav() {
+    if (!m_ArgsShadow) return nullptr;
+    if (!m_ArgsShadowUav) {
+        D3D11_UNORDERED_ACCESS_VIEW_DESC ud{};
+        ud.Format              = DXGI_FORMAT_R32_TYPELESS;
+        ud.ViewDimension       = D3D11_UAV_DIMENSION_BUFFER;
+        ud.Buffer.NumElements  = m_AllocSize / 4u;
+        ud.Buffer.Flags        = D3D11_BUFFER_UAV_FLAG_RAW;
+        HE_D3D11_CHECK(m_Device->GetDevice()->CreateUnorderedAccessView(m_ArgsShadow.Get(), &ud, &m_ArgsShadowUav),
+                       "CreateUnorderedAccessView(影子参数缓冲)");
+    }
+    return m_ArgsShadowUav.Get();
 }
 
 void D3D11Buffer::EnsureShadowCurrent() {

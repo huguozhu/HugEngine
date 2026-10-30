@@ -74,8 +74,9 @@ public:
                      i32 vertexOffset = 0, u32 firstInstance = 0) override;
     /// D3D11 一次只能画一条间接命令：按条数逐条调用 DrawIndexedInstancedIndirect（规划 3.3）
     void DrawIndexedIndirect(IRHIBuffer* buffer, u64 offset, u32 drawCount, u32 stride) override;
-    /// 带 GPU 计数的间接绘制需要 M3.5 的参数整形 CS，当前跳过
-    void DrawIndexedIndirectCount(IRHIBuffer*, u64, IRHIBuffer*, u64, u32, u32) override;
+    /// 内置 CS 把序号 ≥ GPU 计数的命令 instanceCount 置 0，再逐条画满 maxDrawCount 条（规划 3.3）
+    void DrawIndexedIndirectCount(IRHIBuffer* buffer, u64 offset, IRHIBuffer* countBuffer, u64 countOffset,
+                                  u32 maxDrawCount, u32 stride) override;
     // D3D11 没有 mesh shader（supportsMeshShaders=false，引擎不会走这条路径）
     void DrawMeshTasks(u32, u32 = 1, u32 = 1) override {}
     void DrawMeshTasksIndirect(IRHIBuffer*, u64, u32, u32) override {}
@@ -195,7 +196,6 @@ private:
     u32                 m_LabelDepth = 0;           // 未配对的 BeginDebugLabel 层数（End 时补齐）
     std::string         m_LastMissing;              // 上一次报告缺资源的键（同一键不重复打印）
     bool                m_WarnedIndirectCount = false;
-    bool                m_WarnedIndirectStorage = false;
 };
 
 } // namespace he::rhi::d3d11

@@ -76,6 +76,13 @@ public:
     void RefreshPersistentReads();
     bool IsMapped() const { return m_MapCount > 0; }
 
+    /// 作间接参数用的原生缓冲（规划 3.3）。用途不含 Storage 时就是主缓冲（创建时带 DRAWINDIRECT_ARGS）；
+    /// 含 Storage 时主缓冲可能是结构化缓冲、不能作参数缓冲：先把 [offset, offset + size) 拷进
+    /// 「影子参数缓冲」（DRAWINDIRECT_ARGS | 原始视图，与主缓冲同样大小、同样偏移）再返回它
+    ID3D11Buffer* PrepareIndirectArgs(u64 offset, u64 size);
+    /// 影子参数缓冲的原始 UAV（参数整形 CS 改写它）；须先调用 PrepareIndirectArgs
+    ID3D11UnorderedAccessView* GetIndirectArgsUav();
+
 private:
     /// 按当前的结构化步长（0 = 非结构化）创建 GPU 缓冲，initial 非空时作初始数据
     bool CreateGpuBuffer(u32 structStride, const void* initial);
@@ -92,6 +99,8 @@ private:
     ComPtr<ID3D11Buffer> m_Buffer;
     ComPtr<ID3D11Buffer> m_ConstantMirror;   // Uniform 与其它用途混用时的常量缓冲镜像
     ComPtr<ID3D11Buffer> m_Staging;          // 回读用（懒创建）
+    ComPtr<ID3D11Buffer> m_ArgsShadow;       // 影子参数缓冲（Storage + Indirect 时懒创建）
+    ComPtr<ID3D11UnorderedAccessView> m_ArgsShadowUav;
     std::unordered_map<u64, ComPtr<ID3D11ShaderResourceView>>  m_Srvs;
     std::unordered_map<u64, ComPtr<ID3D11UnorderedAccessView>> m_Uavs;
     std::vector<u8>      m_Shadow;           // CPU 影子内存（第一次 Map 时分配）
