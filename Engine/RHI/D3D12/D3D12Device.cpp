@@ -406,7 +406,27 @@ bool D3D12Device::CreateDeviceAndQueue() {
     // 否则样例会走光追路径并因 CreateRTPipelineState 返回空而中止，
     // 连带图形路径也跑不到（实测 01.Triangle 就卡在这里）。
     // 阶段 4 实现后把这一行改成真正的接口探测即可。
-    m_Caps.supportsRayTracing = false;
+    // 光线追踪能力：查 D3D12_OPTIONS5 的 RaytracingTier 并要求能取到 ID3D12Device5
+    // （CreateStateObject / BuildRaytracingAccelerationStructure 都挂在 Device5 / CommandList4 上）。
+    // 引擎侧光追接口仍在实现中，全部打通前只有显式设置 HE_D3D12_RT=1 才上报支持，
+    // 否则样例会走光追路径并因接口未实现而中止，连带图形路径也跑不到。
+    {
+        const char* rtEnv = std::getenv("HE_D3D12_RT");
+        const bool rtRequested = (rtEnv != nullptr) && (rtEnv[0] != '0');
+        D3D12_FEATURE_DATA_D3D12_OPTIONS5 o5{};
+        ComPtr<ID3D12Device5> dev5;
+        const bool tierOk =
+            SUCCEEDED(m_Device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &o5, sizeof(o5))) &&
+            o5.RaytracingTier >= D3D12_RAYTRACING_TIER_1_1 &&
+            SUCCEEDED(m_Device.As(&dev5));
+        m_Caps.supportsRayTracing = tierOk && rtRequested;
+        if (tierOk) {
+            // 硬件支持时填充引擎需要的固定参数（与 Vulkan 侧同名参数对应）
+            m_Caps.maxRayRecursionDepth     = D3D12_RAYTRACING_MAX_DECLARABLE_TRACE_RECURSION_DEPTH;  // 31
+            m_Caps.shaderGroupHandleSize    = D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES;                  // 32
+            m_Caps.shaderGroupBaseAlignment = D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT;           // 64
+        }
+    }
     m_Caps.supportsDGC = true;              // D3D12 原生支持 ExecuteIndirect
     // 最高支持的着色器模型（从高往低探测：传入的 HighestShaderModel 不被支持时 CheckFeatureSupport 失败）
     {
