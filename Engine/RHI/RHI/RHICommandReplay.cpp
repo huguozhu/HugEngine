@@ -5,6 +5,7 @@
 #include "RHI/CommandList.h"      // 执行端：IRHICommandList
 #include "RHI/Buffer.h"           // IRHIBuffer
 #include "RHI/Shader.h"           // IRHIPipelineState
+#include "RHI/QueryPool.h"        // IRHIQueryPool（查询类命令的回放）
 
 namespace he::rhi {
 
@@ -36,7 +37,7 @@ static u32 g_L43PassW = 0, g_L43PassH = 0;
             if (!d) break;
             const u8* data = stream.ArenaRawAt(d->arenaOffset, d->size);
             if (!data) break;
-            cmd.SetPushConstants(0u, d->size, data);
+            cmd.SetPushConstants(d->offset, d->size, data);
             ++replayed;
             break;
         }
@@ -50,7 +51,7 @@ static u32 g_L43PassW = 0, g_L43PassH = 0;
         case RHICommandType::SetIndexBuffer: {
             const auto* d = stream.PayloadAt<RHICommandSetIndexBuffer>(i);
             if (!d || !d->buffer) break;
-            cmd.SetIndexBuffer(static_cast<IRHIBuffer*>(d->buffer));
+            cmd.SetIndexBuffer(static_cast<IRHIBuffer*>(d->buffer), d->offset);
             ++replayed;
             break;
         }
@@ -60,7 +61,7 @@ static u32 g_L43PassW = 0, g_L43PassH = 0;
             // L4-3 修正：旧实现把实例化重载当成"两参数"，丢掉了 startIndex/baseVertex，
             // 且把 instanceCount 传到了 firstIndex 的位置 ⇒ 实例化绘制会画错/画空。
             // 统一用五参数重载，语义与录制侧一一对应。
-            cmd.DrawIndexed(d->indexCount, d->instanceCount, d->startIndex, d->baseVertex, 0u);
+            cmd.DrawIndexed(d->indexCount, d->instanceCount, d->startIndex, d->baseVertex, d->firstInstance);
             ++g_L43PassDraws;
             ++replayed;
             break;
@@ -244,6 +245,104 @@ static u32 g_L43PassW = 0, g_L43PassH = 0;
             const auto* d = stream.PayloadAt<RHICommandBindRTPipeline>(i);
             if (!d || !d->rtPSO) break;
             cmd.BindRTPipeline(static_cast<IRHIRayTracingPipelineState*>(d->rtPSO));
+            ++replayed;
+            break;
+        }
+        case RHICommandType::CmdPipelineBarrierTexture: {
+            const auto* d = stream.PayloadAt<RHICommandPipelineBarrierTexture>(i);
+            if (!d || !d->texture) break;
+            cmd.PipelineBarrier(static_cast<PipelineStage>(d->srcStage), static_cast<PipelineStage>(d->dstStage),
+                                static_cast<ResourceState>(d->srcState), static_cast<ResourceState>(d->dstState),
+                                static_cast<IRHITexture*>(d->texture));
+            ++replayed;
+            break;
+        }
+        case RHICommandType::CmdBufferBarrier: {
+            const auto* d = stream.PayloadAt<RHICommandBufferBarrier>(i);
+            if (!d || !d->buffer) break;
+            cmd.BufferBarrier(static_cast<IRHIBuffer*>(d->buffer), static_cast<ResourceState>(d->srcState),
+                              static_cast<ResourceState>(d->dstState));
+            ++replayed;
+            break;
+        }
+        case RHICommandType::CmdBeginDebugLabel:
+        case RHICommandType::CmdInsertDebugLabel: {
+            const auto* d = stream.PayloadAt<RHICommandSetDebugLabel>(i);
+            if (!d) break;
+            if (c.type == RHICommandType::CmdBeginDebugLabel) cmd.BeginDebugLabel(d->text);
+            else                                              cmd.InsertDebugLabel(d->text);
+            ++replayed;
+            break;
+        }
+        case RHICommandType::CmdEndDebugLabel:
+            cmd.EndDebugLabel();
+            ++replayed;
+            break;
+        case RHICommandType::CmdClearDrawDebugLabel:
+            cmd.ClearDrawDebugLabel();
+            ++replayed;
+            break;
+        case RHICommandType::CmdTimelineSignal:
+        case RHICommandType::CmdTimelineWait: {
+            const auto* d = stream.PayloadAt<RHICommandTimeline>(i);
+            if (!d) break;
+            if (c.type == RHICommandType::CmdTimelineSignal) cmd.SetTimelineSignal(static_cast<RHIFenceHandle>(d->fence), d->value);
+            else                                             cmd.SetTimelineWait(static_cast<RHIFenceHandle>(d->fence), d->value);
+            ++replayed;
+            break;
+        }
+        case RHICommandType::CmdWriteTimestamp:
+        case RHICommandType::CmdBeginQuery:
+        case RHICommandType::CmdEndQuery:
+        case RHICommandType::CmdResetQueryPool: {
+            const auto* d = stream.PayloadAt<RHICommandQuery>(i);
+            if (!d || !d->pool) break;
+            auto* pool = static_cast<IRHIQueryPool*>(d->pool);
+            switch (c.type) {
+                case RHICommandType::CmdWriteTimestamp: cmd.WriteTimestamp(pool, d->index); break;
+                case RHICommandType::CmdBeginQuery:     cmd.BeginQuery(pool, d->index);     break;
+                case RHICommandType::CmdEndQuery:       cmd.EndQuery(pool, d->index);       break;
+                default:                                cmd.ResetQueryPool(pool);           break;
+            }
+            ++replayed;
+            break;
+        }
+        case RHICommandType::CmdDrawMeshTasks: {
+            const auto* d = stream.PayloadAt<RHICommandDrawMeshTasks>(i);
+            if (!d) break;
+            cmd.DrawMeshTasks(d->x, d->y, d->z);
+            ++replayed;
+            break;
+        }
+        case RHICommandType::CmdDrawMeshTasksIndirect: {
+            const auto* d = stream.PayloadAt<RHICommandDrawIndexedIndirect>(i);
+            if (!d || !d->buffer) break;
+            cmd.DrawMeshTasksIndirect(static_cast<IRHIBuffer*>(d->buffer), d->offset, d->drawCount, d->stride);
+            ++replayed;
+            break;
+        }
+        case RHICommandType::CmdDrawMeshTasksIndirectCount: {
+            const auto* d = stream.PayloadAt<RHICommandDrawIndexedIndirectCount>(i);
+            if (!d || !d->buffer || !d->countBuffer) break;
+            cmd.DrawMeshTasksIndirectCount(static_cast<IRHIBuffer*>(d->buffer), d->offset,
+                                           static_cast<IRHIBuffer*>(d->countBuffer), d->countOffset,
+                                           d->maxDrawCount, d->stride);
+            ++replayed;
+            break;
+        }
+        case RHICommandType::CmdExecuteGeneratedCommands: {
+            const auto* d = stream.PayloadAt<RHICommandExecuteGeneratedCommands>(i);
+            if (!d) break;
+            IRHICommandList::DGCExecuteDesc desc{};
+            desc.indirectCommandsLayout = d->indirectCommandsLayout;
+            desc.indirectExecutionSet   = d->indirectExecutionSet;
+            desc.sequencesBufferAddr    = d->sequencesBufferAddr;
+            desc.maxSequenceCount       = d->maxSequenceCount;
+            desc.sequenceCountAddr      = d->sequenceCountAddr;
+            desc.preprocessBufferAddr   = d->preprocessBufferAddr;
+            desc.preprocessBufferSize   = d->preprocessBufferSize;
+            desc.maxDrawCount           = d->maxDrawCount;
+            cmd.ExecuteGeneratedCommands(desc);
             ++replayed;
             break;
         }

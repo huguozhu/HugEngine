@@ -76,6 +76,23 @@ enum class RHICommandType : u32 {
     CmdBindRTPipeline = 35,
     CmdDrawIndexedIndirect = 25,
     CmdDrawIndexedIndirectCount = 26,
+    // D3D12 命令流模式补齐的类型：帧主列表的全部录制调用都进流（回放侧逐一还原）
+    CmdPipelineBarrierTexture   = 36,   // 带纹理的屏障（上面的 CmdPipelineBarrier 是全局屏障）
+    CmdBufferBarrier            = 37,
+    CmdBeginDebugLabel          = 38,   // 载荷同 SetDrawDebugLabel（内联短文本）
+    CmdEndDebugLabel            = 39,
+    CmdInsertDebugLabel         = 40,
+    CmdClearDrawDebugLabel      = 41,
+    CmdTimelineSignal           = 42,   // 时间线信号 / 等待附在回放列表的那次提交上
+    CmdTimelineWait             = 43,
+    CmdWriteTimestamp           = 44,
+    CmdBeginQuery               = 45,
+    CmdEndQuery                 = 46,
+    CmdResetQueryPool           = 47,
+    CmdDrawMeshTasks            = 48,
+    CmdDrawMeshTasksIndirect    = 49,   // 载荷同 CmdDrawIndexedIndirect
+    CmdDrawMeshTasksIndirectCount = 50, // 载荷同 CmdDrawIndexedIndirectCount
+    CmdExecuteGeneratedCommands = 51,
 };
 
 /// 一条命令的载荷：类型擦除 + **内联存储**。
@@ -122,6 +139,22 @@ struct RHICommandDrawIndexedIndirectCount {
 struct RHICommandDrawIndexedIndirect { void* buffer = nullptr; u64 offset = 0; u32 drawCount = 0; u32 stride = 0; };
 struct RHICommandDraw { u32 vertexCount = 0, instanceCount = 1, firstVertex = 0, firstInstance = 0; };
 struct RHICommandPipelineBarrier { u32 srcStage = 0, dstStage = 0, srcState = 0, dstState = 0; };
+/// 带纹理的屏障 / 缓冲屏障（阶段与状态都按 RHI 枚举的数值保存）
+struct RHICommandPipelineBarrierTexture { void* texture = nullptr; u32 srcStage = 0, dstStage = 0, srcState = 0, dstState = 0; };
+struct RHICommandBufferBarrier { void* buffer = nullptr; u32 srcState = 0, dstState = 0; };
+/// 时间线信号 / 等待：围栏句柄（RHIFenceHandle）+ 值
+struct RHICommandTimeline { u64 fence = 0; u64 value = 0; };
+/// 查询：查询池 + 下标（ResetQueryPool 只用 pool）
+struct RHICommandQuery { void* pool = nullptr; u32 index = 0; u32 pad = 0; };
+/// 网格着色器直接绘制
+struct RHICommandDrawMeshTasks { u32 x = 0, y = 1, z = 1; u32 pad = 0; };
+/// DGC 执行描述（与 IRHICommandList::DGCExecuteDesc 逐字段对应；本头文件不依赖 RHI 类型）
+struct RHICommandExecuteGeneratedCommands {
+    void* indirectCommandsLayout = nullptr; void* indirectExecutionSet = nullptr;
+    u64 sequencesBufferAddr = 0; u64 sequenceCountAddr = 0;
+    u64 preprocessBufferAddr = 0; u64 preprocessBufferSize = 0;
+    u32 maxSequenceCount = 0; u32 maxDrawCount = 0;
+};
 
 /// L4-3 batch2: POD only (this header is RHI-free, so no Viewport/ScissorRect types)
 struct RHICommandSetViewport { float x = 0, y = 0, w = 0, h = 0, minZ = 0, maxZ = 1; };
@@ -144,7 +177,7 @@ struct RHICommandSetPipeline { void* pso = nullptr; };
 /// `SetDescriptorSet`：set 索引 + 描述符集句柄（`DescriptorSetHandle` 是 u64）
 struct RHICommandSetDescriptorSet { u32 set = 0; u32 pad = 0; u64 handle = 0; };
 /// `SetPushConstants` 的**内联头**：实际字节在 arena（`ArenaRawAt(offset, size)`）
-struct RHICommandSetPushConstants { u64 arenaOffset = 0; u32 size = 0; u32 pad = 0; };
+struct RHICommandSetPushConstants { u64 arenaOffset = 0; u32 size = 0; u32 offset = 0; };   // offset：推送常量内的字节偏移
 /// `SetVertexBuffer`：缓冲 + 槽位
 struct RHICommandSetVertexBuffer { void* buffer = nullptr; u32 slot = 0; u32 pad = 0; };
 /// `SetIndexBuffer`：缓冲 + 偏移
@@ -152,6 +185,7 @@ struct RHICommandSetIndexBuffer { void* buffer = nullptr; u32 offset = 0; u32 pa
 /// `DrawIndexed`（`instanceCount > 1` 时执行端走"实例化"重载）
 struct RHICommandDrawIndexed {
     u32 indexCount = 0; u32 startIndex = 0; i32 baseVertex = 0; u32 instanceCount = 1;
+    u32 firstInstance = 0;   // 起始实例（D3D12 的实例号依赖它，见 kInstanceIndexSlot）
 };
 /// `ExecuteSecondary`：要执行的次级列表（它已由录制者线程录好）
 struct RHICommandExecuteSecondary { void* secondary = nullptr; };

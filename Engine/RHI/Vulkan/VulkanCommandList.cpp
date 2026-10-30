@@ -471,9 +471,9 @@ void VulkanCommandList::DrawIndexed(u32 indexCount, u32 instanceCount,
                                      u32 firstIndex, i32 vertexOffset, u32 firstInstance) {
     if (m_StreamMode) {
         // L4-3: in stream mode record the draw only; bindings are replayed by the submit thread.
-        HE_ASSERT(firstInstance == 0u && "L4-3 stream mode does not support firstInstance != 0");
+        // 载荷已带起始实例，回放时原样传入
         m_Stream.Enqueue(RHICommandType::DrawIndexed,
-                         RHICommandDrawIndexed{ indexCount, firstIndex, vertexOffset, instanceCount });
+                         RHICommandDrawIndexed{ indexCount, firstIndex, vertexOffset, instanceCount, firstInstance });
         return;
     }
     EmitDrawLabel();  // 自动插入 DrawCall 级调试 marker（若已设置）
@@ -595,7 +595,8 @@ void VulkanCommandList::SetPushConstants(u32 offset, u32 size, const void* data)
     if (m_StreamMode) {
         // L4-3: the caller's data may live on the render thread's stack, so copy it into the stream arena.
         RHICommandSetPushConstants pc{};
-        pc.size = size;
+        pc.size   = size;
+        pc.offset = offset;   // 回放时按原偏移写入
         if (size != 0u && data) {
             void* dst = m_Stream.AllocArena(size, 16);
             std::memcpy(dst, data, size);
