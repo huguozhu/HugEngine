@@ -6,6 +6,7 @@
 #include "D3D11Resources.h"
 #include "D3D11SwapChain.h"
 
+#include <cstring>
 #include <cwchar>
 #include <unordered_map>
 
@@ -173,7 +174,9 @@ void D3D11Device::DrainDebugMessages() {
 //  资源创建（M2 骨架：返回占位对象，后续子任务替换为真正的 D3D11 资源）
 // ---------------------------------------------------------------------------
 std::unique_ptr<IRHISwapChain> D3D11Device::CreateSwapChain(const SwapChainDesc& desc) {
-    return std::make_unique<D3D11SwapChain>(desc);
+    auto sc = std::make_unique<D3D11SwapChain>();
+    if (!sc->Initialize(this, desc)) return nullptr;
+    return sc;
 }
 
 std::unique_ptr<IRHICommandList> D3D11Device::CreateCommandList(QueueType) {
@@ -357,9 +360,10 @@ void D3D11Device::UpdateDescriptorSetWithImageView(DescriptorSetHandle set, u32 
 }
 
 // ---------------------------------------------------------------------------
-//  提交与同步（M2 骨架；围栏在 M2.7 改用 ID3D11Fence）
+//  提交与同步
 // ---------------------------------------------------------------------------
 void D3D11Device::Submit(IRHICommandList* cmdList, RHICommandList*) {
+    // immediate context 的命令在录制时就已发出；这里只下发本次提交的时间线信号（命令之后到达）
     if (cmdList) cmdList->Submit();
     // 持久映射缓冲：把本次提交里 GPU 写过的内容取回影子内存，CPU 下一帧读到的就是它
     RefreshOpenMaps();
@@ -370,29 +374,93 @@ void D3D11Device::SubmitAll(Span<IRHICommandList*> cmdLists) {
     for (auto* cl : cmdLists) Submit(cl);
 }
 
+/// 等围栏到达 value；timeoutMs 为 INFINITE 时一直等。成功返回 true
+static bool WaitFenceValue(ID3D11Fence* fence, u64 value, DWORD timeoutMs) {
+    if (fence->GetCompletedValue() >= value) return true;
+    HANDLE ev = CreateEventEx(nullptr, nullptr, 0, EVENT_ALL_ACCESS);
+    if (!ev) return false;
+    bool ok = false;
+    if (SUCCEEDED(fence->SetEventOnCompletion(value, ev))) ok = (WaitForSingleObject(ev, timeoutMs) == WAIT_OBJECT_0);
+    CloseHandle(ev);
+    return ok;
+}
+
 void D3D11Device::WaitIdle() {
     if (!m_Device || !m_Context) return;
-    // 用事件查询等待 GPU 执行完此前的全部命令；限时 8 秒，超时明确报错而不是永久挂起
-    D3D11_QUERY_DESC qd{ D3D11_QUERY_EVENT, 0 };
-    ComPtr<ID3D11Query> query;
-    if (FAILED(m_Device->CreateQuery(&qd, &query))) return;
-    m_Context->End(query.Get());
+    if (!m_IdleFence && FAILED(m_Device->CreateFence(0, D3D11_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_IdleFence)))) return;
+    m_Context->Signal(m_IdleFence.Get(), ++m_IdleValue);
     m_Context->Flush();
-    const ULONGLONG start = GetTickCount64();
-    BOOL done = FALSE;
-    while (m_Context->GetData(query.Get(), &done, sizeof(done), 0) != S_OK || !done) {
-        if (GetTickCount64() - start > 8000) {
-            HE_CORE_ERROR("[D3D11] WaitIdle 等待 GPU 超时 8 秒，reason=0x{:08x}",
-                          static_cast<u32>(m_Device->GetDeviceRemovedReason()));
-            break;
-        }
-        SwitchToThread();
+    // 限时 8 秒：GPU 侧出了非法操作时明确报错，而不是让进程永久挂起（D3D12 后端的教训）
+    if (!WaitFenceValue(m_IdleFence.Get(), m_IdleValue, 8000)) {
+        HE_CORE_ERROR("[D3D11] WaitIdle 等待 GPU 超时 8 秒，reason=0x{:08x}",
+                      static_cast<u32>(m_Device->GetDeviceRemovedReason()));
     }
     DrainDebugMessages();
 }
 
 RHIFenceHandle D3D11Device::CreateFence() {
-    return static_cast<RHIFenceHandle>(m_NextFence++);   // M2.7 改为 ID3D11Fence
+    ComPtr<ID3D11Fence> fence;
+    if (!HE_D3D11_CHECK(m_Device->CreateFence(0, D3D11_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)), "CreateFence")) {
+        return kInvalidFence;
+    }
+    m_Fences.push_back(fence);
+    return static_cast<RHIFenceHandle>(m_Fences.size());
+}
+
+void D3D11Device::DestroyFence(RHIFenceHandle fence) {
+    if (fence > 0 && fence <= m_Fences.size()) m_Fences[fence - 1].Reset();
+}
+
+bool D3D11Device::WaitForFence(RHIFenceHandle fence, u64 value, u64 timeout) {
+    ID3D11Fence* f = FindFence(fence);
+    if (!f) return false;
+    // timeout 以纳秒计（与 Vulkan 一致）；0 表示只查询不等待
+    const DWORD ms = (timeout == UINT64_MAX) ? INFINITE : static_cast<DWORD>(timeout / 1000000ull);
+    if (timeout != UINT64_MAX) m_Context->Flush();   // 确保信号已提交给 GPU，否则可能等到超时
+    return WaitFenceValue(f, value, ms);
+}
+
+u64 D3D11Device::GetFenceValue(RHIFenceHandle fence) const {
+    ID3D11Fence* f = FindFence(fence);
+    return f ? f->GetCompletedValue() : 0;
+}
+
+void D3D11Device::SignalFenceOnQueue(QueueType, RHIFenceHandle fence, u64 value) {
+    if (ID3D11Fence* f = FindFence(fence)) m_Context->Signal(f, value);
+}
+
+void D3D11Device::WaitFenceOnQueue(QueueType, RHIFenceHandle fence, u64 value) {
+    if (ID3D11Fence* f = FindFence(fence)) m_Context->Wait(f, value);
+}
+
+// ---------------------------------------------------------------------------
+//  推送常量的常量环
+// ---------------------------------------------------------------------------
+bool D3D11Device::AllocatePushConstants(const void* data, u32& firstConstant, u64& generation) {
+    if (!m_PushRing) {
+        D3D11_BUFFER_DESC bd{};
+        bd.ByteWidth      = kPushSlotSize * kPushSlotCount;
+        bd.Usage          = D3D11_USAGE_DYNAMIC;
+        bd.BindFlags      = D3D11_BIND_CONSTANT_BUFFER;
+        bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        if (!HE_D3D11_CHECK(m_Device->CreateBuffer(&bd, nullptr, &m_PushRing), "CreateBuffer(推送常量环)")) return false;
+        m_PushCursor = kPushSlotCount;   // 第一次分配走 DISCARD 分支
+    }
+    D3D11_MAP mapType = D3D11_MAP_WRITE_NO_OVERWRITE;
+    if (m_PushCursor >= kPushSlotCount) {
+        // 用完一圈：DISCARD 换一块新内存（已发出的命令仍读旧内存），旧槽位从此作废
+        mapType = D3D11_MAP_WRITE_DISCARD;
+        m_PushCursor = 0;
+        ++m_PushRingGeneration;
+    }
+    D3D11_MAPPED_SUBRESOURCE ms{};
+    if (FAILED(m_Context->Map(m_PushRing.Get(), 0, mapType, 0, &ms))) return false;
+    std::memcpy(static_cast<u8*>(ms.pData) + static_cast<size_t>(m_PushCursor) * kPushSlotSize, data, kPushSlotSize);
+    m_Context->Unmap(m_PushRing.Get(), 0);
+    firstConstant = m_PushCursor * (kPushSlotSize / 16u);
+    generation    = m_PushRingGeneration;
+    ++m_PushCursor;
+    return true;
 }
 
 } // namespace he::rhi::d3d11

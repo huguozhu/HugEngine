@@ -121,6 +121,9 @@ public:
     ~D3D11Texture() override;
 
     bool Initialize(D3D11Device* device, const TextureDesc& desc);
+    /// 包装一张已有的 2D 纹理（交换链后缓冲）：视图与登记方式与普通渲染目标相同，
+    /// 引擎拿到的后缓冲视图句柄因此也能经视图登记表查回（BeginOffscreenPass / 拷贝等）
+    bool InitializeExternal(D3D11Device* device, ComPtr<ID3D11Texture2D> texture, Format format);
 
     u32    GetWidth()  const override { return m_Width; }
     u32    GetHeight() const override { return m_Height; }
@@ -213,6 +216,8 @@ public:
 
     bool IsValid()   const { return m_Valid; }
     bool IsCompute() const { return m_IsCompute; }
+    /// 任一阶段声明了推送常量块（b0）：绘制 / 派发前要绑定常量环
+    bool UsesPushConstants() const { return m_UsesPushConstants; }
     const char* GetName() const { return m_Name.c_str(); }
     /// 不可用的 PSO 第一次被使用时打印一次说明，之后静默跳过
     void ReportUnusableOnce();
@@ -250,6 +255,7 @@ private:
     bool                         m_Valid = false;
     bool                         m_IsCompute = false;
     bool                         m_Reported = false;
+    bool                         m_UsesPushConstants = false;
     std::vector<u8>              m_VsBytecode;    // DXBC 容器（CreateInputLayout 要用）
     ComPtr<ID3D11VertexShader>   m_VS;
     ComPtr<ID3D11PixelShader>    m_PS;

@@ -161,6 +161,7 @@ bool D3D11PipelineState::LoadStage(D3D11Device* device, const ShaderBytecode* bc
             x.stride = b.NumSamples;
         }
         x.dimension = b.Dimension;
+        if (static_cast<DxbcBindType>(x.type) == DxbcBindType::PushConstant) m_UsesPushConstants = true;
         out.push_back(x);
     }
     return true;

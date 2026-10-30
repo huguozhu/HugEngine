@@ -420,6 +420,28 @@ bool D3D11Texture::Initialize(D3D11Device* device, const TextureDesc& desc) {
     return true;
 }
 
+bool D3D11Texture::InitializeExternal(D3D11Device* device, ComPtr<ID3D11Texture2D> texture, Format format) {
+    if (!texture) return false;
+    D3D11_TEXTURE2D_DESC td{};
+    texture->GetDesc(&td);
+    m_Device      = device;
+    m_Resource    = texture;
+    m_Width       = td.Width;
+    m_Height      = td.Height;
+    m_Depth       = 1;
+    m_MipLevels   = td.MipLevels;
+    m_ArrayLayers = td.ArraySize;
+    m_SampleCount = td.SampleDesc.Count;
+    m_Format      = format;
+    m_Usage       = TextureUsage::RenderTarget | TextureUsage::TransferSrc;
+    const TextureFormats fmts = GetTextureFormats(format, m_Usage);
+    m_SrvFormat = fmts.srv; m_RtvFormat = fmts.rtv; m_DsvFormat = fmts.dsv; m_UavFormat = fmts.uav;
+    m_DefaultView = GetRtv(0, 0);
+    if (!m_DefaultView) return false;
+    m_Device->RegisterView(m_DefaultView, { this, D3D11ViewInfo::Type::RTV, 0, 0, false });
+    return true;
+}
+
 void* D3D11Texture::GetNativeHandle() const { return m_DefaultView; }
 
 void* D3D11Texture::GetNativeHandle(u32 index) const {

@@ -161,12 +161,29 @@ public:
     bool HasAsyncComputeQueue() const override { return false; }
     u32  GetQueueFamily(QueueType) const override { return 0; }
 
+    // ---- 时间线围栏：ID3D11Fence（D3D11.4）----
+    // 只有一个 immediate context，队列参数被忽略；GPU 侧等待在单队列下必然已满足，仍照常下发
     RHIFenceHandle CreateFence() override;
-    void           DestroyFence(RHIFenceHandle) override {}
-    bool           WaitForFence(RHIFenceHandle, u64, u64 = UINT64_MAX) override { return true; }
-    u64            GetFenceValue(RHIFenceHandle) const override { return 0; }
-    void           SignalFenceOnQueue(QueueType, RHIFenceHandle, u64) override {}
-    void           WaitFenceOnQueue(QueueType, RHIFenceHandle, u64) override {}
+    void           DestroyFence(RHIFenceHandle fence) override;
+    bool           WaitForFence(RHIFenceHandle fence, u64 value, u64 timeout = UINT64_MAX) override;
+    u64            GetFenceValue(RHIFenceHandle fence) const override;
+    void           SignalFenceOnQueue(QueueType queue, RHIFenceHandle fence, u64 value) override;
+    void           WaitFenceOnQueue(QueueType queue, RHIFenceHandle fence, u64 value) override;
+    ID3D11Fence*   FindFence(RHIFenceHandle fence) const {
+        return (fence > 0 && fence <= m_Fences.size()) ? m_Fences[fence - 1].Get() : nullptr;
+    }
+
+    // ---- 推送常量的常量环（规划 3.5）----
+    //  一块 D3D11_USAGE_DYNAMIC 的常量缓冲，按 256 字节一槽环形分配，所有命令列表共用
+    //  （只有一个 immediate context）。分配时用 MAP_WRITE_NO_OVERWRITE 写入新槽，转回开头时用
+    //  MAP_WRITE_DISCARD 换一块新内存（已发出的命令仍引用旧内存）。换内存后旧槽位的内容不再
+    //  有效，所以带一个「代次」：命令列表记下的槽位代次与当前不同就要重新分配。
+    static constexpr u32 kPushSlotSize  = 256;
+    static constexpr u32 kPushSlotCount = 4096;   // 1 MB
+    /// 写入一槽推送常量，返回该槽的常量起点（以 16 字节常量计，供 *SetConstantBuffers1 使用）
+    bool  AllocatePushConstants(const void* data, u32& firstConstant, u64& generation);
+    ID3D11Buffer* GetPushConstantRing() const { return m_PushRing.Get(); }
+    u64   GetPushRingGeneration() const { return m_PushRingGeneration; }
 
     // ---- 内部访问（供命令列表 / 资源使用，非 RHI 接口）----
     ID3D11Device5*        GetDevice()  const { return m_Device.Get(); }
@@ -240,7 +257,14 @@ private:
 
     std::vector<DescriptorSetLayoutDesc> m_SetLayouts;      // 句柄 = 下标 + 1
     std::vector<DescriptorSet>           m_DescriptorSets;  // 句柄 = 下标 + 1
-    u64 m_NextFence  = 1;
+
+    std::vector<ComPtr<ID3D11Fence>> m_Fences;      // 句柄 = 下标 + 1（销毁后槽位置空）
+    ComPtr<ID3D11Fence>              m_IdleFence;   // WaitIdle 专用
+    u64                              m_IdleValue = 0;
+
+    ComPtr<ID3D11Buffer> m_PushRing;
+    u32                  m_PushCursor = 0;          // 下一个可用槽
+    u64                  m_PushRingGeneration = 1;  // 每次 DISCARD 换内存加一
 };
 
 } // namespace he::rhi::d3d11

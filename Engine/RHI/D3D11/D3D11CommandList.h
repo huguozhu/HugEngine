@@ -18,6 +18,8 @@
 
 #include "D3D11Common.h"
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace he::rhi::d3d11 {
 
@@ -60,7 +62,9 @@ public:
     void SetFullscreenViewport(u32 width, u32 height) override;
     /// 只记录：真正的绑定在绘制 / 派发前按当前 PSO 下发（FlushBindings）
     void BindDescriptorSet(u32 setIndex, DescriptorSetHandle set) override;
-    void SetPushConstants(u32, u32, const void*) override {}
+    /// Vulkan 语义：同一块 256 字节数据按 offset 累加写入，直到被覆盖前一直有效。
+    /// 只写 CPU 副本；绘制 / 派发前若有改动（或常量环换了内存）才写进常量环新槽（规划 3.5）
+    void SetPushConstants(u32 offset, u32 size, const void* data) override;
 
     // ---- 绘制 ----
     void Draw(u32 vertexCount, u32 instanceCount = 1, u32 firstVertex = 0, u32 firstInstance = 0) override;
@@ -104,8 +108,10 @@ public:
     void ReleaseToQueue(IRHITexture*, QueueType) override {}
     void AcquireFromQueue(IRHITexture*, QueueType) override {}
 
-    // ---- 时间线与查询（M2.7 / M3.7）----
-    void SetTimelineSignal(RHIFenceHandle, u64) override {}
+    // ---- 时间线与查询 ----
+    /// 记录本次提交要发的时间线信号：Submit 时在 immediate context 上 Signal（命令都已发出，信号排在其后）
+    void SetTimelineSignal(RHIFenceHandle fence, u64 value) override;
+    /// 只有一个 immediate context：等待的信号必然来自更早提交的命令，已经满足，忽略
     void SetTimelineWait(RHIFenceHandle, u64) override {}
     void WriteTimestamp(IRHIQueryPool*, u32) override {}
     void ResetQueryPool(IRHIQueryPool*) override {}
@@ -120,9 +126,12 @@ public:
     void EndDebugLabel() override;
     void InsertDebugLabel(const char* name, const float color[4] = nullptr) override;
 
-    void Submit() override {}
+    /// 下发录制期记下的时间线信号（由 D3D11Device::Submit 调用）
+    void Submit() override;
 
 private:
+    /// 当前 PSO 用到推送常量时：数据有改动或常量环换过内存就写进新槽，再绑定到 b0
+    void BindPushConstants();
     /// 绘制 / 派发前调用：当前 PSO 可用时，确保上下文装的是本列表的状态、下发渲染目标 / 顶点缓冲 /
     /// 描述符集并返回 true；PSO 不可用（着色器没有 DXBC）时返回 false，调用方跳过这次绘制 / 派发
     bool PrepareDrawOrDispatch(bool compute);
@@ -165,6 +174,14 @@ private:
     bool                m_DepthReadOnly = false;    // 当前已应用的是否只读 DSV
     D3D11_VIEWPORT      m_Viewport{};
     D3D11_RECT          m_Scissor{};
+
+    // ---- 推送常量 ----
+    u8                  m_PushData[256]{};          // CPU 副本（Vulkan 推送常量的完整 256 字节）
+    bool                m_PushDirty = true;         // 自上次写入常量环后有改动
+    u32                 m_PushFirstConstant = 0;    // 当前数据所在的常量环槽（以 16 字节常量计）
+    u64                 m_PushGeneration = 0;       // 该槽所属的常量环代次（0 = 还没写过）
+
+    std::vector<std::pair<RHIFenceHandle, u64>> m_PendingSignals;   // 本次提交要发的时间线信号
 
     u32                 m_LabelDepth = 0;           // 未配对的 BeginDebugLabel 层数（End 时补齐）
     std::string         m_LastMissing;              // 上一次报告缺资源的键（同一键不重复打印）

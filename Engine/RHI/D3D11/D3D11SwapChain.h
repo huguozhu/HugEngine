@@ -1,40 +1,63 @@
 // ============================================================================
 //  D3D11SwapChain.h —— D3D11 交换链
 //
-//  M2 骨架阶段的占位实现：只记录尺寸，AcquireNextImage 恒成功、Present 不做事，
-//  保证样例的帧循环能跑起来。真正的 DXGI 交换链在 M2.7 实现。
+//  FLIP_DISCARD 模型（规划 3.8）：
+//    · 运行时自动轮换后缓冲，应用永远只访问 **buffer 0**（不能像 D3D12 那样每个缓冲建一个 RTV）；
+//    · 后缓冲包装成 D3D11Texture，视图句柄与普通渲染目标一样登记，引擎拿去当附件 / 拷贝都能查回；
+//    · 垂直同步关闭且系统支持时用 ALLOW_TEARING（与 D3D12 一致）；
+//    · HE_CAPTURE_FRAME=N：第 N 帧在 Present 之前把后缓冲存成 capture_frameN.png
+//      （FLIP 模型 Present 之后内容未定义，截图必须在 Present 之前）。
 // ============================================================================
 #pragma once
 
 #if defined(_WIN32)
 
 #include "D3D11Common.h"
+#include <memory>
 
 namespace he::rhi::d3d11 {
 
+class D3D11Device;
+class D3D11Texture;
+
 class D3D11SwapChain final : public IRHISwapChain {
 public:
-    explicit D3D11SwapChain(const SwapChainDesc& desc)
-        : m_Width(desc.width), m_Height(desc.height), m_Format(desc.format) {}
+    ~D3D11SwapChain() override;
 
-    void   Resize(u32 width, u32 height) override { m_Width = width; m_Height = height; }
+    bool Initialize(D3D11Device* device, const SwapChainDesc& desc);
+
+    void   Resize(u32 width, u32 height) override;
+    /// FLIP 模型下应用只访问 buffer 0
     u32    GetCurrentBackBufferIndex() const override { return 0; }
     u32    GetWidth()  const override { return m_Width; }
     u32    GetHeight() const override { return m_Height; }
-    bool   AcquireNextImage() override { return true; }
-    void   Present(bool) override {}
-    void*  GetCurrentBackBufferView() const override { return nullptr; }
+    /// 窗口最小化（尺寸为 0）时返回 false，调用方跳过本帧
+    bool   AcquireNextImage() override { return m_Width > 0 && m_Height > 0 && m_BackBuffer != nullptr; }
+    void   Present(bool vsync) override;
+    void*  GetCurrentBackBufferView() const override;
     void*  GetDepthBufferView()       const override { return nullptr; }
-    u32    GetBackendFormat()    const override { return 0; }
+    u32    GetBackendFormat()    const override { return static_cast<u32>(m_DxgiFormat); }
     Format GetColorFormat() const override { return m_Format; }
 
-    /// 当前后缓冲的 RTV（M2.7 实现真正的交换链之前为空）
-    ID3D11RenderTargetView* GetRtv() const { return nullptr; }
+    /// 当前后缓冲的 RTV（主 render pass 的目标）
+    ID3D11RenderTargetView* GetRtv() const;
 
 private:
-    u32    m_Width  = 0;
-    u32    m_Height = 0;
-    Format m_Format = Format::RGBA8_UNORM;
+    /// 取 buffer 0 并包装成纹理
+    bool CreateBackBuffer();
+    /// HE_CAPTURE_FRAME=N 时在第 N 帧把后缓冲存成 PNG（必须在 Present 之前）
+    void CaptureIfRequested();
+
+    D3D11Device*                  m_Device = nullptr;
+    ComPtr<IDXGISwapChain1>       m_SwapChain;
+    std::unique_ptr<D3D11Texture> m_BackBuffer;
+    u32         m_Width = 0, m_Height = 0;
+    u32         m_BufferCount = 2;
+    Format      m_Format = Format::RGBA8_UNORM;
+    DXGI_FORMAT m_DxgiFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+    bool        m_Tearing = false;   // 系统支持 ALLOW_TEARING
+    u64         m_FrameCount = 0;
+    int         m_CaptureAt = -1;    // -1 = 未读取环境变量；0 = 不截图
 };
 
 } // namespace he::rhi::d3d11

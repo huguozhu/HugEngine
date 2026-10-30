@@ -38,6 +38,10 @@ void D3D11CommandList::Begin() {
     m_Viewport = {};
     m_Scissor  = {};
     m_LabelDepth = 0;
+    std::memset(m_PushData, 0, sizeof(m_PushData));
+    m_PushDirty = true;
+    m_PushGeneration = 0;
+    m_PendingSignals.clear();
     // 让下一次改动上下文时重新应用（即使上下文的上一个使用者就是本列表的上一轮录制）
     if (m_Device->GetContextOwner() == this) m_Device->SetContextOwner(nullptr);
 }
@@ -271,6 +275,49 @@ void D3D11CommandList::BindDescriptorSet(u32 setIndex, DescriptorSetHandle set) 
     if (setIndex < kMaxSets) m_Sets[setIndex] = set;
 }
 
+void D3D11CommandList::SetPushConstants(u32 offset, u32 size, const void* data) {
+    if (!data || offset >= sizeof(m_PushData)) return;
+    const u32 n = std::min<u32>(size, static_cast<u32>(sizeof(m_PushData)) - offset);
+    std::memcpy(m_PushData + offset, data, n);
+    m_PushDirty = true;
+}
+
+void D3D11CommandList::BindPushConstants() {
+    if (!m_Pipeline->UsesPushConstants()) return;
+    // 数据改过，或常量环转了一圈（旧槽位已作废）：写进新槽
+    if (m_PushDirty || m_PushGeneration != m_Device->GetPushRingGeneration()) {
+        if (!m_Device->AllocatePushConstants(m_PushData, m_PushFirstConstant, m_PushGeneration)) return;
+        m_PushDirty = false;
+    }
+    ID3D11DeviceContext4* ctx = m_Device->GetContext();
+    ID3D11Buffer* ring = m_Device->GetPushConstantRing();
+    const UINT first = m_PushFirstConstant;
+    const UINT count = D3D11Device::kPushSlotSize / 16u;
+    // 同一缓冲只换偏移重新绑定时，部分运行时会把它当冗余调用过滤掉：先绑空再绑（规划 3.5）
+    ID3D11Buffer* none = nullptr;
+    const u32 slot = dxbc::kDxbcPushConstantSlot;
+    if (m_Pipeline->IsCompute()) {
+        ctx->CSSetConstantBuffers(slot, 1, &none);
+        ctx->CSSetConstantBuffers1(slot, 1, &ring, &first, &count);
+    } else {
+        ctx->VSSetConstantBuffers(slot, 1, &none);
+        ctx->VSSetConstantBuffers1(slot, 1, &ring, &first, &count);
+        ctx->PSSetConstantBuffers(slot, 1, &none);
+        ctx->PSSetConstantBuffers1(slot, 1, &ring, &first, &count);
+    }
+}
+
+void D3D11CommandList::SetTimelineSignal(RHIFenceHandle fence, u64 value) {
+    m_PendingSignals.emplace_back(fence, value);
+}
+
+void D3D11CommandList::Submit() {
+    for (const auto& [fence, value] : m_PendingSignals) {
+        if (ID3D11Fence* f = m_Device->FindFence(fence)) m_Device->GetContext()->Signal(f, value);
+    }
+    m_PendingSignals.clear();
+}
+
 void D3D11CommandList::ReportMissing(u32 set, u32 binding, const char* what) {
     std::string key = std::string(m_Pipeline->GetName()) + "#" + std::to_string(set) + "." + std::to_string(binding);
     if (key == m_LastMissing) return;
@@ -413,6 +460,7 @@ bool D3D11CommandList::PrepareDrawOrDispatch(bool compute) {
     // 持久映射缓冲里 CPU 改过的内容先上传，再执行读它的命令（规划 3.10）
     m_Device->FlushOpenMaps();
     FlushBindings();
+    BindPushConstants();
     return true;
 }
 

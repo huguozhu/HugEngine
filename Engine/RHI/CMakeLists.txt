@@ -163,6 +163,7 @@ endif()
             D3D11/D3D11Resources.cpp
             D3D11/D3D11PipelineState.cpp
             D3D11/D3D11SwapChain.h
+            D3D11/D3D11SwapChain.cpp
             D3D11/D3D11CommandList.h
             D3D11/D3D11CommandList.cpp
         )
