@@ -1,4 +1,4 @@
-﻿# Shader — Slang 编译管线 (L3)
+# Shader — Slang 编译管线 (L3)
 # Phase 2: slangc → SPIR-V → embedded C header
 
 add_library(HugEngineShader INTERFACE)
@@ -479,6 +479,43 @@ if(SLANGC)
             else()
                 list(APPEND _dxil_pairs "${SRC}|main|mesh|ms")
             endif()
+        endforeach()
+
+        # ---- 光追着色器（DXIL 库）----
+        #
+        #  DXR 的 RT 管线是「每个着色器一份 DXIL 库 + 状态对象里导出/重命名」：
+        #    slangc -target hlsl -stage <raygeneration|miss|closesthit|anyhit|callable|intersection>
+        #    → ShaderToDxil <hlsl> main lib <out>（lib 目标不带 -E，整份编译单元即库）
+        #  Slang 的输出里已经带 `[shader("...")]` 属性（实测 RT_Sponza.rgen 就有），
+        #  这就是库导出入口的依据，无需 ShaderToDxil 再补。
+        foreach(SRC ${RT_SLANG})
+            # RT_PositionFetch 依赖 VK_KHR_ray_tracing_position_fetch 的
+            # gl_HitTriangleVertexPositionsEXT（DXR 无对应能力，顶点位置只能从顶点缓冲自查），
+            # 且当前没有任何 pass 使用它 ⇒ 不生成 DXIL
+            if(SRC MATCHES "RT_PositionFetch")
+                continue()
+            endif()
+            # RT_PBR 在 closesthit 里用 Texture.Sample（隐式导数采样），DXR 明确禁止
+            #（dxc: Opcode Sample not valid in shader model lib_6_6(closesthit)）；
+            # 它是 Vulkan 侧的备选命中着色器、当前没有任何 pass 引用 ⇒ 不生成 DXIL
+            if(SRC MATCHES "RT_PBR")
+                continue()
+            endif()
+            string(REGEX MATCH "rgen|rmiss|rchit|rahit|rcall|rint" RT_DXIL_STAGE "${SRC}")
+            if(RT_DXIL_STAGE STREQUAL "rgen")
+                set(_rt_slang_stage "raygeneration")
+            elseif(RT_DXIL_STAGE STREQUAL "rmiss")
+                set(_rt_slang_stage "miss")
+            elseif(RT_DXIL_STAGE STREQUAL "rchit")
+                set(_rt_slang_stage "closesthit")
+            elseif(RT_DXIL_STAGE STREQUAL "rahit")
+                set(_rt_slang_stage "anyhit")
+            elseif(RT_DXIL_STAGE STREQUAL "rcall")
+                set(_rt_slang_stage "callable")
+            else()
+                set(_rt_slang_stage "intersection")
+            endif()
+            list(APPEND _dxil_pairs "${SRC}|main|${_rt_slang_stage}|lib")
         endforeach()
 
         foreach(_pair ${_dxil_pairs})

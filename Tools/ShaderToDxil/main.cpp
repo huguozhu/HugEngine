@@ -1,4 +1,4 @@
-﻿// ============================================================================
+// ============================================================================
 //  ShaderToDxil —— D3D12 后端的着色器构建工具
 //
 //  职责：把 `slangc -target hlsl` 输出的 HLSL 文本处理成 dxc 能吃、且语义完整
@@ -467,8 +467,34 @@ static std::string PatchRegisters(const std::string& src) {
 }
 
 // ---------------------------------------------------------------------------
-//  生成 C++ 头文件
+//  库目标（光追）的 bindless 数组空间归位
+//
+//  【为什么必须做】D3D12 后端把 bindless 的**纹理堆 / 采样器堆**分别绑在 space2 的
+//  SRV 表与采样器表上（见 D3D12CommandList::PrepareSetTables 的 SetRootTable(10/26)）。
+//  而 Slang 对「声明在 set0 的无界数组」会自行挪到别的 space（实测 PT_Full.rchit 的
+//  `g_MaterialTextures[]` 被放到 space1、采样器放到 space2）：space1 的 SRV 表在
+//  D3D12 下根本没绑，命中着色器采样读到全 0 ⇒ PT 的 albedo 全 0、roughness 恒为 0.04、
+//  画面整体偏暗（与 Vulkan 对比实测）。这里把库里的无界数组统一改到 space2 的 0 号寄存器，
+//  与光栅路径的 bindless 约定一致（t0,space2 / s0,space2）。
 // ---------------------------------------------------------------------------
+static void PatchUnboundedArraysToBindlessSpace(std::string& s) {
+    size_t pos = 0;
+    while ((pos = s.find("[]", pos)) != std::string::npos) {
+        const size_t reg = s.find(": register(", pos);
+        if (reg == std::string::npos) break;
+        const size_t eol = s.find('\n', pos);
+        if (eol == std::string::npos || reg > eol) { pos += 2; continue; }   // 跨行：不是声明
+        const size_t clsPos = reg + 11;                                      // "(" 之后
+        const char cls = (clsPos < s.size()) ? s[clsPos] : 0;
+        if (cls != 't' && cls != 'u' && cls != 's') { pos += 2; continue; }
+        const size_t close = s.find(')', clsPos);
+        if (close == std::string::npos) break;
+        s.replace(clsPos, close - clsPos, std::string(1, cls) + "0, space2");
+        pos = clsPos + 12;
+    }
+}
+
+
 /// 网格着色器入口参数修正：Slang 生成的 HLSL 在输出数组参数上多带一个 inout
 ///（如 `out vertices inout T verts[N]`、`out indices inout uint3 prims[M]`），有时连
 /// `out vertices` 都缺失（只剩 `inout T verts[N]`），dxc 报 "duplicate HLSL parameter usages"。
@@ -543,16 +569,33 @@ int main(int argc, char** argv) {
     }
 
     const bool isVertex = (std::string(stage) == "vs" || std::string(stage) == "ms");
-    std::string patched = InjectSemantics(src, isVertex);
+    // 【lib（DXIL 库）】光追着色器（*.rgen/.rmiss/.rchit/.rahit/.rcall/.rint）走库目标：
+    //  · 不做 VS/PS 的语义注入（光线追踪着色器没有 VS→PS 链接，强行补 SV_Position 会编译失败）；
+    //  · 不加 [loop]（库里的函数体由 dxc 自行决定展开）；
+    //  · 不做实例号改写（那是顶点着色器专用）；
+    //  · 入口属性 [shader("...")] 由 slangc -target hlsl 直接产出（实测已带），无需补；
+    //  · **仍然要**做寄存器重排（register = binding、space = set）。
+    const bool isLib = (std::string(stage) == "lib");
+    std::string patched = src;
+    if (!isLib) {
+        patched = InjectSemantics(src, isVertex);
+    }
     PatchUint8(patched);
-    // 【已回退】PatchCBuffers 会把所有 cbuffer 归一到 b0，导致多个 cbuffer 重叠
-    //（dxc 报 "resource X at register 0 overlaps with resource Y"）。
-    // 正确的做法是保留着色器自己的寄存器分配（b0/b1/...），根签名用 root CBV 覆盖 b0..b7。
-    PatchLoops(patched);
-    if (std::string(stage) == "vs") PatchInstanceId(patched);
-    if (std::string(stage) == "ms") PatchMeshSignature(patched, entry);   // 修正网格着色器输出参数修饰
+    if (!isLib) {
+        // 【已回退】PatchCBuffers 会把所有 cbuffer 归一到 b0，导致多个 cbuffer 重叠
+        //（dxc 报 "resource X at register 0 overlaps with resource Y"）。
+        // 正确的做法是保留着色器自己的寄存器分配（b0/b1/...），根签名用 root CBV 覆盖 b0..b7。
+        PatchLoops(patched);
+        if (std::string(stage) == "vs") PatchInstanceId(patched);
+        if (std::string(stage) == "ms") PatchMeshSignature(patched, entry);   // 修正网格着色器输出参数修饰
+    } else if (patched.find("[shader(") == std::string::npos) {
+        // 兜底提示：库目标靠 [shader("...")] 导出入口，缺了 dxc 会报 "no entry point"
+        std::fprintf(stderr, "ShaderToDxil: 警告：%s 里没有 [shader(...)] 属性，库目标可能编译失败\n", input);
+    }
     // 寄存器按 vk::binding 重排，与 D3D12 后端的「register = binding、space = set」约定一致
     patched = PatchRegisters(patched);
+    // 库目标（光追）里的无界数组统一归到 space2（D3D12 的 bindless 堆绑在那张表上）
+    if (isLib) PatchUnboundedArraysToBindlessSpace(patched);
 
     // 落一份补丁后的 HLSL 便于排查（设 HE_DUMP_DXIL_HLSL=path 覆盖默认名）
     if (const char* dump = std::getenv("HE_DUMP_DXIL_HLSL")) {
@@ -581,8 +624,12 @@ int main(int argc, char** argv) {
     const std::string dxilPath = std::string(output) + ".dxil";
     std::string cmd = "dxc.exe -T ";
     cmd += profile;
-    cmd += " -E ";
-    cmd += entry;
+    // 【库目标没有单一入口】lib_6_6 下 dxc 不能带 -E（会报 "-E not supported for lib target"）：
+    // 整个编译单元就是一个库，入口由源码里的 [shader("...")] 属性标记
+    if (!isLib) {
+        cmd += " -E ";
+        cmd += entry;
+    }
     cmd += " -Fo \"";
     cmd += dxilPath;
     cmd += "\" \"";
