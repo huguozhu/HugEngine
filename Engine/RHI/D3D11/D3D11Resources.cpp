@@ -193,6 +193,27 @@ void D3D11Buffer::Unmap() {
     }
 }
 
+void D3D11Buffer::WriteRegion(u64 offset, const void* data, u64 size) {
+    if (!data || size == 0 || offset + size > m_AllocSize) return;
+    EnsureShadowCurrent();
+    std::memcpy(m_Shadow.data() + offset, data, static_cast<size_t>(size));
+    // 常量缓冲只能整块更新；结构化缓冲的更新区间必须按步长对齐，也整块更新；其它缓冲只更新这一段
+    if (m_ConstantOnly || m_StructStride > 0) {
+        UploadShadow();
+        return;
+    }
+    D3D11_BOX box{ static_cast<UINT>(offset), 0, 0, static_cast<UINT>(offset + size), 1, 1 };
+    m_Device->GetContext()->UpdateSubresource(m_Buffer.Get(), 0, &box, m_Shadow.data() + offset, 0, 0);
+    if (m_ConstantMirror) m_Device->GetContext()->UpdateSubresource(m_ConstantMirror.Get(), 0, nullptr, m_Shadow.data(), 0, 0);
+    std::memcpy(m_Synced.data() + offset, data, static_cast<size_t>(size));
+}
+
+void D3D11Buffer::ReadRegion(u64 offset, void* out, u64 size) {
+    if (!out || size == 0 || offset + size > m_AllocSize) return;
+    EnsureShadowCurrent();
+    std::memcpy(out, m_Shadow.data() + offset, static_cast<size_t>(size));
+}
+
 void D3D11Buffer::FlushPersistentWrites() {
     if (m_Shadow.size() == m_Synced.size() &&
         std::memcmp(m_Shadow.data(), m_Synced.data(), m_Shadow.size()) == 0) return;

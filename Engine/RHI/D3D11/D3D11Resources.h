@@ -52,6 +52,7 @@ public:
     ID3D11Buffer* GetConstantBuffer();
     /// 创建时给的顶点步长（0 表示未给）
     u32 GetStride() const { return m_Stride; }
+    BufferUsage GetUsage() const { return m_Usage; }
 
     /// 着色器视图的种类（来自 DXBC 反射）
     enum class ViewKind : u8 { Structured, Raw, Typed };
@@ -62,6 +63,13 @@ public:
 
     /// GPU 可能写了它（作为 UAV 绑定 / 拷贝目标）：下次 CPU 读取前必须回读
     void MarkGpuWritten() { m_GpuWritten = true; }
+    /// 把一段数据写进缓冲 [offset, offset + size)（影子内存与 GPU 缓冲同时更新）。
+    /// 用于纹理 → 缓冲的读回拷贝：D3D11 不能直接把纹理拷进缓冲
+    void WriteRegion(u64 offset, const void* data, u64 size);
+    /// 读出缓冲 [offset, offset + size) 的当前内容（必要时先从 GPU 回读）
+    void ReadRegion(u64 offset, void* out, u64 size);
+    /// 当前 GPU 缓冲的结构化步长（0 = 非结构化）：结构化缓冲的拷贝区间必须按步长对齐
+    u32  GetStructStride() const { return m_StructStride; }
     /// 持久映射缓冲：影子内存相对上次同步有改动就上传（绘制 / 派发前由设备调用）
     void FlushPersistentWrites();
     /// 持久映射缓冲：若被 GPU 写过就回读到影子内存（提交时由设备调用）

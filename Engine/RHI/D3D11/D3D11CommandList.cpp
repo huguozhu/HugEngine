@@ -2,28 +2,65 @@
 //  D3D11CommandList.cpp —— D3D11 命令列表（说明见头文件）
 // ============================================================================
 #include "D3D11CommandList.h"
+#include "D3D11Converters.h"
 #include "D3D11Device.h"
 #include "D3D11Resources.h"
+#include "D3D11SwapChain.h"
 #include "RHI/DxbcBindTable.h"
 
 #include <algorithm>
+#include <cstring>
 #include <vector>
 
 namespace he::rhi::d3d11 {
 
 using dxbc::DxbcBindType;
 
+D3D11CommandList::~D3D11CommandList() {
+    // 上下文所有者只做指针比较：本列表销毁后若有新列表恰好分配到同一地址，会误以为状态仍在上下文里
+    if (m_Device && m_Device->GetContextOwner() == this) m_Device->SetContextOwner(nullptr);
+}
+
+// ---------------------------------------------------------------------------
+//  生命周期
+// ---------------------------------------------------------------------------
 void D3D11CommandList::Begin() {
     // 每次录制从干净的绑定开始（与 Vulkan 新开命令缓冲时没有任何绑定一致）
     m_Pipeline = nullptr;
     for (auto& s : m_Sets) s = kInvalidSet;
+    for (auto& vb : m_VertexBuffers) vb = nullptr;
+    m_IndexBuffer = nullptr;
+    m_IndexOffset = 0;
+    for (auto& r : m_Rtvs) r = nullptr;
+    m_RtvCount = 0;
+    m_DepthTexture = nullptr;
+    m_DepthReadOnly = false;
+    m_Viewport = {};
+    m_Scissor  = {};
+    m_LabelDepth = 0;
+    // 让下一次改动上下文时重新应用（即使上下文的上一个使用者就是本列表的上一轮录制）
+    if (m_Device->GetContextOwner() == this) m_Device->SetContextOwner(nullptr);
+}
+
+void D3D11CommandList::End() {
+    // 未配对的调试分组补齐（与 D3D12 一致）
+    while (m_LabelDepth > 0) EndDebugLabel();
 }
 
 // ---------------------------------------------------------------------------
-//  管线与描述符集
+//  上下文所有权与状态应用
 // ---------------------------------------------------------------------------
-void D3D11CommandList::SetPipeline(IRHIPipelineState* pso) {
-    m_Pipeline = static_cast<D3D11PipelineState*>(pso);
+void D3D11CommandList::EnsureOwner() {
+    if (m_Device->GetContextOwner() == this) return;
+    m_Device->SetContextOwner(this);
+    ApplyPipeline();
+    ApplyRenderTargets();
+    ApplyInputAssembler();
+    ApplyViewportScissor();
+    // 描述符集的资源在每次绘制 / 派发前都会重新下发，不需要在这里处理
+}
+
+void D3D11CommandList::ApplyPipeline() {
     if (!m_Pipeline || !m_Pipeline->IsValid()) return;
     ID3D11DeviceContext4* ctx = m_Device->GetContext();
     if (m_Pipeline->IsCompute()) {
@@ -38,6 +75,196 @@ void D3D11CommandList::SetPipeline(IRHIPipelineState* pso) {
     ctx->OMSetDepthStencilState(m_Pipeline->GetDepthStencilState(), 0);
     const float blendFactor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
     ctx->OMSetBlendState(m_Pipeline->GetBlendState(), blendFactor, 0xFFFFFFFFu);
+}
+
+void D3D11CommandList::ApplyRenderTargets() {
+    // 不写深度的 PSO 配只读 DSV：同一张深度图可以同时被采样（规划 1.3）
+    const bool readOnly = m_Pipeline && !m_Pipeline->IsCompute() && !m_Pipeline->GetDepthWrite();
+    ID3D11DepthStencilView* dsv = m_DepthTexture ? m_DepthTexture->GetDsv(m_DepthMip, m_DepthLayer, readOnly) : nullptr;
+    m_DepthReadOnly = readOnly;
+    m_Device->GetContext()->OMSetRenderTargets(m_RtvCount, m_RtvCount ? m_Rtvs : nullptr, dsv);
+}
+
+void D3D11CommandList::ApplyInputAssembler() {
+    ID3D11DeviceContext4* ctx = m_Device->GetContext();
+    ID3D11Buffer* buffers[D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT] = {};
+    UINT strides[D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT] = {};
+    UINT offsets[D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT] = {};
+    UINT count = 0;
+    for (u32 i = 0; i < kMaxVertexSlots; ++i) {
+        auto* vb = static_cast<D3D11Buffer*>(m_VertexBuffers[i]);
+        if (!vb) continue;
+        buffers[i] = vb->GetBuffer();
+        // 步长以 PSO 的顶点布局为准（引擎的 vertexLayout.stride），未给时用缓冲创建时的步长
+        const u32 psoStride = (i == 0 && m_Pipeline) ? m_Pipeline->GetVertexStride() : 0u;
+        strides[i] = psoStride ? psoStride : vb->GetStride();
+        count = i + 1;
+    }
+    if (m_Pipeline && !m_Pipeline->IsCompute()) {
+        if (m_Pipeline->NeedsInstanceIndexBuffer()) {
+            const u32 s = D3D11PipelineState::kInstanceIndexSlot;
+            buffers[s] = m_Device->GetInstanceIndexBuffer();
+            strides[s] = 4;
+            count = std::max<UINT>(count, s + 1);
+        }
+        if (m_Pipeline->NeedsZeroVertexBuffer()) {
+            const u32 s = D3D11PipelineState::kZeroVertexSlot;
+            buffers[s] = m_Device->GetZeroVertexBuffer();
+            strides[s] = 0;   // 步长 0：每个顶点都读同一段全零数据
+            count = std::max<UINT>(count, s + 1);
+        }
+    }
+    if (count) ctx->IASetVertexBuffers(0, count, buffers, strides, offsets);
+    auto* ib = static_cast<D3D11Buffer*>(m_IndexBuffer);
+    // 引擎的索引缓冲都是 32 位（与 D3D12 后端一致）
+    ctx->IASetIndexBuffer(ib ? ib->GetBuffer() : nullptr, DXGI_FORMAT_R32_UINT, m_IndexOffset);
+}
+
+void D3D11CommandList::ApplyViewportScissor() {
+    ID3D11DeviceContext4* ctx = m_Device->GetContext();
+    if (m_Viewport.Width > 0.0f && m_Viewport.Height > 0.0f) ctx->RSSetViewports(1, &m_Viewport);
+    if (m_Scissor.right > m_Scissor.left && m_Scissor.bottom > m_Scissor.top) ctx->RSSetScissorRects(1, &m_Scissor);
+}
+
+// ---------------------------------------------------------------------------
+//  Render pass
+// ---------------------------------------------------------------------------
+ID3D11RenderTargetView* D3D11CommandList::ResolveRtv(void* view) const {
+    if (!view) return nullptr;
+    const D3D11ViewInfo* vi = m_Device->FindView(view);
+    if (!vi) return nullptr;
+    return vi->texture->GetRtv(vi->mip, vi->layer);
+}
+
+void D3D11CommandList::BeginPassTargets(ID3D11RenderTargetView* const* rtvs, u32 rtvCount, void* depthView,
+                                        u32 width, u32 height, bool clearColor, const ClearValue* colorClears,
+                                        bool clearDepth, float depth, u8 stencil) {
+    EnsureOwner();
+    ID3D11DeviceContext4* ctx = m_Device->GetContext();
+
+    m_RtvCount = std::min<u32>(rtvCount, kMaxColorAttachments);
+    for (u32 i = 0; i < kMaxColorAttachments; ++i) m_Rtvs[i] = (i < m_RtvCount) ? rtvs[i] : nullptr;
+    m_DepthTexture = nullptr;
+    if (const D3D11ViewInfo* vi = depthView ? m_Device->FindView(depthView) : nullptr) {
+        if (vi->texture->IsDepth()) {
+            m_DepthTexture = vi->texture;
+            m_DepthMip     = vi->mip;
+            m_DepthLayer   = vi->layer;
+        }
+    }
+    ApplyRenderTargets();
+
+    if (clearColor) {
+        static const float kZero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        for (u32 i = 0; i < m_RtvCount; ++i) {
+            if (m_Rtvs[i]) ctx->ClearRenderTargetView(m_Rtvs[i], colorClears ? colorClears[i].color : kZero);
+        }
+    }
+    if (clearDepth && m_DepthTexture) {
+        // 清除总是用可写 DSV；带模板分量的格式才清模板（只传 DEPTH 对纯深度格式也合法）
+        UINT flags = D3D11_CLEAR_DEPTH;
+        if (HasStencil(m_DepthTexture->GetFormat())) flags |= D3D11_CLEAR_STENCIL;
+        ctx->ClearDepthStencilView(m_DepthTexture->GetDsv(m_DepthMip, m_DepthLayer, false), flags, depth, stencil);
+    }
+
+    // 视口与裁剪矩形设为整个目标（光栅状态开了 ScissorEnable，不设裁剪矩形就什么都画不出来）
+    m_Viewport = { 0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f };
+    m_Scissor  = { 0, 0, static_cast<LONG>(width), static_cast<LONG>(height) };
+    ApplyViewportScissor();
+}
+
+void D3D11CommandList::BeginRenderPass(u32 colorCount, Format, Format, const ClearValue* clear, LoadOp loadOp) {
+    // 主 render pass 的目标是交换链的当前后缓冲
+    auto* sc = static_cast<D3D11SwapChain*>(m_SwapChain);
+    ID3D11RenderTargetView* rtv = sc ? sc->GetRtv() : nullptr;
+    const u32 w = sc ? sc->GetWidth() : 0u, h = sc ? sc->GetHeight() : 0u;
+    // 主通道的清屏值默认黑色、alpha = 1（与 D3D12 一致）
+    ClearValue c = clear ? *clear : ClearValue{};
+    BeginPassTargets(&rtv, (rtv && colorCount) ? 1u : 0u, sc ? sc->GetDepthBufferView() : nullptr, w, h,
+                     loadOp == LoadOp::Clear, &c, false, 1.0f, 0);
+}
+
+void D3D11CommandList::EndRenderPass() {
+    EndOffscreenPass();
+}
+
+void D3D11CommandList::BeginOffscreenPass(void* colorImageView, void* depthImageView, u32 width, u32 height,
+                                          const ClearValue* clear, bool) {
+    // 是否清空由当前 PSO 的 loadOp 决定（与 Vulkan 的 render pass 一致）；clear 只提供清屏值
+    const bool gfxPso = m_Pipeline && m_Pipeline->IsValid() && !m_Pipeline->IsCompute();
+    const bool clearColor = gfxPso ? (m_Pipeline->GetColorLoadOp() == LoadOp::Clear) : (clear != nullptr);
+    const bool clearDepth = gfxPso ? (m_Pipeline->GetDepthLoadOp() == LoadOp::Clear) : (clear != nullptr);
+    ID3D11RenderTargetView* rtv = ResolveRtv(colorImageView);
+    BeginPassTargets(&rtv, rtv ? 1u : 0u, depthImageView, width, height,
+                     clearColor, clear, clearDepth, clear ? clear->depth : 1.0f, clear ? clear->stencil : 0);
+}
+
+void D3D11CommandList::BeginOffscreenPassMRT(void* const* colorImageViews, u32 colorCount, void* depthImageView,
+                                             u32 width, u32 height, const ClearValue* clears, bool) {
+    const bool gfxPso = m_Pipeline && m_Pipeline->IsValid() && !m_Pipeline->IsCompute();
+    const bool clearColor = gfxPso ? (m_Pipeline->GetColorLoadOp() == LoadOp::Clear) : (clears != nullptr);
+    const bool clearDepth = gfxPso ? (m_Pipeline->GetDepthLoadOp() == LoadOp::Clear) : (clears != nullptr);
+    ID3D11RenderTargetView* rtvs[kMaxColorAttachments] = {};
+    const u32 n = std::min<u32>(colorCount, kMaxColorAttachments);
+    for (u32 i = 0; i < n; ++i) rtvs[i] = ResolveRtv(colorImageViews ? colorImageViews[i] : nullptr);
+    // clears 的长度契约：colorCount 个颜色项 + 末尾一个深度项（见 CommandList.h）
+    BeginPassTargets(rtvs, n, depthImageView, width, height, clearColor, clears,
+                     clearDepth, clears ? clears[colorCount].depth : 1.0f, clears ? clears[colorCount].stencil : 0);
+}
+
+void D3D11CommandList::EndOffscreenPass() {
+    // 解绑渲染目标：下一步常把它当 SRV 采样，仍绑在输出上时运行时会把 SRV 强制置空（读到全黑）
+    EnsureOwner();
+    for (auto& r : m_Rtvs) r = nullptr;
+    m_RtvCount = 0;
+    m_DepthTexture = nullptr;
+    m_Device->GetContext()->OMSetRenderTargets(0, nullptr, nullptr);
+}
+
+// ---------------------------------------------------------------------------
+//  管线与资源绑定
+// ---------------------------------------------------------------------------
+void D3D11CommandList::SetPipeline(IRHIPipelineState* pso) {
+    EnsureOwner();
+    m_Pipeline = static_cast<D3D11PipelineState*>(pso);
+    ApplyPipeline();
+}
+
+void D3D11CommandList::SetVertexBuffer(IRHIBuffer* buffer, u32 binding) {
+    if (binding < kMaxVertexSlots) m_VertexBuffers[binding] = buffer;   // 步长依赖 PSO，绘制前统一下发
+}
+
+void D3D11CommandList::SetIndexBuffer(IRHIBuffer* buffer, u32 offset) {
+    m_IndexBuffer = buffer;
+    m_IndexOffset = offset;
+}
+
+void D3D11CommandList::SetViewport(const Viewport& vp) {
+    EnsureOwner();
+    m_Viewport = { vp.x, vp.y, vp.width, vp.height, vp.minDepth, vp.maxDepth };
+    // 引擎传负高度表示「原点在左下」（Vulkan 翻转 Y 的写法），换算成 D3D 的原点左上（与 D3D12 一致）
+    if (vp.height < 0.0f) {
+        m_Viewport.TopLeftY = vp.y + vp.height;
+        m_Viewport.Height   = -vp.height;
+    }
+    ApplyViewportScissor();
+}
+
+void D3D11CommandList::SetScissor(const ScissorRect& sc) {
+    EnsureOwner();
+    m_Scissor = { sc.x, sc.y, sc.x + static_cast<LONG>(sc.width), sc.y + static_cast<LONG>(sc.height) };
+    ApplyViewportScissor();
+}
+
+void D3D11CommandList::SetFullscreenViewport(u32 width, u32 height) {
+    Viewport vp{};
+    vp.width  = static_cast<float>(width);
+    vp.height = static_cast<float>(height);
+    SetViewport(vp);
+    ScissorRect sc{};
+    sc.width  = width;
+    sc.height = height;
+    SetScissor(sc);
 }
 
 void D3D11CommandList::BindDescriptorSet(u32 setIndex, DescriptorSetHandle set) {
@@ -62,11 +289,10 @@ void D3D11CommandList::FlushBindings() {
     ID3D11UnorderedAccessView* graphicsUavs[dxbc::kDxbcMaxUAVSlots] = {};
     u32 graphicsUavMin = dxbc::kDxbcMaxUAVSlots, graphicsUavMax = 0;
 
-    const D3D11PipelineState::Stage stages[] = { D3D11PipelineState::VS, D3D11PipelineState::PS };
-    const D3D11PipelineState::Stage* first = compute ? nullptr : stages;
+    const D3D11PipelineState::Stage graphicsStages[] = { D3D11PipelineState::VS, D3D11PipelineState::PS };
     const u32 stageCount = compute ? 1u : 2u;
     for (u32 si = 0; si < stageCount; ++si) {
-        const auto stage = compute ? D3D11PipelineState::CS : first[si];
+        const auto stage = compute ? D3D11PipelineState::CS : graphicsStages[si];
         for (const auto& b : m_Pipeline->GetBindings(stage)) {
             const auto type = static_cast<DxbcBindType>(b.type);
             if (type == DxbcBindType::PushConstant) continue;   // 常量环（M2.7）
@@ -177,6 +403,13 @@ bool D3D11CommandList::PrepareDrawOrDispatch(bool compute) {
         return false;
     }
     if (m_Pipeline->IsCompute() != compute) return false;
+    EnsureOwner();
+    if (!compute) {
+        // PSO 是否写深度决定用普通还是只读 DSV
+        const bool wantReadOnly = !m_Pipeline->GetDepthWrite();
+        if (m_DepthTexture && wantReadOnly != m_DepthReadOnly) ApplyRenderTargets();
+        ApplyInputAssembler();
+    }
     // 持久映射缓冲里 CPU 改过的内容先上传，再执行读它的命令（规划 3.10）
     m_Device->FlushOpenMaps();
     FlushBindings();
@@ -197,6 +430,33 @@ void D3D11CommandList::DrawIndexed(u32 indexCount, u32 instanceCount, u32 firstI
     m_Device->GetContext()->DrawIndexedInstanced(indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
 }
 
+void D3D11CommandList::DrawIndexedIndirect(IRHIBuffer* buffer, u64 offset, u32 drawCount, u32 stride) {
+    auto* args = static_cast<D3D11Buffer*>(buffer);
+    if (!args) return;
+    // 既是 Storage（CS 写入）又是 Indirect 的缓冲不能直接作间接参数（D3D11 的参数缓冲不能是结构化缓冲），
+    // 需要 M3.5 的参数整形 CS；在那之前跳过并提示一次
+    if (HasAny(args->GetUsage(), BufferUsage::Storage)) {
+        if (!m_WarnedIndirectStorage) {
+            m_WarnedIndirectStorage = true;
+            HE_CORE_WARN("[D3D11] 由计算着色器写入的间接参数缓冲暂不支持（M3.5 实现参数整形），间接绘制被跳过");
+        }
+        return;
+    }
+    if (!PrepareDrawOrDispatch(false)) return;
+    ID3D11DeviceContext4* ctx = m_Device->GetContext();
+    const u32 step = stride ? stride : static_cast<u32>(sizeof(IndirectDrawIndexedCommand));
+    for (u32 i = 0; i < drawCount; ++i) {
+        ctx->DrawIndexedInstancedIndirect(args->GetBuffer(), static_cast<UINT>(offset + u64(i) * step));
+    }
+}
+
+void D3D11CommandList::DrawIndexedIndirectCount(IRHIBuffer*, u64, IRHIBuffer*, u64, u32, u32) {
+    if (!m_WarnedIndirectCount) {
+        m_WarnedIndirectCount = true;
+        HE_CORE_WARN("[D3D11] DrawIndexedIndirectCount 需要 M3.5 的参数整形，暂时跳过");
+    }
+}
+
 void D3D11CommandList::Dispatch(u32 x, u32 y, u32 z) {
     if (!PrepareDrawOrDispatch(true)) return;
     ID3D11DeviceContext4* ctx = m_Device->GetContext();
@@ -204,6 +464,122 @@ void D3D11CommandList::Dispatch(u32 x, u32 y, u32 z) {
     // 派发后解绑 CS 的 UAV：同一资源下一步常被当 SRV 读，留着 UAV 绑定会被运行时强制解绑并告警
     ID3D11UnorderedAccessView* nullUavs[dxbc::kDxbcMaxUAVSlots] = {};
     ctx->CSSetUnorderedAccessViews(0, dxbc::kDxbcMaxUAVSlots, nullUavs, nullptr);
+}
+
+void D3D11CommandList::DispatchIndirect(IRHIBuffer* buffer, u64 offset) {
+    auto* args = static_cast<D3D11Buffer*>(buffer);
+    if (!args) return;
+    if (HasAny(args->GetUsage(), BufferUsage::Storage)) {
+        if (!m_WarnedIndirectStorage) {
+            m_WarnedIndirectStorage = true;
+            HE_CORE_WARN("[D3D11] 由计算着色器写入的间接参数缓冲暂不支持（M3.5 实现参数整形），间接派发被跳过");
+        }
+        return;
+    }
+    if (!PrepareDrawOrDispatch(true)) return;
+    ID3D11DeviceContext4* ctx = m_Device->GetContext();
+    ctx->DispatchIndirect(args->GetBuffer(), static_cast<UINT>(offset));
+    ID3D11UnorderedAccessView* nullUavs[dxbc::kDxbcMaxUAVSlots] = {};
+    ctx->CSSetUnorderedAccessViews(0, dxbc::kDxbcMaxUAVSlots, nullUavs, nullptr);
+}
+
+// ---------------------------------------------------------------------------
+//  拷贝与清除
+// ---------------------------------------------------------------------------
+void D3D11CommandList::CopyBuffer(IRHIBuffer* src, IRHIBuffer* dst, u64 size, u64 srcOffset, u64 dstOffset) {
+    auto* s = static_cast<D3D11Buffer*>(src);
+    auto* d = static_cast<D3D11Buffer*>(dst);
+    if (!s || !d || size == 0) return;
+    m_Device->FlushOpenMaps();   // 源缓冲里 CPU 未上传的改动先上传
+    // 结构化缓冲的拷贝区间（源区间宽度、源起点、目标起点）必须是结构步长的整数倍。
+    // 引擎按字节拷贝（如把 12 字节写进 32 字节步长的缓冲中间），不对齐时改走 CPU：
+    // 读出源区间（必要时同步回读）再写进目标缓冲（正确优先，性能问题记录不修）
+    auto aligned = [](u32 stride, u64 v) { return stride == 0 || v % stride == 0; };
+    const u32 ss = s->GetStructStride(), ds = d->GetStructStride();
+    if (!aligned(ss, srcOffset) || !aligned(ss, size) || !aligned(ds, dstOffset) || !aligned(ds, size) ||
+        (ss && ds && ss != ds)) {
+        std::vector<u8> tmp(static_cast<size_t>(size));
+        s->ReadRegion(srcOffset, tmp.data(), size);
+        d->WriteRegion(dstOffset, tmp.data(), size);
+        return;
+    }
+    D3D11_BOX box{ static_cast<UINT>(srcOffset), 0, 0, static_cast<UINT>(srcOffset + size), 1, 1 };
+    m_Device->GetContext()->CopySubresourceRegion(d->GetBuffer(), 0, static_cast<UINT>(dstOffset), 0, 0,
+                                                  s->GetBuffer(), 0, &box);
+    d->MarkGpuWritten();
+}
+
+void D3D11CommandList::CopyTextureToTexture(IRHITexture* src, IRHITexture* dst) {
+    auto* s = static_cast<D3D11Texture*>(src);
+    auto* d = static_cast<D3D11Texture*>(dst);
+    if (!s || !d || s == d) return;
+    m_Device->GetContext()->CopyResource(d->GetResource(), s->GetResource());
+}
+
+void D3D11CommandList::CopyTextureToBuffer(IRHITexture* src, IRHIBuffer* dst, u32 x, u32 y,
+                                           u32 width, u32 height, u64 bufferOffset) {
+    auto* t = static_cast<D3D11Texture*>(src);
+    auto* b = static_cast<D3D11Buffer*>(dst);
+    if (!t || !b || t->Is3D() || t->GetSampleCount() > 1) return;
+    const u32 w = width ? width : t->GetWidth();
+    const u32 h = height ? height : t->GetHeight();
+    if (w == 0 || h == 0 || x + w > t->GetWidth() || y + h > t->GetHeight()) return;
+
+    // 暂存纹理：只覆盖要读的区域，格式与源资源相同（CopySubresourceRegion 要求格式兼容）
+    ComPtr<ID3D11Texture2D> srcTex;
+    if (FAILED(t->GetResource()->QueryInterface(IID_PPV_ARGS(&srcTex)))) return;
+    D3D11_TEXTURE2D_DESC sd{};
+    srcTex->GetDesc(&sd);
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = w; td.Height = h; td.MipLevels = 1; td.ArraySize = 1;
+    td.Format = sd.Format;
+    td.SampleDesc = { 1, 0 };
+    td.Usage = D3D11_USAGE_STAGING;
+    td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ComPtr<ID3D11Texture2D> staging;
+    if (!HE_D3D11_CHECK(m_Device->GetDevice()->CreateTexture2D(&td, nullptr, &staging), "CreateTexture2D(回读)")) return;
+
+    ID3D11DeviceContext4* ctx = m_Device->GetContext();
+    D3D11_BOX box{ x, y, 0, x + w, y + h, 1 };
+    ctx->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, t->GetResource(), 0, &box);
+    D3D11_MAPPED_SUBRESOURCE ms{};
+    if (FAILED(ctx->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &ms))) return;   // 同步等待 GPU
+    const u32 rowBytes = w * FormatByteSize(t->GetFormat());
+    std::vector<u8> packed(static_cast<size_t>(rowBytes) * h);
+    for (u32 row = 0; row < h; ++row) {
+        std::memcpy(packed.data() + static_cast<size_t>(row) * rowBytes,
+                    static_cast<const u8*>(ms.pData) + static_cast<size_t>(row) * ms.RowPitch, rowBytes);
+    }
+    ctx->Unmap(staging.Get(), 0);
+    b->WriteRegion(bufferOffset, packed.data(), packed.size());
+}
+
+void D3D11CommandList::ClearDepthStencil(IRHITexture* texture, float depth) {
+    auto* t = static_cast<D3D11Texture*>(texture);
+    if (!t || !t->IsDepth()) return;
+    UINT flags = D3D11_CLEAR_DEPTH;
+    if (HasStencil(t->GetFormat())) flags |= D3D11_CLEAR_STENCIL;
+    m_Device->GetContext()->ClearDepthStencilView(t->GetDsv(0, 0, false), flags, depth, 0);
+}
+
+// ---------------------------------------------------------------------------
+//  调试标签
+// ---------------------------------------------------------------------------
+void D3D11CommandList::BeginDebugLabel(const char* name, const float*) {
+    if (auto* a = m_Device->GetAnnotation()) {
+        a->BeginEvent(Utf8ToWide(name).c_str());
+        ++m_LabelDepth;
+    }
+}
+
+void D3D11CommandList::EndDebugLabel() {
+    if (m_LabelDepth == 0) return;
+    if (auto* a = m_Device->GetAnnotation()) a->EndEvent();
+    --m_LabelDepth;
+}
+
+void D3D11CommandList::InsertDebugLabel(const char* name, const float*) {
+    if (auto* a = m_Device->GetAnnotation()) a->SetMarker(Utf8ToWide(name).c_str());
 }
 
 } // namespace he::rhi::d3d11

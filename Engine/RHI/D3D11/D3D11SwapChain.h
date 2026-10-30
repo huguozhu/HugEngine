@@ -28,6 +28,9 @@ public:
     u32    GetBackendFormat()    const override { return 0; }
     Format GetColorFormat() const override { return m_Format; }
 
+    /// 当前后缓冲的 RTV（M2.7 实现真正的交换链之前为空）
+    ID3D11RenderTargetView* GetRtv() const { return nullptr; }
+
 private:
     u32    m_Width  = 0;
     u32    m_Height = 0;

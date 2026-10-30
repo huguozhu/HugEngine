@@ -113,6 +113,8 @@ bool D3D11Device::CreateDeviceAndContext() {
         return false;
     }
 
+    m_Context.As(&m_Annotation);   // 调试标注（失败不影响运行）
+
     // 调试层消息：只记录、不中断（SetBreakOnSeverity 在没有调试器时会让进程永久等待，
     // D3D12 后端“静默挂起”教训 #1）。消息在每次提交后由 DrainDebugMessages 写进日志
     if (wantDebug && SUCCEEDED(m_Device.As(&m_InfoQueue))) {
@@ -217,6 +219,30 @@ void* D3D11Device::CreateTextureMipStorageView(IRHITexture* texture, u32 mipLeve
 void* D3D11Device::CreateTextureMipSampledView(IRHITexture* texture, u32 mipLevel, u32 arrayLayer) {
     auto* tex = static_cast<D3D11Texture*>(texture);
     return tex ? tex->GetSrv(mipLevel, arrayLayer, true) : nullptr;
+}
+
+// ---------------------------------------------------------------------------
+//  零缓冲与实例序号缓冲
+// ---------------------------------------------------------------------------
+ID3D11Buffer* D3D11Device::GetZeroVertexBuffer() {
+    if (!m_ZeroVertexBuffer) {
+        const u8 zeros[64] = {};   // 最大的顶点属性是 16 字节，64 字节足够
+        D3D11_BUFFER_DESC bd{ sizeof(zeros), D3D11_USAGE_IMMUTABLE, D3D11_BIND_VERTEX_BUFFER, 0, 0, 0 };
+        D3D11_SUBRESOURCE_DATA init{ zeros, 0, 0 };
+        HE_D3D11_CHECK(m_Device->CreateBuffer(&bd, &init, &m_ZeroVertexBuffer), "CreateBuffer(零缓冲)");
+    }
+    return m_ZeroVertexBuffer.Get();
+}
+
+ID3D11Buffer* D3D11Device::GetInstanceIndexBuffer() {
+    if (!m_InstanceIndexBuffer) {
+        std::vector<u32> indices(kInstanceIndexCount);
+        for (u32 i = 0; i < kInstanceIndexCount; ++i) indices[i] = i;
+        D3D11_BUFFER_DESC bd{ kInstanceIndexCount * 4u, D3D11_USAGE_IMMUTABLE, D3D11_BIND_VERTEX_BUFFER, 0, 0, 0 };
+        D3D11_SUBRESOURCE_DATA init{ indices.data(), 0, 0 };
+        HE_D3D11_CHECK(m_Device->CreateBuffer(&bd, &init, &m_InstanceIndexBuffer), "CreateBuffer(实例序号缓冲)");
+    }
+    return m_InstanceIndexBuffer.Get();
 }
 
 // ---------------------------------------------------------------------------

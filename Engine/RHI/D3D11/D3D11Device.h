@@ -172,6 +172,19 @@ public:
     ID3D11Device5*        GetDevice()  const { return m_Device.Get(); }
     ID3D11DeviceContext4* GetContext() const { return m_Context.Get(); }
     IDXGIFactory2*        GetFactory() const { return m_Factory.Get(); }
+    /// 调试标注（RenderDoc / PIX 里显示的分组与标记）；运行时不支持时为空
+    ID3DUserDefinedAnnotation* GetAnnotation() const { return m_Annotation.Get(); }
+
+    /// immediate context 当前装着哪个命令列表的状态（多个列表共用一个上下文，见 D3D11CommandList）
+    class D3D11CommandList* GetContextOwner() const { return m_ContextOwner; }
+    void SetContextOwner(class D3D11CommandList* cl) { m_ContextOwner = cl; }
+
+    /// 全零顶点缓冲（步长 0）：着色器声明了、引擎顶点布局未提供的属性从这里读 0
+    ID3D11Buffer* GetZeroVertexBuffer();
+    /// 实例序号缓冲：第 i 个 u32 为 i，供顶点着色器取含起始实例的实例号（见 D3D11PipelineState）
+    ID3D11Buffer* GetInstanceIndexBuffer();
+    /// 实例序号缓冲容量（实例号上限）：覆盖对象号、Nanite 簇号与实例化网格的实例数（与 D3D12 一致）
+    static constexpr u32 kInstanceIndexCount = 1u << 20;
 
     /// 把调试层（InfoQueue）里积累的消息写进日志并清空。ERROR / CORRUPTION 打错误，
     /// WARNING 打告警（同一消息 ID 只打前几次，避免每帧刷屏）。调试层未启用时什么都不做。
@@ -212,6 +225,10 @@ private:
     ComPtr<ID3D11Device5>        m_Device;
     ComPtr<ID3D11DeviceContext4> m_Context;
     ComPtr<ID3D11InfoQueue>      m_InfoQueue;     // 调试层启用时才有
+    ComPtr<ID3DUserDefinedAnnotation> m_Annotation;
+    ComPtr<ID3D11Buffer>         m_ZeroVertexBuffer;      // 懒创建
+    ComPtr<ID3D11Buffer>         m_InstanceIndexBuffer;   // 懒创建
+    class D3D11CommandList*      m_ContextOwner = nullptr;
     D3D11BindlessHeap            m_BindlessHeap;  // 引擎会无条件解引用它
     DeviceCaps                   m_Caps{};
 
