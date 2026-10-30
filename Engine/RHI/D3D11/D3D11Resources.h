@@ -1,8 +1,7 @@
 // ============================================================================
 //  D3D11Resources.h —— D3D11 的资源与管线对象
 //
-//  Buffer / Texture / Sampler 在 M2.3 实现；PipelineState 在 M2.4，QueryPool 在 M3.7
-//  （目前仍是占位对象，保证设备的创建接口都返回非空对象）。
+//  Buffer / Texture / Sampler 在 M2.3 实现；PipelineState 在 M2.4，QueryPool 在 M3.7。
 // ============================================================================
 #pragma once
 
@@ -286,17 +285,40 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-//  QueryPool（占位，M3.7 实现）
+//  QueryPool（M3.7）
+//
+//  每个查询是一个 ID3D11Query（第一次用到时创建）：时间戳用 D3D11_QUERY_TIMESTAMP（End 即写入），
+//  管线统计用 D3D11_QUERY_PIPELINE_STATISTICS（Begin / End 包住一段命令）。时间戳的频率由设备上
+//  轮转的 TIMESTAMP_DISJOINT 查询给出（见 D3D11Device::OnPresent），这里不关心。
+//  D3D11 的查询可以直接复用，Reset 只把各查询标为「本轮还没发出」。
 // ---------------------------------------------------------------------------
-
 class D3D11QueryPool final : public IRHIQueryPool {
 public:
-    D3D11QueryPool(u32 count, QueryType type) : m_Count(count), m_Type(type) {}
+    D3D11QueryPool(D3D11Device* device, u32 count, QueryType type);
     u32       GetQueryCount() const override { return m_Count; }
     QueryType GetQueryType()  const override { return m_Type; }
+
+    /// 所有查询标为未发出
+    void Reset();
+    /// 时间戳：在当前命令位置写入
+    void WriteTimestamp(u32 index);
+    /// 管线统计：开始 / 结束统计
+    void Begin(u32 index);
+    void End(u32 index);
+    /// 读回 [first, first + count)：时间戳每个 1 个 u64，管线统计每个 6 个 u64（顺序见 CommandList.h）。
+    /// wait = true 时等到结果就绪（限时 5 秒，超时填 0）；wait = false 时任一结果未就绪就返回 false。
+    /// 本轮没有发出的查询读作 0（wait = false 时视为未就绪）
+    bool Read(u32 first, u32 count, u64* data, bool wait);
+
 private:
-    u32       m_Count = 0;
-    QueryType m_Type  = QueryType::Timestamp;
+    /// 取（必要时创建）第 index 个查询；越界返回空
+    ID3D11Query* QueryAt(u32 index);
+
+    D3D11Device*                     m_Device = nullptr;
+    u32                              m_Count  = 0;
+    QueryType                        m_Type   = QueryType::Timestamp;
+    std::vector<ComPtr<ID3D11Query>> m_Queries;
+    std::vector<u8>                  m_Issued;   // 本轮（上次 Reset 之后）是否已发出
 };
 
 } // namespace he::rhi::d3d11

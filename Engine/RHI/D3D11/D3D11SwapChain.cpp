@@ -115,6 +115,7 @@ void D3D11SwapChain::Present(bool vsync) {
         HE_CORE_ERROR("[D3D11] Present 失败：设备丢失 reason=0x{:08x}",
                       static_cast<u32>(m_Device->GetDevice()->GetDeviceRemovedReason()));
     }
+    m_Device->OnPresent();   // 时间戳的 disjoint 查询按帧轮转（M3.7）
     m_Device->DrainDebugMessages();
 }
 

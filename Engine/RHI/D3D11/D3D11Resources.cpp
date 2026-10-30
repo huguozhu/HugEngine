@@ -658,4 +658,91 @@ bool D3D11Sampler::Initialize(D3D11Device* device, const SamplerDesc& desc) {
     return HE_D3D11_CHECK(device->GetDevice()->CreateSamplerState(&sd, &m_State), "CreateSamplerState");
 }
 
+// ---------------------------------------------------------------------------
+//  QueryPool
+// ---------------------------------------------------------------------------
+D3D11QueryPool::D3D11QueryPool(D3D11Device* device, u32 count, QueryType type)
+    : m_Device(device), m_Count(count), m_Type(type), m_Queries(count), m_Issued(count, 0) {}
+
+ID3D11Query* D3D11QueryPool::QueryAt(u32 index) {
+    if (index >= m_Count) return nullptr;
+    if (!m_Queries[index]) {
+        D3D11_QUERY_DESC qd{};
+        qd.Query = (m_Type == QueryType::Timestamp) ? D3D11_QUERY_TIMESTAMP : D3D11_QUERY_PIPELINE_STATISTICS;
+        if (!HE_D3D11_CHECK(m_Device->GetDevice()->CreateQuery(&qd, &m_Queries[index]), "CreateQuery")) return nullptr;
+    }
+    return m_Queries[index].Get();
+}
+
+void D3D11QueryPool::Reset() {
+    std::fill(m_Issued.begin(), m_Issued.end(), u8(0));
+}
+
+void D3D11QueryPool::WriteTimestamp(u32 index) {
+    if (m_Type != QueryType::Timestamp) return;
+    if (ID3D11Query* q = QueryAt(index)) {
+        m_Device->GetContext()->End(q);
+        m_Issued[index] = 1;
+    }
+}
+
+void D3D11QueryPool::Begin(u32 index) {
+    if (m_Type != QueryType::PipelineStatistics) return;
+    if (ID3D11Query* q = QueryAt(index)) m_Device->GetContext()->Begin(q);
+}
+
+void D3D11QueryPool::End(u32 index) {
+    if (m_Type != QueryType::PipelineStatistics) return;
+    if (ID3D11Query* q = QueryAt(index)) {
+        m_Device->GetContext()->End(q);
+        m_Issued[index] = 1;
+    }
+}
+
+bool D3D11QueryPool::Read(u32 first, u32 count, u64* data, bool wait) {
+    if (!data) return false;
+    const bool stats = (m_Type == QueryType::PipelineStatistics);
+    const u32  per   = stats ? 6u : 1u;   // 每个查询写几个 u64（与 Vulkan 后端一致）
+    ID3D11DeviceContext4* ctx = m_Device->GetContext();
+    for (u32 i = 0; i < count; ++i) {
+        u64* out = data + u64(i) * per;
+        for (u32 k = 0; k < per; ++k) out[k] = 0;
+        const u32 idx = first + i;
+        if (idx >= m_Count || !m_Issued[idx] || !m_Queries[idx]) {
+            if (!wait) return false;
+            continue;
+        }
+        ID3D11Query* q = m_Queries[idx].Get();
+        D3D11_QUERY_DATA_PIPELINE_STATISTICS ps{};
+        u64 ts = 0;
+        void* dst = stats ? static_cast<void*>(&ps) : static_cast<void*>(&ts);
+        const UINT size = stats ? sizeof(ps) : sizeof(ts);
+        HRESULT hr;
+        if (!wait) {
+            // 不刷新命令缓冲、不等待：没好就下一帧再试
+            hr = ctx->GetData(q, dst, size, D3D11_ASYNC_GETDATA_DONOTFLUSH);
+            if (hr != S_OK) return false;
+        } else {
+            // 等待结果（第一次调用会刷新命令缓冲）；限时 5 秒，GPU 停住时不让进程永久挂起
+            const ULONGLONG start = GetTickCount64();
+            while ((hr = ctx->GetData(q, dst, size, 0)) == S_FALSE) {
+                if (GetTickCount64() - start > 5000) {
+                    HE_CORE_ERROR("[D3D11] 查询结果等待 GPU 超时 5 秒，按 0 处理");
+                    m_Device->OnGpuTimeout();
+                    break;
+                }
+                SwitchToThread();
+            }
+            if (hr != S_OK) continue;
+        }
+        if (stats) {
+            out[0] = ps.IAVertices;    out[1] = ps.IAPrimitives; out[2] = ps.VSInvocations;
+            out[3] = ps.CInvocations;  out[4] = ps.CPrimitives;  out[5] = ps.PSInvocations;
+        } else {
+            out[0] = ts;
+        }
+    }
+    return true;
+}
+
 } // namespace he::rhi::d3d11

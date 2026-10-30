@@ -153,9 +153,13 @@ public:
     /// 提交时调用：把持久映射缓冲里 GPU 写过的内容回读
     void RefreshOpenMaps();
 
-    // ---- 查询（M3.7 实现）----
+    // ---- 查询（M3.7）----
     std::unique_ptr<IRHIQueryPool> CreateQueryPool(u32 queryCount, QueryType type = QueryType::Timestamp) override;
-    float GetTimestampPeriod() override { return 1.0f; }
+    /// 时间戳一个刻度的纳秒数：由 TIMESTAMP_DISJOINT 查询给出的频率换算（初始化时测一次，之后随帧更新）
+    float GetTimestampPeriod() override { return m_TimestampPeriodNs; }
+    /// 每次 Present 后调用：结束当前的 TIMESTAMP_DISJOINT 查询、开始下一个，并用已完成的结果更新频率。
+    /// D3D11 的时间戳只有落在 disjoint 查询之内才有效，所以始终保持一个处于活动状态
+    void OnPresent();
 
     // ---- 提交与同步（M2.7 实现）----
     void Submit(IRHICommandList* cmdList, RHICommandList* stream = nullptr) override;
@@ -277,6 +281,15 @@ private:
     // 各阶段 SRV 槽位当前指向的资源（只作比较，不持有引用）与可能非空的槽位上界
     ID3D11Resource*              m_SrvResources[kSrvStageCount][kSrvSlotCount] = {};
     u32                          m_SrvHigh[kSrvStageCount] = {};
+    // 时间戳的 disjoint 查询环（见 OnPresent）
+    static constexpr u32              kDisjointCount = 4;
+    ComPtr<ID3D11Query>               m_Disjoint[kDisjointCount];
+    bool                              m_DisjointPending[kDisjointCount] = {};   // 已结束、结果还没取
+    u32                               m_DisjointCursor = 0;                     // 当前活动的那个
+    bool                              m_DisjointActive = false;
+    float                             m_TimestampPeriodNs = 1.0f;
+    /// 开始环里的下一个 disjoint 查询
+    void BeginDisjoint();
     // 参数整形 CS 及其资源（第一次用到时创建）
     ComPtr<ID3D11ComputeShader>       m_ClampCS;
     bool                              m_ClampCSFailed = false;    // 编译失败过就不再重试

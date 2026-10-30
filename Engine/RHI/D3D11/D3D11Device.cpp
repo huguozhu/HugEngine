@@ -46,6 +46,23 @@ static std::string AdapterName(const DXGI_ADAPTER_DESC1& desc) {
 bool D3D11Device::Initialize() {
     if (!CreateDeviceAndContext()) return false;
     QueryCaps();
+    // 时间戳频率：先同步测一次（之后每帧由 OnPresent 更新），再开始第一个 disjoint 查询
+    {
+        D3D11_QUERY_DESC qd{ D3D11_QUERY_TIMESTAMP_DISJOINT, 0 };
+        ComPtr<ID3D11Query> q;
+        if (SUCCEEDED(m_Device->CreateQuery(&qd, &q))) {
+            m_Context->Begin(q.Get());
+            m_Context->End(q.Get());
+            D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dj{};
+            const ULONGLONG start = GetTickCount64();
+            while (m_Context->GetData(q.Get(), &dj, sizeof(dj), 0) == S_FALSE && GetTickCount64() - start < 1000) {
+                SwitchToThread();
+            }
+            if (dj.Frequency > 0) m_TimestampPeriodNs = static_cast<float>(1e9 / static_cast<double>(dj.Frequency));
+            HE_CORE_INFO("[D3D11] 时间戳频率 {} Hz（每刻度 {:.3f} ns）", dj.Frequency, m_TimestampPeriodNs);
+        }
+    }
+    BeginDisjoint();
     return true;
 }
 
@@ -145,6 +162,37 @@ void D3D11Device::QueryCaps() {
 
 void* D3D11Device::GetImGuiCommandBuffer(IRHICommandList* cmd) const {
     return cmd ? static_cast<D3D11CommandList*>(cmd)->PrepareExternalRendering() : nullptr;
+}
+
+void D3D11Device::BeginDisjoint() {
+    ComPtr<ID3D11Query>& q = m_Disjoint[m_DisjointCursor];
+    if (!q) {
+        D3D11_QUERY_DESC qd{ D3D11_QUERY_TIMESTAMP_DISJOINT, 0 };
+        if (!HE_D3D11_CHECK(m_Device->CreateQuery(&qd, &q), "CreateQuery(TIMESTAMP_DISJOINT)")) return;
+    }
+    m_DisjointPending[m_DisjointCursor] = false;   // 重新开始会丢掉上一轮未取的结果
+    m_Context->Begin(q.Get());
+    m_DisjointActive = true;
+}
+
+void D3D11Device::OnPresent() {
+    if (m_DisjointActive) {
+        m_Context->End(m_Disjoint[m_DisjointCursor].Get());
+        m_DisjointPending[m_DisjointCursor] = true;
+        m_DisjointActive = false;
+    }
+    // 已完成的结果更新频率（不刷新、不等待；频率会随功耗状态变化，disjoint 的那一段不采用）
+    for (u32 i = 0; i < kDisjointCount; ++i) {
+        if (!m_DisjointPending[i]) continue;
+        D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dj{};
+        if (m_Context->GetData(m_Disjoint[i].Get(), &dj, sizeof(dj), D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK) continue;
+        m_DisjointPending[i] = false;
+        if (!dj.Disjoint && dj.Frequency > 0) {
+            m_TimestampPeriodNs = static_cast<float>(1e9 / static_cast<double>(dj.Frequency));
+        }
+    }
+    m_DisjointCursor = (m_DisjointCursor + 1) % kDisjointCount;
+    BeginDisjoint();
 }
 
 void D3D11Device::OnGpuTimeout() {
@@ -421,7 +469,7 @@ std::unique_ptr<IRHIPipelineState> D3D11Device::CreatePipelineState(const Pipeli
 }
 
 std::unique_ptr<IRHIQueryPool> D3D11Device::CreateQueryPool(u32 queryCount, QueryType type) {
-    return std::make_unique<D3D11QueryPool>(queryCount, type);
+    return std::make_unique<D3D11QueryPool>(this, queryCount, type);
 }
 
 // ---------------------------------------------------------------------------

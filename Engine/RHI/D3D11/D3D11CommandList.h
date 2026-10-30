@@ -116,13 +116,13 @@ public:
     void SetTimelineSignal(RHIFenceHandle fence, u64 value) override;
     /// 只有一个 immediate context：等待的信号必然来自更早提交的命令，已经满足，忽略
     void SetTimelineWait(RHIFenceHandle, u64) override {}
-    void WriteTimestamp(IRHIQueryPool*, u32) override {}
-    void ResetQueryPool(IRHIQueryPool*) override {}
-    void GetQueryResults(IRHIQueryPool*, u32, u32 count, u64* data) override {
-        // 未实现前返回 0，调用方读到的计时为 0 而不是未初始化内存
-        if (data) for (u32 i = 0; i < count; ++i) data[i] = 0;
-    }
-    bool TryGetQueryResults(IRHIQueryPool*, u32, u32, u64*) override { return false; }
+    // 查询（M3.7）：D3D11 的查询对象直接在 immediate context 上 Begin / End，见 D3D11QueryPool
+    void WriteTimestamp(IRHIQueryPool* pool, u32 queryIndex) override;
+    void ResetQueryPool(IRHIQueryPool* pool) override;
+    void GetQueryResults(IRHIQueryPool* pool, u32 first, u32 count, u64* data) override;
+    bool TryGetQueryResults(IRHIQueryPool* pool, u32 first, u32 count, u64* data) override;
+    void BeginQuery(IRHIQueryPool* pool, u32 queryIndex) override;
+    void EndQuery(IRHIQueryPool* pool, u32 queryIndex) override;
 
     // ---- 调试标签（ID3DUserDefinedAnnotation：RenderDoc / PIX 显示为分组与标记）----
     void BeginDebugLabel(const char* name, const float color[4] = nullptr) override;

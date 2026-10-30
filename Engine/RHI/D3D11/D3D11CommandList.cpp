@@ -367,6 +367,33 @@ void D3D11CommandList::Submit() {
     m_PendingSignals.clear();
 }
 
+// ---------------------------------------------------------------------------
+//  查询（M3.7）
+// ---------------------------------------------------------------------------
+void D3D11CommandList::WriteTimestamp(IRHIQueryPool* pool, u32 queryIndex) {
+    if (pool) static_cast<D3D11QueryPool*>(pool)->WriteTimestamp(queryIndex);
+}
+
+void D3D11CommandList::ResetQueryPool(IRHIQueryPool* pool) {
+    if (pool) static_cast<D3D11QueryPool*>(pool)->Reset();
+}
+
+void D3D11CommandList::GetQueryResults(IRHIQueryPool* pool, u32 first, u32 count, u64* data) {
+    if (pool) static_cast<D3D11QueryPool*>(pool)->Read(first, count, data, true);
+}
+
+bool D3D11CommandList::TryGetQueryResults(IRHIQueryPool* pool, u32 first, u32 count, u64* data) {
+    return pool && static_cast<D3D11QueryPool*>(pool)->Read(first, count, data, false);
+}
+
+void D3D11CommandList::BeginQuery(IRHIQueryPool* pool, u32 queryIndex) {
+    if (pool) static_cast<D3D11QueryPool*>(pool)->Begin(queryIndex);
+}
+
+void D3D11CommandList::EndQuery(IRHIQueryPool* pool, u32 queryIndex) {
+    if (pool) static_cast<D3D11QueryPool*>(pool)->End(queryIndex);
+}
+
 ID3D11DeviceContext4* D3D11CommandList::PrepareExternalRendering() {
     EnsureOwner();
     return m_Device->GetContext();
