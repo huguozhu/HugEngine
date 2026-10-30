@@ -100,6 +100,13 @@ public:
     // 创建使用瞬态内存的纹理（GPU 完成前帧后内存被回收）
     // 返回 nullptr 表示后端不支持瞬态资源（回退到普通 CreateTexture）
     virtual std::unique_ptr<IRHITexture>        CreateTransientTexture(const TextureDesc& desc) { return nullptr; }
+    // 带生命周期的瞬态纹理：firstPass / lastPass 是本次 RenderGraph 执行中首次 / 末次使用该纹理的
+    // pass 序号（闭区间）。生命周期不重叠的瞬态纹理可由后端放在同一段内存上（内存别名）。
+    // 默认忽略生命周期、转发到上面的版本（不做别名的后端无需改动）
+    virtual std::unique_ptr<IRHITexture>        CreateTransientTexture(const TextureDesc& desc, u32 firstPass, u32 lastPass) {
+        (void)firstPass; (void)lastPass;
+        return CreateTransientTexture(desc);
+    }
     // 推进瞬态资源帧：回收上一帧内存，切换到下一帧的 Heap
     // 默认空实现：后端不支持瞬态资源时安全跳过
     virtual void AdvanceTransientResources() {}

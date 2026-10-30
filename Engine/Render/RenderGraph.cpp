@@ -349,6 +349,12 @@ void RenderGraph::ApplyAliasing() {
         }
     }
 
+    // 记下生命周期：后端（D3D12）据此按真实大小把生命周期不重叠的瞬态纹理放在同一段内存上
+    for (usize i = 0; i < m_Resources.size() && i < m_AliasInfo.size(); ++i) {
+        m_AliasInfo[i].firstPass = lifetimes[i].first;
+        m_AliasInfo[i].lastPass  = lifetimes[i].last;
+    }
+
     // 贪心合并非重叠区间
     struct Pool { u64 size = 0; std::vector<std::pair<u32,u32>> used; };
     std::vector<Pool> pools;
@@ -436,7 +442,9 @@ void RenderGraph::Execute(rhi::IRHICommandList* cmdList, rhi::IRHIDevice* device
             // 非别名资源（如导入/持久资源）：使用独占 VMA 分配
             bool isAliased = (i < m_AliasInfo.size() && m_AliasInfo[i].poolId > 0);
             if (isAliased) {
-                textures[i] = device->CreateTransientTexture(texDesc);
+                // 带上生命周期：支持内存别名的后端让生命周期不重叠的纹理共用内存
+                textures[i] = device->CreateTransientTexture(texDesc, m_AliasInfo[i].firstPass,
+                                                             m_AliasInfo[i].lastPass);
             }
             // 回退：瞬态分配失败或不支持时使用普通纹理
             if (!textures[i]) {

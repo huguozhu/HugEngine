@@ -97,6 +97,8 @@ struct PassNode {
 struct AliasInfo {
     u64  offset = 0;   // 池内偏移
     u32  poolId = 0;   // 所属池（0=未分配）
+    u32  firstPass = ~0u;   // 生命周期：首次使用的 pass 序号（~0u = 未使用）
+    u32  lastPass  = 0;     // 生命周期：末次使用的 pass 序号（传给后端做真正的内存别名）
 };
 
 // --- Render Graph ---
