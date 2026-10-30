@@ -76,6 +76,8 @@ public:
     void DrawIndexedIndirect(IRHIBuffer* buffer, u64 offset, u32 drawCount, u32 stride) override;
     void DrawIndexedIndirectCount(IRHIBuffer* buffer, u64 offset, IRHIBuffer* countBuffer,
                                   u64 countOffset, u32 maxDrawCount, u32 stride) override;
+    /// DGC 的等价执行：绑定执行集管线，按 GPU 地址找回序列 / 计数缓冲，ExecuteIndirect
+    void ExecuteGeneratedCommands(const DGCExecuteDesc& desc) override;
     /// 网格着色器绘制：ID3D12GraphicsCommandList6::DispatchMesh（需当前绑定网格管线）
     void DrawMeshTasks(u32 groupCountX, u32 groupCountY = 1, u32 groupCountZ = 1) override;
     /// 间接网格绘制：ExecuteIndirect + DISPATCH_MESH 命令签名（参数布局与 Vulkan 的

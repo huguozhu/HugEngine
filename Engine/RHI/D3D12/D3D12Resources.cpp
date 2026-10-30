@@ -22,6 +22,7 @@ namespace he::rhi::d3d12 {
 //  Buffer
 // ===========================================================================
 D3D12Buffer::~D3D12Buffer() {
+    if (m_Device) m_Device->UnregisterBufferAddress(m_GpuAddress);   // 注销 GPU 地址登记
     // 持久映射的缓冲要先解除映射再释放
     if (m_PersistentlyMapped && m_Resource) {
         m_Resource->Unmap(0, nullptr);
@@ -160,6 +161,8 @@ bool D3D12Buffer::Initialize(D3D12Device* device, const BufferDesc& desc) {
     }
 
     m_GpuAddress = m_Resource->GetGPUVirtualAddress();
+    // 登记 GPU 地址范围：DGC 等只传地址的接口据此反查资源与偏移
+    if (m_Device) m_Device->RegisterBufferAddress(m_GpuAddress, m_Size, m_Resource.Get());
 
     // UAV 缓冲的 CPU 暂存：Map() 返回它的映射指针，Unmap() 用 CopyBufferRegion 拷到 GPU
     if (needStaging) {

@@ -1278,6 +1278,43 @@ void D3D12CommandList::DrawIndexedIndirectCount(IRHIBuffer* buffer, u64 offset,
 }
 
 // ---------------------------------------------------------------------------
+//  ExecuteGeneratedCommands —— DGC 的等价执行（对应 vkCmdExecuteGeneratedCommandsEXT）
+//  desc 里的布局 / 执行集来自 D3D12Device::GetDGCLayout / GetDGCExecutionSet（命令签名 / 管线），
+//  序列与计数缓冲以 GPU 地址给出，这里反查成资源 + 偏移后调用带计数缓冲的 ExecuteIndirect。
+//  序列数取 min(maxSequenceCount, maxDrawCount)：Vulkan 的 maxDrawCount 也是本次绘制数的上限。
+// ---------------------------------------------------------------------------
+void D3D12CommandList::ExecuteGeneratedCommands(const DGCExecuteDesc& desc) {
+    if (!m_List || !m_Device || IsComputeQueueList()) return;
+    auto* sig = static_cast<ID3D12CommandSignature*>(desc.indirectCommandsLayout);
+    auto* pso = static_cast<IRHIPipelineState*>(desc.indirectExecutionSet);
+    if (!sig || !pso || sig != m_Device->GetDGCLayout()) {
+        HE_CORE_WARN("D3D12CommandList::ExecuteGeneratedCommands: DGC 未初始化或句柄不匹配，已忽略");
+        return;
+    }
+    u64 seqOffset = 0, countOffset = 0;
+    ID3D12Resource* seqRes   = m_Device->FindBufferByAddress(desc.sequencesBufferAddr, seqOffset);
+    ID3D12Resource* countRes = desc.sequenceCountAddr
+                             ? m_Device->FindBufferByAddress(desc.sequenceCountAddr, countOffset) : nullptr;
+    if (!seqRes || (desc.sequenceCountAddr && !countRes)) {
+        HE_CORE_WARN("D3D12CommandList::ExecuteGeneratedCommands: 找不到序列 / 计数缓冲（地址未登记），已忽略");
+        return;
+    }
+    u32 maxCount = desc.maxSequenceCount;
+    if (desc.maxDrawCount != 0 && desc.maxDrawCount < maxCount) maxCount = desc.maxDrawCount;
+    if (maxCount == 0) return;
+
+    if (m_Pipeline != pso) SetPipeline(pso);   // 执行集只有一条管线：相当于 EXECUTION_SET 令牌
+    // 序列 / 计数缓冲由 GPU 剔除以 UAV 写出：执行前转到 INDIRECT_ARGUMENT
+    TransitionBuffer(seqRes, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+    if (countRes) TransitionBuffer(countRes, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+    EnsureBoundResourceStates();
+    FlushRootArgs();
+    m_List->ExecuteIndirect(sig, maxCount, seqRes, seqOffset, countRes, countOffset);
+    AfterDrawOrDispatch();
+    m_PushDirty = true;   // 同 Draw：常量槽已被本次绘制消费
+}
+
+// ---------------------------------------------------------------------------
 //  网格着色器绘制（对应 Vulkan 的 vkCmdDrawMeshTasks*EXT）
 //  与普通绘制同一套前置：补资源状态、下发根参数；之后标记常量槽已消费
 // ---------------------------------------------------------------------------

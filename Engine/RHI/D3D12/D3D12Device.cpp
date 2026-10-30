@@ -1159,6 +1159,67 @@ void D3D12Device::RegisterSubresourceView(UINT64 handle, ID3D12Resource* res, u3
         m_ResStates[res] = D3D12_RESOURCE_STATE_COMMON;
 }
 
+void D3D12Device::RegisterBufferAddress(D3D12_GPU_VIRTUAL_ADDRESS base, u64 size, ID3D12Resource* res) {
+    if (!base || !size || !res) return;
+    std::lock_guard<std::mutex> lock(m_BufferAddrMutex);
+    m_BufferAddrs[base] = { size, res };
+}
+
+void D3D12Device::UnregisterBufferAddress(D3D12_GPU_VIRTUAL_ADDRESS base) {
+    if (!base) return;
+    std::lock_guard<std::mutex> lock(m_BufferAddrMutex);
+    m_BufferAddrs.erase(base);
+}
+
+ID3D12Resource* D3D12Device::FindBufferByAddress(D3D12_GPU_VIRTUAL_ADDRESS addr, u64& outOffset) const {
+    outOffset = 0;
+    if (!addr) return nullptr;
+    std::lock_guard<std::mutex> lock(m_BufferAddrMutex);
+    // 起始地址不大于 addr 的最后一个缓冲，再判断 addr 是否落在它的范围内
+    auto it = m_BufferAddrs.upper_bound(addr);
+    if (it == m_BufferAddrs.begin()) return nullptr;
+    --it;
+    if (addr >= it->first + it->second.first) return nullptr;
+    outOffset = addr - it->first;
+    return it->second.second;
+}
+
+// ---------------------------------------------------------------------------
+// InitializeDGC —— DGC 的 D3D12 等价实现
+// 只建一个 DRAW_INDEXED 命令签名（步长 20 字节 = D3D12_DRAW_INDEXED_ARGUMENTS，与 Vulkan 的
+// VkDrawIndexedIndirectCommand / 引擎的 IndirectDrawCommand 布局一致）。签名里没有改根参数的
+// 参数，因此不需要根签名。管线作为「执行集」记下，执行时由命令列表绑定。
+// maxDraws 在 D3D12 下没有对应概念（每条序列就是一次绘制），只用 maxSequences 作上限。
+// ---------------------------------------------------------------------------
+bool D3D12Device::InitializeDGC(IRHIPipelineState* pso, u32 maxSequences, u32 /*maxDraws*/) {
+    if (!m_Device || !pso || maxSequences == 0) return false;
+    ShutdownDGC();
+    D3D12_INDIRECT_ARGUMENT_DESC arg{};
+    arg.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED;
+    D3D12_COMMAND_SIGNATURE_DESC sd{};
+    sd.ByteStride       = sizeof(D3D12_DRAW_INDEXED_ARGUMENTS);
+    sd.NumArgumentDescs = 1;
+    sd.pArgumentDescs   = &arg;
+    if (FAILED(m_Device->CreateCommandSignature(&sd, nullptr, IID_PPV_ARGS(&m_DGCSignature)))) {
+        HE_CORE_ERROR("[D3D12] DGC：命令签名创建失败");
+        m_DGCSignature.Reset();
+        return false;
+    }
+    m_DGCSignature->SetName(L"HugEngine DGC 命令签名");
+    m_DGCPso          = pso;
+    m_DGCMaxSequences = maxSequences;
+    HE_CORE_INFO("[D3D12] DGC 初始化完成（ExecuteIndirect + 计数缓冲，maxSeq={}）", maxSequences);
+    return true;
+}
+
+void D3D12Device::ShutdownDGC() {
+    // 命令签名可能仍被在途的命令列表引用：等 GPU 空闲后再释放
+    if (m_DGCSignature) WaitIdle();
+    m_DGCSignature.Reset();
+    m_DGCPso          = nullptr;
+    m_DGCMaxSequences = 0;
+}
+
 void D3D12Device::UnregisterViewResource(UINT64 handle) {
     if (!handle) return;
     const auto it = m_ViewResources.find(handle);

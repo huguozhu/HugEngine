@@ -16,7 +16,7 @@
 #include <thread>  // PSO 后台预编译线程
 #include <atomic>
 #include <unordered_map>
-#include <unordered_map>
+#include <map>     // 缓冲 GPU 地址登记（按起始地址有序查找）
 #include <memory>
 
 namespace he::rhi::d3d12 {
@@ -153,6 +153,24 @@ public:
     /// 登记「只指向某个子资源（mip / 数组层）」的视图句柄，对应 Vulkan 带 subresourceRange 的 ImageView
     void RegisterSubresourceView(UINT64 handle, ID3D12Resource* res, u32 mip, u32 layer);
     void UnregisterViewResource(UINT64 handle);
+    /// 缓冲 GPU 虚拟地址登记：DGC 等接口只传 GPU 地址（对应 Vulkan 的 device address），
+    /// 而 ExecuteIndirect 需要「资源 + 偏移」，据此反查
+    void RegisterBufferAddress(D3D12_GPU_VIRTUAL_ADDRESS base, u64 size, ID3D12Resource* res);
+    void UnregisterBufferAddress(D3D12_GPU_VIRTUAL_ADDRESS base);
+    /// 按 GPU 地址找所在缓冲，outOffset 为地址相对缓冲起点的偏移；找不到返回 nullptr
+    ID3D12Resource* FindBufferByAddress(D3D12_GPU_VIRTUAL_ADDRESS addr, u64& outOffset) const;
+
+    // ---- 设备生成命令（DGC）的等价实现 ----
+    //  Vulkan 的 DGC 布局是「执行集（单个 GBuffer 管线）+ DRAW_INDEXED 令牌（步长 20B）」，
+    //  序列数由 GPU 侧计数缓冲给出。D3D12 用 DRAW_INDEXED 命令签名 + 带计数缓冲的
+    //  ExecuteIndirect 即可得到相同语义：不需要预处理缓冲（地址 / 大小返回 0）。
+    bool  InitializeDGC(IRHIPipelineState* pso, u32 maxSequences, u32 maxDraws) override;
+    void  ShutdownDGC() override;
+    bool  IsDGCReady() const override { return m_DGCSignature != nullptr; }
+    /// 「布局」= 命令签名，「执行集」= 绑定的管线（命令列表执行时据此取回）
+    void* GetDGCLayout()       const override { return m_DGCSignature.Get(); }
+    void* GetDGCExecutionSet() const override { return m_DGCPso; }
+    u32   GetDGCMaxSequences() const override { return m_DGCMaxSequences; }
     ID3D12Resource* FindViewResource(UINT64 handle) const;
     /// 视图句柄 → 资源与子资源范围（UpdateDescriptorSetWithImageView 据此现建 SRV / UAV）
     struct ViewInfo {
@@ -477,6 +495,13 @@ private:
 private:
 private:   // register -> 元素字节数
     std::unordered_map<UINT64, ViewInfo> m_ViewResources;
+    /// 缓冲 GPU 地址登记表：起始地址 → (大小, 资源)。缓冲可能在任意线程创建 / 销毁，加锁
+    std::map<D3D12_GPU_VIRTUAL_ADDRESS, std::pair<u64, ID3D12Resource*>> m_BufferAddrs;
+    mutable std::mutex                                                     m_BufferAddrMutex;
+    /// DGC：DRAW_INDEXED 命令签名、执行集管线、最大序列数
+    ComPtr<ID3D12CommandSignature> m_DGCSignature;
+    IRHIPipelineState*             m_DGCPso = nullptr;
+    u32                            m_DGCMaxSequences = 0;
     std::unordered_map<UINT64, UINT64>          m_ReadOnlyDsv;   // 普通 DSV → 只读 DSV
     mutable std::unordered_map<ID3D12Resource*, D3D12_RESOURCE_STATES> m_ResStates;
 
