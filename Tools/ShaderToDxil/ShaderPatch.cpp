@@ -481,8 +481,49 @@ static bool PrecededByLoopAttr(const std::string& s, size_t kw) {
     return open != std::string::npos && s.compare(open, 6, "[loop]") == 0;
 }
 
-void PatchLoopsFxc(std::string& s) {
+/// 文本位置 pos 在 Slang 源码里的位置：往前找最近的 `#line N ["file"]`，行号 = N + 其后的换行数；
+/// 不带文件名的 #line 沿用更早一条带文件名的
+static LoopSite SourceSiteAt(const std::string& s, size_t pos) {
+    LoopSite site;
+    size_t dir = std::string::npos;
+    for (size_t p = pos; p != std::string::npos && p > 0;) {
+        const size_t found = s.rfind("#line ", p - 1);
+        if (found == std::string::npos) break;
+        if (found == 0 || s[found - 1] == '\n') {
+            const size_t eol = s.find('\n', found);
+            const std::string directive = s.substr(found, eol - found);
+            if (dir == std::string::npos) {
+                dir = found;
+                site.line = std::atoi(directive.c_str() + 6);
+                for (size_t k = eol + 1; k < pos && k < s.size(); ++k) if (s[k] == '\n') ++site.line;
+            }
+            const size_t q1 = directive.find('"');
+            const size_t q2 = (q1 == std::string::npos) ? q1 : directive.find('"', q1 + 1);
+            if (q2 != std::string::npos) { site.file = directive.substr(q1 + 1, q2 - q1 - 1); break; }
+        }
+        p = found;
+    }
+    return site;
+}
+
+/// 两个源码路径是否指同一文件（fxc 报错与 #line 的写法可能一个用正斜杠、一个用反斜杠）
+static bool SameSourceFile(std::string a, std::string b) {
+    for (auto* s : { &a, &b }) for (char& c : *s) { if (c == '\\') c = '/'; c = static_cast<char>(tolower(static_cast<unsigned char>(c))); }
+    return a == b;
+}
+
+void PatchLoopsFxc(std::string& s, bool insertLoop, const std::vector<LoopSite>* skip) {
     StripUnroll(s);
+    if (!insertLoop) return;
+    // 该位置的循环是否在 skip 列表里（同文件、行号相差 ≤ 2：fxc 报的行号可能是循环条件所在行）
+    auto skipped = [&](size_t pos) {
+        if (!skip || skip->empty()) return false;
+        const LoopSite site = SourceSiteAt(s, pos);
+        for (const LoopSite& k : *skip) {
+            if (std::abs(k.line - site.line) <= 2 && SameSourceFile(k.file, site.file)) return true;
+        }
+        return false;
+    };
 
     // 扫描大括号嵌套：栈里记录每个 '{' 是否是循环体；循环深度 = 栈中循环体的个数。
     std::vector<bool> braceIsLoop;
@@ -522,7 +563,7 @@ void PatchLoopsFxc(std::string& s) {
                     resume = k + 1;
                 }
                 if (isLoop) {
-                    if (loopDepth == 0 && !PrecededByLoopAttr(s, i)) insertAt.push_back(i);
+                    if (loopDepth == 0 && !PrecededByLoopAttr(s, i) && !skipped(i)) insertAt.push_back(i);
                     expectLoopBody = true;
                 }
                 i = resume;

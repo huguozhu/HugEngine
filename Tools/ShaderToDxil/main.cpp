@@ -97,42 +97,94 @@ static int RunDxbc(const char* input, const char* entry, const char* stage,
         return 1;
     }
 
-    std::string patched = InjectSemantics(src, st == "vs");
-    PatchUint8(patched);
-    PatchLoopsFxc(patched);
-    if (st == "vs") PatchInstanceId(patched);
-    D3D11RegisterResult regs = PatchRegistersD3D11(patched, st == "ps");
-
+    // 补丁（insertLoop 决定是否给最外层循环加 [loop]）+ 寄存器重新分配；寄存器问题直接失败
     const std::string hlslPath = std::string(output) + ".hlsl";
-    if (!WriteFile(hlslPath.c_str(), regs.hlsl)) {
-        std::fprintf(stderr, "ShaderToDxil: 无法写临时 HLSL %s\n", hlslPath.c_str());
-        return 1;
-    }
-    if (!regs.errors.empty()) {
-        std::fprintf(stderr, "ShaderToDxil --dxbc: %s 无法用于 D3D11（%zu 处寄存器问题）：\n",
-                     input, regs.errors.size());
-        for (const auto& e : regs.errors) std::fprintf(stderr, "    %s\n", e.c_str());
-        return 1;
-    }
+    std::vector<LoopSite> noLoopSites;   // fxc 报 X3531 的循环：这些位置不加 [loop]
+    auto buildPatched = [&](bool insertLoop, D3D11RegisterResult& regs) -> bool {
+        std::string patched = InjectSemantics(src, st == "vs");
+        PatchUint8(patched);
+        PatchLoopsFxc(patched, insertLoop, &noLoopSites);
+        if (st == "vs") PatchInstanceId(patched);
+        regs = PatchRegistersD3D11(patched, st == "ps");
+        if (!WriteFile(hlslPath.c_str(), regs.hlsl)) {
+            std::fprintf(stderr, "ShaderToDxil: 无法写临时 HLSL %s\n", hlslPath.c_str());
+            return false;
+        }
+        if (!regs.errors.empty()) {
+            std::fprintf(stderr, "ShaderToDxil --dxbc: %s 无法用于 D3D11（%zu 处寄存器问题）：\n",
+                         input, regs.errors.size());
+            for (const auto& e : regs.errors) std::fprintf(stderr, "    %s\n", e.c_str());
+            return false;
+        }
+        return true;
+    };
     // 进程内调用 fxc（d3dcompiler_47）。
     // 源文件名传补丁后的 HLSL 路径；HLSL 里保留了 Slang 生成的 `#line N "xxx.slang"`，
     // 所以报错位置直接是 Slang 源文件与行号，不用再人工对照中间 HLSL。
     // 不加 D3DCOMPILE_ENABLE_STRICTNESS：严格模式会强制展开带 break 的循环（X3511）。
     const std::string profile = st + "_5_0";
-    ID3DBlob* code   = nullptr;
-    ID3DBlob* errors = nullptr;
-    const HRESULT hr = D3DCompile(regs.hlsl.data(), regs.hlsl.size(), hlslPath.c_str(),
-                                  nullptr, nullptr, entry, profile.c_str(),
-                                  D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &errors);
-    if (errors) {
-        // 失败时是错误，成功时是警告；都原样打印（每行就是「文件(行,列): 消息」）
-        std::fprintf(stderr, "%s", static_cast<const char*>(errors->GetBufferPointer()));
-        errors->Release();
+    std::string diagnostics;   // 本次编译的错误 / 警告文本
+    auto compile = [&](const std::string& hlsl, ID3DBlob*& code) -> bool {
+        ID3DBlob* errors = nullptr;
+        code = nullptr;
+        const HRESULT hr = D3DCompile(hlsl.data(), hlsl.size(), hlslPath.c_str(), nullptr, nullptr, entry,
+                                      profile.c_str(), D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &errors);
+        diagnostics = errors ? static_cast<const char*>(errors->GetBufferPointer()) : "";
+        if (errors) errors->Release();
+        if (FAILED(hr) || !code) {
+            if (code) { code->Release(); code = nullptr; }
+            return false;
+        }
+        return true;
+    };
+
+    // 从 fxc 的报错里取出所有 X3531 的位置（形如 `path(119,16-22): error X3531: ...`）
+    auto x3531Sites = [&]() {
+        std::vector<LoopSite> sites;
+        std::istringstream lines(diagnostics);
+        std::string l;
+        while (std::getline(lines, l)) {
+            if (l.find("X3531") == std::string::npos) continue;
+            const size_t colon = l.find("): error");
+            const size_t paren = (colon == std::string::npos) ? colon : l.rfind('(', colon);
+            if (paren == std::string::npos) continue;
+            sites.push_back({ l.substr(0, paren), std::atoi(l.c_str() + paren + 1) });
+        }
+        return sites;
+    };
+
+    D3D11RegisterResult regs;
+    ID3DBlob* code = nullptr;
+    bool ok = false;
+    // 【逐循环重试】给最外层循环加 [loop] 是为了挡住 fxc 对动态边界循环的强制展开（X3511）；
+    // 但循环体里有隐式导数采样（Sample）且处在分支内的定长循环，fxc 必须展开它才能算导数，
+    // [loop] 反而让它报 X3531。每次把报 X3531 的循环位置加入「不加 [loop]」名单重编，
+    // 其余循环保留 [loop]，直到编过或不再出现新的 X3531 位置
+    for (int attempt = 0; attempt < 16; ++attempt) {
+        if (!buildPatched(true, regs)) return 1;
+        ok = compile(regs.hlsl, code);
+        if (ok) break;
+        const std::vector<LoopSite> sites = x3531Sites();
+        size_t added = 0;
+        for (const LoopSite& site : sites) {
+            bool known = false;
+            for (const LoopSite& k : noLoopSites) known = known || (k.line == site.line && k.file == site.file);
+            if (!known) { noLoopSites.push_back(site); ++added; }
+        }
+        if (added == 0) break;
+        std::fprintf(stderr, "ShaderToDxil --dxbc: %s 有 %zu 个循环必须展开（X3531），这些循环不加 [loop] 后重编\n",
+                     input, added);
     }
-    if (FAILED(hr) || !code) {
-        std::fprintf(stderr, "ShaderToDxil --dxbc: fxc 编译失败（%s，hr=0x%08lx）\n", input,
-                     static_cast<unsigned long>(hr));
-        if (code) code->Release();
+    // 兜底：仍然报 X3531（报错位置对不上插入的 [loop]）时，整个着色器都不加 [loop] 再试一次
+    if (!ok && diagnostics.find("X3531") != std::string::npos) {
+        std::fprintf(stderr, "ShaderToDxil --dxbc: %s 仍报 X3531，改为整体不加 [loop] 重编\n", input);
+        if (!buildPatched(false, regs)) return 1;
+        ok = compile(regs.hlsl, code);
+    }
+    // 失败时是错误，成功时是警告；都原样打印（每行就是「文件(行,列): 消息」）
+    if (!diagnostics.empty()) std::fprintf(stderr, "%s", diagnostics.c_str());
+    if (!ok) {
+        std::fprintf(stderr, "ShaderToDxil --dxbc: fxc 编译失败（%s）\n", input);
         return 1;
     }
 

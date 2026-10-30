@@ -46,7 +46,15 @@ std::string PatchRegisters(const std::string& src);
 ///  · 去掉所有 [unroll]（fxc 对含 break 的循环强制展开会报 X3511）；
 ///  · 只给**最外层**循环加 [loop]（嵌套循环加 [loop] 会触发 X3531），
 ///    内层循环交给 fxc 自行决定展开与否。
-void PatchLoopsFxc(std::string& s);
+/// 循环在 Slang 源码里的位置（按 HLSL 里的 #line 推算）
+struct LoopSite {
+    std::string file;   // #line 给出的源文件路径
+    int         line = 0;
+};
+/// insertLoop=false：只去掉 [unroll]、不加 [loop]。
+/// skip：这些源码位置（同文件、行号相差 ≤ 2）的循环不加 [loop] —— fxc 报 X3531 说明该循环
+/// 必须展开（如分支内带隐式导数采样的定长循环），见 main.cpp 的逐循环重试
+void PatchLoopsFxc(std::string& s, bool insertLoop = true, const std::vector<LoopSite>* skip = nullptr);
 
 /// D3D11 寄存器分配的结果
 struct D3D11RegisterResult {
