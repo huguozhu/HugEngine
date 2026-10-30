@@ -174,9 +174,95 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-//  PipelineState / QueryPool（占位，M2.4 / M3.7 实现）
+//  PipelineState
+//
+//  D3D11 没有 PSO 对象：这里持有着色器对象 + 输入布局 + 光栅 / 深度模板 / 混合状态对象
+//  （相同描述的状态对象由 D3D11 运行时自动复用，不必再自建缓存）。
+//
+//  【绑定槽位】每个阶段记录着色器**实际用到**的资源（DXBC 反射）及其描述符集位置
+//  （ShaderToDxil 附在 DXBC 之后的绑定表，见 RHI/DxbcBindTable.h），命令列表在绘制 / 派发前
+//  据此把描述符集里的资源绑到 D3D11 槽位。
+//
+//  【不可用的着色器】DXBC 编译失败的着色器只有 1 字节占位（见 cmake/CompileDxbc.cmake）。
+//  这时仍返回一个 PSO 对象（引擎不检查空指针），但标记为不可用：用它的绘制 / 派发被跳过，
+//  并打印一次「该 pass 在 D3D11 下不可用」。
 // ---------------------------------------------------------------------------
-class D3D11PipelineState final : public IRHIPipelineState {};
+class D3D11PipelineState final : public IRHIPipelineState {
+public:
+    /// 一个着色器资源绑定：描述符集位置 → D3D11 槽位，以及视图需要的形态
+    struct Binding {
+        u32  set = 0, binding = 0;     // 描述符集位置（推送常量为 0, 0）
+        u32  type = 0;                 // dxbc::DxbcBindType
+        u32  slot = 0, count = 1;      // D3D11 寄存器槽位与数组长度
+        bool texture = false;          // true：纹理视图；false：缓冲视图（结构化 / 原始）
+        bool rawBuffer = false;        // 缓冲视图是 ByteAddressBuffer
+        u32  stride = 0;               // 结构化缓冲元素字节数（来自反射）
+        D3D_SRV_DIMENSION dimension = D3D_SRV_DIMENSION_UNKNOWN;   // 纹理视图维度（来自反射）
+    };
+    enum Stage : u32 { VS = 0, PS = 1, CS = 2, StageCount = 3 };
+
+    bool Initialize(D3D11Device* device, const PipelineStateDesc& desc);
+
+    bool IsValid()   const { return m_Valid; }
+    bool IsCompute() const { return m_IsCompute; }
+    const char* GetName() const { return m_Name.c_str(); }
+    /// 不可用的 PSO 第一次被使用时打印一次说明，之后静默跳过
+    void ReportUnusableOnce();
+
+    ID3D11VertexShader*      GetVS() const { return m_VS.Get(); }
+    ID3D11PixelShader*       GetPS() const { return m_PS.Get(); }
+    ID3D11ComputeShader*     GetCS() const { return m_CS.Get(); }
+    ID3D11InputLayout*       GetInputLayout() const { return m_InputLayout.Get(); }
+    ID3D11RasterizerState*   GetRasterizerState() const { return m_Rasterizer.Get(); }
+    ID3D11DepthStencilState* GetDepthStencilState() const { return m_DepthStencil.Get(); }
+    ID3D11BlendState*        GetBlendState() const { return m_Blend.Get(); }
+    D3D11_PRIMITIVE_TOPOLOGY GetTopology() const { return m_Topology; }
+    const std::vector<Binding>& GetBindings(Stage s) const { return m_Bindings[s]; }
+
+    u32    GetVertexStride() const { return m_VertexStride; }
+    LoadOp GetColorLoadOp() const { return m_ColorLoadOp; }
+    LoadOp GetDepthLoadOp() const { return m_DepthLoadOp; }
+    bool   GetDepthWrite()  const { return m_DepthWrite; }
+    /// 零缓冲所在的输入槽：着色器声明了、但引擎顶点布局未提供（或超出顶点步长）的属性从这里取 0
+    static constexpr u32 kZeroVertexSlot = 15;
+    /// 实例序号缓冲所在的输入槽：顶点着色器的 SV_InstanceID 经 ShaderToDxil 改为逐实例属性
+    /// HE_INSTANCEINDEX，从这里读 0,1,2…；IA 读逐实例数据时会加上起始实例，与 Vulkan 的
+    /// gl_InstanceIndex 一致（D3D11 的 SV_InstanceID 同样不含起始实例）
+    static constexpr u32 kInstanceIndexSlot = 14;
+    bool NeedsZeroVertexBuffer()    const { return m_NeedsZeroVB; }
+    bool NeedsInstanceIndexBuffer() const { return m_NeedsInstanceIndexVB; }
+
+private:
+    /// 取一个阶段的 DXBC 容器与绑定表，建立该阶段的 Binding 列表；字节码不可用返回 false
+    bool LoadStage(D3D11Device* device, const ShaderBytecode* bc, Stage stage);
+    bool BuildInputLayout(D3D11Device* device, const PipelineStateDesc& desc);
+    void CreateFixedFunctionStates(D3D11Device* device, const PipelineStateDesc& desc);
+
+    std::string                  m_Name;
+    bool                         m_Valid = false;
+    bool                         m_IsCompute = false;
+    bool                         m_Reported = false;
+    std::vector<u8>              m_VsBytecode;    // DXBC 容器（CreateInputLayout 要用）
+    ComPtr<ID3D11VertexShader>   m_VS;
+    ComPtr<ID3D11PixelShader>    m_PS;
+    ComPtr<ID3D11ComputeShader>  m_CS;
+    ComPtr<ID3D11InputLayout>    m_InputLayout;
+    ComPtr<ID3D11RasterizerState>   m_Rasterizer;
+    ComPtr<ID3D11DepthStencilState> m_DepthStencil;
+    ComPtr<ID3D11BlendState>        m_Blend;
+    D3D11_PRIMITIVE_TOPOLOGY     m_Topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+    std::vector<Binding>         m_Bindings[StageCount];
+    u32    m_VertexStride = 0;
+    bool   m_NeedsZeroVB = false;
+    bool   m_NeedsInstanceIndexVB = false;
+    LoadOp m_ColorLoadOp = LoadOp::Clear;
+    LoadOp m_DepthLoadOp = LoadOp::Clear;
+    bool   m_DepthWrite  = true;
+};
+
+// ---------------------------------------------------------------------------
+//  QueryPool（占位，M3.7 实现）
+// ---------------------------------------------------------------------------
 
 class D3D11QueryPool final : public IRHIQueryPool {
 public:

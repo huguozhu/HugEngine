@@ -161,6 +161,7 @@ endif()
             D3D11/D3D11Converters.cpp
             D3D11/D3D11Resources.h
             D3D11/D3D11Resources.cpp
+            D3D11/D3D11PipelineState.cpp
             D3D11/D3D11SwapChain.h
             D3D11/D3D11CommandList.h
         )

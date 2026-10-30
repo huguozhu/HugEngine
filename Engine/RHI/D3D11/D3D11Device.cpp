@@ -230,8 +230,14 @@ void D3D11Device::RefreshOpenMaps() {
     for (D3D11Buffer* b : m_OpenMaps) b->RefreshPersistentReads();
 }
 
-std::unique_ptr<IRHIPipelineState> D3D11Device::CreatePipelineState(const PipelineStateDesc&) {
-    return std::make_unique<D3D11PipelineState>();
+std::unique_ptr<IRHIPipelineState> D3D11Device::CreatePipelineState(const PipelineStateDesc& desc) {
+    // 着色器不可用（DXBC 编译失败）时也返回对象，只是标记为不可用（见 D3D11PipelineState 的说明）
+    auto pso = std::make_unique<D3D11PipelineState>();
+    pso->Initialize(this, desc);
+    if (!pso->IsValid()) {
+        HE_CORE_WARN("[D3D11] PSO {} 不可用：着色器没有可用的 DXBC（使用它的绘制 / 派发将被跳过）", pso->GetName());
+    }
+    return pso;
 }
 
 std::unique_ptr<IRHIQueryPool> D3D11Device::CreateQueryPool(u32 queryCount, QueryType type) {
