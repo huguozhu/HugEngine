@@ -1271,6 +1271,9 @@ void D3D12CommandList::FlushRootArgs() {
     if (m_PushGpu) {
         if (m_IsComputePipeline) {
             m_List->SetComputeRootConstantBufferView(0, m_PushGpu);
+            // 光追的 closesthit 会读 b1：计算/光追路径同样要绑，否则 DXR 报
+            // "Uninitialized root argument accessed (Root Parameter Index: [1])" 并挂起
+            m_List->SetComputeRootConstantBufferView(1, m_PushGpu);
         } else {
             m_List->SetGraphicsRootConstantBufferView(0, m_PushGpu);
             m_List->SetGraphicsRootConstantBufferView(1, m_PushGpu);
