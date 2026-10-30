@@ -47,8 +47,10 @@ bool MeshBatcher::Build(const FrameSceneSnapshot& snapshot, const MeshRegistry& 
             me->indexBuffer->Unmap();
         }
 
-        // 记录间接绘制命令
-        m_Commands.push_back({idxCount, 1, baseIndex, (i32)baseVertex, 0});
+        // 记录间接绘制命令。合批索引在上面已加过 baseVertex（绝对索引），vertexOffset 必须为 0：
+        // 此前填 baseVertex，GPU 剔除写出的间接命令与 DGC 序列都带着它 ⇒ 顶点被偏移两次，画面错乱
+        //（LumenSDF 早已按「绝对索引、vertexOffset 不再相加」的口径消费，见 LumenSDF.cpp）
+        m_Commands.push_back({idxCount, 1, baseIndex, 0, 0});
 
         // 【§14.8 任务 19】材质快照：与上面那条命令**同一个 collect 调用**里产出 ⇒ 顺序天然对齐。
         // 字段来源与收集侧填 `GPUObjectData` 时同一批（`MakePBRMaterial` + `FillObjectData`）：
@@ -72,7 +74,7 @@ bool MeshBatcher::Build(const FrameSceneSnapshot& snapshot, const MeshRegistry& 
         dgcToken.indexCount    = idxCount;
         dgcToken.instanceCount = 1;
         dgcToken.firstIndex    = baseIndex;
-        dgcToken.vertexOffset  = (i32)baseVertex;
+        dgcToken.vertexOffset  = 0;   // 合批索引已是绝对索引（同上）
         dgcToken.firstInstance = (u32)m_DGCTokens.size();  // 初始时 firstInstance=objectIndex
         dgcToken.objectIndex   = (u32)m_DGCTokens.size();  // 按 Build 顺序递增
         m_DGCTokens.push_back(dgcToken);
