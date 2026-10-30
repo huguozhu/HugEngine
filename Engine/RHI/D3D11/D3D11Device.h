@@ -80,16 +80,42 @@ public:
     ASBuildSizes GetTLASBuildSizes(u32) override { return {}; }
     std::unique_ptr<IRHIRayTracingPipelineState> CreateRTPipelineState(const RTPipelineStateDesc&) override { return nullptr; }
 
-    // ---- 描述符集（M2.5 实现）----
+    // ---- 描述符集 ----
+    //
+    //  D3D11 没有描述符集：这里只记录「binding → 资源」，不建任何 GPU 对象。
+    //  命令列表在绘制 / 派发前，按当前 PSO 的绑定槽位从已绑定的集里取资源、现建视图并
+    //  绑到 D3D11 槽位（见 D3D11CommandList::FlushBindings）。因此更新是「立即语义」：
+    //  改了集，下一次绘制就用新内容 —— 同一帧里反复改同一个集也是合法的（规划 3.2）。
     DescriptorSetLayoutHandle CreateDescriptorSetLayout(const DescriptorSetLayoutDesc& desc) override;
     DescriptorSetHandle       AllocateDescriptorSet(DescriptorSetLayoutHandle layout) override;
     void DestroyDescriptorSetLayout(DescriptorSetLayoutHandle) override {}
-    void UpdateDescriptorSet(DescriptorSetHandle, u32, DescriptorType, IRHIBuffer*) override {}
-    void UpdateDescriptorSet(DescriptorSetHandle, u32, DescriptorType, IRHITexture*, IRHISampler*) override {}
-    void UpdateDescriptorSet(DescriptorSetHandle, u32, DescriptorType, IRHITexture**, IRHISampler**, u32) override {}
-    void UpdateDescriptorSet(DescriptorSetHandle, u32, DescriptorType, IRHIBuffer**, u32) override {}
+    void UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, DescriptorType type, IRHIBuffer* buffer) override;
+    void UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, DescriptorType type,
+                             IRHITexture* texture, IRHISampler* sampler) override;
+    void UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, DescriptorType type,
+                             IRHITexture** textures, IRHISampler** samplers, u32 count) override;
+    void UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, DescriptorType type,
+                             IRHIBuffer** buffers, u32 count) override;
+    /// 加速结构：D3D11 没有光追，忽略
     void UpdateDescriptorSet(DescriptorSetHandle, u32, DescriptorType, IRHIAccelerationStructure*) override {}
-    void UpdateDescriptorSetWithImageView(DescriptorSetHandle, u32, DescriptorType, void*) override {}
+    void UpdateDescriptorSetWithImageView(DescriptorSetHandle set, u32 binding, DescriptorType type,
+                                          void* imageView) override;
+
+    /// 描述符集里一个 binding 记录的资源（数组 binding 按元素下标存）
+    struct DescriptorEntry {
+        DescriptorType           type = DescriptorType::UniformBuffer;
+        std::vector<IRHIBuffer*>  buffers;    // 缓冲（数组时多个）
+        std::vector<IRHITexture*> textures;   // 纹理（整资源视图）
+        std::vector<IRHISampler*> samplers;   // 采样器（组合图像采样器或独立采样器）
+        void*                    view = nullptr;   // 经 UpdateDescriptorSetWithImageView 绑定的视图句柄
+    };
+    struct DescriptorSet {
+        std::unordered_map<u32, DescriptorEntry> entries;   // binding → 资源
+    };
+    /// 供命令列表使用：句柄 → 集（无效句柄返回空）
+    const DescriptorSet* FindDescriptorSet(DescriptorSetHandle set) const {
+        return (set > 0 && set <= m_DescriptorSets.size()) ? &m_DescriptorSets[set - 1] : nullptr;
+    }
 
     // ---- 逐 mip / 逐层视图 ----
     // 视图对象由纹理持有并缓存（随纹理销毁），这里只返回登记过的视图指针：
@@ -192,9 +218,11 @@ private:
     std::unordered_map<void*, D3D11ViewInfo> m_Views;      // 视图句柄 → 纹理子资源
     std::unordered_set<D3D11Buffer*>         m_OpenMaps;   // 当前处于映射状态的缓冲
 
-    // 描述符集骨架：只分配句柄（M2.5 换成真正的绑定记录）
-    u64 m_NextLayout = 1;
-    u64 m_NextSet    = 1;
+    /// 取（必要时创建）描述符集里的一项；无效句柄返回空
+    DescriptorEntry* EntryFor(DescriptorSetHandle set, u32 binding);
+
+    std::vector<DescriptorSetLayoutDesc> m_SetLayouts;      // 句柄 = 下标 + 1
+    std::vector<DescriptorSet>           m_DescriptorSets;  // 句柄 = 下标 + 1
     u64 m_NextFence  = 1;
 };
 

@@ -378,10 +378,14 @@ bool D3D11Texture::Initialize(D3D11Device* device, const TextureDesc& desc) {
 
     if (desc.initialData) UploadInitialData(desc);
 
-    // 默认视图：渲染目标 → RTV，深度 → DSV，其余 → 整资源 SRV（见类说明）
-    if (m_IsDepth)                              m_DefaultView = GetDsv(0, 0);
-    else if (bind & D3D11_BIND_RENDER_TARGET)   m_DefaultView = GetRtv(0, 0);
-    else                                        m_DefaultView = GetSrv(0, 0, false);
+    // 默认视图：渲染目标 → RTV，深度 → DSV，其余 → 整资源 SRV（见类说明）。
+    // 默认视图在登记表里标为「整资源」（single=false）：引擎把它交给 UpdateDescriptorSetWithImageView
+    // 采样时，含义与 Vulkan 的整图 ImageView 相同（全部 mip / 层），而不只是 mip 0 / 层 0
+    D3D11ViewInfo::Type defaultType = D3D11ViewInfo::Type::SRV;
+    if (m_IsDepth)                            { m_DefaultView = GetDsv(0, 0); defaultType = D3D11ViewInfo::Type::DSV; }
+    else if (bind & D3D11_BIND_RENDER_TARGET) { m_DefaultView = GetRtv(0, 0); defaultType = D3D11ViewInfo::Type::RTV; }
+    else                                      { m_DefaultView = GetSrv(0, 0, false); }
+    m_Device->RegisterView(m_DefaultView, { this, defaultType, 0, 0, false });
 
     // 逐层视图（立方体图逐面渲染、数组层逐层处理）
     if (m_ArrayLayers > 1) {

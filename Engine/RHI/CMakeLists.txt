@@ -164,6 +164,7 @@ endif()
             D3D11/D3D11PipelineState.cpp
             D3D11/D3D11SwapChain.h
             D3D11/D3D11CommandList.h
+            D3D11/D3D11CommandList.cpp
         )
         target_sources(HugEngineRHI PRIVATE ${RHI_D3D11_SOURCES})
         huge_source_group(${RHI_D3D11_SOURCES})

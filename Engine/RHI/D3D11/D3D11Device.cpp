@@ -268,14 +268,66 @@ void D3D11Device::DestroySamplerHandle(RHISamplerHandle handle) { m_Samplers.Rem
 IRHISampler* D3D11Device::ResolveSampler(RHISamplerHandle handle) const { return m_Samplers.Get(handle); }
 
 // ---------------------------------------------------------------------------
-//  描述符集（M2 骨架：只分配非零句柄，M2.5 实现绑定记录）
+//  描述符集：只记录 binding → 资源（说明见头文件）
 // ---------------------------------------------------------------------------
-DescriptorSetLayoutHandle D3D11Device::CreateDescriptorSetLayout(const DescriptorSetLayoutDesc&) {
-    return m_NextLayout++;
+DescriptorSetLayoutHandle D3D11Device::CreateDescriptorSetLayout(const DescriptorSetLayoutDesc& desc) {
+    m_SetLayouts.push_back(desc);
+    return static_cast<DescriptorSetLayoutHandle>(m_SetLayouts.size());
 }
 
 DescriptorSetHandle D3D11Device::AllocateDescriptorSet(DescriptorSetLayoutHandle) {
-    return m_NextSet++;
+    m_DescriptorSets.emplace_back();
+    return static_cast<DescriptorSetHandle>(m_DescriptorSets.size());
+}
+
+D3D11Device::DescriptorEntry* D3D11Device::EntryFor(DescriptorSetHandle set, u32 binding) {
+    if (set == 0 || set > m_DescriptorSets.size()) return nullptr;
+    return &m_DescriptorSets[set - 1].entries[binding];
+}
+
+void D3D11Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, DescriptorType type, IRHIBuffer* buffer) {
+    DescriptorEntry* e = EntryFor(set, binding);
+    if (!e) return;
+    e->type = type;
+    e->buffers.assign(1, buffer);
+}
+
+void D3D11Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, DescriptorType type,
+                                      IRHITexture* texture, IRHISampler* sampler) {
+    DescriptorEntry* e = EntryFor(set, binding);
+    if (!e) return;
+    e->type = type;
+    e->view = nullptr;
+    // 独立采样器描述符只带采样器；其余带纹理（组合图像采样器同时带两者）
+    if (type != DescriptorType::Sampler) e->textures.assign(1, texture);
+    if (sampler || type == DescriptorType::Sampler) e->samplers.assign(1, sampler);
+}
+
+void D3D11Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, DescriptorType type,
+                                      IRHITexture** textures, IRHISampler** samplers, u32 count) {
+    DescriptorEntry* e = EntryFor(set, binding);
+    if (!e) return;
+    e->type = type;
+    e->view = nullptr;
+    if (textures) e->textures.assign(textures, textures + count);
+    if (samplers) e->samplers.assign(samplers, samplers + count);
+}
+
+void D3D11Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, DescriptorType type,
+                                      IRHIBuffer** buffers, u32 count) {
+    DescriptorEntry* e = EntryFor(set, binding);
+    if (!e || !buffers) return;
+    e->type = type;
+    e->buffers.assign(buffers, buffers + count);
+}
+
+void D3D11Device::UpdateDescriptorSetWithImageView(DescriptorSetHandle set, u32 binding, DescriptorType type,
+                                                   void* imageView) {
+    DescriptorEntry* e = EntryFor(set, binding);
+    if (!e) return;
+    e->type = type;
+    e->view = imageView;   // 绑定时经视图登记表查回纹理与子资源
+    e->textures.clear();
 }
 
 // ---------------------------------------------------------------------------
