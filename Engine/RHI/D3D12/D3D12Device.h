@@ -43,6 +43,8 @@ public:
     // ---- IRHIDevice ----
     Backend           GetBackend() const override { return Backend::D3D12; }
     const DeviceCaps& GetCaps() const override { return m_Caps; }
+    /// 某格式能否作为存储图像（UAV）读写：CheckFeatureSupport 查询 TYPED_UNORDERED_ACCESS_VIEW，按格式缓存
+    bool SupportsStorageImage(Format format) const override;
 
     std::unique_ptr<IRHISwapChain>   CreateSwapChain(const SwapChainDesc& desc) override;
     std::unique_ptr<IRHICommandList> CreateCommandList(QueueType queue = QueueType::Graphics) override;
@@ -584,6 +586,8 @@ private:   // register -> 元素字节数
     ComPtr<ID3D12InfoQueue>     m_InfoQueue;
 
     DeviceCaps m_Caps{};
+    /// SupportsStorageImage 的查询缓存：0 = 未查询、1 = 支持、2 = 不支持（const 查询里填入，故 mutable）
+    mutable i8 m_StorageImageSupport[(usize)Format::Count]{};
     UINT       m_RtvDescSize = 0;
     UINT       m_DsvDescSize = 0;
     UINT       m_SrvDescSize = 0;

@@ -6,6 +6,7 @@
 #include "D3D12CommandList.h"
 #include "D3D12Resources.h"
 #include "D3D12BindlessHeap.h"
+#include "D3D12Converters.h"   // ToDxgiFormat（SupportsStorageImage 用）
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
@@ -397,6 +398,30 @@ bool D3D12Device::CreateDeviceAndQueue() {
                  m_Caps.maxBindlessResources, m_Caps.maxPushConstantsSize,
                  m_Caps.supportsRayTracing ? "支持" : "不支持", m_HighestShaderModel);
     return true;
+}
+
+// ============================================================
+// SupportsStorageImage —— 某格式能否作为存储图像（UAV）被着色器读写
+//
+// 用 CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT) 查询 TYPED_UNORDERED_ACCESS_VIEW 位。
+// 注意深度格式（D32_FLOAT 等）在 D3D12 下恒不支持：深度模板资源不能同时带
+// ALLOW_UNORDERED_ACCESS 标志，查询结果也不会给出 UAV 位，调用方（Nanite 软光栅）
+// 据此走 SV_Depth 路径，与 Vulkan 上不支持深度存储图像的设备一致。
+// 每次查询都要进驱动，故按格式缓存；越界 / Unknown 一律按不支持处理。
+// ============================================================
+bool D3D12Device::SupportsStorageImage(Format format) const {
+    const usize index = (usize)format;
+    if (format == Format::Unknown || index >= (usize)Format::Count || !m_Device) return false;
+    if (m_StorageImageSupport[index] == 0) {
+        D3D12_FEATURE_DATA_FORMAT_SUPPORT fs{};
+        fs.Format = ToDxgiFormat(format);
+        const bool supported =
+            fs.Format != DXGI_FORMAT_UNKNOWN &&
+            SUCCEEDED(m_Device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &fs, sizeof(fs))) &&
+            (fs.Support1 & D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW) != 0;
+        m_StorageImageSupport[index] = supported ? (i8)1 : (i8)2;
+    }
+    return m_StorageImageSupport[index] == (i8)1;
 }
 
 bool D3D12Device::Initialize() {
