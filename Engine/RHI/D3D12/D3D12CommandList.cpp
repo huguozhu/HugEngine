@@ -68,6 +68,7 @@ bool D3D12CommandList::Initialize(D3D12Device* device, QueueType queue) {
                         "CreateCommandList")) {
         return false;
     }
+    m_List.As(&m_List6);   // 网格着色器绘制用（取不到时 DrawMeshTasks* 忽略）
     m_Device->RegisterCommandList(this);   // DRED 报告据此把面包屑对应回事件名
     // 命名：DRED 报告与 RenderDoc 里据此区分图形 / 计算列表
     m_List->SetName(m_QueueType == QueueType::Compute ? L"HugEngine 计算命令列表" : L"HugEngine 图形命令列表");
@@ -93,6 +94,7 @@ bool D3D12CommandList::InitializeBundle(D3D12Device* device) {
                         "CreateCommandList(Bundle)")) {
         return false;
     }
+    m_List.As(&m_List6);   // bundle 里同样可以 DispatchMesh
     m_Device->RegisterCommandList(this);
     m_List->SetName(L"HugEngine 二级命令列表（bundle）");
     m_List->Close();
@@ -1218,6 +1220,7 @@ ID3D12CommandSignature* D3D12CommandList::GetCommandSignature(D3D12_INDIRECT_ARG
             case D3D12_INDIRECT_ARGUMENT_TYPE_DRAW:         want = sizeof(D3D12_DRAW_ARGUMENTS);         break;
             case D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED: want = sizeof(D3D12_DRAW_INDEXED_ARGUMENTS); break;
             case D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH:     want = sizeof(D3D12_DISPATCH_ARGUMENTS);     break;
+            case D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH: want = sizeof(D3D12_DISPATCH_MESH_ARGUMENTS); break;
             default: return nullptr;
         }
     }
@@ -1272,6 +1275,61 @@ void D3D12CommandList::DrawIndexedIndirectCount(IRHIBuffer* buffer, u64 offset,
                             cb->GetResource(), countOffset);
     AfterDrawOrDispatch();
     m_PushDirty = true;   // 同 Draw：常量槽已被本次绘制消费
+}
+
+// ---------------------------------------------------------------------------
+//  网格着色器绘制（对应 Vulkan 的 vkCmdDrawMeshTasks*EXT）
+//  与普通绘制同一套前置：补资源状态、下发根参数；之后标记常量槽已消费
+// ---------------------------------------------------------------------------
+void D3D12CommandList::DrawMeshTasks(u32 groupCountX, u32 groupCountY, u32 groupCountZ) {
+    if (!m_List || !m_List6 || IsComputeQueueList()) return;
+    if (!m_Pipeline || !m_Pipeline->IsMesh()) {
+        HE_CORE_WARN("D3D12CommandList::DrawMeshTasks: 当前未绑定网格管线，已忽略");
+        return;
+    }
+    EnsureBoundResourceStates();
+    FlushRootArgs();
+    m_List6->DispatchMesh(groupCountX, groupCountY, groupCountZ);
+    AfterDrawOrDispatch();
+    m_PushDirty = true;   // 同 Draw：常量槽已被本次绘制消费
+}
+
+void D3D12CommandList::DrawMeshTasksIndirect(IRHIBuffer* buffer, u64 offset, u32 drawCount, u32 stride) {
+    if (!m_List || !m_List6 || !buffer || IsComputeQueueList()) return;
+    if (!m_Pipeline || !m_Pipeline->IsMesh()) {
+        HE_CORE_WARN("D3D12CommandList::DrawMeshTasksIndirect: 当前未绑定网格管线，已忽略");
+        return;
+    }
+    auto* b = static_cast<D3D12Buffer*>(buffer);
+    ID3D12CommandSignature* sig = GetCommandSignature(D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH, stride);
+    if (!sig) return;
+    TransitionBuffer(b->GetResource(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);   // 参数常由计算着色器写出
+    EnsureBoundResourceStates();
+    FlushRootArgs();
+    m_List->ExecuteIndirect(sig, drawCount, b->GetResource(), offset, nullptr, 0);
+    AfterDrawOrDispatch();
+    m_PushDirty = true;
+}
+
+void D3D12CommandList::DrawMeshTasksIndirectCount(IRHIBuffer* buffer, u64 offset, IRHIBuffer* countBuffer,
+                                                  u64 countOffset, u32 maxDrawCount, u32 stride) {
+    if (!m_List || !m_List6 || !buffer || !countBuffer || IsComputeQueueList()) return;
+    if (!m_Pipeline || !m_Pipeline->IsMesh()) {
+        HE_CORE_WARN("D3D12CommandList::DrawMeshTasksIndirectCount: 当前未绑定网格管线，已忽略");
+        return;
+    }
+    auto* b  = static_cast<D3D12Buffer*>(buffer);
+    auto* cb = static_cast<D3D12Buffer*>(countBuffer);
+    ID3D12CommandSignature* sig = GetCommandSignature(D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH, stride);
+    if (!sig) return;
+    // 参数缓冲与计数缓冲都要处于 INDIRECT_ARGUMENT（同一缓冲兼作两者时只转一次）
+    TransitionBuffer(b->GetResource(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+    TransitionBuffer(cb->GetResource(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+    EnsureBoundResourceStates();
+    FlushRootArgs();
+    m_List->ExecuteIndirect(sig, maxDrawCount, b->GetResource(), offset, cb->GetResource(), countOffset);
+    AfterDrawOrDispatch();
+    m_PushDirty = true;
 }
 
 void D3D12CommandList::Dispatch(u32 x, u32 y, u32 z) {

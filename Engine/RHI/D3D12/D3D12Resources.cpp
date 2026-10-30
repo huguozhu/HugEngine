@@ -1101,7 +1101,8 @@ bool D3D12PipelineState::Initialize(D3D12Device* device, const PipelineStateDesc
     {
         ComPtr<IDxcUtils> utils;
         if (SUCCEEDED(DxcCreateInstance(CLSID_DxcUtils, IID_PPV_ARGS(&utils))) && utils) {
-            for (const ShaderBytecode* bc : { desc.vertexShader, desc.pixelShader, desc.computeShader }) {
+            for (const ShaderBytecode* bc : { desc.vertexShader, desc.pixelShader, desc.computeShader,
+                                              desc.meshShader, desc.amplificationShader }) {
                 if (!bc || bc->dxil.empty()) continue;
                 DxcBuffer db{};
                 db.Ptr = bc->dxil.data();
@@ -1177,9 +1178,11 @@ bool D3D12PipelineState::Initialize(D3D12Device* device, const PipelineStateDesc
     // 着色器：从引擎的 ShaderBytecode 取 DXIL 字节
     // 引擎的 ShaderBytecode 有两个后端字节码：spirv（Vulkan）与 dxil（D3D12）。
     // D3D12 的 PSO 需要 DXIL 字节流 ⇒ 取 dxil 这个 vector。
+    // 网格管线（meshShader 非空）没有顶点着色器，PSO 走下面的管线状态流分支
+    const bool isMesh = desc.meshShader && !desc.meshShader->dxil.empty();
     if (desc.vertexShader && !desc.vertexShader->dxil.empty()) {
         pd.VS = { desc.vertexShader->dxil.data(), desc.vertexShader->dxil.size() };
-    } else {
+    } else if (!isMesh) {
         HE_CORE_WARN("D3D12PipelineState: 顶点着色器缺少 DXIL 字节码（name={}）", desc.debugName.c_str());
     }
     if (desc.pixelShader && !desc.pixelShader->dxil.empty()) {
@@ -1602,6 +1605,10 @@ bool D3D12PipelineState::Initialize(D3D12Device* device, const PipelineStateDesc
     // 采样数必须 >= 1；引擎在非 MSAA 路径上可能传 0
     if (pd.SampleDesc.Count == 0) pd.SampleDesc.Count = 1;
 
+    // 网格管线：D3D12_GRAPHICS_PIPELINE_STATE_DESC 没有 MS / AS 字段，必须用管线状态流
+    //（ID3D12Device2::CreatePipelineState）。光栅 / 混合 / 深度 / 目标格式直接沿用上面填好的 pd
+    if (isMesh) return InitializeMeshPso(device, desc, pd, psoHash, haveBlob ? &cachedBlob : nullptr);
+
     HRESULT psoHr = dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&m_Pso));
     if (FAILED(psoHr) && haveBlob) {   // 缓存块与驱动 / 设备不匹配：不用缓存重建
         pd.CachedPSO = {};
@@ -1640,6 +1647,100 @@ bool D3D12PipelineState::Initialize(D3D12Device* device, const PipelineStateDesc
     }
     if (!desc.debugName.empty()) m_Pso->SetName(Utf8ToWide(desc.debugName.c_str()).c_str());   // RenderDoc / DRED 里显示管线名
     HE_CORE_INFO("D3D12PipelineState: PSO 创建成功 name={}", desc.debugName.c_str());
+    return true;
+}
+
+namespace {
+/// 管线状态流的一个子对象：类型标签 + 数据，按指针大小对齐（与 d3dx12.h 的 CD3DX12_PIPELINE_STATE_STREAM_SUBOBJECT 同布局）
+template <D3D12_PIPELINE_STATE_SUBOBJECT_TYPE Type, typename T>
+struct alignas(void*) PsoSubobject {
+    D3D12_PIPELINE_STATE_SUBOBJECT_TYPE type = Type;
+    T                                   value{};
+};
+/// 网格管线的状态流：放大着色器可为空（字节码长度 0 表示不使用）
+struct MeshPsoStream {
+    PsoSubobject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE,        ID3D12RootSignature*>          rootSig;
+    PsoSubobject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_AS,                    D3D12_SHADER_BYTECODE>         as;
+    PsoSubobject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS,                    D3D12_SHADER_BYTECODE>         ms;
+    PsoSubobject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS,                    D3D12_SHADER_BYTECODE>         ps;
+    PsoSubobject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND,                 D3D12_BLEND_DESC>              blend;
+    PsoSubobject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK,           UINT>                          sampleMask;
+    PsoSubobject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER,            D3D12_RASTERIZER_DESC>         rasterizer;
+    PsoSubobject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL,         D3D12_DEPTH_STENCIL_DESC>      depthStencil;
+    PsoSubobject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PRIMITIVE_TOPOLOGY,    D3D12_PRIMITIVE_TOPOLOGY_TYPE> topology;
+    PsoSubobject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS, D3D12_RT_FORMAT_ARRAY>         rtvFormats;
+    PsoSubobject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL_FORMAT,  DXGI_FORMAT>                   dsvFormat;
+    PsoSubobject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC,           DXGI_SAMPLE_DESC>              sampleDesc;
+    PsoSubobject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CACHED_PSO,            D3D12_CACHED_PIPELINE_STATE>   cachedPso;
+};
+} // namespace
+
+// ---------------------------------------------------------------------------
+// InitializeMeshPso —— 用管线状态流创建网格管线（MS + 可选 AS + PS）
+// 除着色器外的全部状态取自已按图形管线规则填好的 gfx（光栅 / 混合 / 深度 / 目标格式 / 采样），
+// 输入布局与 IB 截断值在网格管线里不存在，不放进流里。
+// ---------------------------------------------------------------------------
+bool D3D12PipelineState::InitializeMeshPso(D3D12Device* device, const PipelineStateDesc& desc,
+                                           const D3D12_GRAPHICS_PIPELINE_STATE_DESC& gfx,
+                                           u64 psoHash, const std::vector<u8>* cachedBlob) {
+    ComPtr<ID3D12Device2> dev2;
+    if (!device || !device->GetDevice() || FAILED(device->GetDevice()->QueryInterface(IID_PPV_ARGS(&dev2)))) {
+        HE_CORE_ERROR("D3D12PipelineState: 设备不支持 ID3D12Device2，无法创建网格管线 name={}", desc.debugName.c_str());
+        return false;
+    }
+    MeshPsoStream s{};
+    s.rootSig.value = m_RootSig.Get();
+    if (desc.amplificationShader && !desc.amplificationShader->dxil.empty())
+        s.as.value = { desc.amplificationShader->dxil.data(), desc.amplificationShader->dxil.size() };
+    s.ms.value           = { desc.meshShader->dxil.data(), desc.meshShader->dxil.size() };
+    s.ps.value           = gfx.PS;
+    s.blend.value        = gfx.BlendState;
+    s.sampleMask.value   = gfx.SampleMask;
+    s.rasterizer.value   = gfx.RasterizerState;
+    s.depthStencil.value = gfx.DepthStencilState;
+    s.topology.value     = gfx.PrimitiveTopologyType;
+    s.rtvFormats.value.NumRenderTargets = gfx.NumRenderTargets;
+    for (u32 i = 0; i < 8; ++i) s.rtvFormats.value.RTFormats[i] = gfx.RTVFormats[i];
+    s.dsvFormat.value    = gfx.DSVFormat;
+    s.sampleDesc.value   = gfx.SampleDesc;
+    if (cachedBlob) s.cachedPso.value = { cachedBlob->data(), cachedBlob->size() };
+
+    D3D12_PIPELINE_STATE_STREAM_DESC sd{};
+    sd.SizeInBytes                   = sizeof(s);
+    sd.pPipelineStateSubobjectStream = &s;
+    HRESULT hr = dev2->CreatePipelineState(&sd, IID_PPV_ARGS(&m_Pso));
+    if (FAILED(hr) && cachedBlob) {   // 缓存块与驱动 / 设备不匹配：不用缓存重建
+        s.cachedPso.value = {};
+        hr = dev2->CreatePipelineState(&sd, IID_PPV_ARGS(&m_Pso));
+    }
+    if (FAILED(hr)) {
+        HE_CORE_ERROR("D3D12PipelineState: 网格管线创建失败 name={} hr=0x{:08x} MS={}B AS={}B PS={}B",
+                      desc.debugName.c_str(), static_cast<u32>(hr),
+                      static_cast<u32>(s.ms.value.BytecodeLength), static_cast<u32>(s.as.value.BytecodeLength),
+                      static_cast<u32>(s.ps.value.BytecodeLength));
+        // 调试层消息里有被拒的确切原因
+        if (auto* iq = device->GetInfoQueue()) {
+            const UINT64 n = iq->GetNumStoredMessages();
+            for (UINT64 i = 0; i < n; ++i) {
+                SIZE_T len = 0;
+                iq->GetMessage(i, nullptr, &len);
+                if (!len) continue;
+                std::vector<char> buf(len);
+                auto* msg = reinterpret_cast<D3D12_MESSAGE*>(buf.data());
+                if (SUCCEEDED(iq->GetMessage(i, msg, &len)) && msg->Severity <= D3D12_MESSAGE_SEVERITY_WARNING)
+                    HE_CORE_ERROR("  [D3D12 msg] id={} {}", static_cast<u32>(msg->ID), msg->pDescription);
+            }
+            iq->ClearStoredMessages();
+        }
+        return false;
+    }
+    if (!cachedBlob) device->StorePsoBlob(psoHash, m_Pso.Get());
+    m_IsMesh = true;
+    m_HasPs  = gfx.PS.BytecodeLength != 0;
+    if (!desc.debugName.empty()) m_Pso->SetName(Utf8ToWide(desc.debugName.c_str()).c_str());
+    HE_CORE_INFO("D3D12PipelineState: 网格管线创建成功 name={} MS={}B AS={}B",
+                 desc.debugName.c_str(), static_cast<u32>(s.ms.value.BytecodeLength),
+                 static_cast<u32>(s.as.value.BytecodeLength));
     return true;
 }
 

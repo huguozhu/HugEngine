@@ -296,6 +296,13 @@ bool D3D12Device::CreateDeviceAndQueue() {
             bestAdapter = adapter;
         }
     }
+    // HE_D3D12_WARP=1：改用 WARP 软件适配器。本机硬件缺少网格着色器 / DXR 等特性时，
+    // 可用它做功能验证（速度慢，仅用于测试）
+    if (std::getenv("HE_D3D12_WARP")) {
+        ComPtr<IDXGIAdapter1> warp;
+        if (SUCCEEDED(m_Factory->EnumWarpAdapter(IID_PPV_ARGS(&warp)))) bestAdapter = warp;
+        else HE_CORE_WARN("[D3D12] HE_D3D12_WARP 已设置，但 WARP 适配器不可用，仍用硬件适配器");
+    }
     if (!bestAdapter) {
         HE_CORE_ERROR("[D3D12] 找不到支持 D3D12 的适配器");
         return false;
@@ -380,7 +387,6 @@ bool D3D12Device::CreateDeviceAndQueue() {
     // 连带图形路径也跑不到（实测 01.Triangle 就卡在这里）。
     // 阶段 4 实现后把这一行改成真正的接口探测即可。
     m_Caps.supportsRayTracing = false;
-    m_Caps.supportsMeshShaders = false;     // 阶段 5 用 D3D12_FEATURE_D3D12_OPTIONS7 查询
     m_Caps.supportsDGC = true;              // D3D12 原生支持 ExecuteIndirect
     // 最高支持的着色器模型（从高往低探测：传入的 HighestShaderModel 不被支持时 CheckFeatureSupport 失败）
     {
@@ -394,9 +400,33 @@ bool D3D12Device::CreateDeviceAndQueue() {
         }
         m_HighestShaderModel = static_cast<u32>(sm.HighestShaderModel);
     }
-    HE_CORE_INFO("[D3D12] 设备就绪：bindless={} pushConst={} RT={} 最高着色器模型=0x{:x}",
+    // 网格着色器：OPTIONS7 的 MeshShaderTier，且运行时支持 SM 6.5 以上（ms_6_x / as_6_x）。
+    // 同时要能取到 ID3D12Device2（CreatePipelineState 用管线状态流创建网格 PSO）
+    {
+        D3D12_FEATURE_DATA_D3D12_OPTIONS7 o7{};
+        ComPtr<ID3D12Device2> dev2;
+        m_Caps.supportsMeshShaders =
+            SUCCEEDED(m_Device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS7, &o7, sizeof(o7))) &&
+            o7.MeshShaderTier != D3D12_MESH_SHADER_TIER_NOT_SUPPORTED &&
+            m_HighestShaderModel >= static_cast<u32>(D3D_SHADER_MODEL_6_5) &&
+            SUCCEEDED(m_Device.As(&dev2));
+        if (m_Caps.supportsMeshShaders) {
+            // D3D12 网格着色器的固定上限（规范值）：单组 128 线程、最多 256 顶点 / 256 图元、
+            // 负载 16KB、各维度最多 65535 个组
+            m_Caps.maxMeshWorkGroupInvocations = 128;
+            m_Caps.maxMeshOutputVertices       = 256;
+            m_Caps.maxMeshOutputPrimitives     = 256;
+            m_Caps.maxTaskWorkGroupInvocations = 128;
+            m_Caps.maxTaskPayloadSize          = 16384;
+            m_Caps.maxMeshWorkGroupCountX      = 65535;
+            m_Caps.maxMeshWorkGroupCountY      = 65535;
+            m_Caps.maxMeshWorkGroupCountZ      = 65535;
+        }
+    }
+    HE_CORE_INFO("[D3D12] 设备就绪：bindless={} pushConst={} RT={} 网格着色器={} 最高着色器模型=0x{:x}",
                  m_Caps.maxBindlessResources, m_Caps.maxPushConstantsSize,
-                 m_Caps.supportsRayTracing ? "支持" : "不支持", m_HighestShaderModel);
+                 m_Caps.supportsRayTracing ? "支持" : "不支持",
+                 m_Caps.supportsMeshShaders ? "支持" : "不支持", m_HighestShaderModel);
     return true;
 }
 

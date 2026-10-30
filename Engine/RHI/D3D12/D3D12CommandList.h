@@ -76,9 +76,14 @@ public:
     void DrawIndexedIndirect(IRHIBuffer* buffer, u64 offset, u32 drawCount, u32 stride) override;
     void DrawIndexedIndirectCount(IRHIBuffer* buffer, u64 offset, IRHIBuffer* countBuffer,
                                   u64 countOffset, u32 maxDrawCount, u32 stride) override;
-    void DrawMeshTasks(u32, u32 = 1, u32 = 1) override {}
-    void DrawMeshTasksIndirect(IRHIBuffer*, u64, u32, u32) override {}
-    void DrawMeshTasksIndirectCount(IRHIBuffer*, u64, IRHIBuffer*, u64, u32, u32) override {}
+    /// 网格着色器绘制：ID3D12GraphicsCommandList6::DispatchMesh（需当前绑定网格管线）
+    void DrawMeshTasks(u32 groupCountX, u32 groupCountY = 1, u32 groupCountZ = 1) override;
+    /// 间接网格绘制：ExecuteIndirect + DISPATCH_MESH 命令签名（参数布局与 Vulkan 的
+    /// VkDrawMeshTasksIndirectCommandEXT 相同，都是 3 个 u32）
+    void DrawMeshTasksIndirect(IRHIBuffer* buffer, u64 offset, u32 drawCount, u32 stride) override;
+    /// 带 GPU 侧计数的间接网格绘制：ExecuteIndirect 的计数缓冲参数
+    void DrawMeshTasksIndirectCount(IRHIBuffer* buffer, u64 offset, IRHIBuffer* countBuffer,
+                                    u64 countOffset, u32 maxDrawCount, u32 stride) override;
 
     // ---- 计算 ----
     void Dispatch(u32 x, u32 y, u32 z) override;
@@ -200,6 +205,8 @@ private:
     u64                               m_NextFenceValue = 1;
     u32                               m_FrameSlot = 0;
     ComPtr<ID3D12GraphicsCommandList> m_List;
+    /// 同一列表的 6 号接口（DispatchMesh），运行时不支持时为空
+    ComPtr<ID3D12GraphicsCommandList6> m_List6;
     ComPtr<ID3D12RootSignature>       m_PushRootSig;   // 阶段 0 占位，阶段 2 由 PSO 提供
     D3D12Device*      m_Device = nullptr;
     IRHISwapChain*    m_SwapChain = nullptr;

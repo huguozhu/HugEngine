@@ -216,6 +216,8 @@ public:
     u32 GetVertexStride() const { return m_VertexStride; }
     /// 是否计算管线（图形/计算根签名是两套独立绑定）
     bool IsCompute() const { return m_IsCompute; }
+    /// 是否网格管线（MS / AS + PS，无输入装配）
+    bool IsMesh() const { return m_IsMesh; }
     bool HasPixelShader() const { return m_HasPs; }
     void SetHasPixelShader(bool v) { m_HasPs = v; }
     /// 零缓冲所在的输入槽：着色器声明了、但引擎顶点布局未提供的属性都从这里取 0
@@ -239,9 +241,15 @@ public:
     const std::vector<ResourceUse>& GetResourceUses() const { return m_ResourceUses; }
 
 private:
+    /// 网格管线的创建（管线状态流）：gfx 是已填好的图形管线状态，着色器以外的状态从这里取
+    bool InitializeMeshPso(D3D12Device* device, const PipelineStateDesc& desc,
+                           const D3D12_GRAPHICS_PIPELINE_STATE_DESC& gfx,
+                           u64 psoHash, const std::vector<u8>* cachedBlob);
+
     ComPtr<ID3D12RootSignature> m_RootSig;
     ComPtr<ID3D12PipelineState> m_Pso;
     bool m_IsCompute = false;
+    bool m_IsMesh    = false;
     bool m_HasPs = false;
     D3D12_PRIMITIVE_TOPOLOGY    m_Topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
     /// 输入布局的总步长（由 DXIL 反射或引擎 attributes 累加得出），
