@@ -36,6 +36,12 @@ constexpr u32 kBindingShadowObjects     = 26;
 constexpr u32 kBindingBindlessTextures = 5;   // Bindless 纹理数组（SampledImage）
 constexpr u32 kBindingBindlessSamplers = 6;   // Bindless 采样器数组（Sampler）
 constexpr u32 kBindingBindlessSSBO    = 30;  // Bindless SSBO 数组（StorageBuffer，binding 号最大以承载 VARIABLE_COUNT）
+// 非 bindless 后端（D3D11）的替代绑定（与 ShaderTypes: kGPUBinding_NB_* 一致），见 IRHICommandList::SetNonBindlessHandle
+constexpr u32 kBindingNBMaterialTextures = 100; // 材质 4 张纹理（句柄 = 材质纹理基址）
+constexpr u32 kBindingNBMaterialSamplers = 104; // 材质 4 个采样器（与纹理同一个基址）
+constexpr u32 kBindingNBMaterialSlots    = 4;   // 每个材质的纹理槽数
+/// SetNonBindlessHandle 的「不绑定任何资源」：bindless 句柄 0 是合法句柄，不能拿 0 表示「没有」
+constexpr u32 kNonBindlessNone           = ~0u;
 constexpr u32 kBindingLightGrid        = 7;   // 光源网格（Clustered Shading SSBO）
 constexpr u32 kBindingLightIndexList   = 8;   // 光源索引列表（Clustered Shading SSBO）
 
