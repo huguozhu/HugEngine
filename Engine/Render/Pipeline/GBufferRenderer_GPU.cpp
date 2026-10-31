@@ -179,6 +179,15 @@ void GBufferRenderer_GPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
 
         // ── DGC 路径 vs 传统 ExecuteIndirectCount 路径 ──
         if (ctx.dgc.enabled && ctx.dgc.sequenceBuffer && ctx.dgc.countBuffer) {
+            // 【P1 可观测性】首次进入 DGC 分支时打印一次，确认真正走的是 GPU 生成命令路径
+            // （与 HE_DISABLE_DGC=1 时的传统间接绘制路径区分开）。实际绘制条数由 GPU 计数
+            // 缓冲给出，CPU 不参与决定，读数见 GPUCulling::Readback 的「GPU Cull: 可见 N 个物体」。
+            static bool s_DGCPathLogged = false;
+            if (!s_DGCPathLogged) {
+                s_DGCPathLogged = true;
+                HE_CORE_INFO("GBuffer GPU 绘制路径：DGC（ExecuteGeneratedCommands，容量 {} 条，条数取 GPU 计数缓冲）",
+                             GPUCulling::kMaxObjects);
+            }
             // DGC 路径：由 GPU 生成 vkCmdDrawIndexed 命令（D3D12 侧等价为带计数缓冲的 ExecuteIndirect）
             rhi::IRHICommandList::DGCExecuteDesc dgcDesc{};
             dgcDesc.indirectCommandsLayout = ctx.dgc.indirectCommandsLayout;
@@ -199,6 +208,13 @@ void GBufferRenderer_GPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
             cmd->ExecuteGeneratedCommands(dgcDesc);
         } else {
             // 传统路径：计数缓冲由 GPU 剔除写出，CPU 完全不参与"画几条"的决定
+            // 【P1 可观测性】首次进入时打印一次，供 DGC 开 / 关对照时确认走的是哪条路径
+            static bool s_IndirectPathLogged = false;
+            if (!s_IndirectPathLogged) {
+                s_IndirectPathLogged = true;
+                HE_CORE_INFO("GBuffer GPU 绘制路径：DrawIndexedIndirectCount（传统间接绘制，容量 {} 条）",
+                             GPUCulling::kMaxObjects);
+            }
             char label[64];
             snprintf(label, sizeof(label), "GBuffer IndirectCount (max %u)", GPUCulling::kMaxObjects);
             cmd->SetDrawDebugLabel(label);

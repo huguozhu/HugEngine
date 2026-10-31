@@ -1,4 +1,4 @@
-﻿#include "Pipeline/DeferredPipeline.h"
+#include "Pipeline/DeferredPipeline.h"
 // 阶段 1 T1.4：环境参数（太阳方向 + 浑浊度）走快照，本文件不再直接读世界
 #include "Threading/SceneSnapshotBuilder.h"
 #include "GI/GI_IBL.h"
@@ -31,11 +31,22 @@
 #include "DeferredLighting.frag.spv.h"
 #include "DeferredLighting.frag.dxil.h"
 
-// DGC 开关（编译期常量，默认 false 保留传统 ExecuteIndirect 回退）
+// DGC 开关（编译期常量，默认 true：T7 完成后依赖解除，按文档 2.5 第 1 项做端到端验证）
 // 语义与落点详见 DeferredPipeline.cpp 的同名常量：true = GPU 生成绘制命令
 // （MeshBatcher/GBufferRenderer_GPU 产出命令序列 → ExecuteGeneratedCommands）。
 // 注意：`constexpr` ⇒ 编译期常量，未注册 CVar，控制台改不了；要切换请改初值重编译。
-constexpr bool kDGCEnable = false;
+// 【对照实验开关】DGC 默认打开后，用 `HE_DISABLE_DGC=1` 在运行时强制关闭，
+// 这样开 / 关两组截图只需同一份二进制、不用来回改常量重编译（P1 验证用）。
+constexpr bool kDGCEnable = true;
+
+// 运行时的 DGC 强制关闭开关（仅用于开 / 关对照，默认不影响正常路径）
+static bool IsDGCForceDisabled() {
+    static const bool s_off = [] {
+        const char* v = std::getenv("HE_DISABLE_DGC");
+        return (v != nullptr) && (v[0] != '0');
+    }();
+    return s_off;
+}
 
 // CVar: GBuffer 投影贴花开关（任务 24，默认开启）。
 // 关闭后 Deferred 路径不再绘制贴花（贴花卡片已从 GBuffer 排除，见 DeferredPipeline::Initialize），
@@ -397,6 +408,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
 
             // ── DGC 模式上下文注入（通过 RHI 统一接口）──
             m_DGCEnabled = kDGCEnable
+                && !IsDGCForceDisabled()      // HE_DISABLE_DGC=1：对照实验时强制走传统间接绘制
                 && m_Device->IsDGCReady()
                 && m_GPUCulling.GetIndirectBuffer()
                 && m_GPUCulling.enabled;
@@ -765,8 +777,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
                         // 网格与采样数在参数 UBO 里，dispatch 的射线数在 EnsureCapacity 里定。
                         m_DDGI_Trace->Execute(c, m_RTPass->GetTLAS(), tctx);
                     },
-                    RGPassQueue::Graphics);   // 与 DDGI 的 compute 同队列 ⇒ 靠注册顺序保证先后
-            } else {
+                    RGPassQueue::Graphics);   // 与 DDGI 的 compute 同队列 ⇒ 靠注册顺序保证先后            } else {
                 // 缓冲建不出来：明确回退，不能让 DDGI 去读一个没绑的缓冲（§9.2-T）
                 m_DDGI.SetTracedRadiance(nullptr, 0);
             }
@@ -827,9 +838,12 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
                 m_GITimer.End(c, giIdx);
                 c->SetPipeline(m_Lighting.GetPSO());
             },
-            RGPassQueue::Graphics);  // 与 RSM 同队列顺序执行：探针采样 RSM 前必须确保 RSM 完成
+            // 【P5】GI Provider 的 pass 都是纯 compute（SSGI / Lumen SDF / DDGI 探针滤波），
+            // 且位于帧首的异步前缀内 ⇒ 计算队列。消费方（Lighting 等图形 pass）经时间线围栏
+            // 排在计算列表之后，交接状态由 D3D12 计算列表的 handoff 负责。
+            (m_Device && m_Device->HasAsyncComputeQueue()) ? RGPassQueue::Compute
+                                                           : RGPassQueue::Default);
     }
-
     // ── AO Pass：遍历已注册的 Provider（P4 / Wave 2）──
     // 替代原先手写的「ShouldRunAO + useGTAO 赋值 + 固定 pass 名」：
     // 只要 Provider 声明处理该通道的源且 NeedsPass 为真，就为它注册 pass。
@@ -1370,7 +1384,12 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
                 m_GITimer.Begin(c, giIdx);
                 p->Render(c, MakeGIContext(&camera, m_GIConfig.furnaceMode));
                 m_GITimer.End(c, giIdx);
-            });
+            },
+            // 【P5】IBL 预滤波是纯 compute Pass，且位于帧首 ⇒ 放到计算队列，
+            // 让 RenderGraph 的「异步前缀」非空（此前所有 hint=Compute 的 pass 都在一个
+            // Graphics hint 的 pass 之后 ⇒ 异步 pass 数恒为 0，见文档 2.1 第 6 项）。
+            (m_Device && m_Device->HasAsyncComputeQueue()) ? RGPassQueue::Compute
+                                                           : RGPassQueue::Default);
     }
 
     // Lighting 读取依赖：仅在对应通道注册了 pass 时才加入（避免无效句柄）
