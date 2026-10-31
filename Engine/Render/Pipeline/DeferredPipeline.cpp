@@ -724,15 +724,20 @@ void DeferredPipeline::Render(rhi::IRHICommandList* cmd, const FrameSceneSnapsho
     // ============================================================
     // AsyncCompute: RenderGraph 多阶段提交
     //
-    // 当设备支持专用 Compute 队列时，RenderGraph 内部自动将 Pass
-    // 拆分为三段提交：
-    //   Phase 1: Graphics CmdList #1（Shadow + 前期 Pass）
-    //   Phase 2: Compute CmdList（GPUCull, SSAO, DDGI, AutoExposure）
-    //   Phase 3: Graphics CmdList #2（GBuffer, Lighting, PostProcess）
+    // 设备支持专用 Compute 队列时，RenderGraph 内部把「依赖闭包全在计算组内、且只碰持久
+    // 资源」的 Compute hint pass（本管线里是 GPU_Cull —— 纯 compute dispatch，只读上一帧的
+    // GBuffer 深度）录到一条**独立计算列表**上：计算列表先提交，图形列表经时间线围栏等它
+    // 完成。切分逻辑见 RenderGraph::MarkAsyncQueueGroups / ExecuteWithAsyncCompute。
     //
-    // 传统单队列回退：设备不支持 AsyncCompute 时自动降级。
+    // `HE_ASYNC_COMPUTE=0` 强制走单队列（全同步）路径 —— 用来做"异步 vs 全同步"的
+    // 逐像素对照，不用改设备能力或重编译。
     // ============================================================
     bool useAsyncCompute = m_Device->HasAsyncComputeQueue();
+    {
+        static const char* s_env = std::getenv("HE_ASYNC_COMPUTE");
+        static const bool  s_envOff = (s_env && s_env[0] == '0');
+        if (s_envOff) useAsyncCompute = false;
+    }
 
     if (useAsyncCompute && m_CrossQueueFence == rhi::kInvalidFence) {
         // 首次使用 AsyncCompute 时，创建跨队列时间线信号量

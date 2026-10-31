@@ -247,7 +247,10 @@ private:
     // AsyncCompute: 专用 Compute 队列命令列表（延迟创建）
     std::unique_ptr<rhi::IRHICommandList> m_ComputeCmdList;
     rhi::RHIFenceHandle m_CrossQueueFence = rhi::kInvalidFence;  // 跨队列同步信号量
-    u64  m_FrameCounter = 0;              // 帧计数器（Fence 信号值）
+    // 帧计数器（Fence 信号值）
+    // 【P5】从 1 起：时间线围栏的初始值就是 0，若第一帧用 0 当信号值，图形列表"等 0"本来
+    // 就已经满足 ⇒ 第一帧的跨队列同步点形同虚设。
+    u64  m_FrameCounter = 1;
     bool m_ComputePendingSubmit = false;  // 是否有待提交的 Compute 工作
     // GBuffer 渲染（纹理所有权 + PSO + 描述符集，共享组件）
     std::unique_ptr<GBufferRenderer> m_GBuffer;

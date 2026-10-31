@@ -1385,11 +1385,13 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
                 p->Render(c, MakeGIContext(&camera, m_GIConfig.furnaceMode));
                 m_GITimer.End(c, giIdx);
             },
-            // 【P5】IBL 预滤波是纯 compute Pass，且位于帧首 ⇒ 放到计算队列，
-            // 让 RenderGraph 的「异步前缀」非空（此前所有 hint=Compute 的 pass 都在一个
-            // Graphics hint 的 pass 之后 ⇒ 异步 pass 数恒为 0，见文档 2.1 第 6 项）。
-            (m_Device && m_Device->HasAsyncComputeQueue()) ? RGPassQueue::Compute
-                                                           : RGPassQueue::Default);
+            // 【P5 修正】这里此前标成 `RGPassQueue::Compute`，但 `GI_IBL::Render` 是**图形** pass：
+            // 它用 `BeginOffscreenPass + SetViewport + Draw(3)` 依次烘焙辐照度图（6 面）、预滤波图
+            // （5 mip × 6 面）与 BRDF LUT。放到计算队列上实测直接触发
+            // `[D3D12 ERROR] id=932 OMSetRenderTargets/RSSetViewports: invalid for COMMAND_LIST_TYPE_COMPUTE`，
+            // 随后设备被移除（hr=0x887a0005）。因此交回图形队列；本帧真正能上计算队列的是
+            // GPU_Cull（纯 compute dispatch，见上方），切分规则见 RenderGraph::MarkAsyncQueueGroups。
+            RGPassQueue::Default);
     }
 
     // Lighting 读取依赖：仅在对应通道注册了 pass 时才加入（避免无效句柄）

@@ -17,6 +17,26 @@
 // 这些过程日志此前用 INFO，每帧刷约 70 行，淹没其它日志且拖慢帧率；改为 TRACE，排查时把日志级别调到 Trace 即可看到
 namespace he::render {
 
+// 【P5】把 RHI 资源状态转成能进日志的短名（异步计算的"交接状态"读数要用）
+static const char* StateName(rhi::ResourceState s) {
+    switch (s) {
+        case rhi::ResourceState::Undefined:               return "UNDEFINED";
+        case rhi::ResourceState::Common:                  return "COMMON";
+        case rhi::ResourceState::VertexAndConstantBuffer: return "VB_CB";
+        case rhi::ResourceState::IndexBuffer:             return "IB";
+        case rhi::ResourceState::RenderTarget:            return "RT";
+        case rhi::ResourceState::DepthStencilRead:        return "DEPTH_READ";
+        case rhi::ResourceState::DepthStencilWrite:       return "DEPTH_WRITE";
+        case rhi::ResourceState::ShaderResource:          return "SRV";
+        case rhi::ResourceState::UnorderedAccess:         return "UAV";
+        case rhi::ResourceState::CopySrc:                 return "COPY_SRC";
+        case rhi::ResourceState::CopyDst:                 return "COPY_DST";
+        case rhi::ResourceState::Present:                 return "PRESENT";
+        case rhi::ResourceState::IndirectArgument:        return "INDIRECT";
+        default:                                          return "?";
+    }
+}
+
 RenderGraph::RenderGraph() {
     HE_CORE_TRACE("RenderGraph v2 created (auto-barrier + aliasing)");
 }
@@ -137,6 +157,10 @@ void RenderGraph::Compile() {
 
     BuildDependencies();
     TopologicalSort();
+    // 【P5】屏障推导之前先分组：计算列表上的 pass 会**先于**全部图形 pass 执行，屏障必须按
+    // 这个真实执行顺序推导（否则提前执行的那几个 pass 会拿到"上一个图形 pass 之后"的起始状态，
+    // 与它真正看到的状态不符）。
+    MarkAsyncQueueGroups();
     DeriveBarriers();
     CullDeadPasses();
     ApplyAliasing();
@@ -147,6 +171,78 @@ void RenderGraph::Compile() {
     }
 
     m_Compiled = true;
+}
+
+// ============================================================
+// 【P5】MarkAsyncQueueGroups — 按队列归属分组
+//
+// 旧实现在 ExecuteWithAsyncCompute 里只从 `m_PassOrder` **头部**切连续的 Compute pass，
+// 而编译后第一个 pass 是图形 hint 的 ToneMap（它的 reads 声明为空，内部自己发屏障 ⇒
+// 拓扑序上没有依赖）⇒ 「异步前缀」恒为空、异步 pass 数恒为 0。
+//
+// 这里改成先做分组决定（不只看头部），一个 Compute hint 的 pass 只有在同时满足下面两条
+// 时才被提到计算列表：
+//
+//   ① **依赖闭包全在异步组内**：它的所有前驱 pass 也都在异步组里。等价于"它的输入要么来自
+//      上一帧，要么来自另一个异步 pass"，因此把它挪到本帧**最前面**执行读到的内容与原地
+//      执行一致。第一个被选中的 pass 必然没有前驱 ⇒ 天然从"无依赖"的那些开始。
+//      这条同时挡住了 WAR 方向的问题：如果有图形 pass 在本帧读了它写的资源，BuildDependencies
+//      会把它记成前驱，于是它进不了异步组（不会被提前到那个图形 pass 之前写）。
+//
+//   ② **只碰跨帧持久资源**（导入纹理）：帧图自己创建的资源是**瞬态**的，D3D12 后端会把
+//      生命周期不重叠的瞬态纹理放在同一段内存上（内存别名，见 ApplyAliasing / CreateTransientTexture）。
+//      把这类 pass 提前到帧首，生命周期顺序就与别名分配时用的拓扑序不符 ⇒ 可能和别的 pass
+//      共用内存而互相踩。持久资源（GBuffer 深度、光照 HDR、交换链）不参与别名，提前用是安全的。
+//
+// 另外，被选中的 pass 只读上一帧的内容，所以计算列表提交前必须让计算队列先等"此前的图形
+// 工作完成"（见 D3D12Device::SubmitQueueHandoff），这一点由 RHI 侧保证。
+// ============================================================
+void RenderGraph::MarkAsyncQueueGroups() {
+    // 每帧重新决定（RenderGraph 本身每帧重建，但 Compile 也可能被重入）
+    for (auto* p : m_PassOrder) p->hoistedAsync = false;
+    if (!m_AsyncComputeEnabled) return;
+
+    std::vector<PassNode*> chosen;
+    auto inChosen = [&chosen](PassNode* p) {
+        return std::find(chosen.begin(), chosen.end(), p) != chosen.end();
+    };
+
+    for (auto* pass : m_PassOrder) {
+        if (pass->queueHint != RGPassQueue::Compute) continue;
+
+        // ① 依赖闭包必须在异步组内
+        bool ok = true;
+        for (auto* dep : pass->dependencies) {
+            if (!inChosen(dep)) { ok = false; break; }
+        }
+        if (!ok) {
+            HE_CORE_TRACE("  Async 分组: '{}' 留在图形列表（前驱不在异步组内）", pass->name);
+            continue;
+        }
+
+        // ② 读写的资源必须全是跨帧持久资源
+        for (auto& r : pass->reads) {
+            if (!IsPersistentResource(r.handle)) { ok = false; break; }
+        }
+        if (ok) {
+            for (auto& w : pass->writes) {
+                if (!IsPersistentResource(w.handle)) { ok = false; break; }
+            }
+        }
+        if (!ok) {
+            HE_CORE_TRACE("  Async 分组: '{}' 留在图形列表（使用了帧图瞬态资源）", pass->name);
+            continue;
+        }
+
+        pass->hoistedAsync = true;
+        chosen.push_back(pass);
+        HE_CORE_TRACE("  Async 分组: '{}' → 计算列表", pass->name);
+    }
+}
+
+bool RenderGraph::IsPersistentResource(ResourceHandle handle) const {
+    // 导入纹理 = 跨帧持久（交换链 / GBuffer / 光照目标等）；帧图 CreateTexture 出来的是瞬态
+    return m_ImportedTextures.count(handle) != 0;
 }
 
 void RenderGraph::BuildDependencies() {
@@ -216,8 +312,8 @@ void RenderGraph::DeriveBarriers() {
         m_ResourceStates[i].isDepth = isDepth;
     }
 
-    // 按执行顺序遍历 Pass，推导 Barrier
-    for (auto* pass : m_PassOrder) {
+    // 单个 Pass 的屏障推导：从"当前资源状态"推到本 pass 需要的状态
+    auto deriveOne = [&](PassNode* pass) {
         pass->preBarriers.clear();
 
         // 为每个读/写资源检查当前状态
@@ -303,6 +399,17 @@ void RenderGraph::DeriveBarriers() {
                 st.layout = rhi::ResourceState::DepthStencilRead;
             }
         }
+    };
+
+    // ── 【P5】按真实执行顺序推两遍：先计算列表的 pass，再图形列表的 pass ──
+    // 计算列表先提交、图形列表经时间线围栏等它，所以"异步 pass 在前"就是真实顺序；
+    // 提前执行的那几个 pass 因此会拿到"本帧首次使用"的起始状态（导入纹理从 RHI 记录的
+    // 上一帧布局出发），而不是"某个图形 pass 之后"的状态。
+    for (auto* pass : m_PassOrder) {
+        if (pass->hoistedAsync) deriveOne(pass);
+    }
+    for (auto* pass : m_PassOrder) {
+        if (!pass->hoistedAsync) deriveOne(pass);
     }
 }
 
@@ -498,8 +605,11 @@ void RenderGraph::Execute(rhi::IRHICommandList* cmdList, rhi::IRHIDevice* device
 // ============================================================
 
 bool RenderGraph::HasComputePasses() const {
+    // 【P5】返回的是"本帧真的有 pass 会被放到计算列表上"（编译期分组的结果），
+    // 而不是"声明了 Compute hint 的 pass 是否存在"——后者为真但都被分组条件挡下时，
+    // 走单队列路径即可，不必白建一条空的 Compute 命令列表。
     for (auto* pass : m_PassOrder) {
-        if (pass->queueHint == RGPassQueue::Compute) return true;
+        if (pass->hoistedAsync) return true;
     }
     return false;
 }
@@ -539,24 +649,22 @@ void RenderGraph::ExecuteWithAsyncCompute(rhi::IRHICommandList* mainCmd,
     // ============================================================
 
     // 先收集异步 Compute Pass 列表
+    // 【P5】按编译期的分组决定（pass->hoistedAsync）切分，不再只看头部连续段：
+    // 计算列表 = 那些"依赖闭包全在异步组内 + 只碰持久资源"的 Compute hint pass，
+    // 图形列表 = 其余全部，且保持与单队列路径完全一致的相对顺序。
     std::vector<PassNode*> asyncComputePasses;
     std::vector<PassNode*> mainPasses;
-    bool crossedCompute = false;
     for (auto* pass : m_PassOrder) {
-        if (pass->queueHint == RGPassQueue::Compute && !crossedCompute) {
-            asyncComputePasses.push_back(pass);
-        } else {
-            crossedCompute = true;  // 第一个非 Compute Pass 之后，所有 Pass 走 mainCmd
-            mainPasses.push_back(pass);
-        }
+        if (pass->hoistedAsync) asyncComputePasses.push_back(pass);
+        else                    mainPasses.push_back(pass);
     }
 
     // 创建 Compute 命令列表，录制所有异步 Compute Pass
     auto computeCmd = device->CreateCommandList(rhi::QueueType::Compute);
     computeCmd->BeginLightweight();  // 轻量 Begin：不推进帧计数器，避免延迟销毁提前触发
 
-    // 【P5 可观测性】异步 pass 数此前恒为 0（样例里没有任何 Compute 队列 pass），
-    // 日志里没有任何读数可核对。这里在前几帧与每 120 帧打印一次清单。
+    // 【P5 可观测性】把切分结果、真实执行顺序、跨队列交接状态与同步点一次性打出来。
+    // 前三帧与每 120 帧一次，便于脚本抓读数。
     {
         static u32 s_logCount = 0;
         ++s_logCount;
@@ -569,19 +677,50 @@ void RenderGraph::ExecuteWithAsyncCompute(rhi::IRHICommandList* mainCmd,
             HE_CORE_INFO("[AsyncCompute] 异步计算 pass {} 个（主列表 pass {} 个）：{}",
                          asyncComputePasses.size(), mainPasses.size(),
                          names.empty() ? "(无)" : names);
-            // 第一次打印时补一行"实际执行顺序的前 4 个 pass"：异步前缀按 m_PassOrder 切分，
-            // 前缀的第一个 pass 不是 Compute hint ⇒ 异步数恒为 0，这行是排查该情况的直接读数。
-            if (s_logCount == 1u) {
-                std::string head;
-                u32 shown = 0;
-                for (auto* p : m_PassOrder) {
-                    if (shown++ >= 4u) break;
-                    if (!head.empty()) head += " / ";
-                    head += p->name;
-                    head += (p->queueHint == RGPassQueue::Compute) ? "[C]" : "[G]";
-                }
-                HE_CORE_INFO("[AsyncCompute] 执行顺序前 4 个 pass：{}", head);
+
+            // 真实执行顺序：计算列表的 pass 在前（它们先提交、图形列表等它们），随后是图形列表
+            std::string order;
+            for (auto* p : asyncComputePasses) {
+                if (!order.empty()) order += " → ";
+                order += p->name;
+                order += "[C]";
             }
+            for (auto* p : mainPasses) {
+                if (!order.empty()) order += " → ";
+                order += p->name;
+                order += "[G]";
+            }
+            if (s_logCount <= 3u) HE_CORE_INFO("[AsyncCompute] 执行顺序：{}", order);
+
+            // 跨队列交接状态：把每个异步 pass 的 acquire/release 记录打出来
+            //（RHI 状态名；D3D12 侧实际下发的图形专用状态 → 计算可用状态由 RHI 打印）
+            for (auto* p : asyncComputePasses) {
+                std::string ho;
+                auto add = [&](const BarrierRecord& br, const char* dir) {
+                    if (!ho.empty()) ho += "；";
+                    ho += dir;
+                    const char* resName =
+                        (br.handle < m_Resources.size() && !m_Resources[br.handle].name.empty())
+                        ? m_Resources[br.handle].name.c_str() : "?";
+                    ho += resName;
+                    char buf[96];
+                    std::snprintf(buf, sizeof(buf), " %s→%s",
+                                  StateName(br.srcState), StateName(br.dstState));
+                    ho += buf;
+                };
+                for (auto& br : p->crossQueueAcquire) add(br, "读");
+                for (auto& br : p->crossQueueRelease) add(br, "写");
+                for (auto& br : p->preBarriers)      add(br, "屏障");
+                HE_CORE_INFO("[AsyncCompute] 交接 '{}'：{}", p->name,
+                             ho.empty() ? "(无资源交接)" : ho);
+            }
+            HE_CORE_INFO("[AsyncCompute] 图形队列等待计算队列：时间线围栏值 {}（计算列表先提交、信号在末尾）",
+                         static_cast<unsigned long long>(timelineValue));
+            // 【Profiler 读数】有异步 pass 时 BeginFrame（重置本帧时间戳查询池 + 读回 2 帧前结果）
+            // 必须放在计算列表上：计算列表先提交、先写异步 pass 的时间戳，若主列表随后再重置就把它清掉了。
+            HE_CORE_INFO("[AsyncCompute] Profiler 查询池重置落在：{}",
+                         m_Profiler ? (asyncComputePasses.empty() ? "图形列表" : "计算列表")
+                                    : "（未启用 Profiler）");
         }
     }
 
