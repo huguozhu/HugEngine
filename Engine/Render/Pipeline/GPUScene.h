@@ -42,6 +42,23 @@ public:
     /// 现已删除：调用方（两条管线）本帧本来就有快照，自建一份既多余、又要求渲染期持有世界。
     void CollectFromSnapshot(const FrameSceneSnapshot& snapshot);
 
+    /// 【T7】GPU 驱动 GBuffer：按**合批顺序**重建对象表（下标 = 合批序号）。
+    ///
+    /// 【为什么需要另建入口】GPU 剔除写出的间接命令用 `objectID` 填 `firstInstance`，而绘制端
+    ///   用它当物体缓冲下标（`GBuffer.vert.slang` 的 `useInstanceID == 1` 分支）。因此三处必须
+    ///   是同一个序号：GPUScene 对象下标、间接命令 `firstInstance`、物体缓冲下标 —— 也就是
+    ///   **合批序号**。原实现按快照全量顺序填表，而物体缓冲却是 CPU 视锥裁剪后的可见子集，
+    ///   两者顺序/长度都不同，直接放开就会画错物体（T7 记录的三处问题之一）。
+    ///
+    /// 【实例化网格】`bInstanced` 条目标记为不可见（`visibilityFlags = 0`）：它们由
+    ///   `InstanceCuller` 的逐实例路径单独绘制，不能进 GPU 驱动的间接绘制（否则只会按对象
+    ///   矩阵画 1 个实例，而不是 N 个实例）。
+    ///
+    /// @param snapshot             本帧快照
+    /// @param batchSnapshotIndices 合批命令 → 快照条目下标（`MeshBatcher::GetBatchSnapshotIndices`）
+    void CollectBatchedFromSnapshot(const FrameSceneSnapshot& snapshot,
+                                    const std::vector<u32>& batchSnapshotIndices);
+
     /// 快照条目 → GPU 剔除记录的转换（与旧 `FillObj` 逐字段对齐）。
     /// 【为什么内联在头文件】单测要能在**不链接 HugEngineRHI** 的前提下验证它与旧 `FillObj`
     /// 逐位一致（`GPUScene.cpp` 会拉进设备接口的实现符号）。

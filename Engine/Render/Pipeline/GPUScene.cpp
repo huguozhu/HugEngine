@@ -16,6 +16,7 @@
 #include "Core/Log.h"
 #include "Core/Assert.h"   // HE_ASSERT
 #include <cstring>
+#include <algorithm>      // 【T7】std::min（合批对象数截断）
 
 namespace he::render {
 
@@ -91,6 +92,52 @@ void GPUScene::CollectFromSnapshot(const FrameSceneSnapshot& snapshot) {
         }
     }
     m_ObjectCount = static_cast<u32>(m_Objects.size());
+}
+
+void GPUScene::CollectBatchedFromSnapshot(const FrameSceneSnapshot& snapshot,
+                                          const std::vector<u32>& batchSnapshotIndices) {
+    m_DirtyIndices.clear();
+
+    // 对象表长度 = 合批命令数（受**物体缓冲容量** `MAX_OBJECTS` 约束：绘制端按 objectID 索引
+    // `GPUObjectData[MAX_OBJECTS]`，超出会让顶点着色器读越界）。不保留快照里的全部条目：
+    //   · GPU 剔除只遍历 [0, batchCount)，越界条目无人读；
+    //   · 长度与 `CollectFromSnapshot` 的口径不同 ⇒ 切回 CPU 模式时它会走"整表重建"分支，
+    //     不会把"合批序号"误当成"快照序号"沿用（两类 objectID 的语义必须彻底分开）。
+    const u32 batchCount = static_cast<u32>(
+        std::min<size_t>(batchSnapshotIndices.size(), static_cast<size_t>(MAX_OBJECTS)));
+
+    m_Objects.clear();
+    m_CachedMatrices.clear();
+    m_Objects.reserve(batchCount);
+    m_CachedMatrices.reserve(batchCount);
+
+    for (u32 i = 0; i < batchCount; ++i) {
+        const u32 drawIndex = batchSnapshotIndices[i];
+        if (drawIndex >= snapshot.draws.size()) {
+            // 快照/合批不一致（理论上不应发生）：补一条空记录保持下标与命令一一对应，
+            // 空的 AABB 会被视锥剔除掉，宁可少画也不读越界内存。
+            GPUSceneObject empty{};
+            empty.objectID = i;
+            empty.visibilityFlags = 0;
+            m_Objects.push_back(empty);
+            m_CachedMatrices.push_back(float4x4(1.0f));
+            continue;
+        }
+        const SnapshotDrawItem& item = snapshot.draws[drawIndex];
+        GPUSceneObject o = MakeObjectRecord(item);
+        // 【关键】objectID = 合批序号 = 间接命令 firstInstance = 物体缓冲下标
+        o.objectID = i;
+        // 实例化网格由逐实例路径绘制，不进 GPU 驱动的间接绘制
+        if (item.bInstanced) o.visibilityFlags = 0;
+        // 绘制参数（indexCount/firstIndex/vertexOffset）由 MeshBatcher::FillGPUScene 随后按同序写入
+        m_Objects.push_back(o);
+        m_CachedMatrices.push_back(item.object.worldMatrix);
+    }
+
+    // 顺序与 objectID 每帧都可能变化（收集集增删），全量标脏由 `Upload` 一次写完
+    for (u32 i = 0; i < batchCount; ++i) m_DirtyIndices.push_back(i);
+
+    m_ObjectCount = batchCount;
 }
 
 void GPUScene::Upload(rhi::IRHIDevice* device) {
