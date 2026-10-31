@@ -398,6 +398,13 @@ private:
     bool            m_RootArgsDirty = true;
     /// 本次录制中是否已经 SetDescriptorHeaps（描述符表要求先绑堆）
     bool            m_HeapsSet = false;
+    /// 本次录制中是否已经绑定根签名（图形 / 计算 / 光追三选一）。
+    /// 【为什么必须有】D3D12 在**没有根签名**时调用 SetGraphics/SetComputeRoot* 会静默卡死
+    /// （CPU 0%、无错误日志，见 SetPipeline 里计算管线的同一条注释）。命令流录制中一旦某条
+    /// 命令被标记为「无法承载」而跳过（如光追管线绑定），后续的 SetPushConstants 仍会照常入流，
+    /// 回放时就变成"没有根签名就设根 CBV" ⇒ 整个进程卡死。
+    /// 这里记录状态：未绑根签名时不下发任何根参数（那一帧画不出东西，但绝不允许挂起）。
+    bool            m_RootSigBound = false;
     /// 各 setIndex 当前绑定的描述符集（EnsureBoundTextureStates 据此找纹理）
     DescriptorSetHandle m_BoundSets[8]{};
     /// 各 setIndex 当前根参数表所指快照对应的集与版本：集换了或内容变了才重新拍快照

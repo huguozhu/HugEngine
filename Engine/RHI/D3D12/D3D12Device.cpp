@@ -1472,6 +1472,13 @@ u32 D3D12Device::GetSetBaseSlot(DescriptorSetHandle set) const {
     return m_DescriptorSets[static_cast<size_t>(set - 1)].baseSlot;
 }
 
+// 【P3 诊断】取某 set 的 AS 型 binding 写入记录（没有内容时返回一张静态空表）
+const std::unordered_map<u32, u64>& D3D12Device::GetSetAsBindings(DescriptorSetHandle set) const {
+    static const std::unordered_map<u32, u64> kEmpty;
+    if (set == kInvalidSet || set > m_DescriptorSets.size()) return kEmpty;
+    return m_DescriptorSets[static_cast<size_t>(set - 1)].asBindings;
+}
+
 
 // 懒创建两个 shader-visible 堆（SRV 4096 槽 + 采样器 16 槽）。
 // 根签名同时声明了 SRV 表与 SAMPLER 表 ⇒ 绑定时两个堆都得设置。
@@ -2708,6 +2715,22 @@ void D3D12Device::UpdateDescriptorSet(DescriptorSetHandle set, u32 binding, Desc
     const D3D12_CPU_DESCRIPTOR_HANDLE dst = SetWriteHandle(s, s.baseSlot + binding);
     if (!dst.ptr) return;
     m_Device->CreateShaderResourceView(nullptr, &srv, dst);
+    // 【P3 诊断】记下这个 binding 的 AS 地址：确认录制期写进描述符的 TLAS
+    // 与回放侧构建 / 使用的 AS 是同一个（地址 0 表示 AS 尚未分配）
+    s.asBindings[binding] = srv.RaytracingAccelerationStructure.Location;
+    // 【P3 诊断】HE_D3D12_STREAM_RT_DBG=1：打印 AS 型 SRV 的维度与地址（录制期 / 直录共用）。
+    // 前 8 次逐条打印，之后每 120 次一条，便于长跑时确认绑定没有漂移。
+    if (std::getenv("HE_D3D12_STREAM_RT_DBG")) {
+        static u32 s_dbgAsWrites = 0;
+        ++s_dbgAsWrites;
+        if (s_dbgAsWrites <= 8u || (s_dbgAsWrites % 120u) == 0u) {
+            HE_CORE_INFO("[RTDBG] 写 AS 描述符：第{}次 set={} binding={} baseSlot={} "
+                         "SRV维度={} Location=0x{:x}",
+                         s_dbgAsWrites, static_cast<u64>(set), binding, s.baseSlot,
+                         static_cast<u32>(srv.ViewDimension),
+                         srv.RaytracingAccelerationStructure.Location);
+        }
+    }
 }
 // 【关键】引擎用「图像视图句柄」更新描述符（例如把 HDR 纹理绑到 set=0/bind=0
 // 的 u_HDRTexture_0）。此前这里是空实现，导致该槽永远是空描述符 ——

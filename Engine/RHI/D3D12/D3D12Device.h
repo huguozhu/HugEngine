@@ -271,6 +271,11 @@ public:
     void MarkSetRingChunks(u32 chunkMask, ID3D12Fence* fence, u64 value);
     /// 某个描述符集的堆内起始槽位（0xFFFFFFFF 表示无效句柄）
     u32                              GetSetBaseSlot(DescriptorSetHandle set) const;
+    /// 描述符槽位步长（字节），诊断日志里把 GPU 句柄换算成堆内槽位用
+    UINT                             GetCbvSrvUavSize() const { return m_CbvSrvUavSize; }
+    /// 【P3 诊断】某个描述符集里 AccelerationStructure 型 binding 的写入记录
+    ///（binding → AS 的 GPU 地址）。没有记录时返回空表，仅供诊断日志使用。
+    const std::unordered_map<u32, u64>& GetSetAsBindings(DescriptorSetHandle set) const;
     /// 取 set 某个 binding 写入的资源（纹理或 DEFAULT 堆缓冲），供绘制/派发前补状态转换；
     /// 没写过或不可转状态（如 UPLOAD 堆缓冲）时返回 nullptr。isBuffer 输出资源是否为缓冲
     /// subresource 非空时输出绑定的子资源下标（整资源绑定为 D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES）
@@ -704,6 +709,9 @@ private:   // register -> 元素字节数
         std::unordered_map<u32, DescriptorType> textureTypes;
         /// binding → 子资源下标：只记录经逐 mip / 逐层视图绑定的纹理（其余为整资源）
         std::unordered_map<u32, UINT> subresources;
+        /// 【P3 诊断】AccelerationStructure 型 binding 最近一次写入的 AS GPU 地址（binding → 地址）。
+        /// 只用于诊断日志：确认录制期写进描述符的 TLAS 地址与回放侧绑定的是同一个 AS。
+        std::unordered_map<u32, u64> asBindings;
     };
     /// 按所属布局记录的步长写某个 set 某个 binding 的缓冲描述符（SRV/CBV + UAV）
     void WriteSetBufferDescriptor(D3D12Set& s, u32 binding, const D3D12Set::BufferBinding& bb);

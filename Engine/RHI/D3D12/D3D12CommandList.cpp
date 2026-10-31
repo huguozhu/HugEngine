@@ -18,27 +18,47 @@
 namespace he::rhi::d3d12 {
 
 // ---------------------------------------------------------------------------
-// 【P3】命令流是否承载光追（实验开关，默认关闭）
+// 【P3】命令流是否承载光追（默认开启；HE_RHI_COMMAND_STREAM_RT=0 可回退）
 //
 // 背景：T10 的设计是「命中即回退」——BLAS / TLAS 构建、RT 管线绑定、DispatchRays 一律
 // 标记为无法承载，从下一帧起帧主列表改回直接录制（画面自下一帧恢复，绝不静默丢命令）。
+// P3 把这四类命令都编码进了命令流（`CmdBuildBLAS` / `CmdBuildTLAS` / `CmdBindRTPipeline` /
+// `CmdTraceRays`，几何与 SBT 槽位随流 arena 走），回放侧重建描述结构后下发原生调用。
 //
-// 现状（P3 落地后）：这四类命令的编码与回放链路已经打通（`CmdBuildBLAS` / `CmdBuildTLAS` /
-// `CmdBindRTPipeline` / `CmdTraceRays`，几何与 SBT 槽位随流 arena 走），回放侧确实下发了
-// 原生构建与 DispatchRays（HE_D3D12_STREAM_RT_DBG=1 可看到 replay=1 的执行记录），
-// 且 05 在模式 2 + 流下连续 130 s / 29761 帧 0 报错、无设备丢失。
-// **但画面不对**：05 的截图从 978 KB（模式 0）退化为 16 KB 的纯天空渐变 —— 光线打不到几何，
-// 说明回放侧拿到的是空 / 无效的 TLAS（尚未定位到具体环节）。
-// 因为「截图与模式 0 一致」这条判据没过，这里不能让流模式默认接管光追：
-//   · 默认（未设 HE_RHI_COMMAND_STREAM_RT）⇒ 保持 T10 的回退行为，画面与之前完全一致；
-//   · HE_RHI_COMMAND_STREAM_RT=1 ⇒ 启用流式光追，供继续排查上面那条现象。
+// 【曾经的现象与根因】启用流式光追后 05 截图退化为 16 KB 纯天空（直录为 978 KB），且
+// 0 条 D3D12 错误、0 次设备丢失。根因**不在**描述符快照或 AS 生命周期，而在回放侧取
+// `CmdBuildBLAS` 载荷时用错了接口：录制侧用 `EnqueueArena` 编码（内联 payloadSize 为 0、
+// 数据在 arena），回放侧却用 `PayloadAt`（只读内联载荷）取，长度校验必然失败返回空指针，
+// 于是**所有 BLAS 构建命令被静默跳过**；TLAS 实例指向从未构建过的 BLAS ⇒ 光线全部未命中
+// ⇒ 只剩天空。修复见 RHICommandReplay.cpp（改用 `ArenaPayloadAt`，并对坏载荷留日志）。
+//
+// 现在默认由命令流承载光追；设 HE_RHI_COMMAND_STREAM_RT=0 则整帧直接录制（命令流不接管光追）。
+// 诊断：HE_D3D12_STREAM_RT_DBG=1 会打印录制/回放两侧的描述符表槽位、AS 地址与派发根参数。
 // ---------------------------------------------------------------------------
 static bool StreamRTCarryEnabled() {
     static const bool s_on = [] {
         const char* v = std::getenv("HE_RHI_COMMAND_STREAM_RT");
-        return (v != nullptr) && (v[0] != '0');
+        // 默认开启；只有显式 =0（或以 0 开头）才回退
+        return (v == nullptr) || (v[0] != '0');
     }();
     return s_on;
+}
+
+// ---------------------------------------------------------------------------
+//  【P3 诊断】HE_D3D12_STREAM_RT_DBG=1 时，把描述符 GPU 句柄换算成「堆内槽位」再打印。
+//  直接录制与命令流回放两条路径都用同一个换算，便于逐位对比两者绑定的表到底是哪一块。
+// ---------------------------------------------------------------------------
+static bool StreamRTDebugEnabled() {
+    static const bool s_on = (std::getenv("HE_D3D12_STREAM_RT_DBG") != nullptr);
+    return s_on;
+}
+
+static u32 DbgDescSlot(D3D12Device* dev, D3D12_GPU_DESCRIPTOR_HANDLE h) {
+    if (!dev || h.ptr == 0) return 0xFFFFFFFFu;
+    const D3D12_GPU_DESCRIPTOR_HANDLE base = dev->GetSrvHeapGpuStart();
+    const UINT inc = dev->GetCbvSrvUavSize();
+    if (inc == 0 || h.ptr < base.ptr) return 0xFFFFFFFFu;
+    return static_cast<u32>((h.ptr - base.ptr) / inc);
 }
 
 D3D12CommandList::~D3D12CommandList() {
@@ -293,6 +313,7 @@ void D3D12CommandList::ResetRecordingState(bool allocatePush) {
     for (auto& t : m_RootTables) t.ptr = 0;
     m_RootArgsDirty = true;
     m_HeapsSet = false;
+    m_RootSigBound = false;   // 新录制：尚未绑定任何根签名（未绑时不许下发根参数，见头文件说明）
     for (auto& bs : m_BoundSets) bs = kInvalidSet;
     for (auto& ss : m_SnapSets) ss = kInvalidSet;   // 新的录制：快照一律重新拍
     m_LabelDepth   = 0;         // 标签层级与待插入的逐绘制标签不跨录制
@@ -525,6 +546,7 @@ void D3D12CommandList::PrepareForExternalRendering() {
         m_HeapsSet = true;
     }
     m_Pipeline = nullptr;      // 外部会设置自己的 PSO / 根签名
+    m_RootSigBound = false;    // 外部渲染会改根签名：之后的根参数下发必须重新等 SetPipeline
     m_RootArgsDirty = true;
 }
 
@@ -953,10 +975,12 @@ void D3D12CommandList::SetPipeline(IRHIPipelineState* pso) {
     // 否则后面 SetComputeRootDescriptorTable 没有根签名可用，D3D12 会静默卡死。
     if (m_IsComputePipeline) {
         m_List->SetComputeRootSignature(m_Pipeline->GetRootSignature());
+        m_RootSigBound = true;   // 之后才允许下发根参数
         m_RootArgsDirty = true;
         return;   // 计算管线不涉及输入装配（计算列表上调用 IA* 非法，调试层 id=932）
     } else {
         m_List->SetGraphicsRootSignature(m_Pipeline->GetRootSignature());
+        m_RootSigBound = true;   // 之后才允许下发根参数
     }
     m_List->IASetPrimitiveTopology(m_Pipeline->GetTopology());
     // 引擎布局缺失的属性挂在零缓冲槽上，这里把零缓冲绑上
@@ -1109,6 +1133,20 @@ void D3D12CommandList::PrepareSetTables() {
         m_SnapSets[i]     = set;
         m_SnapVersions[i] = ver;
         m_SetRingChunkMask |= (1u << chunk);
+        // 【P3 诊断】快照落到哪个槽位、该 set 里的 AS 型 binding 写的是什么地址
+        if (StreamRTDebugEnabled()) {
+            static u32 s_dbgSnap = 0;
+            if (++s_dbgSnap <= 16u || (s_dbgSnap % 120u) == 0u) {
+                const auto& asb = m_Device->GetSetAsBindings(set);
+                HE_CORE_INFO("[RTDBG] 描述符快照：set={} ver={} baseSlot={} srvSlot={} uavSlot={} "
+                             "chunk={} asBinds={} stream={}",
+                             static_cast<u64>(set), ver, m_Device->GetSetBaseSlot(set),
+                             DbgDescSlot(m_Device, srv), DbgDescSlot(m_Device, uav), chunk,
+                             asb.size(), m_StreamMode ? 1 : 0);
+                for (const auto& [b, addr] : asb)
+                    HE_CORE_INFO("[RTDBG]    AS binding {} -> addr=0x{:x}", b, addr);
+            }
+        }
         // 【T10】快照必须随命令流携带：模式 2 下回放落后一到两帧，回放时再拍快照拿到的
         // 是后面帧写入的内容（描述符集不按帧分版本 ⇒ 实测挂起）。这里把录制当时的 GPU 句柄入流。
         if (m_StreamMode) {
@@ -1434,6 +1472,11 @@ void D3D12CommandList::FlushRootArgs() {
     if (m_StreamReplay) PrepareBindlessTables();
     else                PrepareSetTables();
     if (!m_List || (!m_Pipeline && !m_RtPipeline) || !m_RootArgsDirty) return;
+    // 【防静默挂起】D3D12 在没有绑定根签名时调用 SetGraphics/SetComputeRoot* 会直接卡死
+    //（CPU 0%、无调试层报错）。命令流回退帧（HE_RHI_COMMAND_STREAM_RT=0 命中光追）会跳过
+    // 光追管线绑定，但后续的推送常量 / 绘制仍会走到这里 ⇒ 没有根签名就什么都不下发。
+    // 根参数保持"脏"，等真正绑了根签名的那次 FlushRootArgs 再补。
+    if (!m_RootSigBound) return;
     // 描述符表必须在 SetDescriptorHeaps 之后才能设置
     if (!m_HeapsSet && m_Device && m_Device->EnsureDescriptorHeaps()) {
         ID3D12DescriptorHeap* heaps[2] = { m_Device->GetCbvSrvUavHeap(), m_Device->GetSetSamplerHeap() };
@@ -1498,12 +1541,17 @@ void D3D12CommandList::SetPushConstants(u32 offset, u32 size, const void* data) 
         m_PushGpu = slot;
         m_PushCpu = cpu;
         m_PushDirty = false;
-        if (m_IsComputePipeline) {
-            m_List->SetComputeRootConstantBufferView(0, slot);
-        } else {
-            // 生成的 HLSL 里 FrameConstants 在 register(b0)/(b1)，两者都绑同一块
-            m_List->SetGraphicsRootConstantBufferView(0, slot);
-            m_List->SetGraphicsRootConstantBufferView(1, slot);
+        // 【防静默挂起】没有根签名时不许下发根参数（D3D12 会卡死，见 m_RootSigBound 的说明）；
+        // 命令流回退帧里光追管线绑定被跳过，推送常量仍会到达这里。数据照常写进常量环，
+        // 只是暂时不绑定；真正绑了根签名后的绘制会重新下发根参数。
+        if (m_RootSigBound) {
+            if (m_IsComputePipeline) {
+                m_List->SetComputeRootConstantBufferView(0, slot);
+            } else {
+                // 生成的 HLSL 里 FrameConstants 在 register(b0)/(b1)，两者都绑同一块
+                m_List->SetGraphicsRootConstantBufferView(0, slot);
+                m_List->SetGraphicsRootConstantBufferView(1, slot);
+            }
         }
     }
 
@@ -2058,9 +2106,11 @@ void D3D12CommandList::BuildTLAS(IRHIAccelerationStructure* tlas, IRHIBuffer* sc
     {
         static const bool s_dbg = (std::getenv("HE_D3D12_STREAM_RT_DBG") != nullptr);
         static u32 s_n = 0;
-        if (s_dbg && ++s_n <= 8u) {
-            HE_CORE_INFO("[RTDBG] 原生 BuildTLAS 执行：replay={} 实例={} 实例地址=0x{:x} AS=0x{:x}",
-                         m_StreamReplay ? 1 : 0, instanceCount, instanceAddr, as->GetDeviceAddress());
+        ++s_n;
+        if (s_dbg && (s_n <= 8u || (s_n % 120u) == 0u)) {
+            HE_CORE_INFO("[RTDBG] 原生 BuildTLAS 执行：replay={} 第{}次 实例={} 实例地址=0x{:x} AS=0x{:x}",
+                         m_StreamReplay ? 1 : 0, s_n, instanceCount, instanceAddr,
+                         as->GetDeviceAddress());
         }
     }
     bd.Inputs.Flags       = ToD3D12ASBuildFlags(ASBuildFlags::PreferFastTrace);
@@ -2112,6 +2162,7 @@ void D3D12CommandList::BindRTPipeline(IRHIRayTracingPipelineState* rtPSO) {
 
     list4->SetPipelineState1(rt->GetStateObject());
     m_List->SetComputeRootSignature(rt->GetGlobalRootSignature());
+    m_RootSigBound = true;    // 光追的全局根签名已绑：之后才允许下发根参数
     m_RootArgsDirty = true;   // 设根签名会清空全部根参数，下一次派发前要重新下发
 }
 
@@ -2143,10 +2194,11 @@ void D3D12CommandList::TraceRays(const SBTDesc& sbt, u32 width, u32 height, u32 
         }
         if (std::getenv("HE_D3D12_STREAM_RT_DBG")) {
             static u32 s_dbgN = 0;
-            if (++s_dbgN <= 8u) {
-                HE_CORE_INFO("[RTDBG] 录制期编码 DispatchRays：rtPSO={} sbtBuf={} rg(off={},stride={}) "
+            ++s_dbgN;
+            if (s_dbgN <= 8u || (s_dbgN % 120u) == 0u) {
+                HE_CORE_INFO("[RTDBG] 录制期编码 DispatchRays：第{}次 rtPSO={} sbtBuf={} rg(off={},stride={}) "
                              "miss(off={},stride={}) hit(off={},stride={})",
-                             (void*)m_RtPipeline, (void*)sbt.buffer, sbt.rayGen.handleOffset,
+                             s_dbgN, (void*)m_RtPipeline, (void*)sbt.buffer, sbt.rayGen.handleOffset,
                              sbt.rayGen.stride, sbt.miss.handleOffset, sbt.miss.stride,
                              sbt.hit.handleOffset, sbt.hit.stride);
             }
@@ -2201,6 +2253,19 @@ void D3D12CommandList::TraceRays(const SBTDesc& sbt, u32 width, u32 height, u32 
     d.Width  = width;
     d.Height = height;
     d.Depth  = depth ? depth : 1;
+
+    // 【P3 诊断】派发当时实际绑定的表 / 根参数 / 堆状态（直接录制与回放逐项对比）
+    if (StreamRTDebugEnabled()) {
+        static u32 s_dbgTrAll = 0;
+        ++s_dbgTrAll;
+        if (s_dbgTrAll <= 8u || (s_dbgTrAll % 120u) == 0u) {
+            HE_CORE_INFO("[RTDBG] DispatchRays 根参数：replay={} 第{}次 srv0Slot={} uav0Slot={} "
+                         "pushGpu=0x{:x} heapsSet={} rtPSO={}",
+                         m_StreamReplay ? 1 : 0, s_dbgTrAll, DbgDescSlot(m_Device, m_RootTables[8]),
+                         DbgDescSlot(m_Device, m_RootTables[16]), m_PushGpu,
+                         m_HeapsSet ? 1 : 0, static_cast<void*>(m_RtPipeline));
+        }
+    }
 
     list4->DispatchRays(&d);
     AfterDrawOrDispatch();
@@ -2747,6 +2812,21 @@ void D3D12CommandList::EnableCommandStream() {
     // 只有图形队列的主列表支持（bundle 与计算列表永远真实录制）
     const char* e = std::getenv("HE_RHI_COMMAND_STREAM");
     const bool want = (e && e[0] == '1') && !m_IsBundle && m_QueueType == QueueType::Graphics;
+    // 【HE_RHI_COMMAND_STREAM_RT=0：显式回退】这个开关表示"命令流不承载光追"。
+    // 不能只在命中光追命令时跳过该条命令：BLAS 构建被跳过后 RTPass 仍会把几何哈希记为
+    // "已构建"，之后（直接录制）再也不会重建 BLAS ⇒ TLAS 的实例指向从未构建的 BLAS，
+    // 画面永远只剩天空。因此关闭承载光追时**整帧直接录制**，第一帧起就是正确画面；
+    // 同时跳过光追命令还会在回放侧留下"没有根签名就设根参数"的非法序列（D3D12 会静默卡死）。
+    if (want && !StreamRTCarryEnabled()) {
+        m_StreamMode = false;
+        static bool s_WarnedRT = false;
+        if (!s_WarnedRT) {
+            s_WarnedRT = true;
+            HE_CORE_WARN("[D3D12] HE_RHI_COMMAND_STREAM_RT=0：命令流不承载光追，"
+                         "帧主列表改为直接录制（画面与未开命令流一致）");
+        }
+        return;
+    }
     // 【T10】回退：录制中遇到过命令流无法承载的调用（光追构建 / 派发等）⇒ 从本帧起直接录制。
     // 打印一次明确原因，绝不静默丢命令。
     if (want && m_StreamFallback) {
@@ -2822,6 +2902,16 @@ void D3D12CommandList::ApplyResolvedBarrier(void* resource, ResolvedBarrierType 
 void D3D12CommandList::ApplyResolvedDescriptorTable(u32 setIndex, u64 set, u64 srv,
                                                     u64 uav, u64 sampler) {
     if (setIndex >= 8u) return;
+    // 【P3 诊断】回放侧收到的描述符表与录制期编码的是同一组句柄（此处换算成堆内槽位）
+    if (StreamRTDebugEnabled()) {
+        static u32 s_dbgApply = 0;
+        if (++s_dbgApply <= 16u || (s_dbgApply % 120u) == 0u) {
+            D3D12_GPU_DESCRIPTOR_HANDLE s{}; s.ptr = srv;
+            D3D12_GPU_DESCRIPTOR_HANDLE u{}; u.ptr = uav;
+            HE_CORE_INFO("[RTDBG] 回放描述符表：setIndex={} set={} srvSlot={} uavSlot={}",
+                         setIndex, set, DbgDescSlot(m_Device, s), DbgDescSlot(m_Device, u));
+        }
+    }
     if (set != static_cast<u64>(kInvalidSet))
         m_BoundSets[setIndex] = static_cast<DescriptorSetHandle>(set);
     D3D12_GPU_DESCRIPTOR_HANDLE s{}; s.ptr = srv;
