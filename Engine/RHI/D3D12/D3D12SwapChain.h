@@ -12,6 +12,7 @@
 #if defined(_WIN32)
 
 #include "D3D12Common.h"
+#include <string>
 #include <vector>
 
 namespace he::rhi::d3d12 {
@@ -60,6 +61,12 @@ public:
     /// 这个镜像仍要维护，因为命令流回放的 hint 走的是它。
     void MarkBackBufferRendered() { m_BackBufferState = D3D12_RESOURCE_STATE_RENDER_TARGET; }
 
+    /// 【调试】按帧号截图（P8：与 Vulkan 共用的 RHI 接口）。
+    /// 第 frameIndex 帧（1 起）在 Present 之前把后缓冲存成 PNG；path 为空 = 默认路径
+    /// `<exe 目录>/capture_frameN.png`（见 RHI/ScreenCapture.h）。frameIndex <= 0 取消。
+    /// 未调用本接口时，行为与原来完全一致：读环境变量 HE_CAPTURE_FRAME。
+    void RequestCapture(u32 frameIndex, const char* path = nullptr) override;
+
     /// 【调试】按环境变量 HE_CAPTURE_FRAME=N 在第 N 帧把后缓冲存成 PNG。
     /// 必须在 **Present 之前** 调用：FLIP_DISCARD 交换链在 Present 之后内容未定义。
     /// index / state：要截的后缓冲序号及其当前状态（由 PresentNow 传入，不读 m_BackBufferState）
@@ -69,6 +76,8 @@ private:
     u64  m_FrameCount  = 0;
     int  m_CaptureAt   = -1;    // -1 = 未读取环境变量；0 = 不截图
     bool m_CaptureInit = false;
+    /// 截图输出路径覆盖（UTF-8）；空 = 用 rhi::DefaultCapturePath(m_FrameCount)
+    std::string m_CapturePath;
     /// 后缓冲的当前 D3D12 状态（未渲染过时是 PRESENT）
     D3D12_RESOURCE_STATES m_BackBufferState = D3D12_RESOURCE_STATE_PRESENT;
 

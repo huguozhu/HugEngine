@@ -11,6 +11,7 @@
 #include "RHI/SwapChain.h"
 #include "RHI/Types.h"   // kMaxFramesInFlight（kAcquireSlots 的派生来源）
 
+#include <string>
 #include <vector>
 
 namespace he::rhi {
@@ -21,7 +22,7 @@ namespace he::rhi {
 class VulkanSwapChain final : public IRHISwapChain {
 public:
     VulkanSwapChain(VkDevice device, VkPhysicalDevice physical, VkSurfaceKHR surface,
-                    VkQueue presentQueue, const SwapChainDesc& desc);
+                    VkQueue presentQueue, u32 graphicsFamily, const SwapChainDesc& desc);
     ~VulkanSwapChain() override;
 
     void Resize(u32 width, u32 height) override;
@@ -30,6 +31,11 @@ public:
     u32  GetHeight() const override { return m_Height; }
     bool AcquireNextImage() override;
     void Present(bool vsync) override;
+    /// 【P8】按帧号截图（与 D3D12 同一 RHI 接口 / 同一套文件语义）。
+    /// 第 frameIndex 帧（1 起）在 **Present 之前** 把交换链图像读回并写成 PNG；
+    /// path 为空 = `<exe 目录>/capture_frameN.png`；frameIndex <= 0 取消。
+    /// 未调用时读环境变量 HE_CAPTURE_FRAME（与 D3D12 一致）。
+    void RequestCapture(u32 frameIndex, const char* path = nullptr) override;
     /// 【绕过路由】真正呈现（模式 2 由 RHI 线程经 `IRHIDevice::ExecutePresent` 调用）。
     /// imageIndex / waitSemaphore 由渲染线程在 `Present` 时捕获 —— RHI 线程不再读交换链状态。
     void PresentNow(u32 imageIndex, void* waitSemaphore, bool vsync);
@@ -56,11 +62,23 @@ public:
 private:
     void CreateSwapchain();
     void DestroySwapchain();
+    /// 【P8】截图实现：布局 PRESENT_SRC → TRANSFER_SRC → PRESENT_SRC，
+    /// 用图形队列提交 + 栅栏同步，读回 host-visible 缓冲后写 PNG。
+    void CaptureIfRequested(u32 imageIndex);
+
+    // ── P8 截图状态（语义与 D3D12SwapChain 完全一致）──
+    u64         m_FrameCount  = 0;      // 已呈现帧数（第 1 帧 = 1）
+    int         m_CaptureAt   = -1;     // -1 = 尚未读环境变量；0 = 不截图
+    bool        m_CaptureInit = false;
+    std::string m_CapturePath;          // 显式路径覆盖（UTF-8）；空 = 默认路径
 
     VkDevice         m_Device        = VK_NULL_HANDLE;
     VkPhysicalDevice m_Physical      = VK_NULL_HANDLE;
     VkSurfaceKHR     m_Surface       = VK_NULL_HANDLE;
     VkQueue          m_PresentQueue  = VK_NULL_HANDLE;
+    /// 呈现队列所属的队列族（= VulkanDevice 的图形队列族）。截图时用它建临时命令池：
+    /// 交换链图像按 EXCLUSIVE 共享模式归该族所有，命令缓冲也必须从同一族分配。
+    u32              m_QueueFamily   = 0;
 
     VkSwapchainKHR   m_Swapchain     = VK_NULL_HANDLE;
     VkFormat         m_Format        = VK_FORMAT_B8G8R8A8_UNORM;

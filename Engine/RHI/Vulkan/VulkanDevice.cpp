@@ -882,7 +882,7 @@ void VulkanDevice::CreateCommandPools() {
 // ============================================================
 std::unique_ptr<IRHISwapChain> VulkanDevice::CreateSwapChain(const SwapChainDesc& desc) {
     return std::make_unique<VulkanSwapChain>(m_Device, m_Physical, m_Surface,
-                                            m_GraphicsQueue, desc);
+                                            m_GraphicsQueue, m_GraphicsFamily, desc);
 }
 
 // L4-3: read the command-stream switch (env var, off by default).
@@ -1604,6 +1604,16 @@ std::unique_ptr<IRHITexture> VulkanDevice::CreateTexture(const TextureDesc& desc
 // 与 CreateTexture 的关键区别：不通过 VMA 分配独占内存
 // ============================================================
 std::unique_ptr<IRHITexture> VulkanDevice::CreateTransientTexture(const TextureDesc& desc) {
+    // 无生命周期信息 ⇒ 按整帧存活（等价于改造前的线性分配）
+    return CreateTransientTexture(desc, 0, ~0u);
+}
+
+// 【P6】带生命周期的瞬态纹理：firstPass / lastPass 是本次执行里首次 / 末次使用该图
+// 的 pass 序号（闭区间）。分配器按"只有生命周期重叠的区段才占位"做 first-fit，于是
+// 生命周期不重叠的两张图会拿到**相同的堆内偏移**（内存别名）；两张图之间由首次使用时
+// 的布局转换（oldLayout = UNDEFINED）完成别名屏障语义。
+std::unique_ptr<IRHITexture> VulkanDevice::CreateTransientTexture(const TextureDesc& desc,
+                                                                 u32 firstPass, u32 lastPass) {
     if (!m_TransientAllocator.IsInitialized()) return nullptr;
 
     // 构建 VkImageCreateInfo（与 VulkanTexture 的构造逻辑保持一致）
@@ -1639,15 +1649,18 @@ std::unique_ptr<IRHITexture> VulkanDevice::CreateTransientTexture(const TextureD
     imageInfo.usage       = ToVkImageUsage(desc.usage);
     imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     if (isCubemap) imageInfo.flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+    // 【P6】瞬态图可能与其他瞬态图共用同一段堆内存（内存别名）：Vulkan 要求这种图带 ALIAS 位
+    imageInfo.flags |= VK_IMAGE_CREATE_ALIAS_BIT;
 
-    // 通过 TransientResourceAllocator 子分配 VkImage + 绑定到共享 Heap
-    auto placed = m_TransientAllocator.AllocateImage(imageInfo);
+    // 通过 TransientResourceAllocator 子分配 VkImage + 绑定到共享 Heap（按生命周期复用区段）
+    auto placed = m_TransientAllocator.AllocateImage(imageInfo, firstPass, lastPass);
     if (placed.image == VK_NULL_HANDLE) {
         HE_CORE_WARN("CreateTransientTexture: 瞬态分配失败 ({}x{}), 回退到普通纹理", desc.width, desc.height);
         return nullptr;  // 调用方应回退到 CreateTexture
     }
 
-    return std::make_unique<VulkanPlacedTexture>(m_Device, placed.image, vkFormat, desc);
+    return std::make_unique<VulkanPlacedTexture>(m_Device, placed.image, vkFormat, desc,
+                                                 placed.offset, placed.size);
 }
 
 std::unique_ptr<IRHISampler> VulkanDevice::CreateSampler(const SamplerDesc& desc) {

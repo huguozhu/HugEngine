@@ -13,6 +13,9 @@ set(RHI_SOURCES
     RHI/BindlessSlotRing.h
     RHI/FrameRetireQueue.h
     RHI/SwapChain.h
+    # P8：按帧截图公共工具（环境变量解析 / 默认路径 / WIC 写 PNG），D3D12 与 Vulkan 共用
+    RHI/ScreenCapture.h
+    RHI/ScreenCapture.cpp
     RHI/ThreadAffinity.h
     RHI/RHICommandList.h
     # A-1 翻译层（命令流 -> RHI 调用；只在 RHI 线程上调用）

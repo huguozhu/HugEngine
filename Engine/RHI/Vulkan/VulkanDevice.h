@@ -93,6 +93,8 @@ public:
 
     // Transient Resource — 使用瞬态内存池创建纹理（RenderGraph 别名分析驱动）
     std::unique_ptr<IRHITexture>        CreateTransientTexture(const TextureDesc& desc) override;
+    // 【P6】带生命周期的瞬态纹理：生命周期不重叠的图共用同一段堆内存（与 D3D12 同一套 first-fit 判据）
+    std::unique_ptr<IRHITexture>        CreateTransientTexture(const TextureDesc& desc, u32 firstPass, u32 lastPass) override;
     void AdvanceTransientResources() override { m_TransientAllocator.AdvanceFrame(); }
 
     // PSO 预热管理器 — 后台编译 PSO 变体到独立 VkPipelineCache

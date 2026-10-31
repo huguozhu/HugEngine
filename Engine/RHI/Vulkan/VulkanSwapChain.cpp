@@ -4,19 +4,24 @@
 // ============================================================
 #include "VulkanSwapChain.h"
 #include "RHI/RHI.h"                    // he::rhi::GetDevice()：查询提交路由（模式 2）
+#include "RHI/ScreenCapture.h"          // P8：按帧截图公共工具（环境变量 / 默认路径 / WIC 写 PNG）
 #include "RHI/TextureLayoutTracker.h"   // 呈现后记录 PRESENT_SRC 布局（见 Present）
 #include "RHI/ThreadAffinity.h"         // T0.1：交换链操作只允许在拥有线程（渲染线程）
 #include "Core/Log.h"
 #include "Core/Assert.h"
 #include <algorithm>
+#include <cstdio>
+#include <cstring>
+#include <vector>
 
 namespace he::rhi {
 
 VulkanSwapChain::VulkanSwapChain(VkDevice device, VkPhysicalDevice physical,
                                  VkSurfaceKHR surface, VkQueue presentQueue,
-                                 const SwapChainDesc& desc)
+                                 u32 graphicsFamily, const SwapChainDesc& desc)
     : m_Device(device), m_Physical(physical), m_Surface(surface)
     , m_PresentQueue(presentQueue)
+    , m_QueueFamily(graphicsFamily)
     , m_Width(desc.width), m_Height(desc.height)
     , m_HDR(desc.hdr)
     , m_Vsync(desc.vsync)
@@ -96,7 +101,8 @@ void VulkanSwapChain::CreateSwapchain() {
     swapInfo.imageArrayLayers = 1;
     swapInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
                          | VK_IMAGE_USAGE_STORAGE_BIT           // RT 直接写入 BackBuffer
-                         | VK_IMAGE_USAGE_TRANSFER_DST_BIT;     // 支持拷贝到 BackBuffer
+                         | VK_IMAGE_USAGE_TRANSFER_DST_BIT      // 支持拷贝到 BackBuffer
+                         | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;     // P8：截图时把交换链图像拷到读回缓冲
     swapInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     swapInfo.preTransform = caps.currentTransform;
     swapInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
@@ -291,6 +297,12 @@ void VulkanSwapChain::PresentNow(u32 imageIndex, void* waitSemaphore, bool /*vsy
     HE_ASSERT_SUBMIT_THREAD();
     if (imageIndex >= m_ImageViews.size()) return;
 
+    // 【P8】帧计数 + 按帧截图。必须在 vkQueuePresentKHR **之前**：
+    //   · 交换链图像在 PRESENT_SRC 布局下属于呈现引擎，Present 之后内容不再由应用拥有；
+    //   · 截图命令提交到同一个队列，同队列内 FIFO 有序 ⇒ 本帧绘制一定先完成。
+    ++m_FrameCount;
+    CaptureIfRequested(imageIndex);
+
     // 用"该图像自己的" render-complete 信号量：同一图像再次被 acquire 蕴含上次 present
     // 已完成，因此不会出现"信号量仍有未完成操作"（详见头文件成员注释）
     VkSemaphore waitSem = reinterpret_cast<VkSemaphore>(waitSemaphore);
@@ -303,6 +315,12 @@ void VulkanSwapChain::PresentNow(u32 imageIndex, void* waitSemaphore, bool /*vsy
     presentInfo.pWaitSemaphores    = waitSem ? &waitSem : nullptr;
 
     VkResult presentResult = vkQueuePresentKHR(m_PresentQueue, &presentInfo);
+    // 呈现失败（尤其 VK_ERROR_DEVICE_LOST）必须显式打印：此前完全静默，
+    // 设备丢失后样例仍会空转，日志里看不出"画面其实已经不再更新"。
+    if (presentResult != VK_SUCCESS && presentResult != VK_SUBOPTIMAL_KHR) {
+        HE_CORE_WARN("[Vulkan] vkQueuePresentKHR 失败：VkResult={}（第 {} 帧）",
+                     static_cast<int>(presentResult), m_FrameCount);
+    }
 
     // 呈现后交换链图像的真实布局是 PRESENT_SRC_KHR，必须记进布局追踪器：
     // 否则下一帧 RenderGraph 对导入的后备缓冲会沿用上一帧记录的"颜色附件"状态
@@ -312,6 +330,278 @@ void VulkanSwapChain::PresentNow(u32 imageIndex, void* waitSemaphore, bool /*vsy
         TrackTextureLayout(reinterpret_cast<void*>(m_ImageViews[imageIndex]),
                            ResourceState::Present);
     }
+}
+
+// ============================================================
+// P8：按帧截图（与 D3D12 同一 RHI 接口，见 RHI/SwapChain.h 的 RequestCapture）
+//
+// 流程（在提交线程上、Present 之前）：
+//   ① 建 host-visible + coherent 读回缓冲（BGRA8 / HDR10 都是 4 字节/像素）；
+//   ② 临时命令池 + 命令缓冲（队列族 = 呈现队列族）；
+//   ③ 布局：当前真实布局 → TRANSFER_SRC；
+//   ④ vkCmdCopyImageToBuffer 拷到读回缓冲；
+//   ⑤ 布局：TRANSFER_SRC → PRESENT_SRC（呈现要求，并写回布局追踪器）；
+//   ⑥ 提交到呈现队列（与引擎绘制同一队列 ⇒ 队列内 FIFO 有序），栅栏等到完成后写 PNG。
+//
+// 【同步要点】
+//   · 交换链图像是 EXCLUSIVE 共享模式、归呈现队列族所有 ⇒ 不涉及队列族所有权转移
+//     （src/dstQueueFamilyIndex = IGNORED）；
+//   · 拷贝命令提交到 `m_PresentQueue`，它同时也是绘制/呈现队列 —— 在同一个队列里
+//     提交顺序即执行顺序，所以本帧绘制一定先于拷贝完成，无需额外等待信号量；
+//   · 自建栅栏等到拷贝落地后再 Map（coherent 内存无需 invalidate）。
+//
+// 【布局为什么这样取】起点查 TextureLayoutTracker（render pass 边界会写回真实布局），
+// 未记录时按 PRESENT_SRC（引擎颜色附件的 finalLayout 就是它）。终点固定回到
+// PRESENT_SRC：vkQueuePresentKHR 要求该布局，而且这里紧接着就呈现。
+// ============================================================
+
+namespace {
+
+/// 找一段满足 `typeBits` 且带 `want` 属性的内存类型；找不到返回 ~0u
+u32 FindMemoryType(VkPhysicalDevice physical, u32 typeBits, VkMemoryPropertyFlags want) {
+    VkPhysicalDeviceMemoryProperties props{};
+    vkGetPhysicalDeviceMemoryProperties(physical, &props);
+    for (u32 i = 0; i < props.memoryTypeCount; ++i) {
+        if ((typeBits & (1u << i)) &&
+            (props.memoryTypes[i].propertyFlags & want) == want) {
+            return i;
+        }
+    }
+    return ~0u;
+}
+
+/// 状态追踪器 → VkImageLayout（只覆盖交换链图像可能出现的状态；优先级与
+/// VulkanCommandList.cpp 里那份映射保持一致：写状态优先）
+VkImageLayout TrackedStateToLayout(ResourceState state) {
+    const u32 s = u32(state);
+    if (s & u32(ResourceState::RenderTarget))    return VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    if (s & u32(ResourceState::ShaderResource))  return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    if (s & u32(ResourceState::Present))         return VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    if (s & u32(ResourceState::UnorderedAccess)) return VK_IMAGE_LAYOUT_GENERAL;
+    if (s & u32(ResourceState::CopySrc))         return VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    if (s & u32(ResourceState::CopyDst))         return VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    return VK_IMAGE_LAYOUT_UNDEFINED;
+}
+
+} // namespace
+
+void VulkanSwapChain::RequestCapture(u32 frameIndex, const char* path) {
+    // 显式请求优先于环境变量：置 m_CaptureInit 后 CaptureIfRequested 不再读 env
+    m_CaptureInit = true;
+    m_CaptureAt   = static_cast<int>(frameIndex);
+    m_CapturePath = (path && *path) ? path : std::string();
+    const std::string out = m_CapturePath.empty()
+                          ? rhi::DefaultCapturePath(frameIndex) : m_CapturePath;
+    HE_CORE_INFO("[Vulkan 截图] 已按帧号请求截图：第 {} 帧 → {}", frameIndex, out);
+}
+
+void VulkanSwapChain::CaptureIfRequested(u32 imageIndex) {
+    if (!m_CaptureInit) {
+        m_CaptureInit = true;
+        m_CaptureAt = rhi::CaptureFrameFromEnv();
+        HE_CORE_INFO("[Vulkan 截图] HE_CAPTURE_FRAME={} (0/-1 表示不截图)", m_CaptureAt);
+    }
+    if (m_CaptureAt <= 0 || static_cast<int>(m_FrameCount) != m_CaptureAt) return;
+    if (m_Swapchain == VK_NULL_HANDLE || m_Device == VK_NULL_HANDLE) return;
+    if (imageIndex >= m_Images.size() || imageIndex >= m_ImageViews.size()) return;
+    if (m_Width == 0 || m_Height == 0) return;
+
+    const VkImage image = m_Images[imageIndex];
+    const u32 w = m_Width;
+    const u32 h = m_Height;
+    const VkDeviceSize total = static_cast<VkDeviceSize>(w) * h * 4u;
+
+    VkBuffer       buffer = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    VkCommandPool  pool   = VK_NULL_HANDLE;
+    VkCommandBuffer cmd   = VK_NULL_HANDLE;
+    VkFence        fence  = VK_NULL_HANDLE;
+    auto cleanup = [&] {
+        if (fence)  vkDestroyFence(m_Device, fence, nullptr);
+        if (cmd && pool) vkFreeCommandBuffers(m_Device, pool, 1, &cmd);
+        if (pool)   vkDestroyCommandPool(m_Device, pool, nullptr);
+        if (buffer) vkDestroyBuffer(m_Device, buffer, nullptr);
+        if (memory) vkFreeMemory(m_Device, memory, nullptr);
+    };
+
+    // ① 读回缓冲（host-visible + coherent）
+    VkBufferCreateInfo bi{};
+    bi.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bi.size        = total;
+    bi.usage       = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (vkCreateBuffer(m_Device, &bi, nullptr, &buffer) != VK_SUCCESS) {
+        HE_CORE_ERROR("[Vulkan 截图] 读回缓冲创建失败（{}x{}）", w, h);
+        cleanup();
+        return;
+    }
+    VkMemoryRequirements req{};
+    vkGetBufferMemoryRequirements(m_Device, buffer, &req);
+    const u32 memType = FindMemoryType(m_Physical, req.memoryTypeBits,
+                                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                       VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (memType == ~0u) {
+        HE_CORE_ERROR("[Vulkan 截图] 找不到 HOST_VISIBLE|HOST_COHERENT 内存类型");
+        cleanup();
+        return;
+    }
+    VkMemoryAllocateInfo ai{};
+    ai.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    ai.allocationSize  = req.size;
+    ai.memoryTypeIndex = memType;
+    if (vkAllocateMemory(m_Device, &ai, nullptr, &memory) != VK_SUCCESS ||
+        vkBindBufferMemory(m_Device, buffer, memory, 0) != VK_SUCCESS) {
+        HE_CORE_ERROR("[Vulkan 截图] 读回缓冲内存分配/绑定失败");
+        cleanup();
+        return;
+    }
+
+    // ② 临时命令池 + 命令缓冲
+    VkCommandPoolCreateInfo pci{};
+    pci.sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    pci.flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    pci.queueFamilyIndex = m_QueueFamily;
+    if (vkCreateCommandPool(m_Device, &pci, nullptr, &pool) != VK_SUCCESS) {
+        HE_CORE_ERROR("[Vulkan 截图] 命令池创建失败（队列族 {}）", m_QueueFamily);
+        cleanup();
+        return;
+    }
+    VkCommandBufferAllocateInfo cai{};
+    cai.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    cai.commandPool        = pool;
+    cai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cai.commandBufferCount = 1;
+    if (vkAllocateCommandBuffers(m_Device, &cai, &cmd) != VK_SUCCESS) {
+        HE_CORE_ERROR("[Vulkan 截图] 命令缓冲分配失败");
+        cleanup();
+        return;
+    }
+
+    // ③ 起点布局：优先取追踪到的真实布局
+    void* view = reinterpret_cast<void*>(m_ImageViews[imageIndex]);
+    VkImageLayout oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    ResourceState tracked;
+    if (QueryTrackedTextureLayout(view, tracked)) {
+        const VkImageLayout mapped = TrackedStateToLayout(tracked);
+        if (mapped != VK_IMAGE_LAYOUT_UNDEFINED) oldLayout = mapped;
+    } else {
+        HE_CORE_INFO("[Vulkan 截图] 交换链图像尚无布局记录，按 PRESENT_SRC 处理（第 {} 帧）", m_FrameCount);
+    }
+
+    // ④ 录制：TRANSFER 前的布局转换 → 拷贝 → 转回 PRESENT_SRC
+    VkCommandBufferBeginInfo cbbi{};
+    cbbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (vkBeginCommandBuffer(cmd, &cbbi) != VK_SUCCESS) {
+        HE_CORE_ERROR("[Vulkan 截图] 命令缓冲开始录制失败");
+        cleanup();
+        return;
+    }
+
+    VkImageMemoryBarrier b{};
+    b.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    b.srcAccessMask       = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    b.dstAccessMask       = VK_ACCESS_TRANSFER_READ_BIT;
+    b.oldLayout           = oldLayout;
+    b.newLayout           = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.image               = image;
+    b.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+
+    VkBufferImageCopy region{};
+    region.bufferOffset      = 0;
+    region.bufferRowLength   = 0;   // 0 = 紧凑排布（行距 = 宽度 × 4 字节）
+    region.bufferImageHeight = 0;
+    region.imageSubresource  = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    region.imageOffset       = { 0, 0, 0 };
+    region.imageExtent       = { w, h, 1 };
+    vkCmdCopyImageToBuffer(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           buffer, 1, &region);
+
+    b.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    b.dstAccessMask = 0;
+    b.oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    b.newLayout     = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+
+    if (vkEndCommandBuffer(cmd) != VK_SUCCESS) {
+        HE_CORE_ERROR("[Vulkan 截图] 命令缓冲录制失败");
+        cleanup();
+        return;
+    }
+
+    // ⑤ 提交到呈现队列 + 栅栏等待
+    // 【同步】提交到与引擎绘制同一个队列：队列内 FIFO 有序 ⇒ 本帧绘制必然先完成，
+    // 不需要额外等 acquire / render-complete 信号量；也不做 vkQueueWaitIdle
+    //（那会多一次全队列停顿，而这里只需要等我们自己这一批）。
+    VkFenceCreateInfo fci{};
+    fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    if (vkCreateFence(m_Device, &fci, nullptr, &fence) != VK_SUCCESS) {
+        HE_CORE_ERROR("[Vulkan 截图] 栅栏创建失败");
+        cleanup();
+        return;
+    }
+    VkSubmitInfo si{};
+    si.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount   = 1;
+    si.pCommandBuffers      = &cmd;
+    const VkResult submitRes = vkQueueSubmit(m_PresentQueue, 1, &si, fence);
+    if (submitRes != VK_SUCCESS) {
+        // 最常见的是 VK_ERROR_DEVICE_LOST(-4)：设备已被 TDR 复位（另一处独立问题），
+        // 这时截图必然拿不到内容，日志要能明确指出来而不是静默失败。
+        HE_CORE_ERROR("[Vulkan 截图] 截图命令提交失败：VkResult={}（-4 = VK_ERROR_DEVICE_LOST）",
+                      static_cast<int>(submitRes));
+        cleanup();
+        return;
+    }
+    constexpr u64 kTimeoutNs = 5ull * 1000ull * 1000ull * 1000ull;   // 5 秒
+    const VkResult waitRes = vkWaitForFences(m_Device, 1, &fence, VK_TRUE, kTimeoutNs);
+    if (waitRes != VK_SUCCESS) {
+        HE_CORE_ERROR("[Vulkan 截图] 等待截图拷贝完成失败（VkResult={}）", static_cast<int>(waitRes));
+        cleanup();
+        return;
+    }
+
+    // 拷贝完成后图像停在 PRESENT_SRC：立刻写回追踪器，紧接着的呈现与下一帧都依赖它
+    TrackTextureLayout(view, ResourceState::Present);
+
+    // ⑥ Map → 拷成 RGBA8 → 写 PNG
+    void* mapped = nullptr;
+    if (vkMapMemory(m_Device, memory, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS || !mapped) {
+        HE_CORE_ERROR("[Vulkan 截图] 映射读回缓冲失败");
+        cleanup();
+        return;
+    }
+    std::vector<unsigned char> rgba(static_cast<size_t>(w) * h * 4u);
+    {
+        const unsigned char* base = static_cast<const unsigned char*>(mapped);
+        // 【通道顺序】交换链是 B8G8R8A8（默认），内存顺序 = B,G,R,A；WIC 的
+        // GUID_WICPixelFormat32bppRGBA 编码器在本机按 BGRA 解读（见 RHI/ScreenCapture.h），
+        // 因此这里**原样拷贝**，与 D3D12 后端的处理逐位一致，便于逐像素对比。
+        // alpha 统一写 255（与 D3D12 相同）；HDR10 的 10-bit 打包不做色彩转换，两后端一致。
+        for (u32 y = 0; y < h; ++y) {
+            const unsigned char* s = base + static_cast<size_t>(y) * w * 4u;
+            unsigned char* d = rgba.data() + static_cast<size_t>(y) * w * 4u;
+            for (u32 x = 0; x < w; ++x) {
+                d[x * 4 + 0] = s[x * 4 + 0];
+                d[x * 4 + 1] = s[x * 4 + 1];
+                d[x * 4 + 2] = s[x * 4 + 2];
+                d[x * 4 + 3] = 255;
+            }
+        }
+    }
+    vkUnmapMemory(m_Device, memory);
+    cleanup();
+
+    const std::string path = m_CapturePath.empty()
+                           ? rhi::DefaultCapturePath(m_FrameCount) : m_CapturePath;
+    const bool ok = rhi::SaveRgbaToPng(path.c_str(), rgba.data(), w, h);
+    HE_CORE_INFO("[Vulkan 截图] 第 {} 帧 {}x{} 保存{}: {}", m_FrameCount, w, h,
+                 ok ? "成功" : "失败", path);
 }
 
 } // namespace he::rhi

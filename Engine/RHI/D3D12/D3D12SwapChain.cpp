@@ -4,6 +4,7 @@
 #include "D3D12SwapChain.h"
 #include "D3D12Device.h"
 #include "RHI/SubmitRouter.h"   // 模式 2：呈现交给提交路由
+#include "RHI/ScreenCapture.h"  // P8：截图公共工具（环境变量 / 默认路径 / WIC 写 PNG）
 #include "D3D12Converters.h"
 #include <cstdio>
 #include <cstdlib>
@@ -329,50 +330,24 @@ D3D12_CPU_DESCRIPTOR_HANDLE D3D12SwapChain::GetCurrentRtv() const {
 //
 //  【为什么必须在 Present 之前】FLIP_DISCARD 交换链在 Present 之后内容未定义，
 //  之后读到的永远是空缓冲（在 D3D11 后端上踩过这个坑）。
+//
+//  【P8】PNG 写出与环境变量解析已抽到 RHI 层（RHI/ScreenCapture.h），
+//  Vulkan 后端走同一份代码 ⇒ 两后端的文件名与像素格式一致，便于逐像素对比。
 // ============================================================================
-#include <wincodec.h>
-#pragma comment(lib, "windowscodecs.lib")
-
-namespace {
-
-/// 把 RGBA8 像素写成 PNG（用 WIC，无第三方依赖）
-bool SaveRgbaToPng(const wchar_t* path, const unsigned char* rgba, u32 w, u32 h) {
-    ComPtr<IWICImagingFactory> factory;
-    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
-                                IID_PPV_ARGS(&factory)))) {
-        HE_CORE_ERROR("[截图] 无法创建 WIC 工厂");
-        return false;
-    }
-    ComPtr<IWICStream> stream;
-    if (FAILED(factory->CreateStream(&stream))) return false;
-    if (FAILED(stream->InitializeFromFilename(path, GENERIC_WRITE))) return false;
-
-    ComPtr<IWICBitmapEncoder> encoder;
-    if (FAILED(factory->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder))) return false;
-    if (FAILED(encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache))) return false;
-
-    ComPtr<IWICBitmapFrameEncode> frame;
-    if (FAILED(encoder->CreateNewFrame(&frame, nullptr))) return false;
-    if (FAILED(frame->Initialize(nullptr))) return false;
-    if (FAILED(frame->SetSize(w, h))) return false;
-
-    WICPixelFormatGUID fmt = GUID_WICPixelFormat32bppRGBA;
-    if (FAILED(frame->SetPixelFormat(&fmt))) return false;
-
-    const UINT stride = w * 4;
-    const UINT size   = stride * h;
-    if (FAILED(frame->WritePixels(h, stride, size, const_cast<BYTE*>(rgba)))) return false;
-    if (FAILED(frame->Commit())) return false;
-    if (FAILED(encoder->Commit())) return false;
-    return true;
+void D3D12SwapChain::RequestCapture(u32 frameIndex, const char* path) {
+    // 显式请求优先于环境变量：置 m_CaptureInit 后 CaptureIfRequested 不再读 env
+    m_CaptureInit = true;
+    m_CaptureAt   = static_cast<int>(frameIndex);
+    m_CapturePath = (path && *path) ? path : std::string();
+    const std::string out = m_CapturePath.empty()
+                          ? rhi::DefaultCapturePath(frameIndex) : m_CapturePath;
+    HE_CORE_INFO("[D3D12 截图] 已按帧号请求截图：第 {} 帧 → {}", frameIndex, out);
 }
-
-} // namespace
 
 void D3D12SwapChain::CaptureIfRequested(u32 index, D3D12_RESOURCE_STATES state) {
     if (!m_CaptureInit) {
         m_CaptureInit = true;
-        if (const char* v = std::getenv("HE_CAPTURE_FRAME")) m_CaptureAt = std::atoi(v);
+        m_CaptureAt = rhi::CaptureFrameFromEnv();
         HE_CORE_INFO("[D3D12 截图] HE_CAPTURE_FRAME={} (0/-1 表示不截图)", m_CaptureAt);
     }
     if (m_CaptureAt <= 0 || static_cast<int>(m_FrameCount) != m_CaptureAt) return;
@@ -460,24 +435,10 @@ void D3D12SwapChain::CaptureIfRequested(u32 index, D3D12_RESOURCE_STATES state) 
     list->ResourceBarrier(1, &b);
     list->Close();
 
-    {   // 实验：先把回读缓冲填 0x80，用来判断拷贝是否真的生效
-        void* fill = nullptr; D3D12_RANGE r0{0,0};
-        if (SUCCEEDED(readback->Map(0, &r0, &fill)) && fill) { memset(fill, 0x80, static_cast<size_t>(totalSize)); readback->Unmap(0, nullptr); }
-    }
     ID3D12CommandList* lists[1] = { list.Get() };
-    {   // 实验：读回前 8 字节，判断是 0x80（拷贝没生效）还是 0（源是黑的）
-        void* chk = nullptr; D3D12_RANGE r1{0,0};
-        if (SUCCEEDED(readback->Map(0, &r1, &chk)) && chk) {
-            const unsigned char* b = static_cast<const unsigned char*>(chk);
-            HE_CORE_ERROR("[CAP] first bytes = {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
-                          b[0],b[1],b[2],b[3],b[4],b[5],b[6],b[7]);
-            readback->Unmap(0, nullptr);
-        }
-    }
     queue->ExecuteCommandLists(1, lists);
     // 【必须等拷贝真正完成】此前只在自建围栏上等，若围栏/事件异常就会在
-    // GPU 还没执行拷贝时就去 Map，读到的仍是填充值（实测 0x80 原封不动）。
-    // 这里直接等引擎队列空闲，保证拷贝已落地。
+    // GPU 还没执行拷贝时就去 Map。这里直接等引擎队列空闲，保证拷贝已落地。
     if (m_Device) m_Device->WaitIdle();
 
     ComPtr<ID3D12Fence> fence;
@@ -517,10 +478,13 @@ void D3D12SwapChain::CaptureIfRequested(u32 index, D3D12_RESOURCE_STATES state) 
     }
     readback->Unmap(0, nullptr);
 
-    wchar_t path[128];
-    swprintf_s(path, L"capture_frame%llu.png", static_cast<unsigned long long>(m_FrameCount));
-    const bool ok = SaveRgbaToPng(path, rgba.data(), w, h);
-    HE_CORE_INFO("[D3D12 截图] 第 {} 帧 {}x{} 保存: {}", m_FrameCount, w, h, ok ? "成功" : "失败");
+    // 【P8】路径与 PNG 写出走 RHI 公共工具：默认 `<exe 目录>/capture_frameN.png`，
+    // 与 Vulkan 后端的默认路径/像素格式完全一致，便于逐像素对比。
+    const std::string path = m_CapturePath.empty()
+                           ? rhi::DefaultCapturePath(m_FrameCount) : m_CapturePath;
+    const bool ok = rhi::SaveRgbaToPng(path.c_str(), rgba.data(), w, h);
+    HE_CORE_INFO("[D3D12 截图] 第 {} 帧 {}x{} 保存{}: {}", m_FrameCount, w, h,
+                 ok ? "成功" : "失败", path);
 }
 
 } // namespace he::rhi::d3d12
