@@ -263,11 +263,14 @@ bool D3D12Device::CreateDebugLayer() {
 
     if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&m_Debug)))) {
         m_Debug->EnableDebugLayer();
+        // 【P1 起可观测性】GPU 端验证是否真的打开要能写进日志：此前只设置开关、不打日志，
+        // 验证时无法从日志确认这一次运行到底有没有开 GBV（判据「0 条报错」的可信度依赖于此）。
+        const bool gpuValidation = (std::getenv("HE_D3D12_GPU_VALIDATION") != nullptr);
         ComPtr<ID3D12Debug1> dbg1;
         if (SUCCEEDED(m_Debug.As(&dbg1))) {
-            dbg1->SetEnableGPUBasedValidation(std::getenv("HE_D3D12_GPU_VALIDATION") ? TRUE : FALSE);
+            dbg1->SetEnableGPUBasedValidation(gpuValidation ? TRUE : FALSE);
         }
-        HE_CORE_INFO("[D3D12] 调试层已启用");
+        HE_CORE_INFO("[D3D12] 调试层已启用（GPU 端验证={}）", gpuValidation ? "开" : "关");
     } else {
         HE_CORE_WARN("[D3D12] 调试层不可用（需要 Graphics Tools 可选功能）");
     }
@@ -410,18 +413,24 @@ bool D3D12Device::CreateDeviceAndQueue() {
     // 阶段 4 实现后把这一行改成真正的接口探测即可。
     // 光线追踪能力：查 D3D12_OPTIONS5 的 RaytracingTier 并要求能取到 ID3D12Device5
     // （CreateStateObject / BuildRaytracingAccelerationStructure 都挂在 Device5 / CommandList4 上）。
-    // 引擎侧光追接口仍在实现中，全部打通前只有显式设置 HE_D3D12_RT=1 才上报支持，
-    // 否则样例会走光追路径并因接口未实现而中止，连带图形路径也跑不到。
+    // 【P2】T5 已把光追接口（BLAS/TLAS、状态对象、SBT、DispatchRays、RayQuery）全部实现并在
+    // 05.Sponza-PathTracing 验证，因此这里改为**按硬件能力默认上报**，不再要求 HE_D3D12_RT=1。
+    // 环境变量语义随之翻转为「强制关闭」：HE_D3D12_RT=0 时不上报，便于做非光追路径的回归对照
+    //（此前是「设置且非 0 才上报」，会让所有样例默认落在非光追路径上）。
     {
         const char* rtEnv = std::getenv("HE_D3D12_RT");
-        const bool rtRequested = (rtEnv != nullptr) && (rtEnv[0] != '0');
+        const bool rtForceOff = (rtEnv != nullptr) && (rtEnv[0] == '0');
         D3D12_FEATURE_DATA_D3D12_OPTIONS5 o5{};
         ComPtr<ID3D12Device5> dev5;
         const bool tierOk =
             SUCCEEDED(m_Device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &o5, sizeof(o5))) &&
             o5.RaytracingTier >= D3D12_RAYTRACING_TIER_1_1 &&
             SUCCEEDED(m_Device.As(&dev5));
-        m_Caps.supportsRayTracing = tierOk && rtRequested;
+        m_Caps.supportsRayTracing = tierOk && !rtForceOff;
+        if (rtForceOff) {
+            HE_CORE_INFO("[D3D12] HE_D3D12_RT=0：强制关闭光追能力上报（硬件 {}）",
+                         tierOk ? "支持" : "不支持");
+        }
         if (tierOk) {
             // 硬件支持时填充引擎需要的固定参数（与 Vulkan 侧同名参数对应）
             m_Caps.maxRayRecursionDepth     = D3D12_RAYTRACING_MAX_DECLARABLE_TRACE_RECURSION_DEPTH;  // 31

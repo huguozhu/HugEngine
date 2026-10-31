@@ -1,4 +1,4 @@
-﻿// A-1：命令流翻译层（ExecuteSubmit 在提交前把纯数据命令流翻译进主列表）
+// A-1：命令流翻译层（ExecuteSubmit 在提交前把纯数据命令流翻译进主列表）
 #include "RHI/RHICommandList.h"
 #include "RHI/RHICommandReplay.h"
 
@@ -174,6 +174,9 @@ DeviceCaps VulkanDevice::QueryCaps() const {
 
     // Ray Tracing
     caps.supportsRayTracing       = m_CapsCache.supportsRayTracing;
+    // Vulkan 交换链图像创建时带 VK_IMAGE_USAGE_STORAGE_BIT ⇒ 后缓冲可直接当存储图像写
+    // （01.Triangle 的 RT 模式依赖它；D3D12 的 DXGI 后缓冲没有这个用途位，见 Types.h 的说明）
+    caps.supportsBackBufferStorageImage = true;
     caps.supportsVRS              = false;
     caps.maxRayRecursionDepth     = m_MaxRayRecursionDepth;
     caps.shaderGroupHandleSize    = m_ShaderGroupHandleSize;

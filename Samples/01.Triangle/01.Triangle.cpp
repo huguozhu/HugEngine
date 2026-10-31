@@ -55,7 +55,15 @@ int main() {
 
     bool rtSupported   = device->GetCaps().supportsRayTracing;
     bool meshSupported = device->GetCaps().supportsMeshShaders;
-    HE_CORE_INFO("RT 支持: {}, Mesh Shader 支持: {}", rtSupported ? "是" : "否", meshSupported ? "是" : "否");
+    // 【P2】光追能力现在按硬件默认上报。但本样例的 RT 模式是**直接把后缓冲当存储图像（UAV）写**：
+    //   · Vulkan 交换链图像带 VK_IMAGE_USAGE_STORAGE_BIT ⇒ 可以；
+    //   · D3D12 的 FLIP 后缓冲由 DXGI 创建，资源标志只有 ALLOW_RENDER_TARGET，转 UNORDERED_ACCESS
+    //     会被调试层判为 id=524（缺 D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS，且该标志无法补）。
+    // 故"能进 RT 模式"要同时满足硬件支持光追 ∧ 后缓冲可作存储图像，二者缺一就走光栅化路径，
+    // 不放任它去撞资源标志检查（改前不设 HE_D3D12_RT 时 rtSupported 恒假，这条路径根本没暴露过）。
+    const bool rtRenderable = rtSupported && device->GetCaps().supportsBackBufferStorageImage;
+    HE_CORE_INFO("RT 支持: {}, Mesh Shader 支持: {}（RT 写后缓冲={}）", rtSupported ? "是" : "否",
+                 meshSupported ? "是" : "否", rtRenderable ? "可" : "不可");
 
     // ============================================================
     // 2. SwapChain
@@ -202,7 +210,7 @@ int main() {
     // ============================================================
     // 8. 主渲染循环
     // ============================================================
-    int renderMode = rtSupported ? 1 : 0;  // 0=光栅化, 1=RT, 2=Mesh Shader
+    int renderMode = rtRenderable ? 1 : 0;  // 0=光栅化, 1=RT, 2=Mesh Shader
     HE_CORE_INFO("01.Triangle started — ImGui 切换渲染模式");
     u64 frameIndex = 0;
 
@@ -219,7 +227,7 @@ int main() {
         framePresenter.BeginRecording(device.get(), cmdList.get());   // L4-2
 
         // ── RT 调度 + 直接渲染到 BackBuffer ──
-        if (renderMode == 1 && rtSupported && rtPSO) {
+        if (renderMode == 1 && rtRenderable && rtPSO) {
             // 将 BackBuffer ImageView 绑定为 RT 输出（StorageImage）
             void* backBufferView = swapchain->GetCurrentBackBufferView();
             device->UpdateDescriptorSetWithImageView(rtSet, 0,
@@ -272,11 +280,13 @@ int main() {
             ImGui::Begin("渲染模式");
 
             ImGui::RadioButton("光栅化 (VS→PS)", &renderMode, 0);
-            if (rtSupported) {
+            if (rtRenderable) {
                 ImGui::RadioButton("Ray Tracing (RayGen)", &renderMode, 1);
             } else {
                 ImGui::BeginDisabled();
-                ImGui::RadioButton("Ray Tracing (不支持)", &renderMode, 1);
+                // 区分「硬件没有光追」与「本后端后缓冲不能当 UAV 写」两种情况，避免误导
+                ImGui::RadioButton(rtSupported ? "Ray Tracing (后缓冲不可写)" : "Ray Tracing (不支持)",
+                                   &renderMode, 1);
                 ImGui::EndDisabled();
             }
             if (meshSupported) {

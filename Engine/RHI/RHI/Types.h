@@ -312,6 +312,12 @@ struct DeviceCaps {
     u32     maxPushConstantsSize   = 128;
     u32     maxSamplerAnisotropy   = 16;
     bool    supportsRayTracing     = false;
+    /// 【P2】交换链后缓冲能否绑定为「存储图像 / UAV」并直接写入。
+    /// Vulkan 的后缓冲带 VK_IMAGE_USAGE_STORAGE_BIT，可以；D3D12 的 FLIP 模型后缓冲由 DXGI 创建，
+    /// 资源标志只有 ALLOW_RENDER_TARGET，转 UNORDERED_ACCESS 会被调试层判为 id=524（缺
+    /// D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS，而 DXGI 创建的资源无法补这个标志）。
+    /// 供直接用 TraceRays 写后缓冲的样例（01.Triangle 的 RT 模式）判断能否走该路径。
+    bool    supportsBackBufferStorageImage = false;
     bool    supportsMeshShaders    = false;
     bool    supportsGraphicsPipelineLibrary = false;  // VK_EXT_graphics_pipeline_library fast-link
     bool    supportsWorkGraphs     = false;
