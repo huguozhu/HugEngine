@@ -3,6 +3,7 @@
 // ============================================================================
 #include "D3D12SwapChain.h"
 #include "D3D12Device.h"
+#include "D3D12Resources.h"     // 【P10】DumpStorageBufferStats（Storage 缓冲堆统计）
 #include "RHI/SubmitRouter.h"   // 模式 2：呈现交给提交路由
 #include "RHI/ScreenCapture.h"  // P8：截图公共工具（环境变量 / 默认路径 / WIC 写 PNG）
 #include "D3D12Converters.h"
@@ -53,6 +54,26 @@ bool D3D12SwapChain::Initialize(D3D12Device* device, const SwapChainDesc& desc) 
     sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
     sd.AlphaMode = DXGI_ALPHA_MODE_UNSPECIFIED;
     sd.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
+
+    // 【P10】无垂直同步（vsync=false）时必须建带 ALLOW_TEARING 的交换链，否则
+    //   `Present(0, DXGI_PRESENT_ALLOW_TEARING)` 每帧返回 DXGI_ERROR_INVALID_CALL
+    //   （实测：HE_NO_VSYNC=1 时 04/06/07 的 D3D12 路径全部报错、帧时间测量失去意义）。
+    //   只有适配器报告支持 tearing 时才加；不支持就保持旧行为（下面 Present 会退回 syncInterval=1）。
+    {
+        bool tearingSupported = false;
+        ComPtr<IDXGIFactory5> factory5;
+        if (SUCCEEDED(device->GetFactory()->QueryInterface(IID_PPV_ARGS(&factory5))) && factory5) {
+            BOOL allow = FALSE;
+            if (SUCCEEDED(factory5->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING,
+                                                         &allow, sizeof(allow)))) {
+                tearingSupported = (allow != FALSE);
+            }
+        }
+        m_TearingEnabled = tearingSupported && !desc.vsync;
+        if (m_TearingEnabled) sd.Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+        HE_CORE_INFO("[D3D12 交换链] tearing 支持={} 本次启用={}（vsync={}）",
+                     tearingSupported ? 1 : 0, m_TearingEnabled ? 1 : 0, desc.vsync ? 1 : 0);
+    }
 
     HWND hwnd = static_cast<HWND>(desc.windowHandle);
     ComPtr<IDXGISwapChain1> sc1;
@@ -212,7 +233,14 @@ void D3D12SwapChain::PresentNow(u32 index, D3D12_RESOURCE_STATES before, bool vs
     if (s_frames % 60 == 1) {
         HE_CORE_INFO("[D3D12] 已呈现 {} 帧（索引 {}）", s_frames, m_Index);
     }
-    const UINT flags = vsync ? 0u : DXGI_PRESENT_ALLOW_TEARING;
+    // 【P10】Storage 缓冲堆统计：第 60 帧打一次（此时样例的缓冲都已建好），之后每 600 帧一次
+    if (s_frames == 60 || s_frames % 600 == 0) {
+        DumpStorageBufferStats(s_frames == 60 ? "首帧" : "运行中");
+    }
+    // 【P10】只有交换链创建时带了 ALLOW_TEARING 才能用「syncInterval=0 + ALLOW_TEARING」；
+    //   否则退回 syncInterval=1（否则 Present 每帧 DXGI_ERROR_INVALID_CALL）。
+    const bool presentNoVsync = !vsync && m_TearingEnabled;
+    const UINT flags = presentNoVsync ? DXGI_PRESENT_ALLOW_TEARING : 0u;
     // 【Present 前必须切回 PRESENT】否则下一次以 RTV 使用同一缓冲会被判非法
     if (before != D3D12_RESOURCE_STATE_PRESENT) {
         ID3D12Resource* bb = index < m_Buffers.size() ? m_Buffers[index].Get() : nullptr;
@@ -276,7 +304,7 @@ void D3D12SwapChain::PresentNow(u32 index, D3D12_RESOURCE_STATES before, bool vs
         static int s_n = 0;
         if (++s_n == 60) m_Device->PassStatsRead("第60帧的全部索引绘制");   // 只读一次
     }
-    const HRESULT hr = m_SwapChain->Present(vsync ? 1u : 0u, flags);
+    const HRESULT hr = m_SwapChain->Present(presentNoVsync ? 0u : 1u, flags);
     if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
         m_Device->ReportDeviceRemoved("SwapChain::Present");
         return;

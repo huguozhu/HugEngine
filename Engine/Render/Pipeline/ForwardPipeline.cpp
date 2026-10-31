@@ -1,4 +1,4 @@
-﻿#include "Pipeline/ForwardPipeline.h"
+#include "Pipeline/ForwardPipeline.h"
 #include <iterator>
 #include "PBR.vert.dxil.h"
 #include "PBR.frag.dxil.h"
@@ -135,22 +135,30 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height)
     m_ShadowSystem->CreateShadowPSO();
 
     // --- 创建三缓冲 Storage Buffers（Phase 1 多线程渲染）---
+    // 【P10】这四类缓冲每帧由 CPU Map 写入 ⇒ 显式置 cpuAccess=true，留在 CPU 可见堆。
+    //   （不置的话会被 P10 的"DEFAULT 堆"规则收走，Map 只能走按需暂存 + 等待拷贝，极慢。）
     for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
         rhi::BufferDesc objBufDesc;
         objBufDesc.size  = sizeof(GPUObjectData) * MAX_OBJECTS;
         objBufDesc.usage = rhi::BufferUsage::Storage;
+        objBufDesc.cpuAccess = true;
+        objBufDesc.debugName = "Forward.Objects";
         m_ObjectBuffers[i] = device->CreateBufferHandle(objBufDesc);   // A-3：句柄式创建
         HE_ASSERT(m_ObjectBuffers[i].IsValid(), "ForwardPipeline: 对象缓冲句柄创建失败");
 
         rhi::BufferDesc lightBufDesc;
         lightBufDesc.size  = sizeof(GPULight) * MAX_LIGHTS;
         lightBufDesc.usage = rhi::BufferUsage::Storage;
+        lightBufDesc.cpuAccess = true;
+        lightBufDesc.debugName = "Forward.Lights";
         m_LightBuffers[i] = device->CreateBufferHandle(lightBufDesc);   // A-3
         HE_ASSERT(m_LightBuffers[i].IsValid(), "ForwardPipeline: 光源缓冲句柄创建失败");
 
         rhi::BufferDesc shadowBufDesc;
         shadowBufDesc.size  = sizeof(GPUShadowData) * MAX_SHADOWS;
         shadowBufDesc.usage = rhi::BufferUsage::Storage;
+        shadowBufDesc.cpuAccess = true;
+        shadowBufDesc.debugName = "Forward.Shadows";
         m_ShadowBuffers[i] = device->CreateBufferHandle(shadowBufDesc); // A-3
         HE_ASSERT(m_ShadowBuffers[i].IsValid(), "ForwardPipeline: 阴影缓冲句柄创建失败");
 
@@ -158,6 +166,8 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height)
         rhi::BufferDesc shadowObjDesc;
         shadowObjDesc.size  = sizeof(GPUObjectData) * MAX_OBJECTS;
         shadowObjDesc.usage = rhi::BufferUsage::Storage;
+        shadowObjDesc.cpuAccess = true;
+        shadowObjDesc.debugName = "Forward.ShadowObjects";
         m_ShadowObjBuffers[i] = device->CreateBufferHandle(shadowObjDesc);  // A-3
         HE_ASSERT(m_ShadowObjBuffers[i].IsValid(), "ForwardPipeline: 阴影对象缓冲句柄创建失败");
     }

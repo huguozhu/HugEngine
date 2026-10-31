@@ -1,4 +1,4 @@
-﻿// ============================================================================
+// ============================================================================
 //  D3D12SwapChain.h —— D3D12 交换链
 //
 //  使用 FLIP_DISCARD 模型（D3D12 唯一支持现代特性的模式）：
@@ -98,6 +98,10 @@ private:
     UINT m_RtvSize = 0;
     Format m_Format = Format::BGRA8_UNORM;
     bool m_Vsync = true;
+    /// 【P10】交换链是否带 `DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING`（= 允许无垂直同步呈现）。
+    /// 只有它为真时才能用 syncInterval=0 + DXGI_PRESENT_ALLOW_TEARING，否则 Present 每帧
+    /// 返回 DXGI_ERROR_INVALID_CALL（实测：HE_NO_VSYNC 下 04/06/07 全部中招）。
+    bool m_TearingEnabled = false;
 
     /// Present 前「后缓冲 → PRESENT」屏障用的命令列表。必须常驻并按帧槽位轮换：
     /// 之前每帧临时创建、提交后立即析构，分配器在 GPU 执行完之前就被销毁

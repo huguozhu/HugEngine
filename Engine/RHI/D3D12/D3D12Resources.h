@@ -65,7 +65,22 @@ private:
     ComPtr<ID3D12Resource> m_CpuStaging;
     bool                   m_NeedsStagingCopy = false;
     D3D12Device*           m_Device = nullptr;
+    /// 【P10】是否是 Storage 缓冲（统计 Map 次数用：Map 过的 Storage 必须留在 CPU 可见堆）
+    bool                   m_IsStorage = false;
+    /// 【P10】是否被迁到了 DEFAULT 堆（GPU-only Storage）：Map 时按需建 UPLOAD 暂存并告警
+    bool                   m_OnDefaultHeapStorage = false;
+    /// 【P10】调试名（BufferDesc::debugName；告警/统计里点名用，不影响行为）
+    const char*            m_DebugName = nullptr;
 };
+
+// ---------------------------------------------------------------------------
+//  【P10】Storage 缓冲堆统计（`HE_STORAGE_HEAP_STATS=1`）
+//
+//  D3D12Resources.cpp 里维护一张"所有 Storage 缓冲"的表（调试名/大小/cpuAccess/堆类型/
+//  是否被 Map 过），SwapChain 每 60 帧调用 DumpStorageBufferStats 打印一次。
+//  用途：在把大缓冲迁到 DEFAULT 堆之前/之后各跑一次，确认迁移对象与"仍然被 Map"的例外。
+// ---------------------------------------------------------------------------
+void DumpStorageBufferStats(const char* tag);
 
 // ---------------------------------------------------------------------------
 //  Texture

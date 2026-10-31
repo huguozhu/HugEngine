@@ -18,6 +18,11 @@ struct BufferDesc {
     bool        cpuAccess   = false;      // Mappable from CPU
     const void* initialData = nullptr;    // Optional initial upload
     usize       stride      = 0;          // For vertex/index buffers
+    // 【P10】调试名（仅用于统计 / 诊断；不改变任何行为）。
+    // Storage 缓冲的堆类型统计（`HE_STORAGE_HEAP_STATS=1`）按它列清单，
+    // 便于把"GPU 频繁读写的大缓冲"和"CPU 每帧 Map 的小缓冲"区分开。
+    // 仍以聚合初始化传参 ⇒ 必须保持在**最后一个**字段之后新增。
+    const char* debugName   = nullptr;
 };
 
 // --- Texture descriptor ---

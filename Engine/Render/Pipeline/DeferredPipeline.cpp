@@ -87,14 +87,39 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
     // LDR 中间纹理已在 PostProcessChain::Initialize() 中创建
 
     // 三缓冲
+    // 【P10】这些缓冲每帧由 CPU Map 写入（对象/光源/阴影数据）⇒ 必须显式置 cpuAccess=true，
+    //   让它们留在 CPU 可见堆（只补调试名便于统计清单辨认）。
+    //   【为什么必须显式置】迁移规则是「Storage && !cpuAccess ⇒ DEFAULT 堆」，这四类缓冲
+    //   原先没置 cpuAccess 却被 Map（实测迁移后 D3D12 报"DEFAULT 堆 Storage 缓冲被 CPU Map"），
+    //   属于 §P10 安全提醒里的"引擎某处偷偷 Map"。
     for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-        m_LightBuffers[i]      = device->CreateBufferHandle({sizeof(GPULight) * MAX_LIGHTS, rhi::BufferUsage::Storage});   // A-3
+        rhi::BufferDesc lightDesc;
+        lightDesc.size = sizeof(GPULight) * MAX_LIGHTS;
+        lightDesc.usage = rhi::BufferUsage::Storage;
+        lightDesc.cpuAccess = true;
+        lightDesc.debugName = "Deferred.Lights";
+        m_LightBuffers[i]      = device->CreateBufferHandle(lightDesc);   // A-3
         HE_ASSERT(m_LightBuffers[i].IsValid(), "DeferredPipeline: 光源缓冲句柄创建失败");
-        m_ObjectBuffers[i]     = device->CreateBufferHandle({sizeof(GPUObjectData) * MAX_OBJECTS, rhi::BufferUsage::Storage});   // A-3
+        rhi::BufferDesc objDesc;
+        objDesc.size = sizeof(GPUObjectData) * MAX_OBJECTS;
+        objDesc.usage = rhi::BufferUsage::Storage;
+        objDesc.cpuAccess = true;
+        objDesc.debugName = "Deferred.Objects";
+        m_ObjectBuffers[i]     = device->CreateBufferHandle(objDesc);   // A-3
         HE_ASSERT(m_ObjectBuffers[i].IsValid(), "DeferredPipeline: 对象缓冲句柄创建失败");
-        m_ShadowBuffers[i]     = device->CreateBufferHandle({sizeof(GPUShadowData) * MAX_SHADOWS, rhi::BufferUsage::Storage});   // A-3
+        rhi::BufferDesc shadowDesc;
+        shadowDesc.size = sizeof(GPUShadowData) * MAX_SHADOWS;
+        shadowDesc.usage = rhi::BufferUsage::Storage;
+        shadowDesc.cpuAccess = true;
+        shadowDesc.debugName = "Deferred.Shadows";
+        m_ShadowBuffers[i]     = device->CreateBufferHandle(shadowDesc);   // A-3
         HE_ASSERT(m_ShadowBuffers[i].IsValid(), "DeferredPipeline: 阴影缓冲句柄创建失败");
-        m_ShadowObjBuffers[i]  = device->CreateBufferHandle({sizeof(GPUObjectData) * MAX_OBJECTS, rhi::BufferUsage::Storage});   // A-3
+        rhi::BufferDesc shadowObjDesc;
+        shadowObjDesc.size = sizeof(GPUObjectData) * MAX_OBJECTS;
+        shadowObjDesc.usage = rhi::BufferUsage::Storage;
+        shadowObjDesc.cpuAccess = true;
+        shadowObjDesc.debugName = "Deferred.ShadowObjects";
+        m_ShadowObjBuffers[i]  = device->CreateBufferHandle(shadowObjDesc);   // A-3
         HE_ASSERT(m_ShadowObjBuffers[i].IsValid(), "DeferredPipeline: 阴影对象缓冲句柄创建失败");
     }
 

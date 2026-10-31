@@ -99,7 +99,10 @@ int main() {
     config.appName      = "HugEngine — 04.Sponza-Deferred";
     config.windowWidth  = 960;
     config.windowHeight = 540;
-    config.enableVSync  = true;
+    // 【P10 测量钩子】HE_NO_VSYNC=1 关闭垂直同步（与 06/07 样例的同名开关一致）
+    // 【为什么需要】垂直同步会把帧率锁在刷新率上，测不出 Storage 缓冲换堆的 GPU 侧收益。
+    const bool useVsync = std::getenv("HE_NO_VSYNC") == nullptr;
+    config.enableVSync  = useVsync;
     config.logLevel     = LogLevel::Info;
 
     Engine engine(config);
@@ -124,7 +127,7 @@ int main() {
         .windowHandle = engine.GetWindow()->GetNativeHandleRaw(),
         .width  = engine.GetWindow()->GetWidth(),
         .height = engine.GetWindow()->GetHeight(),
-        .vsync  = true,
+        .vsync  = useVsync,
     });
 
     // ============================================================
@@ -1178,7 +1181,7 @@ int main() {
             cmdList->EndRenderPass();
             framePresenter.EndRecording();   // L4-2：End + Submit 收口
             pipeline.FlushComputeWork();  // AsyncCompute: Graphics Submit 之后提交 Compute 工作
-            framePresenter.EndFrame(true);
+            framePresenter.EndFrame(useVsync);
             frameIndex++;        };
         submitRender(recordUiAndPresent);
 

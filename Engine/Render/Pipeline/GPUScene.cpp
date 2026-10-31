@@ -25,6 +25,7 @@ bool GPUScene::Initialize(rhi::IRHIDevice* device) {
     desc.size  = sizeof(GPUSceneObject) * kMaxObjects;
     desc.usage = rhi::BufferUsage::Storage;
     desc.cpuAccess = true;
+    desc.debugName = "GPUScene.Objects";   // 【P10】堆类型统计里的名字（CPU 每帧 Map 写，保留 CPU 可见堆）
     m_Device     = device;                              // A-3：解析句柄用
     m_ObjectSSBO = device->CreateBufferHandle(desc);    // A-3
     HE_ASSERT(m_ObjectSSBO.IsValid(), "GPUScene: 对象 SSBO 句柄创建失败");

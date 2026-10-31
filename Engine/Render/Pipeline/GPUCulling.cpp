@@ -99,6 +99,7 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
     {
         rhi::BufferDesc d;
         d.size = sizeof(IndirectDrawCommand) * kMaxObjects;
+        d.debugName = "GPUCull.IndirectCmds";
         d.usage = rhi::BufferUsage::Storage | rhi::BufferUsage::Indirect;
         d.cpuAccess = true;
         m_IndirectCmdBuf = device->CreateBufferHandle(d);   // A-3
@@ -163,6 +164,7 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
     {
         rhi::BufferDesc d;
         d.size = sizeof(u32) * kMaxObjects;
+        d.debugName = "GPUCull.Candidates";
         d.usage = rhi::BufferUsage::Storage;
         d.cpuAccess = true;
         m_CandidateBuf = device->CreateBufferHandle(d);   // A-3

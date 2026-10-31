@@ -14,15 +14,177 @@
 #include <memory>
 #include <cstring>
 #include <cstdlib>
+#include <mutex>
+#include <unordered_map>
+#include <vector>
 
 #if defined(_WIN32)
 
 namespace he::rhi::d3d12 {
 
 // ===========================================================================
+//  【P10】Storage 缓冲的堆类型统计（`HE_STORAGE_HEAP_STATS=1`）
+//
+//  【为什么需要】D3D12Buffer::Initialize 把**所有** Storage 缓冲放在 CPU 可读写的
+//  自定义堆上（引擎习惯直接 Map 任何 SSBO）。在独显上那是**系统内存**，GPU 经 PCIe
+//  访问；GPU 频繁读写大缓冲（GPU Scene / Lumen / Nanite / 粒子）会明显变慢。
+//  要区分"该留在 DEFAULT 堆"与"必须 CPU 可见"，先得有一份清单：
+//  每条 Storage 缓冲的调试名、大小、cpuAccess、落在哪种堆、以及**是否真的被 Map 过**。
+//
+//  【怎么用】`HE_STORAGE_HEAP_STATS=1` 运行样例；SwapChain 每 60 帧调用一次
+//  DumpStorageBufferStats，打印按大小排序的前若干项 + 「CPU 可见堆上的 Storage 总字节」。
+//  统计只在进程内保存（缓冲析构即注销），不参与任何渲染逻辑。
+// ===========================================================================
+namespace {
+
+struct StorageBufferStat {
+    std::string name;             // 调试名（BufferDesc::debugName，未命名时为空）
+    u64         size        = 0;  // 逻辑大小（字节）
+    u32         usage       = 0;  // BufferUsage 位掩码
+    bool        cpuAccess   = false;  // 创建时声明的 cpuAccess
+    // 堆类型：0 = DEFAULT（显存）, 1 = UPLOAD（CPU 写、GPU 读）, 2 = CPU 可见的自定义堆
+    u32         heapKind    = 0;
+    bool        uav         = false;  // 是否带 ALLOW_UNORDERED_ACCESS
+    u32         mapCount    = 0;      // 被 Map 的次数（>0 ⇒ 引擎确实在 CPU 侧读写它）
+    u32         seq         = 0;      // 创建序号（没有调试名时用来区分）
+};
+
+std::mutex                                                     g_StorageStatMutex;
+std::unordered_map<const void*, StorageBufferStat>             g_StorageStats;   // key = D3D12Buffer*
+u32                                                            g_StorageStatSeq = 0;
+
+/// 统计开关（一次性读取环境变量）
+bool StorageStatsEnabled() {
+    static const bool s_On = [] {
+        const char* v = std::getenv("HE_STORAGE_HEAP_STATS");
+        return v != nullptr && v[0] != '\0' && v[0] != '0';
+    }();
+    return s_On;
+}
+
+/// 人类可读的大小（KB / MB），统计打印用
+std::string FormatBytes(u64 bytes) {
+    char buf[64];
+    if (bytes >= 1024ull * 1024ull)
+        std::snprintf(buf, sizeof(buf), "%.2f MB", static_cast<double>(bytes) / (1024.0 * 1024.0));
+    else if (bytes >= 1024ull)
+        std::snprintf(buf, sizeof(buf), "%.1f KB", static_cast<double>(bytes) / 1024.0);
+    else
+        std::snprintf(buf, sizeof(buf), "%llu B", static_cast<unsigned long long>(bytes));
+    return std::string(buf);
+}
+
+} // namespace
+
+/// 登记一条 Storage 缓冲（在 D3D12Buffer::Initialize 里调用）
+void RecordStorageBufferStat(const void* owner, const BufferDesc& desc,
+                             u32 heapKind, bool uav) {
+    if (!StorageStatsEnabled() || owner == nullptr) return;
+    std::lock_guard<std::mutex> lock(g_StorageStatMutex);
+    StorageBufferStat& s = g_StorageStats[owner];
+    s.name       = (desc.debugName != nullptr) ? desc.debugName : std::string();
+    s.size       = static_cast<u64>(desc.size);
+    s.usage      = static_cast<u32>(desc.usage);
+    s.cpuAccess  = desc.cpuAccess;
+    s.heapKind   = heapKind;
+    s.uav        = uav;
+    s.mapCount   = 0;
+    s.seq        = ++g_StorageStatSeq;
+}
+
+/// 记一次 Map（在 D3D12Buffer::Map 里调用）
+void NoteStorageBufferMapped(const void* owner) {
+    if (!StorageStatsEnabled() || owner == nullptr) return;
+    std::lock_guard<std::mutex> lock(g_StorageStatMutex);
+    const auto it = g_StorageStats.find(owner);
+    if (it != g_StorageStats.end()) ++it->second.mapCount;
+}
+
+/// 注销（在 D3D12Buffer 析构里调用）
+void ReleaseStorageBufferStat(const void* owner) {
+    if (!StorageStatsEnabled() || owner == nullptr) return;
+    std::lock_guard<std::mutex> lock(g_StorageStatMutex);
+    g_StorageStats.erase(owner);
+}
+
+/// 打印统计清单：按大小降序取前 N 项 + 汇总「CPU 可见堆上的 Storage 总字节」
+void DumpStorageBufferStats(const char* tag) {
+    if (!StorageStatsEnabled()) return;
+
+    std::vector<StorageBufferStat> items;
+    {
+        std::lock_guard<std::mutex> lock(g_StorageStatMutex);
+        items.reserve(g_StorageStats.size());
+        for (const auto& kv : g_StorageStats) items.push_back(kv.second);
+    }
+    std::sort(items.begin(), items.end(),
+              [](const StorageBufferStat& a, const StorageBufferStat& b) { return a.size > b.size; });
+
+    u64 totalBytes = 0, cpuVisibleBytes = 0, defaultBytes = 0, uploadBytes = 0;
+    u32 cpuVisibleCount = 0, defaultCount = 0, uploadCount = 0;
+    u32 mappedCount = 0, mappedDefault = 0;
+    for (const auto& s : items) {
+        totalBytes += s.size;
+        if (s.heapKind == 2)      { cpuVisibleBytes += s.size; ++cpuVisibleCount; }
+        else if (s.heapKind == 1) { uploadBytes     += s.size; ++uploadCount; }
+        else                      { defaultBytes    += s.size; ++defaultCount; }
+        // DEFAULT 堆的 Storage 还被 Map ⇒ 说明 cpuAccess 漏置，必须让它回到 CPU 可见堆
+        if (s.mapCount > 0) { ++mappedCount; if (s.heapKind == 0) ++mappedDefault; }
+    }
+
+    HE_CORE_INFO("[P10 Storage 堆统计:{}] 共 {} 条 Storage 缓冲，合计 {}；"
+                 "CPU 可见堆 {}（{} 条），DEFAULT 堆 {}（{} 条），UPLOAD 堆 {}（{} 条）",
+                 (tag ? tag : ""), items.size(), FormatBytes(totalBytes),
+                 FormatBytes(cpuVisibleBytes), cpuVisibleCount,
+                 FormatBytes(defaultBytes), defaultCount,
+                 FormatBytes(uploadBytes), uploadCount);
+    HE_CORE_INFO("[P10 Storage 堆统计:{}] 被 Map 过的 Storage 缓冲 {} 条（其中 DEFAULT 堆 {} 条 ← 必须留在 CPU 可见堆）",
+                 (tag ? tag : ""), mappedCount, mappedDefault);
+    if (mappedDefault > 0) {
+        HE_CORE_INFO("[P10 Storage 堆统计:{}] —— DEFAULT 堆却被 Map 的缓冲（cpuAccess 漏置，需要修创建点）——",
+                     (tag ? tag : ""));
+        u32 listed = 0;
+        for (const auto& s : items) {
+            if (s.heapKind != 0 || s.mapCount == 0) continue;
+            HE_CORE_INFO("[P10 Storage 堆统计:{}]   ! size={}({} B) Map={} 名={} usage=0x{:x}",
+                         (tag ? tag : ""), FormatBytes(s.size), s.size, s.mapCount,
+                         s.name.empty() ? std::string("<未命名>") : s.name, s.usage);
+            if (++listed >= 20u) break;
+        }
+    }
+
+    const u32 kTop = 20u;
+    const u32 n = std::min<u32>((u32)items.size(), kTop);
+    auto heapName = [](u32 kind) -> const char* {
+        return kind == 2 ? "CPU-VISIBLE" : (kind == 1 ? "UPLOAD" : "DEFAULT");
+    };
+    for (u32 i = 0; i < n; ++i) {
+        const StorageBufferStat& s = items[i];
+        HE_CORE_INFO("[P10 Storage 堆统计:{}] #{} size={}({} B) 堆={} cpuAccess={} uav={} Map={} 名={}",
+                     (tag ? tag : ""), i + 1, FormatBytes(s.size), s.size, heapName(s.heapKind),
+                     s.cpuAccess ? 1 : 0, s.uav ? 1 : 0, s.mapCount,
+                     s.name.empty() ? std::string("<未命名>") : s.name);
+    }
+    // 明确列出"仍在 CPU 可见堆、但从未被 Map"的大缓冲：它们就是 P10 的迁移候选
+    HE_CORE_INFO("[P10 Storage 堆统计:{}] —— 以下为 CPU 可见堆上从未 Map 的 Storage（迁移候选，> 64KB）——",
+                 (tag ? tag : ""));
+    u32 listed = 0;
+    for (const auto& s : items) {
+        if (s.heapKind != 2 || s.mapCount != 0 || s.size < 64ull * 1024ull) continue;
+        HE_CORE_INFO("[P10 Storage 堆统计:{}]   * size={}({} B) 名={} usage=0x{:x}",
+                     (tag ? tag : ""), FormatBytes(s.size), s.size,
+                     s.name.empty() ? std::string("<未命名>") : s.name, s.usage);
+        if (++listed >= 20u) break;
+    }
+    if (listed == 0u)
+        HE_CORE_INFO("[P10 Storage 堆统计:{}]   （无）", (tag ? tag : ""));
+}
+
+// ===========================================================================
 //  Buffer
 // ===========================================================================
 D3D12Buffer::~D3D12Buffer() {
+    ReleaseStorageBufferStat(this);   // 【P10】统计表注销（缓冲已释放）
     if (m_Device) m_Device->UnregisterBufferAddress(m_GpuAddress);   // 注销 GPU 地址登记
     // 持久映射的缓冲要先解除映射再释放
     if (m_PersistentlyMapped && m_Resource) {
@@ -58,6 +220,7 @@ bool D3D12Buffer::Initialize(D3D12Device* device, const BufferDesc& desc) {
     m_Device = device;   // Unmap 的暂存拷贝需要它
     m_Size   = desc.size;
     m_Stride = static_cast<u32>(desc.stride);
+    m_DebugName = desc.debugName;   // 【P10】告警/统计里点名用
 
     // 光追缓冲的创建说明（T5）：加速结构本身由 D3D12AccelerationStructure 自己创建，
     // 不经过本类；经过本类的是 SBT / scratch / TLAS 实例缓冲，按下面 T5.3 的分支区分堆类型。
@@ -87,6 +250,7 @@ bool D3D12Buffer::Initialize(D3D12Device* device, const BufferDesc& desc) {
     //      写入、GPU 只读 ⇒ 同样放 UPLOAD 堆（GPU 地址 64KB 对齐，满足 16 字节要求）。
     // ------------------------------------------------------------------
     const bool isStorage    = HasAny(desc.usage, BufferUsage::Storage);
+    m_IsStorage = isStorage;   // 【P10】Map 次数统计只看 Storage 缓冲
     const bool isSbt        = HasAny(desc.usage, BufferUsage::ShaderBindingTable);
     const bool isRtScratch  = HasAny(desc.usage, BufferUsage::RayTracingScratch);
     const bool isRtInstance = HasAny(desc.usage, BufferUsage::AccelerationStruct) && !isSbt &&
@@ -121,8 +285,34 @@ bool D3D12Buffer::Initialize(D3D12Device* device, const BufferDesc& desc) {
     // 改为放在 CPU 可访问的自定义堆上（属性按 READBACK 堆取，自动适配集显/独显），直接映射。
     // 【scratch 例外】光追 scratch 只由 GPU 写、CPU 从不访问，必须留在 DEFAULT 堆（DXR 要求），
     // 既不能映射也不需要暂存。
-    const bool cpuVisibleUav = allowUav && !isRtScratch;
-    const bool needStaging   = allowUav && !cpuVisibleUav && !isRtScratch;
+    //
+    // ========================================================================
+    // 【P10】GPU 只读写的 Storage 缓冲迁到 DEFAULT 堆（显存），不再占用系统内存
+    //
+    // 判据：`Storage` && **未声明 cpuAccess** && 不是 SBT / RT 实例 / RT scratch。
+    //   · 引擎里"真的会 Map"的 Storage 缓冲都会显式置 `cpuAccess = true`（Nanite 的
+    //     dump 读回、粒子、对象/光源缓冲…）。迁移前用 `HE_STORAGE_HEAP_STATS=1`
+    //     实测过：cpuAccess=false 的 Storage 缓冲在全部样例里 Map 次数恒为 0。
+    //   · 因此 cpuAccess=false 就是"CPU 从不访问"的**可信信号**；这一类缓冲放在
+    //     CPU 可见的自定义堆上时，GPU 每次访问都要走 PCIe（独显上就是系统内存）。
+    // 迁移后的两件事：
+    //   ① 初始数据仍走下面已有的「UPLOAD 中转 → 命令队列拷贝一次」路径（DEFAULT 分支）；
+    //   ② 万一有调用方偷偷 Map（cpuAccess 漏置），Map() 会按需建 UPLOAD 暂存并**告警点名**，
+    //      不会崩、也不会静默读到脏数据 ⇒ 触发告警的缓冲要改回 cpuAccess=true。
+    // 想退回旧行为：设 `HE_STORAGE_CPU_VISIBLE=1`（现场排查用）。
+    // ========================================================================
+    static const bool s_KeepStorageCpuVisible = [] {
+        const char* v = std::getenv("HE_STORAGE_CPU_VISIBLE");
+        return v != nullptr && v[0] != '\0' && v[0] != '0';
+    }();
+    const bool gpuOnlyStorage = isStorage && !desc.cpuAccess && !isSbt && !isRtInstance &&
+                                !isRtScratch && !s_KeepStorageCpuVisible;
+
+    const bool cpuVisibleUav = allowUav && !isRtScratch && !gpuOnlyStorage;
+    // DEFAULT 堆的 GPU-only Storage **不预建** UPLOAD 暂存（省一份同尺寸的系统内存）：
+    // 正常路径从不 Map；万一被 Map，Map() 会按需创建暂存并告警（见 D3D12Buffer::Map）。
+    const bool needStaging   = false;
+    m_OnDefaultHeapStorage   = gpuOnlyStorage;
 
     D3D12_RESOURCE_DESC rd{};
     rd.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
@@ -265,13 +455,45 @@ bool D3D12Buffer::Initialize(D3D12Device* device, const BufferDesc& desc) {
                  static_cast<u64>(desc.size),
                  (heapType == D3D12_HEAP_TYPE_UPLOAD ? "UPLOAD" : "DEFAULT"),
                  static_cast<u32>(desc.usage));
+    // 【P10】登记 Storage 缓冲的堆类型（`HE_STORAGE_HEAP_STATS=1` 时打印清单用）
+    if (isStorage) {
+        const u32 heapKind = cpuVisibleUav ? 2u : (heapType == D3D12_HEAP_TYPE_UPLOAD ? 1u : 0u);
+        RecordStorageBufferStat(this, desc, heapKind, allowUav);
+    }
     return true;
 }
 
 void* D3D12Buffer::Map() {
-
+    // 【P10】统计：记录这个 Storage 缓冲确实被 CPU 侧映射过（决定它必须留在 CPU 可见堆）
+    if (m_IsStorage) NoteStorageBufferMapped(this);
     if (!m_Resource) return nullptr;
     if (m_MappedPtr) return m_MappedPtr;
+
+    // 【P10】DEFAULT 堆上的 Storage 缓冲不可映射。理论上 cpuAccess=false 的缓冲从不 Map
+    //（迁移前用 HE_STORAGE_HEAP_STATS=1 实测过 Map 次数为 0）；万一有调用方漏置 cpuAccess，
+    // 这里按需建一份 UPLOAD 暂存并**点名告警**，Unmap 时把暂存拷回 GPU —— 语义仍是
+    //「CPU 写 → GPU 读」，不会静默读到脏数据；但每次写都要一次等待拷贝，性能很差，
+    // 因此告警出现的缓冲应当改回 cpuAccess=true（保留 CPU 可见堆）。
+    if (m_OnDefaultHeapStorage && !m_CpuStaging) {
+        D3D12_RESOURCE_DESC srd = m_Resource->GetDesc();
+        srd.Flags = D3D12_RESOURCE_FLAG_NONE;
+        D3D12_HEAP_PROPERTIES shp{};
+        shp.Type = D3D12_HEAP_TYPE_UPLOAD;
+        shp.CreationNodeMask = 1;
+        shp.VisibleNodeMask  = 1;
+        ID3D12Device* dev = (m_Device && m_Device->GetDevice()) ? m_Device->GetDevice() : nullptr;
+        if (!dev || FAILED(dev->CreateCommittedResource(&shp, D3D12_HEAP_FLAG_NONE, &srd,
+                                                        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                        IID_PPV_ARGS(&m_CpuStaging)))) {
+            HE_CORE_ERROR("D3D12Buffer::Map: DEFAULT 堆 Storage 缓冲无法 Map，且按需暂存创建失败（size={}）",
+                          static_cast<u64>(m_Size));
+            return nullptr;
+        }
+        m_NeedsStagingCopy = true;
+        HE_CORE_WARN("D3D12Buffer::Map: DEFAULT 堆 Storage 缓冲被 CPU Map（size={} 名={}）—— 说明创建时漏置 "
+                     "cpuAccess=true，应让该缓冲留在 CPU 可见堆（HE_STORAGE_HEAP_STATS=1 可查清单）",
+                     static_cast<u64>(m_Size), (m_DebugName ? m_DebugName : "<未命名>"));
+    }
 
     D3D12_RANGE range{ 0, 0 };   // 声明 CPU 不读，驱动可以避免不必要的同步
     void* p = nullptr;

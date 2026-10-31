@@ -106,9 +106,14 @@ bool PathTracingPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 hei
     }
 
     // ── 三缓冲光源 SSBO ──
+    // 【P10】每帧 CPU Map 写入 ⇒ 显式 cpuAccess=true（否则会被迁到 DEFAULT 堆，Map 变慢路径）
     for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-        m_LightBuffers[i] = device->CreateBuffer(
-            {sizeof(GPULight) * MAX_LIGHTS, rhi::BufferUsage::Storage});
+        rhi::BufferDesc lb;
+        lb.size = sizeof(GPULight) * MAX_LIGHTS;
+        lb.usage = rhi::BufferUsage::Storage;
+        lb.cpuAccess = true;
+        lb.debugName = "PathTracing.Lights";
+        m_LightBuffers[i] = device->CreateBuffer(lb);
     }
 
     // ── Ray Tracing 子系统 ──
