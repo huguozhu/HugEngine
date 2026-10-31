@@ -1,4 +1,4 @@
-﻿#include "Pipeline/DeferredPipeline.h"
+#include "Pipeline/DeferredPipeline.h"
 // 阶段 1 附录 E（E-2①）：注册点要读骨骼网格的缓冲与材质字段
 #include "Scene/SkeletalMeshComponent.h"
 #include "GI/GI_IBL.h"
@@ -39,9 +39,12 @@
 //
 // 注意：这是 `constexpr` **编译期常量**，未注册 CVar，控制台/配置文件都改不了；
 // 要切换请改这里的初值并重新编译。
+// 【P1】默认改为 true（T7 完成后依赖已解除）；**生效的闸门在
+// `DeferredPipeline_FrameGraph.cpp` 的同名常量**（本文件的常量只作语义说明，未参与判断），
+// 运行时对照实验用环境变量 `HE_DISABLE_DGC=1` 强制关闭。
 // 设备能力不满足时（`VulkanDGC::IsSupported()` 为假）`InitializeDGC()` 返回 false，
 // 整条 DGC 路径自动跳过（`IsDGCReady()` 为 false），不会出错。
-constexpr bool kDGCEnable = false;
+constexpr bool kDGCEnable = true;
 
 
 

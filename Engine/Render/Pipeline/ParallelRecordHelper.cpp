@@ -3,6 +3,7 @@
 #include "RHI/RHI.h"
 #include "RHI/ThreadAffinity.h"   // rhi::SecondaryRecordScope（两级归属的显式声明）
 #include "Threading/JobSystem.h"
+#include "Core/Log.h"   // 【P7】并行录制执行的一次性日志
 
 #include <algorithm>
 
@@ -35,6 +36,17 @@ void ParallelRecordHelper::Record(rhi::IRHICommandList* mainCmd, u32 drawCount,
     const u32 listCount = static_cast<u32>(m_Lists.size());
     const u32 numChunks = std::min(listCount, drawCount);
     const u32 chunkSize = (drawCount + numChunks - 1u) / numChunks;
+
+    // 【P7 可观测性】首次真正走并行录制时打印一次：样例的绘制数此前达不到 64 条门槛，
+    // bundle 路径从未执行过，日志里也就没有任何读数能证明它跑过（见文档 2.1 该项）。
+    {
+        static bool s_logged = false;
+        if (!s_logged) {
+            s_logged = true;
+            HE_CORE_INFO("[MTCR] 并行录制已执行：绘制 {} 条 → {} 个次级列表（bundle），门槛 {} 条",
+                         drawCount, numChunks, MinDrawsForParallel());
+        }
+    }
 
     std::vector<std::function<void()>> tasks;
     tasks.reserve(numChunks);

@@ -7,6 +7,7 @@
 #include <functional>
 #include <memory>
 #include <vector>
+#include <cstdlib>   // 【P7】HE_MTCR_MIN_DRAWS 读取（std::getenv / std::atoi）
 
 // ============================================================
 // ParallelRecordHelper —— 并行命令录制（MTCR）的公共骨架（T3.1）
@@ -59,9 +60,23 @@ public:
     /// 都远超它，因此不影响现有判据场景）。
     static constexpr u32 kMinDrawsForParallel = 64;
 
+    /// 【P7】并行门槛的运行期覆盖：`HE_MTCR_MIN_DRAWS=<n>`（默认仍是 64）。
+    /// 存在的理由：样例的绘制数达不到 64 条门槛，bundle 路径从来没在真实场景里执行过
+    /// （见文档 2.1「多线程录制」一项）。把门槛降到 8 / 16 就能让同一条代码路径真正跑起来，
+    /// 便于验证「bundle 执行 + 与串行截图一致 + 0 报错」，不用改常量重编译。
+    [[nodiscard]] static u32 MinDrawsForParallel() {
+        static const u32 s_min = [] {
+            const char* v = std::getenv("HE_MTCR_MIN_DRAWS");
+            if (!v || !v[0]) return kMinDrawsForParallel;
+            const int n = std::atoi(v);
+            return (n > 0) ? static_cast<u32>(n) : kMinDrawsForParallel;
+        }();
+        return s_min;
+    }
+
     /// 【T3.4】调用方据此决定走并行还是串行（false 时请回落到原有的主列表直接录制路径）。
     [[nodiscard]] static bool ShouldRecordParallel(u32 drawCount) {
-        return drawCount >= kMinDrawsForParallel;
+        return drawCount >= MinDrawsForParallel();
     }
 
     /// 并行录制 + 合并。`mainCmd` 是主线程列表（在其上 ExecuteSecondary）。

@@ -555,6 +555,36 @@ void RenderGraph::ExecuteWithAsyncCompute(rhi::IRHICommandList* mainCmd,
     auto computeCmd = device->CreateCommandList(rhi::QueueType::Compute);
     computeCmd->BeginLightweight();  // 轻量 Begin：不推进帧计数器，避免延迟销毁提前触发
 
+    // 【P5 可观测性】异步 pass 数此前恒为 0（样例里没有任何 Compute 队列 pass），
+    // 日志里没有任何读数可核对。这里在前几帧与每 120 帧打印一次清单。
+    {
+        static u32 s_logCount = 0;
+        ++s_logCount;
+        if (s_logCount <= 3u || (s_logCount % 120u) == 0u) {
+            std::string names;
+            for (auto* p : asyncComputePasses) {
+                if (!names.empty()) names += " / ";
+                names += p->name;
+            }
+            HE_CORE_INFO("[AsyncCompute] 异步计算 pass {} 个（主列表 pass {} 个）：{}",
+                         asyncComputePasses.size(), mainPasses.size(),
+                         names.empty() ? "(无)" : names);
+            // 第一次打印时补一行"实际执行顺序的前 4 个 pass"：异步前缀按 m_PassOrder 切分，
+            // 前缀的第一个 pass 不是 Compute hint ⇒ 异步数恒为 0，这行是排查该情况的直接读数。
+            if (s_logCount == 1u) {
+                std::string head;
+                u32 shown = 0;
+                for (auto* p : m_PassOrder) {
+                    if (shown++ >= 4u) break;
+                    if (!head.empty()) head += " / ";
+                    head += p->name;
+                    head += (p->queueHint == RGPassQueue::Compute) ? "[C]" : "[G]";
+                }
+                HE_CORE_INFO("[AsyncCompute] 执行顺序前 4 个 pass：{}", head);
+            }
+        }
+    }
+
     // 【Profiler 帧开始放在计算列表上】BeginFrame 会重置本帧查询池。此前它在主列表上调用，而计算列表
     // 先提交、先写入异步计算 pass 的时间戳，主列表随后的重置把这些时间戳清掉（异步 pass 的耗时恒为 0/无效）。
     // 有异步 pass 时改在计算列表开头重置：主列表经时间线等待排在计算列表之后，写入顺序成立；
