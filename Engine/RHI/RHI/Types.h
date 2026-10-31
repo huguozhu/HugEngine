@@ -38,6 +38,10 @@ constexpr u32 kBindingBindlessSamplers = 6;   // Bindless 采样器数组（Samp
 constexpr u32 kBindingBindlessSSBO    = 30;  // Bindless SSBO 数组（StorageBuffer，binding 号最大以承载 VARIABLE_COUNT）
 constexpr u32 kBindingLightGrid        = 7;   // 光源网格（Clustered Shading SSBO）
 constexpr u32 kBindingLightIndexList   = 8;   // 光源索引列表（Clustered Shading SSBO）
+// 【P9】网格着色器几何 SSBO（GBuffer 的 per-frame set；与 ShaderTypes: kGPUBinding_Mesh* 一致）
+//   内容是合批后的合并顶点/索引缓冲，`GBuffer.mesh.slang` 按索引读顶点（替代输入装配）。
+constexpr u32 kBindingMeshVertices      = 21;
+constexpr u32 kBindingMeshIndices       = 22;
 
 // 渲染管线限制常量（与 ShaderTypes: kGPU* 一致）
 constexpr u32 kMaxColorAttachments  = 8;   // 最大 MRT 颜色附件数

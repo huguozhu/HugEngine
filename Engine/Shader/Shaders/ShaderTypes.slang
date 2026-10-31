@@ -50,6 +50,13 @@ GPU_CONST(GPU_UINT kGPUBinding_BindlessSamplers = 6);   // Bindless 采样器数
 GPU_CONST(GPU_UINT kGPUBinding_BindlessSSBO     = 30);  // Bindless SSBO 数组（最高 binding，VARIABLE_COUNT）
 GPU_CONST(GPU_UINT kGPUBinding_LightGrid        = 7);   // 光源网格 SSBO
 GPU_CONST(GPU_UINT kGPUBinding_LightIndexList   = 8);   // 光源索引列表 SSBO
+// --- 网格着色器几何 SSBO（P9；只出现在 GBuffer 的 per-frame set 里）---
+// 【为什么是 21/22】GBuffer 的 set=0 目前只占 2（对象）/5/6（bindless 纹理、采样器）/30
+//  （bindless SSBO 数组，其 4096 个描述符占满 30 之后的号段）⇒ 21/22 在其之前、且与该
+//  管线其它 set 的号（Lighting 的 17..31）互不影响（绑定号只在"同一个集"内有意义）。
+//  内容是 `MeshBatcher` 合批出来的合并顶点/索引缓冲，mesh shader 按索引读取。
+GPU_CONST(GPU_UINT kGPUBinding_MeshVertices     = 21);  // 合并顶点 SSBO（StructuredBuffer<StaticVertex>）
+GPU_CONST(GPU_UINT kGPUBinding_MeshIndices      = 22);  // 合并索引 SSBO（StructuredBuffer<uint>，绝对顶点索引）
 
 // --- Forward 管线 Binding 索引 ---
 GPU_CONST(GPU_UINT kGPUBinding_Lights          = 1);   // GPULight[] SSBO

@@ -1,5 +1,6 @@
 // Pipeline/MeshBatcher.cpp — Mesh 合并实现（阶段 1 §15.1 第③段第 4 批：改吃快照 + 注册表）
 #include "Pipeline/MeshBatcher.h"
+#include "Pipeline/GBufferMeshMode.h"   // 【P9】HE_GBUFFER_MESH：合并缓冲是否要加 Storage 用途位
 #include "Threading/MeshRegistry.h"   // 顶点/索引缓冲与顶点/索引数按 meshIndex 从这里取
 #include "Pipeline/GPUScene.h"
 #include "Pipeline/Material.h"   // 【任务 19】PBRMaterial / ComputeMaterialTextureMask（材质快照同源）
@@ -127,18 +128,28 @@ bool MeshBatcher::Build(const FrameSceneSnapshot& snapshot, const MeshRegistry& 
     }
 
     // 创建合并后的 GPU 缓冲
+    // 【P9】网格着色器路径要从 Storage Buffer 读顶点/索引 ⇒ 打开 HE_GBUFFER_MESH 时给
+    //   合并缓冲增加 Storage 用途位；关闭时保持原样（Vertex / Index），既有路径零改动。
+    rhi::BufferUsage vbUsage = rhi::BufferUsage::Vertex;
+    rhi::BufferUsage ibUsage = rhi::BufferUsage::Index;
+    if (GBufferMeshPathEnabled()) {
+        vbUsage = vbUsage | rhi::BufferUsage::Storage;
+        ibUsage = ibUsage | rhi::BufferUsage::Storage;
+    }
     rhi::BufferDesc vbDesc;
     vbDesc.size = m_MergedVertices.size() * sizeof(StaticVertex);
-    vbDesc.usage = rhi::BufferUsage::Vertex;
+    vbDesc.usage = vbUsage;
     vbDesc.initialData = m_MergedVertices.data();
     vbDesc.stride = sizeof(StaticVertex);
+    vbDesc.debugName = "MeshBatcher.MergedVB";   // 【P10】堆类型统计用
     m_MergedVB = rhi::GetDevice()->CreateBufferHandle(vbDesc);   // A-3
 
     rhi::BufferDesc ibDesc;
     ibDesc.size = m_MergedIndices.size() * sizeof(u32);
-    ibDesc.usage = rhi::BufferUsage::Index;
+    ibDesc.usage = ibUsage;
     ibDesc.initialData = m_MergedIndices.data();
     ibDesc.stride = sizeof(u32);
+    ibDesc.debugName = "MeshBatcher.MergedIB";   // 【P10】堆类型统计用
     m_MergedIB = rhi::GetDevice()->CreateBufferHandle(ibDesc);   // A-3
 
     HE_CORE_INFO("MeshBatcher: {} meshes → {} verts, {} indices ({} KB VB + {} KB IB)",

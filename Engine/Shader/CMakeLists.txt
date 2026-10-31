@@ -471,11 +471,9 @@ if(SLANGC)
         # 网格 / 任务着色器（*.mesh.slang / *.task.slang）：入口与 SPIR-V 一致为 main，
         # dxc 目标分别为 ms_6_6 / as_6_6（任务着色器在 D3D12 叫放大着色器）
         foreach(SRC ${MESH_SLANG})
-            # GBuffer.mesh 是未写任何输出的桩（TODO），DXIL 校验要求写满 SV_Position 而拒收；
-            # 它也没有 D3D12 侧的使用者，跳过
-            if(SRC MATCHES "GBuffer\\.mesh\\.slang$")
-                continue()
-            endif()
+            # 【P9】GBuffer.mesh 已从桩补齐（从 Storage Buffer 读顶点、输出顶点/图元），
+            # 不再是"未写任何输出"的桩，正常生成 ms_6_6 DXIL（GBufferRenderer 建
+            # `GBufferMesh` 网格管线时消费它）。
             if(SRC MATCHES "\\.task\\.slang$")
                 list(APPEND _dxil_pairs "${SRC}|main|amplification|as")
             else()

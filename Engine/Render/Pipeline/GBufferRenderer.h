@@ -58,6 +58,10 @@ struct GBufferContext {
     rhi::IRHIPipelineState* pso     = nullptr;
     rhi::DescriptorSetHandle descSet = rhi::kInvalidSet;
 
+    /// 【P9】网格着色器版 GBuffer 管线（`HE_GBUFFER_MESH=1` 时非空）。
+    /// 非空 = 本帧的逐物体绘制改用 `DrawMeshTasks` + 合批几何 SSBO（见 GBuffer.mesh.slang）。
+    rhi::IRHIPipelineState* meshPso = nullptr;
+
     // Per-frame ObjectBuffer（每帧由外部设置）
     rhi::IRHIBuffer* objectBuffer = nullptr;
 
@@ -193,6 +197,8 @@ public:
 
     // ── 描述符集访问器 ──
     rhi::IRHIPipelineState*       GetPSO()           const { return ResP(m_PSO); }
+    /// 【P9】网格着色器版 GBuffer 管线（未开启 / 设备不支持时为空）
+    rhi::IRHIPipelineState*       GetMeshPSO()       const { return ResP(m_MeshPSO); }
     rhi::DescriptorSetLayoutHandle GetLayout()       const { return m_Layout; }
     rhi::DescriptorSetHandle       GetDescriptorSet() const { return m_Set; }
 
@@ -214,6 +220,9 @@ private:
 
     // ── PSO + 描述符集 ──
     rhi::RHIPipelineStateHandle m_PSO{};   // A-3：句柄持有
+    /// 【P9】网格着色器版 GBuffer 管线（`GBuffer.mesh.slang` + 同一个 GBuffer.frag）。
+    /// 只在 `HE_GBUFFER_MESH=1`、D3D12 后端、设备支持网格着色器时创建。
+    rhi::RHIPipelineStateHandle m_MeshPSO{};
     rhi::DescriptorSetLayoutHandle m_Layout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_Set    = rhi::kInvalidSet;
 

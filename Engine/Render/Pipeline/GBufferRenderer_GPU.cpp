@@ -3,6 +3,7 @@
 // MeshBatcher::Build + GPUScene 按合批顺序重建 + FillGPUScene 在 DeferredPipeline::BuildFrameGraph 中完成
 #include "Pipeline/GBufferRenderer_GPU.h"
 #include "Pipeline/MeshBatcher.h"
+#include "Pipeline/GBufferMeshMode.h"   // 【P9】HE_GBUFFER_MESH 开关 + 每工作组三角形数
 #include "Pipeline/InstanceCuller.h"   // 任务 25：逐实例剔除（状态表也在它这里）
 #include "Threading/MeshRegistry.h"    // 阶段 1 第①段：按 meshIndex 取顶点/索引缓冲
 #include "Scene/MeshComponent.h"
@@ -110,6 +111,26 @@ void GBufferRenderer_GPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
     // 绑定 set=0
     ctx.device->UpdateDescriptorSet(ctx.descSet, rhi::kBindingObjectData, rhi::DescriptorType::StorageBuffer,
                                      ctx.objectBuffer);
+
+    // ── 【P9】网格着色器路径：把合批几何（合并 VB/IB）写进 set=0 的两个几何 binding ──
+    // 只在"PSO 建出来了 + 合批缓冲就绪"时生效；否则 meshPath=false ⇒ 后面仍走原来的
+    // DrawIndexedIndirectCount / DGC，既有行为不变。
+    // 【为什么在 BindDescriptorSet 之前写】描述符集在下一次绘制前会被快照（PrepareSetTables），
+    // 写在绘制之后对那一批绘制无效。
+    bool meshPath = GBufferMeshPathEnabled() && ctx.meshPso != nullptr && ctx.meshBatcher != nullptr;
+    if (meshPath) {
+        rhi::IRHIBuffer* mv = ctx.meshBatcher->GetVertexBuffer();
+        rhi::IRHIBuffer* mi = ctx.meshBatcher->GetIndexBuffer();
+        if (mv == nullptr || mi == nullptr) {
+            meshPath = false;
+        } else {
+            ctx.device->UpdateDescriptorSet(ctx.descSet, rhi::kBindingMeshVertices,
+                                             rhi::DescriptorType::StorageBuffer, mv);
+            ctx.device->UpdateDescriptorSet(ctx.descSet, rhi::kBindingMeshIndices,
+                                             rhi::DescriptorType::StorageBuffer, mi);
+        }
+    }
+
     // 逐实例剔除必须在渲染通道外派发（Vulkan 限制）：先上传实例变换并剔除，通道内（CPU 回退段）只做间接绘制
     if (ctx.instanceCuller)
         ctx.instanceCuller->PrepareInstances(cmd, ctx.device, ctx.meshRegistry, snapshot,
@@ -171,6 +192,64 @@ void GBufferRenderer_GPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
     pc.useInstanceID      = 1;   // 1 = GPU Driven：物体下标取 SV_InstanceID（= 间接命令 firstInstance）
 
     if (drawViaGPU) {
+        // ── 【P9】网格着色器路径：一次 `DrawMeshTasks` 取代间接绘制 ──
+        // 【为什么逐条绘制而不是 DrawMeshTasksIndirect】合批缓冲里的每条命令自带
+        // (firstIndex, indexCount)，而 `DispatchMesh` 的组数必须由 CPU 按三角形数算；
+        // 引擎的网格间接路径（DrawMeshTasksIndirectCount）虽有入口，但 GPU 剔除写的是
+        // **索引绘制**参数，不是网格组数。本项验收的是"同场景画面一致"，逐条派发即可，
+        // 派发条数 = 合批条数（CPU 可见），不涉及 GPU 读回。
+        if (meshPath) {
+            static bool s_MeshPathLogged = false;
+            if (!s_MeshPathLogged) {
+                s_MeshPathLogged = true;
+                HE_CORE_INFO("GBuffer GPU 绘制路径：Mesh Shader（GBufferMesh，{} 条合批，{} 三角形/工作组）",
+                             ctx.meshBatcher->GetCommandCount(), kGBufferMeshTrianglesPerGroup);
+            }
+            const auto& commands = ctx.meshBatcher->GetDrawCommands();
+            cmd->SetPipeline(ctx.meshPso);
+            u32 meshDrawCount = 0;
+            for (u32 i = 0; i < static_cast<u32>(commands.size()); ++i) {
+                // 实例化网格由下面的实例路径绘制（GPU 剔除对它们写了 visibilityFlags=0）；
+                // 网格路径必须同样跳过，否则会与实例路径重复画一遍。
+                if (i < static_cast<u32>(drawItems.size()) && drawItems[i].bInstanced) continue;
+                const IndirectDrawCommand& c = commands[i];
+                const u32 triCount = c.indexCount / 3u;
+                if (triCount == 0u) continue;
+                // push constant 与 IA 路径同布局（192B），_pad[0]/_pad[1] 分别是
+                // firstIndex / triangleCount（见 GBuffer.mesh.slang 的 FrameConstants）
+                struct {
+                    float4x4 vp; float4x4 pvp;
+                    u32 oi, uid, inst, vis;
+                    u32 firstIndex, triangleCount;
+                    u32 _pad[10];
+                } mpc{};
+                mpc.vp            = pc.viewProjMatrix;
+                mpc.pvp           = pc.prevViewProjMatrix;
+                mpc.oi            = i;            // 物体缓冲下标 = 合批序号
+                mpc.uid           = 0;            // mesh 路径只支持逐物体（无 SV_InstanceID）
+                mpc.inst          = 0;
+                mpc.vis           = 0;
+                mpc.firstIndex    = c.firstIndex;
+                mpc.triangleCount = triCount;
+                cmd->SetPushConstants(0, sizeof(mpc), &mpc);
+                const u32 groups = (triCount + kGBufferMeshTrianglesPerGroup - 1u) / kGBufferMeshTrianglesPerGroup;
+                cmd->DrawMeshTasks(groups, 1, 1);
+                ++meshDrawCount;
+            }
+            // 恢复图形 PSO：下面的实例化网格段落仍用 IA 管线（SetVertexBuffer/SetIndexBuffer）
+            cmd->SetPipeline(ctx.pso);
+            // 节流日志：前两帧 + 每 120 帧（与文件末尾的 GBuffer_GPU 统计同一节奏）
+            static u32 s_MeshLogFrame = 0;
+            if (++s_MeshLogFrame <= 2u || s_MeshLogFrame % 120u == 0u) {
+                HE_CORE_INFO("GBuffer_GPU: 网格着色器路径第 {} 帧派发 {} 次 DrawMeshTasks（合批 {} 条）",
+                             s_MeshLogFrame, meshDrawCount, ctx.meshBatcher->GetCommandCount());
+            }
+            if (meshDrawCount == 0u) {
+                // 没有任何可画的三角形：不落回间接绘制（那会重复画），只提示一次
+                static bool s_MeshEmptyLogged = false;
+                if (!s_MeshEmptyLogged) { s_MeshEmptyLogged = true; HE_CORE_WARN("GBuffer_GPU: 网格路径没有可派发的三角形"); }
+            }
+        } else {
         // ── GPU 驱动绘制：顶点/索引缓冲 = MeshBatcher 的合并缓冲 ──
         // 间接命令里的 (firstIndex, indexCount) 指向合并缓冲，vertexOffset 恒 0（合批索引已是绝对索引）
         cmd->SetVertexBuffer(ctx.meshBatcher->GetVertexBuffer(), 0);
@@ -223,6 +302,7 @@ void GBufferRenderer_GPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
                                           GPUCulling::kMaxObjects,
                                           sizeof(IndirectDrawCommand));
         }
+        }   // ← if (meshPath) ... else（IA 间接绘制）
     } else {
         // ── CPU 回退：逐对象直接绘制（objectIndex = 物体缓冲下标）──
         for (auto& di : drawItems) {

@@ -1,4 +1,4 @@
-﻿// ============================================================
+// ============================================================
 // GBufferRenderer.cpp — GBuffer 纹理所有权 + 渲染实现
 // 负责 5 MRT + Depth 纹理创建、PSO 创建、描述符集管理、
 // RenderGraph 导入接口。内部委托给 IGBufferRenderer（CPU/GPU 策略）。
@@ -7,17 +7,35 @@
 #include <iterator>
 #include "Pipeline/GBufferRenderer_CPU.h"
 #include "Pipeline/GBufferRenderer_GPU.h"
+#include "Pipeline/GBufferMeshMode.h"   // 【P9】HE_GBUFFER_MESH 开关（一次性读取）
 #include "Scene/MeshComponent.h"
 #include "Core/Log.h"
 #include "Core/Assert.h"
+#include <cstdlib>
 
 // SPIR-V 嵌入头文件
 #include "GBuffer.vert.spv.h"
 #include "GBuffer.vert.dxil.h"
 #include "GBuffer.frag.spv.h"
 #include "GBuffer.frag.dxil.h"
+// 【P9】网格着色器版 GBuffer（DXIL 由 Engine/Shader/CMakeLists.txt 的 ms_6_6 分支生成）
+#include "GBuffer.mesh.spv.h"
+#include "GBuffer.mesh.dxil.h"
 
 namespace he::render {
+
+// ============================================================
+// 【P9】`GBuffer.mesh.slang` 的 GBufferMeshVertex 与 C++ `StaticVertex` 必须逐字节一致
+//
+// 网格着色器是按"绝对索引 + 固定步长"从合并顶点缓冲里直接 Load 的（没有输入装配阶段，
+// 也没有属性偏移表可用），所以结构体布局一旦漂移就会读出垃圾坐标 ⇒ 画面撕裂。
+// 这里用编译期断言把布局钉死（Math.h 打开了 GLM_FORCE_DEFAULT_ALIGNED_GENTYPES：
+// vec3 = 16B 对齐、vec2 = 8B 对齐 ⇒ 偏移 0/16/32、总大小 48B）。
+// ============================================================
+static_assert(sizeof(he::StaticVertex) == 48, "GBuffer.mesh 的顶点布局按 48 字节硬编码，改 StaticVertex 必须同步改 shader");
+static_assert(offsetof(he::StaticVertex, position) == 0,  "GBuffer.mesh 假设 position 在偏移 0");
+static_assert(offsetof(he::StaticVertex, normal)   == 16, "GBuffer.mesh 假设 normal 在偏移 16");
+static_assert(offsetof(he::StaticVertex, uv)       == 32, "GBuffer.mesh 假设 uv 在偏移 32");
 
 bool GBufferRenderer::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_Width  = width;
@@ -46,6 +64,7 @@ bool GBufferRenderer::Initialize(rhi::IRHIDevice* device, u32 width, u32 height)
     m_Ctx.gbDisneyB = ResT(m_G);
     m_Ctx.gbLightmapKey = ResT(m_H);
     m_Ctx.pso       = ResP(m_PSO);
+    m_Ctx.meshPso   = ResP(m_MeshPSO);   // 【P9】为空时 GPU 路径仍走原来的 IA 绘制
     m_Ctx.descSet   = m_Set;
 
     // ── 5. 创建策略模式渲染器 ──
@@ -73,6 +92,7 @@ void GBufferRenderer::Shutdown() {
     }
 
     // 销毁 PSO + 纹理
+    m_Ctx.device->DestroyPipelineStateHandle(m_MeshPSO); m_MeshPSO = {};   // 【P9】网格版 GBuffer
     m_Ctx.device->DestroyPipelineStateHandle(m_PSO); m_PSO = {};
     m_Ctx.device->DestroyTextureHandle(m_Depth); m_Depth = {};
     m_Ctx.device->DestroyTextureHandle(m_H); m_H = {};
@@ -204,12 +224,18 @@ void GBufferRenderer::CreateTextures(rhi::IRHIDevice* device) {
 
 void GBufferRenderer::CreatePSO(rhi::IRHIDevice* device) {
     // 描述符集布局：set=0 = per-frame GPUObjectData[] + bindless 纹理/采样器数组
+    // 【P9】另加两个网格着色器几何 SSBO（合并 VB/IB）：只有 `GBuffer.mesh.slang` 引用它们，
+    // 顶点/片元着色器不引用 ⇒ 不开网格路径时不写这两个描述符也不影响既有绘制。
+    const u32 kGeomStageMask = rhi::kStageMaskVertex | rhi::kStageMaskFragment | rhi::kStageMaskMesh;
     rhi::DescriptorSetLayoutDesc gbLayout;
     gbLayout.bindings = {
         {kGPUBinding_ObjectData, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskVertex | rhi::kStageMaskFragment},
         {kGPUBinding_BindlessTextures, rhi::DescriptorType::SampledImage, 4096, rhi::kStageMaskFragment, true},   // bindless 纹理
         {kGPUBinding_BindlessSamplers, rhi::DescriptorType::Sampler, 4096, rhi::kStageMaskFragment, true},         // bindless 采样器
         {kGPUBinding_BindlessSSBO, rhi::DescriptorType::StorageBuffer, 4096, rhi::kStageMaskVertex | rhi::kStageMaskFragment, true},  // u_SSBO[] bindless
+        // 【P9】网格着色器的几何来源（MeshBatcher 的合并 VB/IB）。写描述符在 GPU 路径每帧做。
+        {kGPUBinding_MeshVertices, rhi::DescriptorType::StorageBuffer, 1, kGeomStageMask},
+        {kGPUBinding_MeshIndices,  rhi::DescriptorType::StorageBuffer, 1, kGeomStageMask},
     };
     m_Layout = device->CreateDescriptorSetLayout(gbLayout);
 
@@ -270,6 +296,51 @@ void GBufferRenderer::CreatePSO(rhi::IRHIDevice* device) {
 
     m_PSO = device->CreatePipelineStateHandle(gbDesc);   // A-3
     HE_ASSERT(m_PSO.IsValid(), "GBufferRenderer: PSO 句柄创建失败");
+
+    // ============================================================
+    // 【P9】网格着色器版 GBuffer 管线（`HE_GBUFFER_MESH=1`）
+    //
+    // 与上面那条 PSO 的**唯一区别**是几何段：`meshShader` 非空 ⇒ 走网格管线
+    //（无输入装配、无顶点缓冲）；片元着色器仍是同一个 `GBuffer.frag`，8 个颜色附件 /
+    // 深度 / push constant / 描述符集布局全部沿用，所以两条路径的像素结果可以直接对比。
+    //
+    // 【为什么门控在 D3D12】本项验收以 D3D12（DXIL / 调试层）为准；Vulkan 侧的
+    // `GBuffer.mesh` SPIR-V 仍会编译，但驱动差异不在本次范围内 ⇒ 不在 Vulkan 上建这条 PSO
+    //（避免在既有 Vulkan 路径上引入一条未验证的管线）。
+    // ============================================================
+    const bool wantMesh = GBufferMeshPathEnabled();
+    if (!wantMesh) return;
+    if (device->GetBackend() != rhi::Backend::D3D12) {
+        HE_CORE_WARN("GBufferRenderer: HE_GBUFFER_MESH=1 但当前后端不是 D3D12，跳过网格版 GBuffer 管线");
+        return;
+    }
+    if (!device->GetCaps().supportsMeshShaders) {
+        HE_CORE_WARN("GBufferRenderer: 设备不支持网格着色器，跳过网格版 GBuffer 管线");
+        return;
+    }
+
+    rhi::ShaderBytecode gbMS;
+    gbMS.stage      = rhi::ShaderStage::Mesh;
+    gbMS.spirv      = k_GBuffer_mesh_spv;   // Vulkan 侧不使用，但字节码字段必须合法（空指针会崩）
+    gbMS.dxil.assign(std::begin(k_GBuffer_mesh_dxil), std::end(k_GBuffer_mesh_dxil));
+    gbMS.entryPoint = "main";
+
+    rhi::PipelineStateDesc meshDesc = gbDesc;   // 深度/混合/目标格式/描述符布局逐项继承
+    meshDesc.vertexShader   = nullptr;          // 网格管线没有 VS
+    meshDesc.meshShader     = &gbMS;            // ← 走 InitializeMeshPso（管线状态流）
+    meshDesc.vertexLayout   = {};               // 无输入装配
+    // push constant 必须覆盖 **Mesh** 阶段：D3D12 的根签名可见性是 ALL（不区分阶段），
+    // Vulkan 侧 PipelinePipeline 会自动补 Mesh|Task 位（见 VulkanPipeline.cpp 的 mesh 分支）。
+    meshDesc.pushConstantRanges = {pc};
+    meshDesc.debugName      = "GBufferMesh";
+
+    m_MeshPSO = device->CreatePipelineStateHandle(meshDesc);   // A-3
+    if (!m_MeshPSO.IsValid()) {
+        HE_CORE_ERROR("GBufferRenderer: 网格版 GBuffer 管线创建失败（HE_GBUFFER_MESH=1），本帧回退 IA 路径");
+        return;
+    }
+    HE_CORE_INFO("GBufferRenderer: 网格版 GBuffer 管线就绪 name=GBufferMesh（{} 三角形/工作组）",
+                 kGBufferMeshTrianglesPerGroup);
 }
 
 void GBufferRenderer::CreateDescriptorSet(rhi::IRHIDevice* device) {
