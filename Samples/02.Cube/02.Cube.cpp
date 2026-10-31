@@ -1,4 +1,4 @@
-﻿// ============================================================
+// ============================================================
 // 02.Cube — HugEngine PBR 前向渲染管线演示
 //
 // 使用逐物体 Push Constants 的 PBR 渲染：
@@ -1029,6 +1029,11 @@ int main() {
         HE_CORE_INFO("02.Cube：已起真渲染线程（整帧 RHI 归它；游戏线程按帧严格握手等待）");
         renderThread.Start();
     }
+    // 【帧上下文的设备指针】即使没起真渲染线程，`SubmitAndWait` / `SubmitAndPump` 也会在调用线程上
+    // 就地泵帧（壳模式），泵帧时把 RenderThreadContext 发布到线程局部。若这里不登记设备，上下文里的
+    // device 为空 ⇒ 各 pass 的 ResB/ResT 解析恒为 nullptr，随后解引用空指针（02.Cube 在模式 1/2 下
+    // 第一帧的 CSM 阴影就崩在这里；06.GILab 早已登记，故只有本样例受影响）。
+    renderThread.SetDevice(device.get());
     auto submitRender = [&](auto&& fn) {
         if (useRenderThread) {
             renderQueue.BeginFrame();
