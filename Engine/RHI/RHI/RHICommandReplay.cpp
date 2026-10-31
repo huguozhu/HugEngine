@@ -349,8 +349,22 @@ static u32 g_L43PassW = 0, g_L43PassH = 0;
         }
         // 【P3】命令流承载光追：BLAS 构建 / 光线派发按录制期复制进流的数据在回放侧下发
         case RHICommandType::CmdBuildBLAS: {
-            const auto* d = stream.PayloadAt<RHICommandBuildBLAS>(i);
-            if (!d || !d->blas || d->geometryCount == 0u) break;
+            // 【P3 根因修复】BLAS 构建是录制侧用 `EnqueueArena` 编码的（载荷在 arena、
+            // 内联 payloadSize 为 0）。此前这里用 `PayloadAt`（只读内联载荷）取，长度校验
+            // 必然失败返回 nullptr ⇒ 整条构建命令被静默跳过：TLAS 里的实例指向从未构建过的
+            // BLAS ⇒ 所有光线未命中、画面只剩天空，且不产生任何 D3D12 错误（跳过命令是合法的）。
+            // 必须与录制侧成对使用 `ArenaPayloadAt`。
+            const auto* d = stream.ArenaPayloadAt<RHICommandBuildBLAS>(i);
+            if (!d || !d->blas || d->geometryCount == 0u) {
+                // 不允许静默丢命令：载荷读不出来时留一条明确日志（限一次，避免刷屏）
+                static bool s_warnedBadBLAS = false;
+                if (!s_warnedBadBLAS) {
+                    s_warnedBadBLAS = true;
+                    HE_CORE_WARN("ReplayCommandStream: CmdBuildBLAS 载荷不可读（内联/arena 长度不匹配），"
+                                 "该 BLAS 构建被跳过");
+                }
+                break;
+            }
             const auto* geos = reinterpret_cast<const RHIBLASGeometry*>(
                 stream.ArenaRawAt(d->geometryOffset, sizeof(RHIBLASGeometry) * d->geometryCount));
             if (!geos) break;
