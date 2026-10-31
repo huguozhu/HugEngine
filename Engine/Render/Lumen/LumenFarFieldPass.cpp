@@ -41,9 +41,15 @@ bool LumenFarFieldPass::Initialize(rhi::IRHIDevice* device) {
     pc.size      = 128;
 
     std::vector<rhi::ShaderBytecode> shaders(3);
+    // 【必须同时填 SPIR-V 与 DXIL】此前只赋了 .spirv：Vulkan 后端能建管线，D3D12 的
+    //  光追状态对象要求每个着色器都有 DXIL 库字节码（缺失时 CreateStateObject 直接失败，
+    //  日志报"缺少 DXIL 字节码"，远场光追永远不运行 ⇒ Lumen 统计与 Vulkan 差约 9 倍）。
     shaders[0].stage = rhi::ShaderStage::RayGen;     shaders[0].spirv = k_Lumen_FarField_rgen_spv; shaders[0].entryPoint = "main";
+    shaders[0].dxil.assign(std::begin(k_Lumen_FarField_rgen_dxil), std::end(k_Lumen_FarField_rgen_dxil));
     shaders[1].stage = rhi::ShaderStage::ClosestHit; shaders[1].spirv = k_RT_GI_rchit_spv;         shaders[1].entryPoint = "main";
+    shaders[1].dxil.assign(std::begin(k_RT_GI_rchit_dxil), std::end(k_RT_GI_rchit_dxil));
     shaders[2].stage = rhi::ShaderStage::Miss;       shaders[2].spirv = k_RT_GI_rmiss_spv;         shaders[2].entryPoint = "main";
+    shaders[2].dxil.assign(std::begin(k_RT_GI_rmiss_dxil), std::end(k_RT_GI_rmiss_dxil));
 
     std::vector<rhi::RTShaderGroup> groups(3);
     groups[0].type = rhi::RTShaderGroupType::RayGen; groups[0].generalShader = 0;    groups[0].name = "LumenFarFieldRayGen";
@@ -84,23 +90,45 @@ bool LumenFarFieldPass::EnsureCapacity(u32 rayCount) {
     if (rayCount == 0u || !m_Device) return false;
     if (rayCount <= m_Capacity && m_Result) { m_RayCount = rayCount; return true; }
 
+    // 【T2：扩容必须预留余量】此前按精确条数分配，而 Lumen 的探针数在卡片陆续建出来的
+    // 前几十帧里几乎**每帧都在涨**（实测 1497 → 1506 …）⇒ 每帧都会重建结果缓冲。
+    // 重建会把上一份缓冲立刻析构，而上一帧的 DispatchRays / 对照 pass 还在 GPU 上执行、
+    // 正往这块显存里写 —— GPU 访问已释放的分配会直接挂起（DXGI_ERROR_DEVICE_HUNG
+    // 0x887a0006，随后所有 Create* 失败、CPU 侧在别的 pass 里空指针崩溃）。
+    // 这里按「1.25 倍 + 至少 4096 条」预留，探针数稳定后只在跨档时重建。
+    const u32 capacity = rayCount + rayCount / 4u + 4096u;
+
     rhi::BufferDesc bd;
     // **每条光线两个 float4**（[2i] = 命中距离/标志/亮度，[2i+1] = 命中点）——rgen 就是这么写的。
     // 第一版只按 1 个 float4/光线分配，于是 rgen 写出界、踩坏相邻显存：症状是"RT 命中率从 71% 掉到 44%"
     // 这类完全说不通的变化（不是确定性差异，是越界写）。
-    bd.size      = (u64)rayCount * 2u * sizeof(float4);
+    bd.size      = (u64)capacity * 2u * sizeof(float4);
     bd.usage     = rhi::BufferUsage::Storage;
     // 直接映射读回：验收要做"SDF 命中 vs 三角形命中"的逐光线对照，回读是最短路径
     bd.cpuAccess = true;
+    // 【重建前让 GPU 空闲】旧缓冲可能仍被在飞的帧引用（本 Pass 不走延迟释放）；
+    // 扩容是低频事件（只有跨档才发生），等一次 GPU 空闲换来的是不会挂设备。
+    bool grew = false;
+    if (m_Result) {
+        m_Device->WaitIdle();
+        m_Result.reset();
+        m_ResultMapped = nullptr;
+        grew = true;
+    }
     m_Result = m_Device->CreateBuffer(bd);
     if (!m_Result) {
-        HE_CORE_WARN("LumenFarFieldPass: 结果缓冲创建失败（{} 条射线）", rayCount);
+        HE_CORE_WARN("LumenFarFieldPass: 结果缓冲创建失败（{} 条射线，容量 {}）", rayCount, capacity);
+        m_Capacity = 0;
         return false;
     }
     m_ResultMapped = m_Result->Map();
-    m_Capacity     = rayCount;
+    m_Capacity     = capacity;
     m_RayCount     = rayCount;
     m_Device->UpdateDescriptorSet(m_RayGenSet, kBindResult, rhi::DescriptorType::StorageBuffer, m_Result.get());
+    if (grew) {
+        HE_CORE_INFO("LumenFarFieldPass: 结果缓冲扩容到 {} 条（本次 {} 条，旧缓冲已等 GPU 空闲后释放）",
+                     capacity, rayCount);
+    }
     return true;
 }
 

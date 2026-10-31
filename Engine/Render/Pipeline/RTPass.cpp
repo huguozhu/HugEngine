@@ -391,9 +391,18 @@ void RTPass::BuildAS(rhi::IRHICommandList* cmd, const FrameSceneSnapshot& snapsh
     }
 
     if (!instances.empty()) {
-        void* mapped = rhi::GetDevice()->ResolveBuffer(m_TLASInstanceBuffer)->Map();
+        // 【T2 遗留：设备丢失后的空指针崩溃】设备被移除（如 GPU 挂起 0x887a0006）之后，
+        // ResolveBuffer 仍返回对象、但 Map 会失败返回空；此前直接 memcpy 到空指针，
+        // 把"设备丢失"变成 0xC0000005 访问违例（崩溃报告只看得到这里的栈，掩盖了真因）。
+        // 这里显式判空并报错，让日志留下真正的设备状态。
+        rhi::IRHIBuffer* instanceBuf = rhi::GetDevice()->ResolveBuffer(m_TLASInstanceBuffer);
+        void* mapped = instanceBuf ? instanceBuf->Map() : nullptr;
+        if (!mapped) {
+            HE_CORE_ERROR("RTPass::BuildAS: 实例缓冲不可映射（设备已丢失？），本帧跳过 TLAS 构建");
+            return;
+        }
         std::memcpy(mapped, instances.data(), instances.size() * sizeof(rhi::TLASInstanceDesc));
-        rhi::GetDevice()->ResolveBuffer(m_TLASInstanceBuffer)->Unmap();
+        instanceBuf->Unmap();
 
         cmd->BuildTLAS(rhi::GetDevice()->ResolveAccelerationStructure(m_TLAS), rhi::GetDevice()->ResolveBuffer(m_TLASScratch), rhi::GetDevice()->ResolveBuffer(m_TLASInstanceBuffer),
                        static_cast<u32>(instances.size()), false);

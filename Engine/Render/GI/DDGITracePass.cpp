@@ -40,9 +40,14 @@ bool DDGITracePass::Initialize(rhi::IRHIDevice* device) {
     pc.size      = 128;
 
     std::vector<rhi::ShaderBytecode> shaders(3);
+    // 【与 LumenFarFieldPass 同一处遗漏】此前只赋 .spirv：Vulkan 能建管线，D3D12 的 RT 状态
+    //  对象要求每个着色器都有 DXIL 库字节码（缺了直接建失败）。补上 DXIL，两个后端走同一份描述。
     shaders[0].stage = rhi::ShaderStage::RayGen;      shaders[0].spirv = k_DDGI_Trace_rgen_spv; shaders[0].entryPoint = "main";
+    shaders[0].dxil.assign(std::begin(k_DDGI_Trace_rgen_dxil), std::end(k_DDGI_Trace_rgen_dxil));
     shaders[1].stage = rhi::ShaderStage::ClosestHit;  shaders[1].spirv = k_RT_GI_rchit_spv;     shaders[1].entryPoint = "main";
+    shaders[1].dxil.assign(std::begin(k_RT_GI_rchit_dxil), std::end(k_RT_GI_rchit_dxil));
     shaders[2].stage = rhi::ShaderStage::Miss;        shaders[2].spirv = k_RT_GI_rmiss_spv;     shaders[2].entryPoint = "main";
+    shaders[2].dxil.assign(std::begin(k_RT_GI_rmiss_dxil), std::end(k_RT_GI_rmiss_dxil));
 
     std::vector<rhi::RTShaderGroup> groups(3);
     groups[0].type = rhi::RTShaderGroupType::RayGen; groups[0].generalShader = 0;   groups[0].name = "DDGITraceRayGen";
