@@ -12,7 +12,7 @@
 
 namespace he::render {
 
-// FXAA 鎻忚堪绗﹂泦缁戝畾鍙穈r
+// FXAA 描述符集绑定号（输入 LDR 纹理）
 static constexpr u32 kFXAABindInput = 0;
 
 bool AA_FXAA::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {

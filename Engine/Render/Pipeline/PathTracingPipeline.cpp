@@ -43,6 +43,21 @@ static constexpr u32 kPTFlag_Textures = 1u << 4;   // 材质贴图采样（r.PT.
 // 相机运动 → 时域降噪混合权重缩放：约 0.33m 平移或 0.33rad(~19°) 旋转 → 混合抬到 1.0
 static constexpr float kMotionBlendScale = 3.0f;
 
+// ============================================================
+//  HE_PT_FXAA 开关解析（T5）
+//
+//  语义：未设置 ⇒ 用默认值；`0/off/false/no` ⇒ 关闭；其它非空值（含 1/on/true）⇒ 开启。
+//  此前实现只判断 `getenv() != nullptr`，于是 HE_PT_FXAA=0 也会把 FXAA 打开，
+//  无法做「关闭」对照实验。
+// ============================================================
+static bool ParseFXAAEnv(bool defaultValue) {
+    const char* env = std::getenv("HE_PT_FXAA");
+    if (!env || !*env) return defaultValue;
+    return !(env[0] == '0' || env[0] == 'o' || env[0] == 'O'     // 0 / off
+             || env[0] == 'f' || env[0] == 'F'                   // false
+             || env[0] == 'n' || env[0] == 'N');                 // no
+}
+
 bool PathTracingPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_Device = device;
     // 采用调用方给出的初始尺寸（0 = 沿用默认），避免启动期被 OnResize 全量重建
@@ -51,14 +66,15 @@ bool PathTracingPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 hei
 
     // ── 后处理（ToneMap → LDR → FXAA）──
     m_PostProcess.Initialize(device, m_Width, m_Height);
-    // FXAA：Vulkan 上默认开启（终端 AA，保证 RP 状态正确）。
-    // 【D3D12 例外】D3D12 后端的 FXAA pass（LDR → 后缓冲）实测渲染异常偏暗
-    // （后缓冲亮度 ~15/255，同帧 LDR 目标 ~111/255），关掉 FXAA 后两者一致。
-    // 该 pass 在 D3D12 上此前从未真正执行（PSO 与 RTV 格式不匹配，绘制一直被丢弃），
-    // 属既有后处理问题、与光追无关 ⇒ 默认只在 Vulkan 上开，HE_PT_FXAA=1 可强制打开复查。
-    const bool wantFXAA = (device->GetBackend() == rhi::Backend::Vulkan)
-                        || (std::getenv("HE_PT_FXAA") != nullptr);
+    // FXAA：两个后端默认都开启（终端 AA，保证 RP 状态正确）。
+    // 【T5】D3D12 早年「FXAA 输出偏暗（后缓冲 ~15/255、同帧 LDR ~111/255）」的根因是
+    // 后缓冲格式与 FXAA 的 PSO/RTV 不匹配，整条 FXAA 绘制被 D3D12 丢弃、后缓冲保留着
+    // 上一帧的陈旧内容；交换链统一成 BGRA8（见 D3D12SwapChain.cpp）后该 pass 已能真正执行，
+    // 实测亮度与 Vulkan 一致 ⇒ 不再对 D3D12 设例外，默认开启。
+    // HE_PT_FXAA=0/off 关闭、=1/on 强制开启（见 ParseFXAAEnv）。
+    const bool wantFXAA = ParseFXAAEnv(true);
     m_PostProcess.EnableFXAA(device, m_Width, m_Height, wantFXAA);
+    HE_CORE_INFO("[T5] PT FXAA: {}", wantFXAA ? "on" : "off");
 
     // ToneMap HDR 输入采样器（线性，与 LightingPass 的 HDR sampler 同款）
     {
