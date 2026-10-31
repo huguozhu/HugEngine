@@ -36,7 +36,9 @@ class D3D12SwapChain;   // 前置声明（设备要保存它的指针）
 
 class D3D12Device final : public IRHIDevice {
 public:
-    D3D12Device() = default;
+    /// 构造 / 析构都放在 .cpp：成员里有 `std::unique_ptr<D3D12CommandList>`，
+    /// 而本头文件只前置声明了命令列表（避免循环包含），内联的默认构造会要求完整类型
+    D3D12Device();
     ~D3D12Device() override;
 
     /// 创建设备。失败时返回 false，错误已打日志。
@@ -151,6 +153,9 @@ public:
     void  DestroyImGuiDescriptorPool(void*) override {}
     /// 返回 ID3D12GraphicsCommandList*，并为外部渲染（ImGui）准备好描述符堆
     void* GetImGuiCommandBuffer(IRHICommandList* cmd) const override;
+    /// 【P4】命令流模式下给 ImGui 单开一条直接录制的列表：开好后缓冲的 Load 通道并返回原生列表。
+    /// 该列表在本帧主列表之后提交（见 Submit），因此不依赖跨帧的绘制数据。
+    void* BeginImGuiDirectList(class D3D12CommandList* mainList);
     D3D12_CPU_DESCRIPTOR_HANDLE GetImGuiFontSrvCpu() const { return GetSlotCpuHandle(kImGuiFontSlot); }
     D3D12_GPU_DESCRIPTOR_HANDLE GetImGuiFontSrvGpu() const { return GetSetGpuHandle(kImGuiFontSlot); }
 
@@ -753,6 +758,12 @@ private:   // register -> 元素字节数
     std::mutex                  m_DeferredMutex;
     /// 把命令流回放到影子列表并提交（流模式的提交、或普通列表附带的命令流）
     void SubmitStreamReplay(class D3D12CommandList* src, const RHICommandList& stream);
+
+    // ---- 【P4】命令流模式下的 ImGui 专用列表 ----
+    //  ImGui 仍然直接录到原生列表（不经过命令流），但该列表在本帧主列表之后提交，
+    //  所以绘制数据只在本帧有效、不需要快照或跨帧回放。
+    std::unique_ptr<class D3D12CommandList> m_ImGuiList;
+    bool                                    m_ImGuiListRecording = false;
 
     /// 异步计算的队列交接：把计算列表记下的交接转换（图形专用状态 → 计算可用状态）录到一条
     /// 小的图形列表上，提交到图形队列并打围栏，再让计算队列在 GPU 侧等待它完成

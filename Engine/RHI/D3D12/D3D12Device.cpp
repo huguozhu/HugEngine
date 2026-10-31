@@ -222,6 +222,9 @@ static void CheckDeviceAlive(ID3D12Device* dev, const char* where) {
     }
 }
 
+// 构造函数放这里：成员里有 unique_ptr<D3D12CommandList>，本文件才包含它的完整定义
+D3D12Device::D3D12Device() = default;
+
 D3D12Device::~D3D12Device() {
     // 先停下 PSO 预编译线程（它在用设备创建 PSO）
     m_PrecompileStop.store(true, std::memory_order_release);
@@ -934,8 +937,19 @@ void D3D12Device::Submit(IRHICommandList* cmdList, RHICommandList* stream) {
     }
     // 【T10】模式 2（有提交路由）下命令流同样交给 RHI 线程回放：回放用到的描述符表句柄与
     // 资源状态转换都已由录制线程在录制期解析进流，回放只按数据下指令（见 SubmitStreamReplay）。
-    if (m_SubmitRouter && m_SubmitRouter->RouteSubmit(cmdList, stream)) return;
-    ExecuteSubmit(cmdList, stream);
+    if (m_SubmitRouter && m_SubmitRouter->RouteSubmit(cmdList, stream)) { /* 已由路由接管 */ }
+    else ExecuteSubmit(cmdList, stream);
+
+    // 【P4】本帧若录了 ImGui 专用列表，关闭并排在主列表之后提交（同队列、同帧）。
+    // 顺序很重要：场景的通道由主列表录制，UI 用 LoadOp::Load 叠在它上面。
+    if (m_ImGuiListRecording && m_ImGuiList) {
+        m_ImGuiListRecording = false;
+        m_ImGuiList->EndDebugLabel();
+        m_ImGuiList->End();             // Close：此时才真正封口，回放/提交都用这条原生列表
+        m_ImGuiList->PackSubmission();
+        if (m_SubmitRouter && m_SubmitRouter->RouteSubmit(m_ImGuiList.get(), nullptr)) { /* 已由路由接管 */ }
+        else ExecuteSubmit(m_ImGuiList.get(), nullptr);
+    }
 }
 
 void D3D12Device::ExecuteSubmit(IRHICommandList* cmdList, RHICommandList* stream) {
@@ -2198,15 +2212,55 @@ void* D3D12Device::CreateImGuiDescriptorPool() {
     return EnsureDescriptorHeaps() ? static_cast<void*>(m_CbvSrvUavHeap.Get()) : nullptr;
 }
 
+// ============================================================
+//  【P4】命令流模式下的 ImGui：单开一条直接录制的命令列表
+//
+//  【为什么不能沿用主列表】命令流模式下帧主列表只往纯数据流里 append，真正的回放要等到提交
+//  （模式 2 更是在 RHI 线程上、落后一到两帧）；而 ImGui 的 draw data 在下一帧 NewFrame 后
+//  就失效，不能推迟回放 —— 此前这里直接返回 nullptr，命令流模式下整块 UI 消失。
+//
+//  【做法】ImGui 仍然直接录到**自己**的原生列表（不经过流），并在同一帧的提交里排在主列表
+//  之后（见 Submit 末尾）：主列表负责场景，本列表只负责把 UI 叠上去。这里先为它开一个
+//  LoadOp::Load 的后缓冲通道 —— 主列表（流）在录制期已把后缓冲登记成 RENDER_TARGET，
+//  所以不会再插入多余的转换屏障，也不会清掉场景内容。
+// ============================================================
+void* D3D12Device::BeginImGuiDirectList(D3D12CommandList* mainList) {
+    if (!mainList) return nullptr;
+    if (!m_ImGuiList) {
+        auto list = std::make_unique<D3D12CommandList>();
+        if (!list->Initialize(this, QueueType::Graphics)) {
+            HE_CORE_ERROR("[D3D12] ImGui 专用命令列表创建失败（命令流模式下 UI 不绘制）");
+            return nullptr;
+        }
+        m_ImGuiList = std::move(list);
+    }
+    // 上一帧若没走到提交（窗口最小化 / 录制被丢弃）：直接丢弃那次未关闭的录制
+    if (m_ImGuiListRecording) {
+        m_ImGuiList->End();
+        m_ImGuiListRecording = false;
+    }
+
+    IRHISwapChain* sc = mainList->GetSwapChain();
+    if (!sc) sc = GetSwapChainPtr();
+    m_ImGuiList->SetSwapChain(sc);
+    m_ImGuiList->Begin();   // Reset 分配器与原生列表（会先等本槽位上一次提交的围栏）
+
+    const Format fmt = sc ? sc->GetColorFormat() : Format::BGRA8_UNORM;
+    m_ImGuiList->BeginRenderPass(1, fmt, Format::Unknown, nullptr, LoadOp::Load);
+    m_ImGuiList->BeginDebugLabel("ImGui（命令流模式独立列表）");
+    // 绑引擎的描述符堆（含 ImGui 字体 SRV 槽位），并让后续的根参数下发重新等 SetPipeline：
+    // ImGui 自己的后端会改根签名与 PSO
+    m_ImGuiList->PrepareForExternalRendering();
+    m_ImGuiListRecording = true;
+    return m_ImGuiList->GetNativeCommandList();
+}
+
 void* D3D12Device::GetImGuiCommandBuffer(IRHICommandList* cmd) const {
     auto* cl = static_cast<D3D12CommandList*>(cmd);
     if (!cl) return nullptr;
     if (cl->IsStreamMode()) {
-        // 流模式：命令在提交时才回放，外部代码无法直接往原生列表录制；ImGui 的绘制数据也在
-        // 下一帧 NewFrame 后失效，不能推迟回放 ⇒ 本模式下不绘制 ImGui
-        static bool s_Warned = false;
-        if (!s_Warned) { s_Warned = true; HE_CORE_WARN("[D3D12] 命令流模式下不绘制 ImGui（HE_RHI_COMMAND_STREAM=1）"); }
-        return nullptr;
+        // 【P4】流模式：返回 ImGui 专用的那条列表（本帧排在主列表之后提交）
+        return const_cast<D3D12Device*>(this)->BeginImGuiDirectList(cl);
     }
     cl->PrepareForExternalRendering();
     return cl->GetNativeCommandList();
