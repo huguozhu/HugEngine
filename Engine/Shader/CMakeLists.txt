@@ -445,6 +445,8 @@ if(SLANGC)
     #
     #  链路：slangc -target hlsl  →  ShaderToDxil（补丁 uint8_t/语义/[loop]）
     #        →  dxc -T <stage>_6_6  →  DXIL  →  *.dxil.h（C++ 字节数组）
+    #  顶点着色器例外：ShaderToDxil 默认用 vs_6_8（T6：实例号用 SV_StartInstanceLocation，
+    #  取代逐实例 HE_INSTANCEINDEX 属性绕行；代价是需要 SM 6.8 设备）
     #
     #  为什么不直接用 `slangc -target dxil`：Slang 生成的 HLSL 里会出现
     #  `vector<uint8_t,4>`，dxc 不认识 uint8_t（实测 -D 宏无效，必须文本替换）；

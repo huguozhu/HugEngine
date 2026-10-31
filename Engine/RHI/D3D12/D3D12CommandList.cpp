@@ -531,11 +531,15 @@ void D3D12CommandList::BeginRenderPass(u32 colorCount, Format colorFormat,
     // 【交换链后缓冲必须显式屏障】D3D12 不会把 PRESENT 隐式提升为 RENDER_TARGET，
     // 不做转换就以 RTV 使用会被判非法、渲染内容被丢弃（调试层 id=538 实测 1669 条，
     // 这也是 02.Cube 画面全黑的根因）。
+    ID3D12Resource* bb = nullptr;   // 本帧的后缓冲（下面同步状态用，可能为空）
     if (hasRtv && m_SwapChain) {
         auto* sc = static_cast<D3D12SwapChain*>(m_SwapChain);
-        ID3D12Resource* bb = hinted ? sc->GetBackBuffer(hintIndex) : sc->GetCurrentBackBufferResource();
-        const D3D12_RESOURCE_STATES bbState =
-            hinted ? static_cast<D3D12_RESOURCE_STATES>(static_cast<u64>(hint) >> 32) : sc->GetBackBufferState();
+        bb = hinted ? sc->GetBackBuffer(hintIndex) : sc->GetCurrentBackBufferResource();
+        // 【T9：状态以设备表为准】后缓冲的 RTV 已登记进设备状态表，真实状态从这里取；
+        // 命令流回放用录制时登记的 hint（回放线程不能读渲染线程正在改的记录）
+        const D3D12_RESOURCE_STATES bbState = hinted
+            ? static_cast<D3D12_RESOURCE_STATES>(static_cast<u64>(hint) >> 32)
+            : (m_Device && bb ? m_Device->GetResourceState(bb) : sc->GetBackBufferState());
         if (bb && bbState != D3D12_RESOURCE_STATE_RENDER_TARGET) {
             D3D12_RESOURCE_BARRIER tb{};
             tb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -544,6 +548,7 @@ void D3D12CommandList::BeginRenderPass(u32 colorCount, Format colorFormat,
             tb.Transition.StateBefore = bbState;
             tb.Transition.StateAfter  = D3D12_RESOURCE_STATE_RENDER_TARGET;
             m_List->ResourceBarrier(1, &tb);
+            if (m_Device) m_Device->SetResourceState(bb, D3D12_RESOURCE_STATE_RENDER_TARGET);
         }
     }
 
@@ -553,6 +558,7 @@ void D3D12CommandList::BeginRenderPass(u32 colorCount, Format colorFormat,
     // 回放时这一步已在录制侧（渲染线程）做过，交换链的状态记录只归渲染线程写
     if (hasRtv && m_SwapChain && !hinted) {
         static_cast<D3D12SwapChain*>(m_SwapChain)->MarkBackBufferRendered();
+        if (m_Device && bb) m_Device->SetResourceState(bb, D3D12_RESOURCE_STATE_RENDER_TARGET);
     }
 
     if (hasRtv && loadOp == LoadOp::Clear) {
@@ -637,6 +643,8 @@ void D3D12CommandList::BeginOffscreenPass(void* colorImageView, void* depthImage
                     m_List->ResourceBarrier(1, &b);
                     m_Device->SetResourceState(res, D3D12_RESOURCE_STATE_RENDER_TARGET);
                 }
+                // 【T9】附件若就是交换链后缓冲，同步交换链那份镜像（见函数注释）
+                SyncBackBufferStateForAttachment(res);
             }
         }
         if (hasDsv) {
@@ -823,6 +831,8 @@ void D3D12CommandList::BeginOffscreenPassMRT(void* const* colorImageViews, u32 c
                 m_List->ResourceBarrier(1, &tb);
                 m_Device->SetResourceState(res, D3D12_RESOURCE_STATE_RENDER_TARGET);
             }
+            // 【T9】附件若就是交换链后缓冲，同步交换链那份镜像
+            SyncBackBufferStateForAttachment(res);
         }
     }
     if (hasDsv && m_Device) {
@@ -940,11 +950,8 @@ void D3D12CommandList::SetPipeline(IRHIPipelineState* pso) {
         const D3D12_VERTEX_BUFFER_VIEW zv = m_Device->GetZeroVertexBufferView();
         if (zv.BufferLocation) m_List->IASetVertexBuffers(D3D12PipelineState::kZeroVertexSlot, 1, &zv);
     }
-    // 顶点着色器读实例号：绑定实例序号缓冲（读出值含起始实例，见 kInstanceIndexSlot）
-    if (m_Pipeline->NeedsInstanceIndexBuffer() && m_Device) {
-        const D3D12_VERTEX_BUFFER_VIEW iv = m_Device->GetInstanceIndexBufferView();
-        if (iv.BufferLocation) m_List->IASetVertexBuffers(D3D12PipelineState::kInstanceIndexSlot, 1, &iv);
-    }
+    // 【T6】不再绑定实例序号缓冲：顶点着色器用 SV_StartInstanceLocation 取起始实例号
+    //（此前这里会把 0,1,2,… 的逐实例序号缓冲绑到 14 号槽，作为 SV_InstanceID 的替代）
     // 设置根签名会清空所有根参数，下一次绘制/派发前需要重新下发
     m_RootArgsDirty = true;
 }
@@ -1964,6 +1971,25 @@ void D3D12CommandList::ActivateAliasedTexture(ID3D12Resource* res) {
         m_Device->SetResourceState(res, discardState);
     }
     m_List->DiscardResource(res, nullptr);
+}
+
+// ---------------------------------------------------------------------------
+//  SyncBackBufferStateForAttachment —— 【T9】离屏 pass 用后缓冲做附件时的状态同步
+//
+//  06.GILab 的最终合成（以及其他"直接写后缓冲"的离屏 pass）会把交换链后缓冲当作普通
+//  颜色附件传进来。后缓冲的 RTV 现在登记在设备的资源状态表里（见
+//  D3D12SwapChain::CreateBuffers），BeginOffscreenPass / BeginOffscreenPassMRT 的通用
+//  路径会正确地做 PRESENT→RENDER_TARGET 转换并更新设备表；但交换链自己那份
+//  m_BackBufferState 只有 BeginRenderPass 会写。两份记录一旦分叉，截图/呈现就会声明
+//  错误的 StateBefore（调试层 id=527，约 6 次运行出现 1 次）。
+//  这里在附件确实是后缓冲时把镜像同步过去，保证两份记录永远一致。
+// ---------------------------------------------------------------------------
+void D3D12CommandList::SyncBackBufferStateForAttachment(ID3D12Resource* res) {
+    if (!res) return;
+    if (!m_SwapChain && m_Device) m_SwapChain = m_Device->GetSwapChainPtr();
+    if (!m_SwapChain) return;
+    auto* sc = static_cast<D3D12SwapChain*>(m_SwapChain);
+    if (sc->IsBackBuffer(res)) sc->MarkBackBufferRendered();
 }
 
 D3D12_RESOURCE_STATES D3D12CommandList::UsableTextureState(ID3D12Resource* res) {

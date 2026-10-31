@@ -17,6 +17,8 @@
 //  用法：
 //    ShaderToDxil <input.hlsl> <entry> <stage> <output.h> <symbol> [profile]
 //    stage: vs / ps / cs / ms / as / lib
+//    profile 缺省：vs→vs_6_8（T6：SV_StartInstanceLocation 需要 6.8），
+//                  其余 ps/cs/ms/as→6_6，lib→lib_6_6
 // ============================================================================
 
 #include <cstdio>
@@ -264,15 +266,6 @@ static std::string PatchCBuffers(const std::string& src) {
 }
 
 /// 给 for 循环加 [loop]：抑制 DXC 的激进展开（某些循环展开后编译时间爆炸）
-/// 顶点着色器的实例号改为读逐实例顶点属性 HE_INSTANCEINDEX。
-/// Vulkan 的 gl_InstanceIndex 含 firstInstance（GPU 剔除把对象号、Nanite 把簇号放在 firstInstance 里），
-/// 而 D3D12 的 SV_InstanceID 恒从 0 起、不含 StartInstanceLocation（SM 6.8 才有 SV_StartInstanceLocation）。
-/// 但 IA 取逐实例数据时会加上 StartInstanceLocation：后端在专用输入槽绑定内容为 0,1,2… 的逐实例缓冲，
-/// 读出的值即「起始实例 + 实例号」，直接绘制与间接绘制都与 Vulkan 一致（见 D3D12PipelineState::kInstanceIndexSlot）
-static void PatchInstanceId(std::string& s) {
-    ReplaceAll(s, ": SV_InstanceID", ": HE_INSTANCEINDEX");
-}
-
 static void PatchLoops(std::string& s) {
     size_t p = 0;
     while ((p = s.find("for (", p)) != std::string::npos) {
@@ -293,6 +286,63 @@ static void PatchLoops(std::string& s) {
         }
         p += 5;
     }
+}
+
+// ---------------------------------------------------------------------------
+//  顶点着色器的实例号：SM 6.8 起用 SV_StartInstanceLocation，取代逐实例属性绕行
+//
+//  【为什么必须处理】Vulkan 的 gl_InstanceIndex 含 draw 的 firstInstance（GPU 剔除把对象号、
+//  Nanite 把簇号放在 firstInstance 里），而 D3D12 的 SV_InstanceID 恒从 0 起。
+//  SM 6.8 之前只能绕行：把 `SV_InstanceID` 改名成逐实例属性 `HE_INSTANCEINDEX`，由后端在
+//  14 号输入槽绑一张 `0,1,2,…` 的序号缓冲（IA 取逐实例数据时会自动加上起始实例）。
+//  那要多一张 1M 项的缓冲、每次绘制多绑一个顶点缓冲，PSO 反射里还要特判语义。
+//
+//  SM 6.8 的 `SV_StartInstanceLocation` 直接给出起始实例号，于是改成：
+//      instanceID = SV_InstanceID + SV_StartInstanceLocation
+//  与 Vulkan 语义一致，绕行相关的东西全部不需要。
+//
+//  做法：给入口函数追加一个 `uint heStartInstance_ : SV_StartInstanceLocation` 参数，
+//  并在函数体第一行把起始实例号加到原实例号参数上（函数体内部的所有读取都不用改）。
+// ---------------------------------------------------------------------------
+static void PatchStartInstanceLocation(std::string& s) {
+    static const std::string kSv = ": SV_InstanceID";
+    const size_t p = s.find(kSv);
+    if (p == std::string::npos) return;
+
+    // 取出语义前面的参数名（Slang 生成的是 instanceID_0 / iid_0 这类标识符）
+    size_t nameEnd = p;
+    while (nameEnd > 0 && (s[nameEnd - 1] == ' ' || s[nameEnd - 1] == '\t')) --nameEnd;
+    size_t nameBeg = nameEnd;
+    while (nameBeg > 0 && (std::isalnum(static_cast<unsigned char>(s[nameBeg - 1])) ||
+                           s[nameBeg - 1] == '_')) --nameBeg;
+    const std::string name = s.substr(nameBeg, nameEnd - nameBeg);
+    if (name.empty()) return;
+
+    // 1) 追加 SV_StartInstanceLocation 参数
+    s.insert(p + kSv.size(), ", uint heStartInstance_ : SV_StartInstanceLocation");
+
+    // 2) 在函数体开头把起始实例号加进实例号（参数表结束的 ')' 之后的第一个 '{'）
+    const size_t rp = s.find(')', p);
+    if (rp == std::string::npos) return;
+    const size_t lb = s.find('{', rp);
+    if (lb == std::string::npos) return;
+    s.insert(lb + 1, "\n    " + name + " += heStartInstance_;");
+}
+
+/// 旧绕行（SM 6.8 以下保留）：顶点着色器的实例号改为读逐实例顶点属性 HE_INSTANCEINDEX。
+/// 后端在 kInstanceIndexSlot 绑 0,1,2,… 的逐实例序号缓冲，IA 读出时自动加上起始实例。
+static void PatchInstanceId(std::string& s) {
+    ReplaceAll(s, ": SV_InstanceID", ": HE_INSTANCEINDEX");
+}
+
+/// 目标 profile 是否是 6.8 或更高（形如 vs_6_8 / vs_6_9 / vs_7_0）
+static bool ProfileAtLeast68(const char* profile) {
+    if (!profile) return false;
+    const char* us = std::strchr(profile, '_');
+    if (!us) return false;
+    int major = 0, minor = 0;
+    if (std::sscanf(us + 1, "%d_%d", &major, &minor) != 2) return false;
+    return major > 6 || (major == 6 && minor >= 8);
 }
 
 // ---------------------------------------------------------------------------
@@ -576,6 +626,20 @@ int main(int argc, char** argv) {
     //  · 入口属性 [shader("...")] 由 slangc -target hlsl 直接产出（实测已带），无需补；
     //  · **仍然要**做寄存器重排（register = binding、space = set）。
     const bool isLib = (std::string(stage) == "lib");
+    // 目标 profile 必须先定下来：顶点着色器的实例号改写方式取决于着色器模型
+    //（SM 6.8 起用系统值 SV_StartInstanceLocation，以下仍用逐实例属性绕行）
+    char profile[32];
+    if (profileArg) {
+        std::snprintf(profile, sizeof(profile), "%s", profileArg);
+    } else {
+        std::string s = stage;
+        // 【T6】顶点着色器提到 vs_6_8：D3D12 的 SV_InstanceID 不含起始实例号，6.8 的
+        // SV_StartInstanceLocation 才能在不绑序号缓冲的前提下与 Vulkan 的 gl_InstanceIndex 对齐
+        const char* t = (s == "vs") ? "vs_6_8" : (s == "ps") ? "ps_6_6"
+                      : (s == "cs") ? "cs_6_6" : (s == "ms") ? "ms_6_6"
+                      : (s == "as") ? "as_6_6" : "lib_6_6";
+        std::snprintf(profile, sizeof(profile), "%s", t);
+    }
     std::string patched = src;
     if (!isLib) {
         patched = InjectSemantics(src, isVertex);
@@ -586,7 +650,10 @@ int main(int argc, char** argv) {
         //（dxc 报 "resource X at register 0 overlaps with resource Y"）。
         // 正确的做法是保留着色器自己的寄存器分配（b0/b1/...），根签名用 root CBV 覆盖 b0..b7。
         PatchLoops(patched);
-        if (std::string(stage) == "vs") PatchInstanceId(patched);
+        if (std::string(stage) == "vs") {
+            if (ProfileAtLeast68(profile)) PatchStartInstanceLocation(patched);
+            else                           PatchInstanceId(patched);
+        }
         if (std::string(stage) == "ms") PatchMeshSignature(patched, entry);   // 修正网格着色器输出参数修饰
     } else if (patched.find("[shader(") == std::string::npos) {
         // 兜底提示：库目标靠 [shader("...")] 导出入口，缺了 dxc 会报 "no entry point"
@@ -606,18 +673,6 @@ int main(int argc, char** argv) {
     if (!WriteFile(hlslPath.c_str(), patched)) {
         std::fprintf(stderr, "ShaderToDxil: 无法写临时 HLSL %s\n", hlslPath.c_str());
         return 1;
-    }
-
-    // 目标 profile
-    char profile[32];
-    if (profileArg) {
-        std::snprintf(profile, sizeof(profile), "%s", profileArg);
-    } else {
-        std::string s = stage;
-        const char* t = (s == "vs") ? "vs_6_6" : (s == "ps") ? "ps_6_6"
-                      : (s == "cs") ? "cs_6_6" : (s == "ms") ? "ms_6_6"
-                      : (s == "as") ? "as_6_6" : "lib_6_6";
-        std::snprintf(profile, sizeof(profile), "%s", t);
     }
 
     // 调用 dxc

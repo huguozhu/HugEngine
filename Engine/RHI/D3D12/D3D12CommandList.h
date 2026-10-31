@@ -247,6 +247,11 @@ private:
     /// DiscardResource。没有待激活登记时立即返回（见 D3D12Device::RegisterAliasActivation）
     void ActivateAliasedTexture(ID3D12Resource* res);
 
+    /// 【T9】把交换链那份后缓冲状态镜像同步为 RENDER_TARGET：离屏 pass 的附件若正好是
+    /// 交换链后缓冲（06.GILab 的最终合成就走这条路径），设备状态表已经按反查到的资源转换过，
+    /// 这里只维护交换链镜像（Present 的 hint / 截图旧路径读的是它）
+    void SyncBackBufferStateForAttachment(ID3D12Resource* res);
+
     /// 每个飞行帧槽位一个分配器（同 Vulkan 的逐帧命令缓冲）：分配器在 GPU 执行完之前
     /// 不能 Reset，样例只建一个命令列表并每帧重录，单分配器会在 GPU 仍在执行上一帧时
     /// 被重置 ⇒ GPU 读到被覆盖的命令内存 ⇒ 页错误 / 设备挂起（调试层 id=552）。

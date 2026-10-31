@@ -1213,10 +1213,10 @@ bool D3D12PipelineState::Initialize(D3D12Device* device, const PipelineStateDesc
                 // 早先没过滤，导致 PBR 的输入布局多出一个 VERTEX_IN_5 之外的
                 // 系统值元素 ⇒ CreateGraphicsPipelineState 返回 E_INVALIDARG。
                 if (p.SystemValueType != D3D_NAME_UNDEFINED) continue;
-                // 实例号（ShaderToDxil 由 SV_InstanceID 改写而来）不是顶点属性：不进顶点槽，
-                // 在布局最后单独挂到实例序号槽（见下方 kInstanceIndexSlot）
+                // 【T6】旧绕行遗留的 HE_INSTANCEINDEX 不再产生（顶点着色器已按 SM 6.8 编译，
+                // 实例号 = SV_InstanceID + SV_StartInstanceLocation）。这里仍保险地跳过这类
+                // 非顶点属性语义，避免旧 DXIL 被反射成输入元素让 PSO 创建失败。
                 if (p.SemanticName && std::strcmp(p.SemanticName, "HE_INSTANCEINDEX") == 0) {
-                    m_NeedsInstanceIndexVB = true;
                     continue;
                 }
 
@@ -1446,19 +1446,8 @@ bool D3D12PipelineState::Initialize(D3D12Device* device, const PipelineStateDesc
             desc.debugName.c_str(), static_cast<u32>(elems.size()), m_VertexStride);
     }
 
-    // 实例号：逐实例数据、步进 1，从实例序号槽读 R32_UINT。IA 按「起始实例 + 实例号」取元素，
-    // 序号缓冲第 i 个元素为 i，读出即含起始实例的实例号
-    if (m_NeedsInstanceIndexVB) {
-        D3D12_INPUT_ELEMENT_DESC e{};
-        e.SemanticName         = "HE_INSTANCEINDEX";
-        e.SemanticIndex        = 0;
-        e.Format               = DXGI_FORMAT_R32_UINT;
-        e.InputSlot            = kInstanceIndexSlot;
-        e.AlignedByteOffset    = 0;
-        e.InputSlotClass       = D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA;
-        e.InstanceDataStepRate = 1;
-        elems.push_back(e);
-    }
+    // 【T6】实例号不再经输入布局传入：顶点着色器按 SM 6.8 编译，用 SV_StartInstanceLocation
+    // 直接拿到起始实例号（此前这里会往 14 号槽挂一条逐实例的 HE_INSTANCEINDEX 元素）
     pd.InputLayout.pInputElementDescs = elems.empty() ? nullptr : elems.data();
     pd.InputLayout.NumElements = static_cast<UINT>(elems.size());
 
