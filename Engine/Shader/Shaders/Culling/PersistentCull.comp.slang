@@ -41,18 +41,23 @@ bool AABBOutside(float3 aabbMin, float3 aabbMax, float4 plane) {
 
 bool IsOccluded(float3 mn, float3 mx) {
     float2 rMin = float2(1e10, 1e10), rMax = float2(-1e10, -1e10);
-    float mZ = 0;
+    // 【T7 保守判定】标准 Z（近=0、远=1）：遮蔽判定要用包围盒**最近**深度（min）。
+    // 只有"最近点比采样区域里最远的表面还远"才能认定整体被遮挡；用最远深度（max）会误剔除。
+    float nearestZ = 1e30;
     for (int c = 0; c < 8; c++) {
         float3 corner = float3((c & 1) ? mx.x : mn.x,
                                (c & 2) ? mx.y : mn.y,
                                (c & 4) ? mx.z : mn.z);
         float4 clip = mul(u_PTGParams.viewProj, float4(corner, 1));
+        if (clip.w < 0) return false;   // 角点在相机后：投影无效，保守判为未遮挡
         float3 ndc = clip.xyz / max(clip.w, 0.0001);
-        if (clip.w < 0) return false;
-        float2 s = ndc.xy * 0.5 + 0.5;
+        // 【T7】NDC→UV 的 Y 方向：两个后端都按"NDC +Y = 屏幕上方 = 纹理 v=0"渲染
+        //（Vulkan 用负视口高度翻转 Y，D3D12 视口变换同样把 +Y 映射到顶部）⇒ v = 0.5 - ndc.y*0.5。
+        // 此前写成 0.5 + ndc.y*0.5 会采样到上下镜像的深度，造成大面积误剔除。
+        float2 s = float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
         rMin = min(rMin, s);
         rMax = max(rMax, s);
-        mZ = max(mZ, ndc.z);
+        nearestZ = min(nearestZ, ndc.z);
     }
     rMin = clamp(rMin, 0, 1);
     rMax = clamp(rMax, 0, 1);
@@ -64,7 +69,8 @@ bool IsOccluded(float3 mn, float3 mx) {
     d.y = u_HiZDepth.SampleLevel(u_HiZSampler, float2(rMax.x, rMin.y), mip);
     d.z = u_HiZDepth.SampleLevel(u_HiZSampler, float2(rMin.x, rMax.y), mip);
     d.w = u_HiZDepth.SampleLevel(u_HiZSampler, rMax, mip);
-    return mZ > max(max(d.x, d.y), max(d.z, d.w));
+    // 采样区域取最远深度（max 四角）：最近点仍更远 ⇒ 保守地判为被遮挡
+    return nearestZ > max(max(d.x, d.y), max(d.z, d.w));
 }
 
 groupshared uint g_DoneFrameIndex;
@@ -103,6 +109,9 @@ void main(uint3 gtid : SV_GroupThreadID) {
 
             GPUSceneObject o = u_SceneObjects[globalIdx];
             float3 mn = o.boundsMin.xyz, mx = o.boundsMax.xyz;
+
+            // 【T7】visibilityFlags == 0 = 不参与 GPU 驱动的间接绘制（实例化网格走逐实例路径）
+            if (o.visibilityFlags == 0u) continue;
 
             bool visible = true;
             [unroll] for (int i = 0; i < 6 && visible; i++) {

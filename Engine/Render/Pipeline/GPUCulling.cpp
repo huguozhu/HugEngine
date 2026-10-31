@@ -16,6 +16,7 @@
 #include "Core/Assert.h"
 #include <cstring>
 #include <cstdio>
+#include <cstdlib>   // 【T7 诊断】std::getenv（HE_T7_DEBUG）
 #include <glm/gtc/matrix_access.hpp>
 
 // ============================================================
@@ -107,7 +108,10 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
     {
         rhi::BufferDesc d;
         d.size = sizeof(u32) * 4;
-        d.usage = rhi::BufferUsage::Storage;
+        // 【T7】计数缓冲同时是 `DrawIndexedIndirectCount` 的 countBuffer：
+        // Vulkan 要求 countBuffer 必须带 INDIRECT_BUFFER usage（VUID-vkCmdDrawIndexedIndirectCount-countBuffer-02715），
+        // 此前只声明 Storage ⇒ 一旦真正用 GPU 计数驱动绘制，校验层每帧报警。D3D12 侧该标志无副作用。
+        d.usage = rhi::BufferUsage::Storage | rhi::BufferUsage::Indirect;
         d.cpuAccess = true;
         m_DrawCountBuf = device->CreateBufferHandle(d);   // A-3
         HE_ASSERT(m_DrawCountBuf.IsValid(), "GPUCulling: 绘制计数缓冲句柄创建失败");
@@ -349,7 +353,10 @@ void GPUCulling::SetDepthTexture(rhi::IRHIDevice* device, rhi::IRHITexture* dept
                                    u32 width, u32 height) {
     if (!m_Initialized) return;
     m_DepthInput = depthTex;
-    m_HiZMipCount = 1;  // 当前仅使用全分辨率深度
+    // 【T7 诊断开关】HE_T7_NO_HIZ=1 时只做视锥剔除（hizMipCount=0）：
+    // 单级 Hi-Z 的遮挡测试在保守方向之外仍可能误剔除，这个开关用于"关掉遮挡后画面是否恢复正常"的对照。
+    static const bool s_NoHiZ = std::getenv("HE_T7_NO_HIZ") != nullptr;
+    m_HiZMipCount = s_NoHiZ ? 0 : 1;  // 当前仅使用全分辨率深度
 
     // 单阶段/Phase 1: 绑定上帧深度
     device->UpdateDescriptorSet(m_DescSet, kCullBindDepth, rhi::DescriptorType::CombinedImageSampler,
@@ -436,9 +443,9 @@ void GPUCulling::Dispatch(rhi::IRHICommandList* cmd,
     snprintf(label, sizeof(label), "Cull Single (%u obj)", objectCount);
     cmd->SetDrawDebugLabel(label);
     cmd->Dispatch(groups, 1, 1);
-    // Dispatch 后清零 visibleCount, GBuffer 渲染回退 CPU 逐对象路径
-    // GPU Culling 结果仅用于 Readback（统计/调试），不直接驱动 DrawIndexedIndirect
-    m_LastVisibleCount = 0;
+    // 【T7】这里**不再**把 m_LastVisibleCount 清零。本派发已经把可见物体的间接命令与计数
+    // 直接写在 GPU 缓冲里，GBuffer 用 `DrawIndexedIndirectCount` 消费同一份计数（CPU 不参与
+    // 条数决定）。m_LastVisibleCount 只保留上一帧 Readback 读回的统计值（界面/日志显示）。
 }
 
 // ============================================================
@@ -595,8 +602,8 @@ void GPUCulling::DispatchPhase2(rhi::IRHICommandList* cmd, u32 screenW, u32 scre
     cmd->SetDrawDebugLabel(label);
     cmd->Dispatch(groups, 1, 1);
 
-    // Phase 2 完成后，最终可见物体数需要从 m_DrawCountBuf 读回
-    m_LastVisibleCount = 0;  // 延迟到 Readback 时更新
+    // 【T7】同 Dispatch：Phase 2 已把间接命令与计数写进 GPU 缓冲，绘制端直接消费该计数，
+    // 因此不再清零 m_LastVisibleCount（它只作为上一帧 Readback 的统计值）。
 }
 
 // ============================================================
@@ -630,6 +637,17 @@ void GPUCulling::Readback(rhi::IRHIDevice* device,
     void* dc   = dcBb ? dcBb->Map() : nullptr;
     if (dc) { count = *static_cast<u32*>(dc); if (auto* ub = ResB(m_DrawCountBuf)) ub->Unmap(); }
 
+    // 【T7 可观测性】这里读回的 count 是 GPU 剔除着色器写进计数缓冲的值（上一帧派发的结果），
+    // 不是 CPU 剔除结果 —— 它是"GPU 驱动路径确实在跑、且可见数非 0"的直接证据。
+    // 前两次（首帧 0 与第二帧的首个真实值）必打，之后每 120 帧打一次。
+    {
+        static u32 s_ReadbackTimes = 0;
+        ++s_ReadbackTimes;
+        if (s_ReadbackTimes <= 2u || s_ReadbackTimes % 120u == 0u) {
+            HE_CORE_INFO("GPU Cull: 可见 {} 个物体（GPU 计数缓冲读回，第 {} 次）", count, s_ReadbackTimes);
+        }
+    }
+
     if (count == 0) { m_LastVisibleCount = 0; return; }
     if (count > kMaxObjects) count = kMaxObjects;
 
@@ -641,6 +659,24 @@ void GPUCulling::Readback(rhi::IRHIDevice* device,
         auto* cmds = static_cast<IndirectDrawCommand*>(vi);
         for (u32 i = 0; i < count; ++i)
             outVisibleIndices[i] = cmds[i].firstInstance;
+        // 【T7 诊断】HE_T7_DEBUG=1 时打印前几条 GPU 写出的间接命令（前 3 次读回），
+        // 用于核对 indexCount/firstIndex/firstInstance 是否与合批一致（排查画面错乱）。
+        if (std::getenv("HE_T7_DEBUG")) {
+            static u32 s_DumpTimes = 0;
+            if (++s_DumpTimes <= 3u) {
+                const u32 n = (count < 8u) ? count : 8u;
+                for (u32 i = 0; i < n; ++i) {
+                    HE_CORE_INFO("[T7] 间接命令[{}]: indexCount={} instanceCount={} firstIndex={} "
+                                 "vertexOffset={} firstInstance={}",
+                                 i, cmds[i].indexCount, cmds[i].instanceCount, cmds[i].firstIndex,
+                                 cmds[i].vertexOffset, cmds[i].firstInstance);
+                }
+                // 完整可见集合（最多 64 条）：用于对照"开/关 Hi-Z"两个集合的差集
+                std::string ids;
+                for (u32 i = 0; i < count && i < 64u; ++i) ids += std::to_string(cmds[i].firstInstance) + " ";
+                HE_CORE_INFO("[T7] 可见集合({}): {}", count, ids);
+            }
+        }
         if (auto* ub = ResB(m_IndirectCmdBuf)) ub->Unmap();
     }
 
@@ -766,8 +802,9 @@ void GPUCulling::SignalPTG(rhi::IRHICommandList* cmd, const float4x4& viewProj,
     cmd->PipelineBarrier(
         rhi::PipelineStage::ComputeShader, rhi::PipelineStage::DrawIndirect,
         rhi::ResourceState::UnorderedAccess, rhi::ResourceState::IndirectArgument);
-    // PTG Signal 后清零, GBuffer 回退 CPU 逐对象路径
-    m_LastVisibleCount = 0;
+    // 【T7】PTG 已把间接命令与计数写进 GPU 缓冲，绘制端用 `DrawIndexedIndirectCount` 直接消费，
+    // 因此这里**不再**清零 m_LastVisibleCount（它只表示上一帧 Readback 的统计值）。
+    // 计数缓冲的清零由着色器在派发开头完成（见 PersistentCull.comp.slang 的 u_DrawCount[0] = 0）。
 }
 
 // ============================================================

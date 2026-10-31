@@ -20,6 +20,7 @@
 #include "Core/Assert.h"
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>   // 【T7 诊断】std::getenv（HE_T7_DEBUG）
 #include <chrono>   // 步骤 37：Lumen 计算 pass 的 CPU 录制分解
 #include <cstring>
 #include <algorithm>
@@ -118,24 +119,53 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
     m_PostProcess.GetMotionBlur().SetIntensity(camera.motionBlurIntensity);
     // exposureBias 叠加到 AutoExposure 输出（在 ToneMap Pass 前处理）
 
-    // GPUScene 收集 → [GPU 模式: 填充 IndirectDraw 参数] → 上传
+    // GPUScene 收集 → [GPU 模式: 按合批顺序重建对象表 + 填充 IndirectDraw 参数] → 上传
     // 【第③段】GPUScene 不再自建快照：直接消费管线本帧的快照（口径相同 —— 贴花排除已由
     // `BuildObjects` 的 `excludeDecals` 烘进快照），顺带省掉每帧一次重复的物体收集。
-    m_GPUScene.CollectFromSnapshot(FrameSnap());
+    //
     // MeshBatcher 的构建条件有三条：① GPU 模式要靠它填 IndirectDraw 参数；
     // ② **Lumen 的 Mesh SDF 构建需要这份 CPU 侧几何**（步骤 8）——CPU GBuffer 模式下
     //    绘制不走它，但 SDF 仍然要有几何输入，否则距离场队列为空（实测就是这么发现的）；
     // ③ **Nanite 的资产构建也要这份合并几何**（§14.8 任务 12）：模块只把它当**一次性输入**，
     //    且这条条件带 `enabled`，所以关闭档下这一行与今天逐字等价（§14.2 不变式 1）。
+    //
+    // 【T7 顺序】GPU 模式的合批必须在 GPUScene 收集**之前**建好：对象表要按合批顺序（= 间接命令
+    // `firstInstance` = 物体缓冲下标）重排。故这里把"先 Collect 再 Build"改成"GPU 模式先 Build"。
+    const bool gpuGBufferMode = (m_GBuffer->GetMode() == GBufferRenderer::Mode::GPU);
     const bool lumenNeedsGeometry = m_GIConfig.diffuse.Has(GISourceId::Lumen)
                                  || m_GIConfig.specular.Has(GISourceId::Lumen);
     const bool naniteNeedsGeometry = m_Nanite.GetSettings().enabled && m_Nanite.IsReady();
-    if (m_GBuffer->GetMode() == GBufferRenderer::Mode::GPU) {
-        if (!m_BatchBuilt) { m_MeshBatcher.Build(FrameSnap(), m_MeshRegistry, m_ExcludeDecalCards); m_BatchBuilt = true; }
-        m_MeshBatcher.FillGPUScene(m_GPUScene);  // 在 Upload 前写入 draw 参数
-    } else if ((lumenNeedsGeometry || naniteNeedsGeometry) && !m_BatchBuilt) {
-        m_MeshBatcher.Build(FrameSnap(), m_MeshRegistry, m_ExcludeDecalCards);   // 供 Lumen 的 SDF / Nanite 的资产使用
+    if (gpuGBufferMode && !m_BatchBuilt) {
+        m_MeshBatcher.Build(FrameSnap(), m_MeshRegistry, m_ExcludeDecalCards);
         m_BatchBuilt = true;
+    }
+    if (gpuGBufferMode) {
+        // 【T7】按合批顺序重建对象表：GPUScene 下标 / 间接命令 firstInstance / 物体缓冲下标三者对齐。
+        // 旧实现用 `CollectFromSnapshot`（快照全量顺序）+ CPU 裁剪后的可见子集物体缓冲 ⇒ 错位。
+        m_GPUScene.CollectBatchedFromSnapshot(FrameSnap(), m_MeshBatcher.GetBatchSnapshotIndices());
+        m_MeshBatcher.FillGPUScene(m_GPUScene);  // 在 Upload 前写入 draw 参数（同序）
+        // 【T7 诊断】HE_T7_DEBUG=1：打印对象表前几条（objectID / 绘制参数 / 包围盒），
+        // 用来核对「合批序号 = objectID = 间接命令 firstInstance」这条契约。
+        if (std::getenv("HE_T7_DEBUG")) {
+            static u32 s_DumpTimes = 0;
+            if (++s_DumpTimes <= 3u) {
+                const auto& objs = m_GPUScene.GetObjects();
+                const u32 n = (u32)std::min<size_t>(objs.size(), 8u);
+                for (u32 i = 0; i < n; ++i) {
+                    HE_CORE_INFO("[T7] GPUScene[{}]: objectID={} indexCount={} firstIndex={} "
+                                 "vertexOffset={} meshIndex={} boundsMin=({:.1f},{:.1f},{:.1f})",
+                                 i, objs[i].objectID, objs[i].indexCount, objs[i].firstIndex,
+                                 objs[i].vertexOffset, objs[i].meshIndex,
+                                 objs[i].boundsMin.x, objs[i].boundsMin.y, objs[i].boundsMin.z);
+                }
+            }
+        }
+    } else {
+        m_GPUScene.CollectFromSnapshot(FrameSnap());
+        if ((lumenNeedsGeometry || naniteNeedsGeometry) && !m_BatchBuilt) {
+            m_MeshBatcher.Build(FrameSnap(), m_MeshRegistry, m_ExcludeDecalCards);   // 供 Lumen 的 SDF / Nanite 的资产使用
+            m_BatchBuilt = true;
+        }
     }
     m_GPUScene.Upload(m_Device);
 
