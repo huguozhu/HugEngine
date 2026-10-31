@@ -67,6 +67,12 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
     m_GBuffer = std::make_unique<GBufferRenderer>();
     m_GBuffer->Initialize(device, m_Width, m_Height);
 
+    // 【T8】从这里开始进入"启动阶段批量预编译"窗口：窗口内创建 PSO 的 pass 只登记占位句柄，
+    // 编译由后台预编译线程与下面的初始化工作并行完成，窗口结束时（Initialize 末尾）统一落地。
+    // 位置必须在 GBuffer 之后：下面的 InitializeDGC 要用 GBuffer 的 PSO 对象（DGC 执行集）。
+    // 不支持该能力的后端（默认实现为空操作）保持原来的同步创建行为。
+    device->BeginPSOPrecompileBatch();
+
     // 硬件 MSAA：覆盖纹理和 PSO 的 sampleCount（委托给 PostProcessChain）
     if (m_PostProcess.IsMSAAEnabled()) {
         HE_CORE_INFO("DeferredPipeline: MSAA enabled (HDR 目标多采样，GBuffer 保持 1x)");
@@ -464,12 +470,11 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
     m_ParticleRenderer.Initialize(device);
     m_ParticleRenderer.SetSceneDepth(m_Lighting.GetHDRDepth(), m_Lighting.GetPointSampler());  // 软粒子深度纹理
 
-    // 启动 PSO 后台预热（目前**只有 SSAO** 调用了 PrecompileQueuePSO 注册变体：
-    // SSAO.cpp:144/167/196 的三个变体；原文写"所有子系统已调用"与事实不符，故改准）
-    // 另注：worker 用 setLayoutCount = 0 建简化管线，与真实（带描述符布局的）PSO 不会命中同一
-    // 缓存条目 ⇒ 即便恢复本调用，对真实管线的预热收益也有限（详见
-    // docs/HugEngine引擎介绍/15.多线程架构与渲染实现分析.md 的 §7.1）
-    // 注意：本机（Intel Arc B370 + 该版驱动）预编译 worker 线程会在
+    // 启动 PSO 后台预热。**D3D12 下真正的覆盖面来自上面的 BeginPSOPrecompileBatch**：
+    // 初始化窗口内创建的 PSO 全部登记进预编译队列（代码见 D3D12Device::CreatePipelineStateHandle），
+    // 日志里的「PSO 预编译完成 N / N」就是这些 PSO 的数量；SSAO 仍显式注册它的三个惰性变体。
+    // 这行 StartPSOPrecompile 是给"没有批处理窗口"的后端/路径兜底的（已在跑时是空操作）。
+    // 注意：本机（Intel Arc B370 + 该版驱动）Vulkan 预编译 worker 线程会在
     // igc-default64.dll 内随机 SIGSEGV（约 50% 概率，见 gdb 栈：线程 27 编译器崩溃），
     // 导致 02.Cube 启动随机崩溃。预编译是纯优化（PSO 缓存已按 hash 去重，
     // 禁用后 PSO 仅在首次使用时惰性编译），故本机禁用。稳定驱动上可恢复。
@@ -485,6 +490,10 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
         HE_CORE_WARN("DeferredPipeline: NaniteRenderer 骨架初始化失败，Nanite 不可用");
     }
 
+    // 【T8】关闭批量预编译窗口：等后台线程把这些 PSO 编译完，再把占位句柄统一落地。
+    // 必须在 m_Ready = true 之前：首帧开始渲染时所有 PSO 必须已经可用（不改变画面）。
+    device->EndPSOPrecompileBatch();
+
     m_Ready = true;
     HE_CORE_INFO("DeferredPipeline initialized");
     return true;
@@ -494,6 +503,10 @@ void DeferredPipeline::Shutdown() {
     // 【空保护】m_Device 可能为空（Shutdown 被调用两次，或 Initialize 失败后进入清理路径），
     // 直接解引用会崩溃（实测：02.Cube 退出时连续崩在多个 Shutdown 里）。
     if (!m_Device) return;
+
+    // 【T8】初始化中途失败时批量预编译窗口可能还开着：先正常收尾（等后台线程、落地占位句柄），
+    // 否则后台线程会一直等新登记，设备析构时才被唤醒
+    m_Device->EndPSOPrecompileBatch();
 
     // GI Provider 生命周期遍历（§12 架构前置）：Provider 自持的资源（如 Lumen 的
     // Surface Cache atlas / SDF clipmap）必须在这里释放。**必须早于底层 pass 的 Shutdown**

@@ -14,6 +14,7 @@
 #include <vector>
 #include <mutex>   // 多线程录制：设备分配加锁
 #include <thread>  // PSO 后台预编译线程
+#include <condition_variable>   // 批量预编译：后台线程等待新登记
 #include <atomic>
 #include <unordered_map>
 #include <map>     // 缓冲 GPU 地址登记（按起始地址有序查找）
@@ -512,14 +513,15 @@ public:
     void  StartPSOPrecompile() override;
     /// 预编译进度（0 ~ 1）
     float GetPSOPrecompileProgress() const override;
+    /// 【T8】启动阶段批量预编译：批内的 CreatePipelineStateHandle 只返回占位句柄并把描述
+    /// 交给后台线程（与初始化工作并行编译），End 时等后台完成再统一落地
+    void  BeginPSOPrecompileBatch() override;
+    void  EndPSOPrecompileBatch() override;
     /// 取 / 存 PSO 缓存块（PSO 创建时调用；线程安全）
     bool  FindPsoBlob(u64 hash, std::vector<u8>& out) const;
     void  StorePsoBlob(u64 hash, ID3D12PipelineState* pso);
-    /// 实例序号缓冲（懒创建）：第 i 个 u32 为 i，供顶点着色器取含起始实例的实例号
-    D3D12_VERTEX_BUFFER_VIEW GetInstanceIndexBufferView();
-    /// 序号缓冲容量（实例号上限）：覆盖对象号（kGPUMaxObjects）、Nanite 簇号（kNaniteMaxBVHClusters）
-    /// 与实例化网格的实例数；超出时 IA 越界读到 0
-    static constexpr u32 kInstanceIndexCount = 1u << 20;
+    // 【T6 已移除】GetInstanceIndexBufferView / kInstanceIndexCount：实例号绕行用的
+    // 0,1,2,… 逐实例序号缓冲已不需要（顶点着色器用 SV_StartInstanceLocation 取起始实例号）
 private:
     /// 等待 GPU 执行完才能释放的对象（见 DeferRelease）
     struct DeferredRelease {
@@ -557,12 +559,23 @@ private:
         PipelineStateDesc desc;
         std::vector<std::unique_ptr<ShaderBytecode>> shaders;
     };
+    /// 把描述复制成一项预编译（深拷贝着色器字节码并把 desc 的指针改指向副本）
+    static std::unique_ptr<PrecompileItem> MakePrecompileItem(const PipelineStateDesc& desc);
+    /// 把一项预编译放进队列并唤醒后台线程（调用方已持有 m_PrecompileMutex 时用 Locked 版本）
+    void PushPrecompileItemLocked(std::unique_ptr<PrecompileItem> item);
+    /// 等后台预编译线程结束（批处理关闭后调用；线程已结束则直接返回）
+    void JoinPSOPrecompile();
     std::vector<std::unique_ptr<PrecompileItem>> m_PrecompileQueue;
     std::mutex                 m_PrecompileMutex;
+    std::condition_variable    m_PrecompileCv;      // 后台线程：队列空但批还没关闭时等待
     std::thread                m_PrecompileThread;
     std::atomic<u32>           m_PrecompileDone{ 0 };
     std::atomic<u32>           m_PrecompileTotal{ 0 };
     std::atomic<bool>          m_PrecompileStop{ false };
+    /// 批量预编译是否打开（Begin 打开、End 关闭）：打开期间后台线程不因队列暂时为空而退出
+    bool                       m_PrecompileOpen = false;
+    /// 启动阶段是否把 PSO 创建推迟到批处理末尾（只有主线程读写；创建走后台线程 + 末尾落地）
+    bool                       m_DeferPsoCreates = false;
     /// 预编译得到的 PSO 缓存块（键 = 描述哈希）：之后创建同一 PSO 时作为 CachedPSO 传入，跳过着色器编译
     mutable std::mutex                          m_PsoBlobMutex;
     std::unordered_map<u64, std::vector<u8>>    m_PsoBlobs;
@@ -570,7 +583,6 @@ private:
     std::recursive_mutex m_RecordMutex;
     class D3D12Buffer* m_LastUploadedObject = nullptr;
     ComPtr<ID3D12Resource> m_ZeroVertexBuffer;   // 懒创建的 64 字节全零缓冲
-    ComPtr<ID3D12Resource> m_InstanceIndexBuffer;   // 懒创建的实例序号缓冲（0,1,2…）
     u32                    m_HighestShaderModel = 0;   // D3D_SHADER_MODEL（如 0x68 = SM 6.8）
     // 逐 mip RTV 池（CreateTextureMipStorageView 分配、DestroyTextureMipView 回收）
     static constexpr u32 kMipRtvCapacity = 1024;

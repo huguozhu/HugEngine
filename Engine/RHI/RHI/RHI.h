@@ -130,6 +130,15 @@ public:
     // ProcessPSOCreateQueue 在拥有线程上真正创建后填充它。未实现该能力的后端返回空句柄。
     virtual RHIPipelineStateHandle EnqueuePSOCreateHandle(const PipelineStateDesc& /*desc*/) { return {}; }
 
+    // --- 启动阶段的 PSO 批量预编译（T8）---
+    // 【用途】把"初始化阶段创建的全部 PSO"变成一次批处理：批内的 CreatePipelineStateHandle
+    //  只登记占位句柄，真正的编译交给后台预编译线程与初始化工作并行；End 时等后台完成、
+    //  再把占位句柄统一落地（此时命中驱动缓存块，创建很快）。
+    // 【默认实现】空操作：不支持预编译的后端（Vulkan 在本机驱动上会被引擎禁用）保持原有
+    //  同步创建行为，调用方无需按后端分支。
+    virtual void BeginPSOPrecompileBatch() {}
+    virtual void EndPSOPrecompileBatch() {}
+
     // --- Ray Tracing 资源创建 ---
     virtual std::unique_ptr<IRHIAccelerationStructure>
         CreateBLAS(const BLASBuildDesc& desc) = 0;                                // 创建 Bottom-Level Acceleration Structure

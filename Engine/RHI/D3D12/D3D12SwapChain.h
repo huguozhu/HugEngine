@@ -50,10 +50,14 @@ public:
     ID3D12Resource*      GetCurrentBackBufferResource() const;
     D3D12_RESOURCE_STATES GetBackBufferState() const { return m_BackBufferState; }
     void                 SetBackBufferState(D3D12_RESOURCE_STATES st) { m_BackBufferState = st; }
+    /// 某个资源是否为本交换链的后缓冲（命令列表据此把后缓冲的状态同步给交换链）
+    bool                 IsBackBuffer(const ID3D12Resource* res) const;
 
     /// 标记后缓冲已经被写成 RENDER_TARGET（命令列表 BeginRenderPass 时调用）。
     /// D3D12 的屏障要求 StateBefore 严格等于资源**当前**状态，猜错会让设备挂起
     /// （实测截图时猜 RENDER_TARGET、实际是 PRESENT ⇒ DEVICE_HUNG）。
+    /// 【T9】自后缓冲登记进设备资源状态表后，真正的事实来源是设备表（GetResourceState）；
+    /// 这个镜像仍要维护，因为命令流回放的 hint 走的是它。
     void MarkBackBufferRendered() { m_BackBufferState = D3D12_RESOURCE_STATE_RENDER_TARGET; }
 
     /// 【调试】按环境变量 HE_CAPTURE_FRAME=N 在第 N 帧把后缓冲存成 PNG。

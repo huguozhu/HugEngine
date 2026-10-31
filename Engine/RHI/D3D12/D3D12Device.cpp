@@ -225,6 +225,7 @@ static void CheckDeviceAlive(ID3D12Device* dev, const char* where) {
 D3D12Device::~D3D12Device() {
     // 先停下 PSO 预编译线程（它在用设备创建 PSO）
     m_PrecompileStop.store(true, std::memory_order_release);
+    m_PrecompileCv.notify_all();   // 批处理没关闭时线程正在条件变量上等：必须唤醒才能退出
     if (m_PrecompileThread.joinable()) m_PrecompileThread.join();
     // 退出前确保 GPU 空闲，否则销毁资源时驱动会报 use-after-free
     if (m_Queue) { m_Queue->Signal(nullptr, 0); }
@@ -470,6 +471,13 @@ bool D3D12Device::CreateDeviceAndQueue() {
                  m_Caps.maxBindlessResources, m_Caps.maxPushConstantsSize,
                  m_Caps.supportsRayTracing ? "支持" : "不支持",
                  m_Caps.supportsMeshShaders ? "支持" : "不支持", m_HighestShaderModel);
+    // 【T6】顶点着色器按 SM 6.8 编译（实例号用 SV_StartInstanceLocation，取代逐实例属性绕行）。
+    // 低于 6.8 的设备建不出这些顶点 PSO —— 这里明确报一次，避免只看到"PSO 创建失败"猜原因。
+    if (m_HighestShaderModel < static_cast<u32>(D3D_SHADER_MODEL_6_8)) {
+        HE_CORE_WARN("[D3D12] 本设备最高着色器模型 0x{:x} < 6.8：顶点着色器按 6.8 编译"
+                     "（SV_StartInstanceLocation），带顶点/实例的绘制会失败。请改用支持 SM 6.8 的适配器。",
+                     m_HighestShaderModel);
+    }
     return true;
 }
 
@@ -523,9 +531,25 @@ std::unique_ptr<IRHICommandList> D3D12Device::CreateCommandList(QueueType queue)
 }
 
 void D3D12Device::PrecompileQueuePSO(const PipelineStateDesc& desc) {
+    auto item = MakePrecompileItem(desc);
+    {
+        std::lock_guard<std::mutex> lock(m_PrecompileMutex);
+        PushPrecompileItemLocked(std::move(item));
+    }
+    // 后台线程可能正因队列暂时为空而等待（批处理未关闭）：唤醒它取走新登记的一项
+    m_PrecompileCv.notify_one();
+}
+
+// ---------------------------------------------------------------------------
+//  MakePrecompileItem —— 把一份 PSO 描述变成"自持字节码"的预编译项
+//
+//  调用方（各 pass 的 Initialize）传进来的 ShaderBytecode 常常是**栈上对象**，函数返回后即失效；
+//  后台线程 / 批处理末尾落地时再去读就是悬垂指针。这里把每个着色器字节码深拷贝一份，
+//  并把 desc 里的指针改指向副本，之后无论何时创建都不会读到失效内存。
+// ---------------------------------------------------------------------------
+std::unique_ptr<D3D12Device::PrecompileItem> D3D12Device::MakePrecompileItem(const PipelineStateDesc& desc) {
     auto item = std::make_unique<PrecompileItem>();
     item->desc = desc;
-    // 着色器字节码深拷贝：调用方传的往往是栈上 / 临时对象，后台编译时早已失效
     ShaderBytecode** slots[] = { &item->desc.vertexShader, &item->desc.pixelShader, &item->desc.computeShader,
                                  &item->desc.meshShader, &item->desc.amplificationShader };
     for (ShaderBytecode** slot : slots) {
@@ -533,7 +557,11 @@ void D3D12Device::PrecompileQueuePSO(const PipelineStateDesc& desc) {
         item->shaders.push_back(std::make_unique<ShaderBytecode>(**slot));
         *slot = item->shaders.back().get();
     }
-    std::lock_guard<std::mutex> lock(m_PrecompileMutex);
+    return item;
+}
+
+// 调用方必须已持有 m_PrecompileMutex
+void D3D12Device::PushPrecompileItemLocked(std::unique_ptr<PrecompileItem> item) {
     m_PrecompileQueue.push_back(std::move(item));
     m_PrecompileTotal.store(static_cast<u32>(m_PrecompileQueue.size()), std::memory_order_release);
 }
@@ -542,17 +570,24 @@ void D3D12Device::StartPSOPrecompile() {
     if (m_PrecompileThread.joinable()) return;   // 已在运行 / 已跑完
     {
         std::lock_guard<std::mutex> lock(m_PrecompileMutex);
-        if (m_PrecompileQueue.empty()) return;
+        // 批处理打开时即使队列暂时为空也要启动：调用方会在初始化过程中陆续登记
+        if (m_PrecompileQueue.empty() && !m_PrecompileOpen) return;
     }
     // ID3D12Device 的创建接口是线程安全的：后台线程逐个创建 PSO，取出驱动的缓存块后丢弃 PSO 对象。
     // 主线程之后创建同一 PSO 时用缓存块作 CachedPSO，跳过 DXIL → 机器码的编译
     m_PrecompileThread = std::thread([this]() {
         size_t i = 0;
-        while (!m_PrecompileStop.load(std::memory_order_acquire)) {
+        for (;;) {
             PrecompileItem* item = nullptr;
             {
-                std::lock_guard<std::mutex> lock(m_PrecompileMutex);
-                if (i >= m_PrecompileQueue.size()) break;
+                std::unique_lock<std::mutex> lock(m_PrecompileMutex);
+                // 【T8】批处理打开期间队列空也要继续等，否则后台线程会在初始化还没登记完时提前退出
+                m_PrecompileCv.wait(lock, [this, i] {
+                    return m_PrecompileStop.load(std::memory_order_acquire) ||
+                           i < m_PrecompileQueue.size() || !m_PrecompileOpen;
+                });
+                if (m_PrecompileStop.load(std::memory_order_acquire)) break;
+                if (i >= m_PrecompileQueue.size()) break;   // 批已关闭且队列已空
                 item = m_PrecompileQueue[i++].get();
             }
             D3D12PipelineState pso;
@@ -561,6 +596,49 @@ void D3D12Device::StartPSOPrecompile() {
         }
         HE_CORE_INFO("[D3D12] PSO 预编译完成：{} / {}", m_PrecompileDone.load(), m_PrecompileTotal.load());
     });
+}
+
+void D3D12Device::JoinPSOPrecompile() {
+    if (m_PrecompileThread.joinable()) m_PrecompileThread.join();
+}
+
+// ---------------------------------------------------------------------------
+//  【T8】启动阶段批量预编译
+//
+//  为什么需要：初始化阶段各 pass 都是"同步创建 PSO"，一个接一个地等驱动编译（Debug 下每个
+//  数十毫秒到上百毫秒），启动时间被串行累加。这里把初始化阶段的 PSO 创建改成：
+//    · Begin 之后：CreatePipelineStateHandle 只登记一个占位句柄，并把描述交给后台预编译线程；
+//    · 后台线程与初始化工作并行编译（每个 PSO 编完把驱动缓存块存进 m_PsoBlobs）；
+//    · End 时关掉批处理、等后台线程结束，再把占位句柄统一落地（用缓存块创建很快）。
+//  这样总耗时从"Σ 编译"变成"max(其余初始化工作, Σ 编译) + 低成本落地"。
+// ---------------------------------------------------------------------------
+void D3D12Device::BeginPSOPrecompileBatch() {
+    {
+        std::lock_guard<std::mutex> lock(m_PrecompileMutex);
+        m_PrecompileOpen    = true;
+        m_DeferPsoCreates = true;
+    }
+    StartPSOPrecompile();   // 先起线程：之后每次登记都会被它立刻取走编译
+    HE_CORE_INFO("[D3D12] PSO 批量预编译开始：初始化阶段的 PSO 创建改为后台编译 + 末尾落地");
+}
+
+void D3D12Device::EndPSOPrecompileBatch() {
+    if (!m_DeferPsoCreates && !m_PrecompileOpen) return;
+    {
+        std::lock_guard<std::mutex> lock(m_PrecompileMutex);
+        m_PrecompileOpen    = false;
+        m_DeferPsoCreates = false;
+    }
+    m_PrecompileCv.notify_all();
+    JoinPSOPrecompile();   // 等后台把所有登记项编译完（缓存块已存好）
+
+    // 落地所有占位句柄：此时命中 CachedPSO，驱动直接取编译结果
+    const u32 pending = static_cast<u32>(m_PendingPsoHandleCreates.size());
+    if (pending > 0) {
+        auto created = ProcessPSOCreateQueue(pending);
+        HE_CORE_INFO("[D3D12] PSO 批量预编译落地：{} 个占位句柄已创建（缓存命中）", pending);
+        (void)created;
+    }
 }
 
 float D3D12Device::GetPSOPrecompileProgress() const {
@@ -1175,6 +1253,22 @@ void D3D12Device::DestroyRTPipelineStateHandle(RHIRayTracingPipelineHandle handl
 }
 
 RHIPipelineStateHandle D3D12Device::CreatePipelineStateHandle(const PipelineStateDesc& desc) {
+    // 【T8】批量预编译窗口内：主线程不编译，只登记占位句柄并把描述交给后台线程。
+    //  描述里的着色器指针往往指向调用方的栈上对象，必须先深拷贝（MakePrecompileItem）；
+    //  副本由 m_PrecompileQueue 一直持有到设备销毁，EndPSOPrecompileBatch 落地时仍有效。
+    if (m_DeferPsoCreates) {
+        auto item = MakePrecompileItem(desc);
+        RHIPipelineStateHandle h{};
+        h.index = m_PipelineStates.Acquire(nullptr, h.generation);   // 占位：载荷为空
+        if (h.index == 0) return {};
+        m_PendingPsoHandleCreates.emplace_back(h, item->desc);
+        {
+            std::lock_guard<std::mutex> lock(m_PrecompileMutex);
+            PushPrecompileItemLocked(std::move(item));
+        }
+        m_PrecompileCv.notify_one();
+        return h;
+    }
     auto obj = CreatePipelineState(desc);
     if (!obj) return {};
     RHIPipelineStateHandle h{};
@@ -1889,43 +1983,6 @@ D3D12_VERTEX_BUFFER_VIEW D3D12Device::GetZeroVertexBufferView() {
         v.BufferLocation = m_ZeroVertexBuffer->GetGPUVirtualAddress();
         v.SizeInBytes    = 64;
         v.StrideInBytes  = 0;   // 每个顶点都读同一份 0
-    }
-    return v;
-}
-
-D3D12_VERTEX_BUFFER_VIEW D3D12Device::GetInstanceIndexBufferView() {
-    std::lock_guard<std::recursive_mutex> lock(m_RecordMutex);   // 多线程录制：懒创建加锁
-    D3D12_VERTEX_BUFFER_VIEW v{};
-    constexpr UINT64 kBytes = static_cast<UINT64>(kInstanceIndexCount) * sizeof(u32);
-    if (!m_InstanceIndexBuffer && m_Device) {
-        // 与零缓冲一样放 UPLOAD 堆：只读，创建时写一次序号（引擎的顶点缓冲也在 UPLOAD 堆）
-        D3D12_HEAP_PROPERTIES hp{};
-        hp.Type = D3D12_HEAP_TYPE_UPLOAD;
-        hp.CreationNodeMask = 1;
-        hp.VisibleNodeMask  = 1;
-        D3D12_RESOURCE_DESC rd{};
-        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-        rd.Width = kBytes;
-        rd.Height = 1; rd.DepthOrArraySize = 1; rd.MipLevels = 1;
-        rd.Format = DXGI_FORMAT_UNKNOWN;
-        rd.SampleDesc = { 1, 0 };
-        rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-        if (SUCCEEDED(m_Device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
-                D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&m_InstanceIndexBuffer)))) {
-            void* p = nullptr;
-            D3D12_RANGE noRead{ 0, 0 };
-            if (SUCCEEDED(m_InstanceIndexBuffer->Map(0, &noRead, &p)) && p) {
-                u32* dst = static_cast<u32*>(p);
-                for (u32 i = 0; i < kInstanceIndexCount; ++i) dst[i] = i;
-                m_InstanceIndexBuffer->Unmap(0, nullptr);
-            }
-            m_InstanceIndexBuffer->SetName(L"HE_InstanceIndex");
-        }
-    }
-    if (m_InstanceIndexBuffer) {
-        v.BufferLocation = m_InstanceIndexBuffer->GetGPUVirtualAddress();
-        v.SizeInBytes    = static_cast<UINT>(kBytes);
-        v.StrideInBytes  = sizeof(u32);
     }
     return v;
 }

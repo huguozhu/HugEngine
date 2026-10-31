@@ -97,6 +97,19 @@ bool D3D12SwapChain::CreateBuffers() {
             return false;
         }
         dev->CreateRenderTargetView(m_Buffers[i].Get(), nullptr, rtv);
+        // 【T9：后缓冲也进设备的资源状态表】
+        //  D3D12 的屏障要求 StateBefore 严格等于资源**实际**状态，而此前后缓冲有两套记录：
+        //  交换链自己的 m_BackBufferState（只有 BeginRenderPass / Present 写），以及设备的
+        //  状态表（BeginOffscreenPass 系经 FindViewResource 反查、找不到就跳过）。后缓冲的
+        //  RTV 从没登记过，于是：
+        //    · 若某帧只用 BeginOffscreenPass 写后缓冲，实际状态被改成 RENDER_TARGET 却无人记录
+        //      （或干脆没做转换），截图与 Present 的屏障就会声明错状态（调试层 id=527，
+        //      约 6 次运行出现 1 次）；
+        //    · 两套记录还可能对不上。
+        //  统一做法：后缓冲的每个 RTV/资源都登记进设备表，状态以设备表为唯一事实来源。
+        //  初始状态是 PRESENT（等价于 COMMON，DXGI 的 FLIP 模型在首次 Present 前就是这个语义）。
+        m_Device->RegisterViewResource(static_cast<UINT64>(rtv.ptr), m_Buffers[i].Get());
+        m_Device->SetResourceState(m_Buffers[i].Get(), D3D12_RESOURCE_STATE_PRESENT);
         rtv.ptr += m_RtvSize;
     }
     return true;
@@ -109,6 +122,12 @@ void D3D12SwapChain::Resize(u32 width, u32 height) {
 
     // 重建前必须等 GPU 空闲，否则会在用中的资源上做 ResizeBuffers
     m_Device->WaitIdle();
+    // 旧后缓冲的 RTV 将随堆一起重建：先把设备状态表里的登记与状态清掉，
+    // 否则同一 CPU 句柄地址会被新资源复用，状态表里却还留着旧资源的状态记录
+    if (m_RtvHeap) {
+        for (u32 i = 0; i < m_Buffers.size(); ++i)
+            m_Device->UnregisterViewResource(static_cast<UINT64>(GetRtv(i).ptr));
+    }
     for (auto& b : m_Buffers) b.Reset();
 
     if (FAILED(m_SwapChain->ResizeBuffers(m_BufferCount, width, height,
@@ -120,6 +139,8 @@ void D3D12SwapChain::Resize(u32 width, u32 height) {
     m_Width = width;
     m_Height = height;
     m_Index = m_SwapChain->GetCurrentBackBufferIndex();
+    // 新后缓冲的初始状态是 PRESENT/COMMON（CreateBuffers 里会重新登记设备状态）
+    m_BackBufferState = D3D12_RESOURCE_STATE_PRESENT;
     CreateBuffers();
     HE_CORE_INFO("D3D12 交换链已重建 {}x{}", width, height);
 }
@@ -146,8 +167,18 @@ void D3D12SwapChain::Present(bool vsync) {
     if (!m_SwapChain) return;
     if (m_Device) m_Device->FlushRetired();   // 回收延迟释放的资源（会 WaitIdle，只能在渲染线程做）
     const u32 index = RecordIndex();
-    const D3D12_RESOURCE_STATES before = m_BackBufferState;
+    // 【T9：真实状态以设备的资源状态表为准】交换链的 m_BackBufferState 只是一份镜像
+    //（命令流回放要用它，见 BeginRenderPass 的 hinted 路径）。此前后缓冲只在这里与
+    // BeginRenderPass 里记录状态，一旦某帧经 BeginOffscreenPass 把后缓冲当附件写，
+    // 实际状态变成 RENDER_TARGET 却无人登记 ⇒ 截图列表声明 PRESENT 与实际不符（id=527）。
+    // 现在设备表在每次转换后都会被更新，Present 直接查它。
+    ID3D12Resource* bb = (index < m_Buffers.size()) ? m_Buffers[index].Get() : nullptr;
+    const D3D12_RESOURCE_STATES before =
+        (m_Device && bb) ? m_Device->GetResourceState(bb) : m_BackBufferState;
     m_BackBufferState = D3D12_RESOURCE_STATE_PRESENT;
+    // 渲染线程侧就登记成 PRESENT：本帧在 GPU 上的最后一步是"后缓冲 → PRESENT"，
+    // 下一帧录制 BeginRenderPass 时读到的正是这个值
+    if (m_Device && bb) m_Device->SetResourceState(bb, D3D12_RESOURCE_STATE_PRESENT);
     ISubmitRouter* router = m_Device ? m_Device->GetSubmitRouter() : nullptr;
     if (router && router->RoutePresent(this, index, reinterpret_cast<void*>(static_cast<uintptr_t>(before)), vsync)) {
         m_PresentRouted = true;
@@ -157,6 +188,14 @@ void D3D12SwapChain::Present(bool vsync) {
     m_PresentRouted = false;
     PresentNow(index, before, vsync);
     m_Index = m_SwapChain->GetCurrentBackBufferIndex();
+}
+
+bool D3D12SwapChain::IsBackBuffer(const ID3D12Resource* res) const {
+    if (!res) return false;
+    for (const auto& b : m_Buffers) {
+        if (b.Get() == res) return true;
+    }
+    return false;
 }
 
 void D3D12SwapChain::PresentNow(u32 index, D3D12_RESOURCE_STATES before, bool vsync) {
@@ -189,6 +228,7 @@ void D3D12SwapChain::PresentNow(u32 index, D3D12_RESOURCE_STATES before, bool vs
             if (ok) m_PresentList->SetName(L"HugEngine 呈现屏障列表");   // DRED / RenderDoc 里据此识别
             ok = ok && SUCCEEDED(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_PresentFence)));
             if (!ok) m_PresentList.Reset();
+            if (!ok) HE_CORE_ERROR("[D3D12] 呈现屏障列表创建失败：后缓冲将停在 RENDER_TARGET（状态会与实际不符）");
         }
         if (bb && q && m_PresentList) {
             // 轮换槽位；该槽位的分配器必须等 GPU 执行完上一次的屏障后才能 Reset
@@ -215,7 +255,12 @@ void D3D12SwapChain::PresentNow(u32 index, D3D12_RESOURCE_STATES before, bool vs
                 q->ExecuteCommandLists(1, lists);
                 m_PresentFenceValues[m_PresentSlot] = m_PresentNextValue;
                 q->Signal(m_PresentFence.Get(), m_PresentNextValue++);
+            } else {
+                // 【T9】静默跳过会让"实际状态仍是 RENDER_TARGET"却无人记录，后面的屏障全部错位
+                HE_CORE_ERROR("[D3D12] 呈现屏障的命令分配器/列表重置失败：后缓冲未转回 PRESENT");
             }
+        } else if (!bb || !q) {
+            HE_CORE_ERROR("[D3D12] 呈现屏障缺少后缓冲或队列：后缓冲未转回 PRESENT");
         }
     }
 
