@@ -1,4 +1,4 @@
-﻿// ============================================================
+// ============================================================
 // 03.Sponza-Forward — 加载 Sponza glTF 场景，自由相机漫游
 //
 // 使用 glTFLoader (cgltf) 加载完整的 Sponza 场景，
@@ -432,6 +432,21 @@ int main() {
     pipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
 
     // ============================================================
+    // 【P7】HE_NO_INDIRECT=1 —— 关掉 GPU 驱动的 ExecuteIndirect 绘制
+    //
+    // 并行录制（MTCR）的 bundle 路径只录制 `filteredItems` 里的逐 draw 命令，**不**走
+    // ExecuteIndirect；而 `m_UseExecuteIndirect` 默认为 true，于是串行路径走的是 GPU 驱动
+    // 的间接绘制分支。两条路径的 draw 来源不同，截图自然对不上（实测 1080p 里 78% 像素不同）。
+    // 做「并行录制 vs 串行录制」的干净 A/B 时，必须先把 draw 来源统一成逐 draw：
+    // 这个开关把 indirect 关掉，串行路径就落到与 bundle 完全相同的逐 draw 循环上，
+    // 唯一的差别只剩「谁录这条命令」。
+    // ============================================================
+    if (std::getenv("HE_NO_INDIRECT")) {
+        pipeline.SetUseExecuteIndirect(false);
+        HE_CORE_INFO("ExecuteIndirect 已关闭（HE_NO_INDIRECT=1）：串行/并行走同一份逐 draw 来源");
+    }
+
+    // ============================================================
     // 5.5 RT 路径初始化（Ray Tracing 渲染 Path）
     // ============================================================
     bool rtSupported = device->GetCaps().supportsRayTracing;
@@ -582,6 +597,22 @@ int main() {
     bool   animCameraMode = false; // T 键切换：动画相机模式（默认关闭）
 
     // ============================================================
+    // 【P7】HE_NO_CAM_ANIM=1 —— 把相机钉死在配置文件给出的位姿上
+    //
+    // 并行录制（MTCR）的 A/B 需要「同一帧号 = 同一位姿」，否则两趟截图无法逐像素对比。
+    // 本样例默认已经是手动相机（动画相机要按 T 才切换、clip 默认不播放），但下面三条路径
+    // 都可能把相机交给动画：① 运行时按 T；② ImGui 面板的「播放动画」复选框；
+    // ③ 上一趟留在 imgui.ini 里的窗口状态。打开这个开关后每帧强制回手动相机并停播，
+    // 任何输入都改不回来 —— 位姿只由 cfg 的 cam_pos_*/cam_yaw/cam_pitch 决定。
+    // ============================================================
+    const bool noCamAnim = (std::getenv("HE_NO_CAM_ANIM") != nullptr);
+    if (noCamAnim) {
+        animCameraMode  = false;
+        camAnim->playing = false;
+        HE_CORE_INFO("相机动画已锁定为关闭（HE_NO_CAM_ANIM=1）：位姿固定为配置文件值");
+    }
+
+    // ============================================================
     // 9. 窗口调整回调
     // ============================================================
     // 【T2.4】回调跑在游戏线程，而里面全是 RHI（交换链 Resize / SetSwapChain / 管线 OnResize）
@@ -653,6 +684,11 @@ int main() {
         // 导致鼠标与键盘都无法操作相机。它属于游戏线程的帧前准备，必须在装配快照之前执行。
         // --- 相机控制 ---
         {
+            // 【P7】锁定模式：每帧先把动画相机按下去，保证这一帧的位姿只来自手动相机
+            if (noCamAnim) {
+                animCameraMode   = false;
+                camAnim->playing = false;
+            }
             // 右键拖拽旋转
             // 相机输入统一在 Samples/Common/CameraInput.h（六个样例共用，手感一致）；
             // 这里只保留样例自己的策略：T 键切换"动画相机 / 手动相机"。
