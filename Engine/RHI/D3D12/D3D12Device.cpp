@@ -909,16 +909,22 @@ void D3D12Device::Submit(IRHICommandList* cmdList, RHICommandList* stream) {
     auto* cl = static_cast<D3D12CommandList*>(cmdList);
     if (cl->IsStreamMode()) {
         if (!stream) stream = cl->GetRecordedStream();   // 必须在渲染线程上取：下一帧 Begin 会轮换命令流
-        // 命令流不交给 RHI 线程回放（原因见 D3D12CommandList::EnableCommandStream）。提交路由在本帧录制
-        // 期间才装上时会走到这里：先排空路由保证提交顺序，再在本线程就地回放提交
-        if (m_SubmitRouter) {
-            m_SubmitRouter->FlushAndWait();
-            ExecuteSubmit(cmdList, stream);
+        if (!stream) {
+            // 流模式却取不到流：宁可报错也不要静默丢整帧
+            HE_CORE_ERROR("[D3D12] 命令流模式提交时取不到命令流（帧被丢弃）");
             return;
         }
+        // 【T10】把录制期用过的描述符快照环块掩码随命令流交接：回放提交后据此登记围栏，
+        // 快照块在 GPU 用完之前不会被覆盖。必须在渲染线程上取（下一帧 Begin 会清掉它）。
+        stream->SetAuxMask(cl->GetStreamSetRingMask());
+        // 【T10】影子列表必须在渲染线程上先建出来：它的 CreateCommandList 会登记到设备的
+        // 命令列表表（非线程安全），若等 RHI 线程回放时才懒创建，会和渲染线程建计算列表并发。
+        (void)cl->GetReplayList();
     } else {
         cl->PackSubmission();
     }
+    // 【T10】模式 2（有提交路由）下命令流同样交给 RHI 线程回放：回放用到的描述符表句柄与
+    // 资源状态转换都已由录制线程在录制期解析进流，回放只按数据下指令（见 SubmitStreamReplay）。
     if (m_SubmitRouter && m_SubmitRouter->RouteSubmit(cmdList, stream)) return;
     ExecuteSubmit(cmdList, stream);
 }
@@ -926,22 +932,26 @@ void D3D12Device::Submit(IRHICommandList* cmdList, RHICommandList* stream) {
 void D3D12Device::ExecuteSubmit(IRHICommandList* cmdList, RHICommandList* stream) {
     if (!cmdList) return;
     auto* cl = static_cast<D3D12CommandList*>(cmdList);
-    if (cl->IsStreamMode()) {
-        if (stream) SubmitStreamReplay(cl, *stream);
+    // 【T10】带命令流一律走回放（录制期已解析完描述符表与资源状态，回放只按数据下指令）。
+    // 【为什么不再判 IsStreamMode()】提交被路由后，回放在 RHI 线程上执行，而录制线程可能已经进入
+    // 下一帧并改过 m_StreamMode —— 那个判断在这里是跨线程读，直接以"有没有流"为准更稳。
+    if (stream) {
+        SubmitStreamReplay(cl, *stream);
         return;
     }
     SubmitNow(cl);
-    // A-1：普通列表附带的命令流。列表已关闭、不能再往里录，回放到影子列表并紧随其后提交
-    if (stream) SubmitStreamReplay(cl, *stream);
 }
 
 void D3D12Device::SubmitStreamReplay(D3D12CommandList* src, const RHICommandList& stream) {
     D3D12CommandList* replay = src ? src->GetReplayList() : nullptr;
     if (!replay) return;
     replay->SetSwapChain(src->GetSwapChain());   // 后缓冲相关的 pass 依赖交换链
+    replay->MarkAsReplayList();                  // 【T10】回放侧跳过一切依赖当前引擎状态的解析
     replay->Begin();
     ReplayCommandStream(stream, *replay);
     replay->End();
+    // 【T10】录制期拍下的描述符快照块要在本次提交后由围栏回收：把掩码交给回放列表的提交包
+    replay->SetStreamSetRingMask(stream.AuxMask());
     replay->PackSubmission();
     SubmitNow(replay);
 }

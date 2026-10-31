@@ -93,6 +93,10 @@ enum class RHICommandType : u32 {
     CmdDrawMeshTasksIndirect    = 49,   // 载荷同 CmdDrawIndexedIndirect
     CmdDrawMeshTasksIndirectCount = 50, // 载荷同 CmdDrawIndexedIndirectCount
     CmdExecuteGeneratedCommands = 51,
+    // 【T10】D3D12 模式 2：录制期解析好的后端细节（回放侧不再查描述符集 / 设备状态表）
+    CmdResolvedBarrier          = 52,   // 一条已解析的原生资源屏障
+    CmdResolvedDescriptorTables = 53,   // 已拍下的描述符表快照 GPU 句柄（按帧分版本）
+    CmdResolvedRenderTargets    = 54,   // 已解析的 RTV/DSV 绑定（只读 DSV 切换等）
 };
 
 /// 一条命令的载荷：类型擦除 + **内联存储**。
@@ -154,6 +158,28 @@ struct RHICommandExecuteGeneratedCommands {
     u64 sequencesBufferAddr = 0; u64 sequenceCountAddr = 0;
     u64 preprocessBufferAddr = 0; u64 preprocessBufferSize = 0;
     u32 maxSequenceCount = 0; u32 maxDrawCount = 0;
+};
+/// 【T10】一条已解析的原生资源屏障：类型数值与 IRHICommandList::ResolvedBarrierType 一致
+/// （1 = 状态转换、2 = UAV、3 = 别名、4 = Discard）。before/after 是后端的状态枚举数值。
+struct RHICommandResolvedBarrier {
+    void* resource    = nullptr;
+    u32   type        = 1;
+    u32   subresource = 0xFFFFFFFFu;
+    u32   before      = 0;
+    u32   after       = 0;
+};
+/// 【T10】描述符表快照：录制线程已把描述符集内容拷进快照环，这里只带 GPU 句柄。
+/// `set` 是描述符集句柄（回放侧据此取采样器表基址，也可用于诊断）。
+struct RHICommandDescriptorTables {
+    u32 setIndex = 0; u32 pad = 0;
+    u64 set = 0; u64 srv = 0; u64 uav = 0; u64 sampler = 0;
+};
+/// 【T10】已解析的渲染目标绑定：RTV 数组放 arena（void* 数组），dsv 可为空
+struct RHICommandResolvedRenderTargets {
+    void* dsv        = nullptr;
+    u64   rtvsOffset = 0;
+    u32   count      = 0;
+    u32   pad        = 0;
 };
 
 /// L4-3 batch2: POD only (this header is RHI-free, so no Viewport/ScissorRect types)
@@ -287,6 +313,12 @@ public:
     [[nodiscard]] u64           ArenaCapacity() const { return m_ArenaCapacity; }
     [[nodiscard]] u8*           ArenaData() { return m_Arena; }
 
+    /// 后端辅助位：随命令流一起交接给回放端的少量标量（D3D12 用来携带
+    /// "本帧用过的描述符快照环块掩码"，回放提交后据此登记围栏，见 MarkSetRingChunks）。
+    /// 必须在录制线程上设置（提交前），回放线程只读。
+    [[nodiscard]] u32  AuxMask() const { return m_AuxMask; }
+    void SetAuxMask(u32 mask) { m_AuxMask = mask; }
+
     /// 按类型读回内联载荷（执行端用）。长度不匹配时返回 nullptr —— 用返回值而不是断言，
     /// 是因为执行端将来要能对**越界/损坏的命令流**容错（那一层不允许直接 abort）。
     template <typename TPayload>
@@ -320,6 +352,7 @@ public:
         m_Commands.clear();
         m_ArenaUsed = 0u;
         m_HasSubmit = false;
+        m_AuxMask   = 0u;
     }
 
 private:
@@ -332,6 +365,7 @@ private:
     u64                     m_ArenaCapacity = 0;
     u64                     m_ArenaUsed     = 0;
     bool                    m_HasSubmit     = false;     // 是否已标记提交边界
+    u32                     m_AuxMask       = 0;         // 后端辅助位（见 AuxMask 的说明）
 };
 
 } // namespace he::rhi

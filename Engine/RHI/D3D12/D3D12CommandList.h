@@ -187,6 +187,26 @@ public:
     D3D12CommandList* GetReplayList();
     IRHISwapChain* GetSwapChain() const { return m_SwapChain; }
 
+    // ---- 【T10】命令流在模式 2 下的"录制期解析"契约 ----
+    //  【问题】提交路由下回放落后录制线程最多两帧。若回放时再查描述符集内容 / 设备资源状态表，
+    //  用到的就是后面帧写入的数据 ⇒ 屏障 StateBefore 与描述符内容全部错位（实测挂起）。
+    //  【做法】录制线程在录制时完成全部依赖这两类可变数据的解析，并把结果编码进命令流：
+    //    · PrepareSetTables 在流模式下立即拍快照，编码 CmdResolvedDescriptorTables（按帧分版本）；
+    //    · EnsureBoundResourceStates / pass 附件转换 / 显式屏障 / 拷贝的转换在流模式下立即解析，
+    //      经 EmitBarrier 编码 CmdResolvedBarrier；
+    //    · 回放列表（m_StreamReplay）跳过上述所有解析，只按命令流里的数据下原生指令。
+    /// 标记本列表是命令流回放用的影子列表：跳过一切"依赖当前引擎状态"的解析
+    void MarkAsReplayList() { m_StreamReplay = true; }
+    bool IsStreamReplay() const { return m_StreamReplay; }
+    /// 录制期用过的描述符快照环块掩码：提交时转交给回放提交包，围栏到达后才允许覆盖
+    u32  GetStreamSetRingMask() const { return m_SetRingChunkMask; }
+    void SetStreamSetRingMask(u32 mask) { m_SetRingChunkMask = mask; }
+    /// 【T10】已解析数据的三条回放入口（见 IRHICommandList 的同名说明）
+    void ApplyResolvedBarrier(void* resource, ResolvedBarrierType type,
+                              u32 subresource, u32 before, u32 after) override;
+    void ApplyResolvedDescriptorTable(u32 setIndex, u64 set, u64 srv, u64 uav, u64 sampler) override;
+    void ApplyResolvedRenderTargets(void* const* rtvs, u32 count, void* dsv) override;
+
     // ---- 调试标签（PIX 事件格式：RenderDoc / PIX 显示为分组与标记，DRED 报告据此给出所在 pass）----
     void BeginDebugLabel(const char* name, const float color[4] = nullptr) override;
     void EndDebugLabel() override;
@@ -217,6 +237,37 @@ private:
     /// 绘制/派发前把缓存的根参数重新下发。D3D12 的 Set*RootSignature 会清空全部根参数，
     /// 而 Vulkan 切管线时兼容的绑定会保留 —— 引擎按 Vulkan 语义只绑一次，这里负责补齐。
     void FlushRootArgs();
+
+    // ---- 【T10】录制期解析与回放的辅助 ----
+    /// 把一条原生资源屏障送进当前录制：普通列表直接发原生屏障；流模式编码成 CmdResolvedBarrier
+    /// （之后回放按数据下发）；回放列表不会再走到这里（它只执行命令流里的屏障）。
+    void EmitBarrier(const D3D12_RESOURCE_BARRIER& barrier);
+    /// DiscardResource 的流式版本（别名激活的一部分）
+    void EmitDiscard(ID3D12Resource* res);
+    /// 流模式下把"已解析的 RTV/DSV 绑定"编码进命令流（只读 DSV 切换用）
+    void EmitResolvedRenderTargets(const D3D12_CPU_DESCRIPTOR_HANDLE* rtvs, u32 count,
+                                   const D3D12_CPU_DESCRIPTOR_HANDLE* dsv);
+    /// 流模式下把渲染目标的资源转到 RENDER_TARGET / DEPTH_WRITE（录制期查设备状态表并登记），
+    /// 同时发别名激活与后缓冲镜像同步。回放侧不再做这些事。
+    void ResolveAttachmentTransitions(const D3D12_CPU_DESCRIPTOR_HANDLE* rtvs, u32 rtvCount,
+                                      const D3D12_CPU_DESCRIPTOR_HANDLE* dsv);
+    /// 绑定 RTV/DSV、按当前 PSO 的 loadOp 清屏、设置整张目标的视口与裁剪。
+    /// 原生录制与命令流回放共用（回放侧状态转换已由录制期解析，这里只做纯绑定）。
+    void BindPassTargets(const D3D12_CPU_DESCRIPTOR_HANDLE* rtvs, u32 rtvCount,
+                         const D3D12_CPU_DESCRIPTOR_HANDLE* dsv,
+                         u32 width, u32 height, const ClearValue* clears);
+    /// space2 的 bindless 表（句柄由设备常量决定，回放侧可安全重算）
+    void PrepareBindlessTables();
+    /// 当前是否处于"命令流录制"（会做录制期解析）或"命令流回放"（跳过解析）
+    bool StreamResolving() const { return m_StreamMode && !m_StreamReplay; }
+    /// 【T10 回退】录制中遇到命令流无法承载的调用：打印一次原因，本帧继续按流提交，
+    /// 从下一帧起 EnableCommandStream 会把帧主列表切回直接录制（画面自下一帧恢复完整）。
+    void MarkStreamUnsupported(const char* what);
+    /// 【T10】流模式绘制/派发的录制期解析：描述符快照（CmdResolvedDescriptorTables）与
+    /// 资源状态转换（CmdResolvedBarrier）在这里入流，顺序与原生路径的屏障→根参数→绘制一致。
+    void StreamDrawPrologue();
+    /// 【T10】绘制命令入流之后：补绘制后屏障并标记常量槽已消费
+    void StreamDrawEpilogue();
     /// 绘制/派发前，按当前 PSO 反射出的资源用途（SRV 读 / UAV 读写）把已绑定描述符集里的
     /// 纹理与缓冲转到所需状态。引擎按 Vulkan 习惯只发全局内存屏障、常不为「刚写完就读」发
     /// 资源屏障（Intel 的 Vulkan 驱动容忍）；D3D12 下渲染目标未转状态就采样会读到未解压数据，
@@ -275,7 +326,17 @@ private:
     std::mutex                        m_SubmitPacketMutex;
     /// 命令流模式：开关、按帧槽位轮换的命令流、回放用的影子列表
     bool                              m_StreamMode = false;
-    std::unique_ptr<RHICommandList>   m_Streams[kMaxFramesInFlight];
+    /// 本列表是命令流回放用的影子列表（T10）：跳过一切依赖当前引擎状态的解析
+    bool                              m_StreamReplay = false;
+    /// 【T10 回退】本列表在命令流录制中遇到过"流无法承载"的调用（如光追加速结构构建 / 派发）。
+    /// 置位后从下一帧起改为直接录制（原生列表），并打印一次明确原因 —— 不允许静默丢命令或挂起。
+    bool                              m_StreamFallback = false;
+    /// 【T10】命令流槽位数 = 飞行帧数 + 1。
+    /// 背压允许"渲染线程领先 RHI 线程 2 帧"，而 Begin 发生在 Submit 之前：只留 kMaxFramesInFlight
+    /// 个槽时，录制第 N+3 帧会覆盖仍在回放的第 N 帧流。多留一个槽后，复用第 N 帧槽时第 N 帧的回放
+    /// 必定已完成（FIFO + 背压共同保证）。
+    static constexpr u32 kStreamSlots = kMaxFramesInFlight + 1;
+    std::unique_ptr<RHICommandList>   m_Streams[kStreamSlots];
     u32                               m_StreamSlot = 0;
     std::unique_ptr<D3D12CommandList> m_ReplayList;
     /// 回放用的后缓冲提示：低 32 位 = 序号 + 1（0 表示无提示），高 32 位 = 录制时的后缓冲状态。
@@ -305,8 +366,9 @@ private:
     BundleSlotUse m_BundleSlotUses[kMaxFramesInFlight];
     /// 主列表本次录制执行过的 bundle 及其槽位：提交时（OnSubmitted）给它们打上本次的围栏值
     std::vector<std::pair<D3D12CommandList*, u32>> m_ExecutedBundles;
-    /// Begin / BeginSecondary 共用：清空一次录制内的缓存状态并申请推送常量槽位
-    void ResetRecordingState();
+    /// Begin / BeginSecondary / 流模式 Begin 共用：清空一次录制内的缓存状态并申请推送常量槽位。
+    /// 【T10】流模式录制不写原生列表，推送常量走命令流 arena ⇒ allocatePush 传 false，不占常量环槽位。
+    void ResetRecordingState(bool allocatePush = true);
     QueueType m_QueueType = QueueType::Graphics;   // 创建时确定的队列类型
     /// 当前管线是否为计算管线（决定绑定哪一套根签名与描述符表）
     bool m_IsComputePipeline = false;

@@ -64,6 +64,31 @@ public:
     /// 默认空实现（后端无关层不需要知道具体类型；Vulkan 后端会真正的把它记下来）。
     virtual void SetRenderPassHint(void* /*renderPass*/) {}
 
+    // ============================================================
+    // 【T10】命令流回放：录制期已解析好的后端细节
+    //
+    // 【为什么需要这三个入口】模式 2 下命令流在 RHI 线程上回放，落后录制线程一到两帧。
+    // 若回放时再去查描述符集内容 / 设备资源状态表，拿到的是**后面帧**的数据（T10 挂起根因）。
+    // 所以录制线程在录制时就完成这些解析，把结果编码进命令流；回放只按数据下指令：
+    //   · ApplyResolvedBarrier            —— 一条已解析的原生资源屏障（转换 / UAV / 别名 / 丢弃）；
+    //   · ApplyResolvedDescriptorTable    —— 已拍下的描述符表快照 GPU 句柄（按帧分版本）；
+    //   · ApplyResolvedRenderTargets      —— 已解析的 RTV/DSV 绑定（如只读深度 DSV 切换）。
+    // 默认空实现：其它后端不产生这些命令（命令流里的对应类型只由 D3D12 录制）。
+    // ============================================================
+    /// 屏障类型（与 RHICommandResolvedBarrier::type 使用同一组数值）
+    enum class ResolvedBarrierType : u32 {
+        Transition = 1,   ///< before → after 的状态转换
+        Uav        = 2,   ///< UAV 屏障（resource 为空表示全局）
+        Aliasing   = 3,   ///< 别名屏障（resourceAfter = resource，before 为空）
+        Discard    = 4,   ///< DiscardResource（配合别名激活清空未知内容）
+    };
+    virtual void ApplyResolvedBarrier(void* /*resource*/, ResolvedBarrierType /*type*/,
+                                      u32 /*subresource*/, u32 /*before*/, u32 /*after*/) {}
+    /// set / srv / uav / sampler 都是录制时取出的 GPU 句柄（后端自行解释）
+    virtual void ApplyResolvedDescriptorTable(u32 /*setIndex*/, u64 /*set*/, u64 /*srv*/,
+                                              u64 /*uav*/, u64 /*sampler*/) {}
+    virtual void ApplyResolvedRenderTargets(void* const* /*rtvs*/, u32 /*count*/, void* /*dsv*/) {}
+
     // 离屏渲染通道：渲染到自定义纹理附件（非 SwapChain）
     // colorImageView/depthImageView 为后端特定句柄（VkImageView），可空。
     // 必须先调用 SetPipeline 设置匹配的 PSO（render pass 一致）。

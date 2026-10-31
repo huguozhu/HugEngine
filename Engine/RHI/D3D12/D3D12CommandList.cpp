@@ -135,25 +135,59 @@ void D3D12CommandList::BeginSecondary(IRHIPipelineState* pso) {
 }
 
 void D3D12CommandList::ExecuteSecondary(IRHICommandList* secondary) {
-    if (m_StreamMode) { Stream().Enqueue(RHICommandType::ExecuteSecondary, RHICommandExecuteSecondary{ secondary }); return; }
     auto* b = static_cast<D3D12CommandList*>(secondary);
+    if (m_StreamMode) {
+        // 【T10】流模式：bundle 的状态转换必须在录制期解析（回放侧不再查描述符集 / 设备状态表），
+        // 然后把"执行 bundle"这一条命令入流；bundle 自身的原生列表仍由录制者线程真实录制。
+        if (b && b->m_IsBundle && m_Device) {
+            D3D12PipelineState* savedPso = m_Pipeline;
+            const bool savedCompute = m_IsComputePipeline;
+            DescriptorSetHandle savedSets[8];
+            std::copy(std::begin(m_BoundSets), std::end(m_BoundSets), savedSets);
+            for (const auto& u : b->m_BundleUsages) {
+                m_Pipeline          = u.pipeline;
+                m_IsComputePipeline = u.compute;
+                std::copy(std::begin(u.sets), std::end(u.sets), std::begin(m_BoundSets));
+                EnsureBoundResourceStates();
+            }
+            m_Pipeline          = savedPso;
+            m_IsComputePipeline = savedCompute;
+            std::copy(std::begin(savedSets), std::end(savedSets), std::begin(m_BoundSets));
+            for (const auto& [res, want] : b->m_BundleBufferTransitions) TransitionBuffer(res, want);
+            AfterDrawOrDispatch();
+            m_SetRingChunkMask |= b->m_SetRingChunkMask;   // bundle 用过的快照块随本帧提交登记围栏
+        }
+        // 【T10】与原生路径的第 4 步一致：bundle 改过的管线 / 根参数 / IA 状态会延续到主列表，
+        // 录制侧缓存必须作废 —— 否则下一次绘制不会重新拍描述符表（回放侧的缓存已被清除，
+        // 但表数据只随"重新拍快照"入流，两边会不一致）。
+        for (auto& t : m_RootTables) t.ptr = 0;
+        for (auto& ss : m_SnapSets) ss = kInvalidSet;
+        m_RootArgsDirty = true;
+        m_PushDirty     = true;
+        if (m_Pipeline) SetPipeline(m_Pipeline);
+        Stream().Enqueue(RHICommandType::ExecuteSecondary, RHICommandExecuteSecondary{ secondary });
+        return;
+    }
     if (!m_List || !m_Recording || !m_Device || !b || !b->m_IsBundle || !b->m_List) return;
     // 1. 资源状态：bundle 里不能发屏障，按它记下的每次绘制的管线 + 绑定集，在主列表上补状态转换
-    D3D12PipelineState* savedPso = m_Pipeline;
-    const bool savedCompute = m_IsComputePipeline;
-    DescriptorSetHandle savedSets[8];
-    std::copy(std::begin(m_BoundSets), std::end(m_BoundSets), savedSets);
-    for (const auto& u : b->m_BundleUsages) {
-        m_Pipeline          = u.pipeline;
-        m_IsComputePipeline = u.compute;
-        std::copy(std::begin(u.sets), std::end(u.sets), std::begin(m_BoundSets));
-        EnsureBoundResourceStates();
+    //    【T10】回放侧跳过：这些转换在录制期已编码进命令流
+    if (!m_StreamReplay) {
+        D3D12PipelineState* savedPso = m_Pipeline;
+        const bool savedCompute = m_IsComputePipeline;
+        DescriptorSetHandle savedSets[8];
+        std::copy(std::begin(m_BoundSets), std::end(m_BoundSets), savedSets);
+        for (const auto& u : b->m_BundleUsages) {
+            m_Pipeline          = u.pipeline;
+            m_IsComputePipeline = u.compute;
+            std::copy(std::begin(u.sets), std::end(u.sets), std::begin(m_BoundSets));
+            EnsureBoundResourceStates();
+        }
+        m_Pipeline          = savedPso;
+        m_IsComputePipeline = savedCompute;
+        std::copy(std::begin(savedSets), std::end(savedSets), std::begin(m_BoundSets));
+        for (const auto& [res, want] : b->m_BundleBufferTransitions) TransitionBuffer(res, want);
+        AfterDrawOrDispatch();   // 按子资源拆分的转换在这里没有绘制可依附：立即转回统一状态
     }
-    m_Pipeline          = savedPso;
-    m_IsComputePipeline = savedCompute;
-    std::copy(std::begin(savedSets), std::end(savedSets), std::begin(m_BoundSets));
-    for (const auto& [res, want] : b->m_BundleBufferTransitions) TransitionBuffer(res, want);
-    AfterDrawOrDispatch();   // 按子资源拆分的转换在这里没有绘制可依附：立即转回统一状态
 
     // 2. bundle 用到描述符表时，主列表必须先绑定同一组描述符堆
     if (!m_HeapsSet && m_Device->EnsureDescriptorHeaps()) {
@@ -163,7 +197,7 @@ void D3D12CommandList::ExecuteSecondary(IRHICommandList* secondary) {
 
     // 3. 执行，并记下：bundle 用过的描述符快照块、提交时要给 bundle 槽位打的围栏
     m_List->ExecuteBundle(b->m_List.Get());
-    m_SetRingChunkMask |= b->m_SetRingChunkMask;
+    if (!m_StreamReplay) m_SetRingChunkMask |= b->m_SetRingChunkMask;   // 回放：录制期已并入流提交包
     m_ExecutedBundles.emplace_back(b, b->m_FrameSlot);
     m_TotalDraws += b->m_TotalDraws;
 
@@ -178,9 +212,13 @@ void D3D12CommandList::ExecuteSecondary(IRHICommandList* secondary) {
 void D3D12CommandList::Begin() {
     if (m_StreamMode) {
         // 流模式：不碰原生列表与分配器（由影子列表负责），只轮换到下一份命令流并清空
-        m_StreamSlot = (m_StreamSlot + 1) % kMaxFramesInFlight;
+        m_StreamSlot = (m_StreamSlot + 1) % kStreamSlots;
         if (!m_Streams[m_StreamSlot]) m_Streams[m_StreamSlot] = std::make_unique<RHICommandList>();
         m_Streams[m_StreamSlot]->Reset();
+        // 【T10】录制期解析用的缓存必须按帧作废：描述符快照的"集 + 版本"、绑定集、缓冲状态、
+        // 快照环块掩码全都只对本次录制成对，沿用上一帧会让新帧误以为快照仍然有效（内容却是旧块的）。
+        // 流模式不写原生列表，推送常量走命令流 arena ⇒ 不占常量环槽位。
+        ResetRecordingState(false);
         m_Recording = true;
         return;
     }
@@ -226,7 +264,7 @@ void D3D12CommandList::Begin() {
     ResetRecordingState();
 }
 
-void D3D12CommandList::ResetRecordingState() {
+void D3D12CommandList::ResetRecordingState(bool allocatePush) {
     // 新的录制：列表的根参数与描述符堆都已失效，清空缓存
     for (auto& t : m_RootTables) t.ptr = 0;
     m_RootArgsDirty = true;
@@ -249,6 +287,8 @@ void D3D12CommandList::ResetRecordingState() {
     // 为整帧申请一块推送常量槽位，并清零
     m_PushGpu = 0;
     m_PushCpu = nullptr;
+    m_PushDirty = true;
+    if (!allocatePush) return;   // 命令流录制：推送常量走流 arena，不需要常量环槽位
     D3D12_GPU_DESCRIPTOR_HANDLE dummyCbv{};
     if (m_Device && m_Device->AllocateConstants(m_PushGpu, dummyCbv)) {
         m_PushCpu = m_Device->GetConstantSlotPtr(m_PushGpu);
@@ -487,8 +527,16 @@ void D3D12CommandList::BeginRenderPass(u32 colorCount, Format colorFormat,
         uintptr_t hint = 0;
         if (m_SwapChain) {
             auto* sc = static_cast<D3D12SwapChain*>(m_SwapChain);
-            hint = (static_cast<uintptr_t>(sc->GetBackBufferState()) << 32) | (sc->GetRecordIndex() + 1u);
+            const u32 idx = sc->GetRecordIndex();
+            hint = (static_cast<uintptr_t>(sc->GetBackBufferState()) << 32) | (static_cast<uintptr_t>(idx) + 1u);
             sc->MarkBackBufferRendered();
+            // 【T10】录制期就把后缓冲登记成 RENDER_TARGET：Present 在渲染线程上读设备状态表，
+            // 若等回放（RHI 线程）再登记，Present 可能先看到旧状态 ⇒ 调试层 id=538
+            //（PRESENT_SOURCE 要求 COMMON/PRESENT，实际已是 RENDER_TARGET）。
+            if (m_Device) {
+                if (ID3D12Resource* bb = sc->GetBackBuffer(idx))
+                    m_Device->SetResourceState(bb, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            }
         }
         // 清屏值放 arena（本后端只读 clear[0]）
         RHICommandBeginRenderPass p{};
@@ -548,7 +596,8 @@ void D3D12CommandList::BeginRenderPass(u32 colorCount, Format colorFormat,
             tb.Transition.StateBefore = bbState;
             tb.Transition.StateAfter  = D3D12_RESOURCE_STATE_RENDER_TARGET;
             m_List->ResourceBarrier(1, &tb);
-            if (m_Device) m_Device->SetResourceState(bb, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            // 【T10】回放列表不再写设备状态表（同一资源的后续帧录制也写它，回放写会覆盖更新的状态）
+            if (m_Device && !m_StreamReplay) m_Device->SetResourceState(bb, D3D12_RESOURCE_STATE_RENDER_TARGET);
         }
     }
 
@@ -558,7 +607,7 @@ void D3D12CommandList::BeginRenderPass(u32 colorCount, Format colorFormat,
     // 回放时这一步已在录制侧（渲染线程）做过，交换链的状态记录只归渲染线程写
     if (hasRtv && m_SwapChain && !hinted) {
         static_cast<D3D12SwapChain*>(m_SwapChain)->MarkBackBufferRendered();
-        if (m_Device && bb) m_Device->SetResourceState(bb, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        if (m_Device && bb && !m_StreamReplay) m_Device->SetResourceState(bb, D3D12_RESOURCE_STATE_RENDER_TARGET);
     }
 
     if (hasRtv && loadOp == LoadOp::Clear) {
@@ -587,7 +636,13 @@ void D3D12CommandList::BeginRenderPass(u32 colorCount, Format colorFormat,
 }
 
 void D3D12CommandList::EndRenderPass() {
-    if (m_StreamMode) { Stream().Enqueue(RHICommandType::CmdEndRenderPass, u32{0}); return; }
+    if (m_StreamMode) {
+        Stream().Enqueue(RHICommandType::CmdEndRenderPass, u32{0});
+        // 【T10】录制期的附件表也必须随 pass 结束清空：否则后续绘制会把这些资源误判为"正作为附件"，
+        // 跳过它们的资源状态转换（原生路径在下面同样会清）。
+        ClearPassAttachments();
+        return;
+    }
     if (TraceEnabled()) { std::printf("[TRACE] EndRenderPass\n"); std::fflush(stdout); }
 
     // D3D12 没有 pass 结束的概念；资源状态转换由显式 PipelineBarrier 负责
@@ -598,7 +653,16 @@ void D3D12CommandList::BeginOffscreenPass(void* colorImageView, void* depthImage
                                           u32 width, u32 height,
                                           const ClearValue* clear,
                                           bool allowSecondary) {
+    D3D12_CPU_DESCRIPTOR_HANDLE rtv = ToCpuHandle(colorImageView);
+    D3D12_CPU_DESCRIPTOR_HANDLE dsv = ToCpuHandle(depthImageView);
+    D3D12_CPU_DESCRIPTOR_HANDLE* rtvPtr = colorImageView ? &rtv : nullptr;
+    const u32 rtvCount = colorImageView ? 1u : 0u;
+    D3D12_CPU_DESCRIPTOR_HANDLE* dsvPtr = depthImageView ? &dsv : nullptr;
+
     if (m_StreamMode) { // 清屏值放 arena（本后端只读 clear 的第一个元素：颜色与深度都在里面）
+        // 【T10】附件状态转换必须在录制期解析：模式 2 下回放时设备状态表已属于后面帧，
+        // 回放侧再查会把 RTV/DSV 转到错误的状态（T10 挂起的根因之一）。
+        ResolveAttachmentTransitions(rtvPtr, rtvCount, dsvPtr);
         RHICommandBeginOffscreenPass p{};
         p.colorImageView = colorImageView; p.depthImageView = depthImageView;
         p.width = width; p.height = height; p.allowSecondary = allowSecondary ? 1u : 0u;
@@ -611,59 +675,20 @@ void D3D12CommandList::BeginOffscreenPass(void* colorImageView, void* depthImage
         Stream().Enqueue(RHICommandType::CmdBeginOffscreenPass, p);
         return;
     }
+    // 【T10】回放：状态转换已随命令流完成（上面的录制期解析已编码 CmdResolvedBarrier），
+    // 这里只做纯绑定：RTV/DSV、按 PSO loadOp 的清屏、视口与裁剪。
+    if (m_StreamReplay) {
+        if (!m_List) return;
+        SetPassAttachments(rtvPtr, rtvCount, dsvPtr);
+        BindPassTargets(rtvPtr, rtvCount, dsvPtr, width, height, clear);
+        return;
+    }
     (void)allowSecondary;
     if (!m_List) return;
 
-    D3D12_CPU_DESCRIPTOR_HANDLE rtv = ToCpuHandle(colorImageView);
-    D3D12_CPU_DESCRIPTOR_HANDLE dsv = ToCpuHandle(depthImageView);
-    const bool hasRtv = (colorImageView != nullptr);
-    const bool hasDsv = (depthImageView != nullptr);
-    // 记下本 pass 的附件：绘制前补纹理状态时跳过它们
-    SetPassAttachments(&rtv, hasRtv ? 1u : 0u, hasDsv ? &dsv : nullptr);
-
-    // RTV 数量必须与指针一致：只有深度附件的 pass 传 1+nullptr 是非法调用（设备会被移除）
-    // 【必须做资源屏障】D3D12 要求绑定为 RTV/DSV 的资源处于 RENDER_TARGET /
-    // DEPTH_WRITE 状态。引擎只把 CPU 句柄传进来，所以先按句柄反查资源，
-    // 再按记录的状态做一次转换（否则 OMSetRenderTargets / Clear 会静默卡死）。
-    if (m_Device) {
-        if (hasRtv) {
-            if (auto* res = m_Device->FindViewResource(static_cast<UINT64>(rtv.ptr))) {
-                ActivateAliasedTexture(res);   // 瞬态纹理首次使用：先激活
-                const auto from = m_Device->GetResourceState(res);
-                // 【只要不是目标状态就显式转换】此前只在「当前是着色器资源」时才转，
-                // 从 COMMON 依赖所谓隐式提升 —— 但调试层明确判定 COMMON 不能直接当
-                // 渲染目标使用（id=538 实测 1118 条），渲染内容被丢弃。
-                if (from != D3D12_RESOURCE_STATE_RENDER_TARGET) {
-                    D3D12_RESOURCE_BARRIER b{};
-                    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-                    b.Transition.pResource = res;
-                    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-                    b.Transition.StateBefore = from;
-                    b.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
-                    m_List->ResourceBarrier(1, &b);
-                    m_Device->SetResourceState(res, D3D12_RESOURCE_STATE_RENDER_TARGET);
-                }
-                // 【T9】附件若就是交换链后缓冲，同步交换链那份镜像（见函数注释）
-                SyncBackBufferStateForAttachment(res);
-            }
-        }
-        if (hasDsv) {
-            if (auto* res = m_Device->FindViewResource(static_cast<UINT64>(dsv.ptr))) {
-                ActivateAliasedTexture(res);   // 瞬态纹理首次使用：先激活
-                const auto from = m_Device->GetResourceState(res);
-                if (from != D3D12_RESOURCE_STATE_DEPTH_WRITE) {
-                    D3D12_RESOURCE_BARRIER b{};
-                    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-                    b.Transition.pResource = res;
-                    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-                    b.Transition.StateBefore = from;
-                    b.Transition.StateAfter = D3D12_RESOURCE_STATE_DEPTH_WRITE;
-                    m_List->ResourceBarrier(1, &b);
-                    m_Device->SetResourceState(res, D3D12_RESOURCE_STATE_DEPTH_WRITE);
-                }
-            }
-        }
-    }
+    // 记下本 pass 的附件并完成状态转换（D3D12 要求 RTV/DSV 处于 RENDER_TARGET / DEPTH_WRITE；
+    // 只有深度附件的 pass 传 1+nullptr 是非法调用，这里按指针是否为空决定 RTV 数量）
+    ResolveAttachmentTransitions(rtvPtr, rtvCount, dsvPtr);
 
     // 【HDR 中间结果转储】进入宽屏离屏 pass 时，把该目标回读并打印首像素。
     // 此刻里面是**上一帧**完整渲染后的结果，可判断几何是否真的画进了 HDR。
@@ -671,7 +696,7 @@ void D3D12CommandList::BeginOffscreenPass(void* colorImageView, void* depthImage
     // 拷到回读缓冲，下一帧等 GPU 完成后扫描整张图，统计非零像素与最大值。
     // 用途：定位"哪个 pass 真正产出了内容"，从而找出黑屏发生在哪一步。
     static const bool s_DumpHdr = (std::getenv("HE_DUMP_HDR") != nullptr);   // 只读一次环境变量
-    if (s_DumpHdr && hasRtv && m_Device && m_Device->GetDevice() && m_Device->GetQueue()) {
+    if (s_DumpHdr && colorImageView && m_Device && m_Device->GetDevice() && m_Device->GetQueue()) {
         if (ID3D12Resource* hres = m_Device->FindViewResource(static_cast<UINT64>(rtv.ptr))) {
             const D3D12_RESOURCE_DESC hd = hres->GetDesc();
             const u32 bpp = 8;                       // 只处理 16F/RGBA 类
@@ -741,50 +766,22 @@ void D3D12CommandList::BeginOffscreenPass(void* colorImageView, void* depthImage
         }
     }
 
-    m_List->OMSetRenderTargets(hasRtv ? 1u : 0u, hasRtv ? &rtv : nullptr, FALSE, hasDsv ? &dsv : nullptr);
-    m_HasRtv = hasRtv;
-
-    // 【是否清空附件由 PSO 的 loadOp 决定】与 Vulkan 一致：离屏 pass 用当前 PSO 的 render pass，
-    // Clear 才清空、Load 保留；clear 只提供清屏值（为空时颜色 0、深度 1.0）。此前深度无条件清空，
-    // 延迟管线的天空盒 pass（depthLoadOp=Load）因此丢掉 GBuffer 深度、覆盖整张光照结果。
-    const bool gfxPso     = m_Pipeline && !m_IsComputePipeline;
-    const bool clearColor = gfxPso ? (m_Pipeline->GetColorLoadOp() == LoadOp::Clear) : (clear != nullptr);
-    const bool clearDepth = gfxPso ? (m_Pipeline->GetDepthLoadOp() == LoadOp::Clear) : (clear != nullptr);
-    static const float kZeroColor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-    if (hasRtv && clearColor) {
-        m_List->ClearRenderTargetView(rtv, clear ? clear->color : kZeroColor, 0, nullptr);
-    }
-    if (hasDsv && clearDepth) {
-        // 【只有带模板的格式才能传 STENCIL 标志】D32_FLOAT 没有模板位，
-        // 同时传 DEPTH|STENCIL 会让整个 ClearDepthStencilView 被拒，
-        // 深度缓冲留在未初始化状态 ⇒ 所有物体（含天空盒）都过不了深度测试 ⇒ 画面全黑。
-        D3D12_CLEAR_FLAGS dflags = D3D12_CLEAR_FLAG_DEPTH;
-        if (m_Device) {
-            if (ID3D12Resource* dres = m_Device->FindViewResource(static_cast<UINT64>(dsv.ptr))) {
-                const DXGI_FORMAT df = dres->GetDesc().Format;
-                if (df == DXGI_FORMAT_D24_UNORM_S8_UINT || df == DXGI_FORMAT_D32_FLOAT_S8X24_UINT)
-                    dflags |= D3D12_CLEAR_FLAG_STENCIL;
-            }
-        }
-        m_List->ClearDepthStencilView(dsv, dflags,
-                                       clear ? clear->depth : 1.0f,
-                                       clear ? clear->stencil : 0, 0, nullptr);
-    }
-
-    D3D12_VIEWPORT vp{};
-    vp.Width  = static_cast<float>(width);
-    vp.Height = static_cast<float>(height);
-    vp.MaxDepth = 1.0f;
-    m_List->RSSetViewports(1, &vp);
-    D3D12_RECT rc{ 0, 0, static_cast<LONG>(width), static_cast<LONG>(height) };
-    m_List->RSSetScissorRects(1, &rc);
+    BindPassTargets(rtvPtr, rtvCount, dsvPtr, width, height, clear);
 }
 
 void D3D12CommandList::BeginOffscreenPassMRT(void* const* colorImageViews, u32 colorCount,
                                              void* depthImageView, u32 width, u32 height,
                                              const ClearValue* clears,
                                              bool allowSecondary) {
+    D3D12_CPU_DESCRIPTOR_HANDLE rtvs[8]{};
+    const u32 n = (colorCount < 8) ? colorCount : 8;
+    for (u32 i = 0; i < n; ++i) rtvs[i] = ToCpuHandle(colorImageViews ? colorImageViews[i] : nullptr);
+    D3D12_CPU_DESCRIPTOR_HANDLE dsv = ToCpuHandle(depthImageView);
+    D3D12_CPU_DESCRIPTOR_HANDLE* dsvPtr = depthImageView ? &dsv : nullptr;
+
     if (m_StreamMode) { // 附件视图数组与清屏值都放 arena（本后端读 clears[0 .. colorCount)，深度取 clears[0]）
+        // 【T10】同 BeginOffscreenPass：附件状态转换在录制期解析并入流
+        ResolveAttachmentTransitions(n ? rtvs : nullptr, n, dsvPtr);
         RHICommandBeginOffscreenPassMRT p{};
         p.depthImageView = depthImageView; p.colorCount = colorCount;
         p.width = width; p.height = height; p.allowSecondary = allowSecondary ? 1u : 0u;
@@ -794,73 +791,53 @@ void D3D12CommandList::BeginOffscreenPassMRT(void* const* colorImageViews, u32 c
             p.colorViewsOffset = Stream().ArenaOffsetOf(dst);
         }
         if (clears) {
-            const u32 n = colorCount ? colorCount : 1u;
-            void* dst = Stream().AllocArena(sizeof(ClearValue) * n, 16);
-            std::memcpy(dst, clears, sizeof(ClearValue) * n);
+            const u32 cn = colorCount ? colorCount : 1u;
+            void* dst = Stream().AllocArena(sizeof(ClearValue) * cn, 16);
+            std::memcpy(dst, clears, sizeof(ClearValue) * cn);
             p.clearOffset = Stream().ArenaOffsetOf(dst);
-            p.clearCount  = n;
+            p.clearCount  = cn;
         }
         Stream().Enqueue(RHICommandType::CmdBeginOffscreenPassMRT, p);
+        return;
+    }
+    // 【T10】回放：状态转换已随命令流完成，只做纯绑定
+    if (m_StreamReplay) {
+        if (!m_List || colorCount == 0) return;
+        SetPassAttachments(rtvs, n, dsvPtr);
+        BindPassTargets(rtvs, n, dsvPtr, width, height, clears);
         return;
     }
     (void)allowSecondary;
     if (!m_List || colorCount == 0) return;
 
-    D3D12_CPU_DESCRIPTOR_HANDLE rtvs[8]{};
-    const u32 n = (colorCount < 8) ? colorCount : 8;
-    for (u32 i = 0; i < n; ++i) rtvs[i] = ToCpuHandle(colorImageViews[i]);
-    D3D12_CPU_DESCRIPTOR_HANDLE dsv = ToCpuHandle(depthImageView);
-    const bool hasDsv = (depthImageView != nullptr);
-    // 记下本 pass 的附件：绘制前补纹理状态时跳过它们
-    SetPassAttachments(rtvs, n, hasDsv ? &dsv : nullptr);
-
     // 【MRT 也必须做状态转换】此前只有单目标路径做了屏障，多目标 pass（GBuffer 等）
     // 的渲染目标停在 COMMON/PRESENT，被调试层判定非法、绘制被丢弃（id=538）。
-    for (u32 i = 0; i < n; ++i) {
-        if (!colorImageViews[i] || !m_Device) continue;
-        if (ID3D12Resource* res = m_Device->FindViewResource(static_cast<UINT64>(rtvs[i].ptr))) {
-            ActivateAliasedTexture(res);   // 瞬态纹理首次使用：先激活
-            const auto from = m_Device->GetResourceState(res);
-            if (from != D3D12_RESOURCE_STATE_RENDER_TARGET) {
-                D3D12_RESOURCE_BARRIER tb{};
-                tb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-                tb.Transition.pResource = res;
-                tb.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-                tb.Transition.StateBefore = from;
-                tb.Transition.StateAfter  = D3D12_RESOURCE_STATE_RENDER_TARGET;
-                m_List->ResourceBarrier(1, &tb);
-                m_Device->SetResourceState(res, D3D12_RESOURCE_STATE_RENDER_TARGET);
-            }
-            // 【T9】附件若就是交换链后缓冲，同步交换链那份镜像
-            SyncBackBufferStateForAttachment(res);
-        }
-    }
-    if (hasDsv && m_Device) {
-        if (ID3D12Resource* dres = m_Device->FindViewResource(static_cast<UINT64>(dsv.ptr))) {
-            ActivateAliasedTexture(dres);   // 瞬态纹理首次使用：先激活
-            const auto from = m_Device->GetResourceState(dres);
-            if (from != D3D12_RESOURCE_STATE_DEPTH_WRITE) {
-                D3D12_RESOURCE_BARRIER tb{};
-                tb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-                tb.Transition.pResource = dres;
-                tb.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-                tb.Transition.StateBefore = from;
-                tb.Transition.StateAfter  = D3D12_RESOURCE_STATE_DEPTH_WRITE;
-                m_List->ResourceBarrier(1, &tb);
-                m_Device->SetResourceState(dres, D3D12_RESOURCE_STATE_DEPTH_WRITE);
-            }
-        }
-    }
-    m_List->OMSetRenderTargets(n, rtvs, FALSE, hasDsv ? &dsv : nullptr);
+    ResolveAttachmentTransitions(rtvs, n, dsvPtr);
+    BindPassTargets(rtvs, n, dsvPtr, width, height, clears);
+}
 
-    // 是否清空由 PSO 的 loadOp 决定（同 BeginOffscreenPass）
+// 绑定 RTV/DSV + 按 PSO 的 loadOp 清屏 + 设置整张目标的视口与裁剪。
+// 原生录制与命令流回放共用：回放侧的状态转换已经在录制期解析进命令流，这里只做纯绑定。
+void D3D12CommandList::BindPassTargets(const D3D12_CPU_DESCRIPTOR_HANDLE* rtvs, u32 rtvCount,
+                                       const D3D12_CPU_DESCRIPTOR_HANDLE* dsv,
+                                       u32 width, u32 height, const ClearValue* clears) {
+    if (!m_List) return;
+    const bool hasDsv = dsv != nullptr && dsv->ptr != 0;
+    const u32 n = (rtvCount < 8u) ? rtvCount : 8u;
+    m_List->OMSetRenderTargets(n, (n && rtvs) ? rtvs : nullptr, FALSE, hasDsv ? dsv : nullptr);
+    m_HasRtv = n > 0;
+
+    // 【是否清空附件由 PSO 的 loadOp 决定】与 Vulkan 一致：离屏 pass 用当前 PSO 的 render pass，
+    // Clear 才清空、Load 保留；clear 只提供清屏值（为空时颜色 0、深度 1.0）。此前深度无条件清空，
+    // 延迟管线的天空盒 pass（depthLoadOp=Load）因此丢掉 GBuffer 深度、覆盖整张光照结果。
     const bool gfxPso     = m_Pipeline && !m_IsComputePipeline;
     const bool clearColor = gfxPso ? (m_Pipeline->GetColorLoadOp() == LoadOp::Clear) : (clears != nullptr);
     const bool clearDepth = gfxPso ? (m_Pipeline->GetDepthLoadOp() == LoadOp::Clear) : (clears != nullptr);
     static const float kZeroColor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
     if (clearColor) {
         for (u32 i = 0; i < n; ++i) {
-            if (colorImageViews[i]) m_List->ClearRenderTargetView(rtvs[i], clears ? clears[i].color : kZeroColor, 0, nullptr);
+            if (!rtvs || !rtvs[i].ptr) continue;
+            m_List->ClearRenderTargetView(rtvs[i], clears ? clears[i].color : kZeroColor, 0, nullptr);
         }
     }
     if (hasDsv && clearDepth) {
@@ -869,15 +846,15 @@ void D3D12CommandList::BeginOffscreenPassMRT(void* const* colorImageViews, u32 c
         // 深度缓冲留在未初始化状态 ⇒ 所有物体（含天空盒）都过不了深度测试 ⇒ 画面全黑。
         D3D12_CLEAR_FLAGS dflags = D3D12_CLEAR_FLAG_DEPTH;
         if (m_Device) {
-            if (ID3D12Resource* dres = m_Device->FindViewResource(static_cast<UINT64>(dsv.ptr))) {
+            if (ID3D12Resource* dres = m_Device->FindViewResource(static_cast<UINT64>(dsv->ptr))) {
                 const DXGI_FORMAT df = dres->GetDesc().Format;
                 if (df == DXGI_FORMAT_D24_UNORM_S8_UINT || df == DXGI_FORMAT_D32_FLOAT_S8X24_UINT)
                     dflags |= D3D12_CLEAR_FLAG_STENCIL;
             }
         }
-        m_List->ClearDepthStencilView(dsv, dflags,
-                                       clears ? clears[0].depth : 1.0f,
-                                       clears ? clears[0].stencil : 0, 0, nullptr);
+        m_List->ClearDepthStencilView(*dsv, dflags,
+                                      clears ? clears[0].depth : 1.0f,
+                                      clears ? clears[0].stencil : 0, 0, nullptr);
     }
 
     D3D12_VIEWPORT vp{};
@@ -890,7 +867,11 @@ void D3D12CommandList::BeginOffscreenPassMRT(void* const* colorImageViews, u32 c
 }
 
 void D3D12CommandList::EndOffscreenPass() {
-    if (m_StreamMode) { Stream().Enqueue(RHICommandType::CmdEndOffscreenPass, u32{0}); return; }
+    if (m_StreamMode) {
+        Stream().Enqueue(RHICommandType::CmdEndOffscreenPass, u32{0});
+        ClearPassAttachments();   // 【T10】同 EndRenderPass：录制期附件表随 pass 结束清空
+        return;
+    }
     ClearPassAttachments();   // pass 结束：附件之后可以被转成可读状态
 }
 
@@ -919,7 +900,16 @@ void D3D12CommandList::ClearPassAttachments() {
 }
 
 void D3D12CommandList::SetPipeline(IRHIPipelineState* pso) {
-    if (m_StreamMode) { Stream().Enqueue(RHICommandType::SetPipeline, RHICommandSetPipeline{ pso }); return; }
+    if (m_StreamMode) {
+        // 【T10】流模式下也要更新本地管线状态：录制期的描述符快照、资源状态解析、
+        // 以及 pass begin 的 loadOp 判断都按当前 PSO 反射出来的信息进行。
+        m_Pipeline   = static_cast<D3D12PipelineState*>(pso);
+        m_RtPipeline = nullptr;
+        if (m_Pipeline) m_IsComputePipeline = m_Pipeline->IsCompute();
+        m_RootArgsDirty = true;
+        Stream().Enqueue(RHICommandType::SetPipeline, RHICommandSetPipeline{ pso });
+        return;
+    }
     // 计算列表不能设置图形管线（COMPUTE 列表上 SetGraphicsRootSignature 非法）。异步计算 pass
     // 结尾常为主列表「恢复」图形 PSO（如 GPU_Cull 末尾的 SetPipeline(GBuffer PSO)），这里忽略
     if (IsComputeQueueList() && pso && !static_cast<D3D12PipelineState*>(pso)->IsCompute()) return;
@@ -1032,7 +1022,17 @@ void D3D12CommandList::SetFullscreenViewport(u32 width, u32 height) {
 }
 
 void D3D12CommandList::BindDescriptorSet(u32 setIndex, DescriptorSetHandle set) {
-    if (m_StreamMode) { Stream().Enqueue(RHICommandType::SetDescriptorSet, RHICommandSetDescriptorSet{ setIndex, 0u, static_cast<u64>(set) }); return; }
+    if (m_StreamMode) {
+        // 【T10】录制期也要记下绑定集：绘制前的资源状态解析要按集内容找资源；
+        // 描述符表本身在绘制前由 PrepareSetTables 拍快照并入流。
+        if (set != kInvalidSet && setIndex < 8) {
+            m_BoundSets[setIndex] = set;
+            m_LastBoundSet = set;
+            if (m_Device) m_LastBaseSlot = m_Device->GetSetBaseSlot(set);
+        }
+        Stream().Enqueue(RHICommandType::SetDescriptorSet, RHICommandSetDescriptorSet{ setIndex, 0u, static_cast<u64>(set) });
+        return;
+    }
     if (!m_List || !m_Device || set == kInvalidSet || setIndex >= 8) return;
     if (!m_Device->EnsureDescriptorHeaps()) return;
     m_Device->FlushPendingBindlessBuffers();   // 补写初始化早期被丢弃的 bindless 缓冲描述符
@@ -1060,13 +1060,18 @@ void D3D12CommandList::BindDescriptorSet(u32 setIndex, DescriptorSetHandle set) 
     m_RootArgsDirty = true;
 }
 
-void D3D12CommandList::PrepareSetTables() {
+void D3D12CommandList::PrepareBindlessTables() {
     if (!m_Device) return;
     // space2 的 bindless 表：此前只在 DrawIndexed 里设置，计算派发与 Draw 都没有，
     // 用 bindless 的 compute（如逐实例剔除）读到未初始化的根参数（GPU 验证 id=935）
     if (const auto h = m_Device->GetBindlessSrvGpuHandle(); h.ptr) SetRootTable(10, h);
     if (const auto h = m_Device->GetBindlessUavGpuHandle(); h.ptr) SetRootTable(18, h);
     if (const auto h = m_Device->GetBindlessSmpGpuHandle(); h.ptr) SetRootTable(26, h);
+}
+
+void D3D12CommandList::PrepareSetTables() {
+    if (!m_Device) return;
+    PrepareBindlessTables();
     for (u32 i = 0; i < 8u; ++i) {
         const DescriptorSetHandle set = m_BoundSets[i];
         if (set == kInvalidSet) continue;
@@ -1080,18 +1085,152 @@ void D3D12CommandList::PrepareSetTables() {
         m_SnapSets[i]     = set;
         m_SnapVersions[i] = ver;
         m_SetRingChunkMask |= (1u << chunk);
+        // 【T10】快照必须随命令流携带：模式 2 下回放落后一到两帧，回放时再拍快照拿到的
+        // 是后面帧写入的内容（描述符集不按帧分版本 ⇒ 实测挂起）。这里把录制当时的 GPU 句柄入流。
+        if (m_StreamMode) {
+            RHICommandDescriptorTables t{};
+            t.setIndex = i;
+            t.set      = static_cast<u64>(set);
+            t.srv      = srv.ptr;
+            t.uav      = uav.ptr;
+            t.sampler  = m_Device->GetSetSamplerGpuHandle(m_Device->GetSetSamplerBase(set)).ptr;
+            Stream().Enqueue(RHICommandType::CmdResolvedDescriptorTables, t);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  【T10】录制期解析结果的发送端
+//
+//  普通列表：直接下原生屏障；命令流录制：编码成一条 CmdResolvedBarrier（回放只按数据下发）；
+//  命令流回放：不会走到这里（回放列表跳过所有状态解析）。
+// ---------------------------------------------------------------------------
+void D3D12CommandList::EmitBarrier(const D3D12_RESOURCE_BARRIER& barrier) {
+    if (m_StreamMode) {
+        RHICommandResolvedBarrier r{};
+        switch (barrier.Type) {
+        case D3D12_RESOURCE_BARRIER_TYPE_TRANSITION:
+            r.resource    = barrier.Transition.pResource;
+            r.type        = static_cast<u32>(ResolvedBarrierType::Transition);
+            r.subresource = barrier.Transition.Subresource;
+            r.before      = static_cast<u32>(barrier.Transition.StateBefore);
+            r.after       = static_cast<u32>(barrier.Transition.StateAfter);
+            break;
+        case D3D12_RESOURCE_BARRIER_TYPE_UAV:
+            r.resource = barrier.UAV.pResource;
+            r.type     = static_cast<u32>(ResolvedBarrierType::Uav);
+            break;
+        case D3D12_RESOURCE_BARRIER_TYPE_ALIASING:
+            r.resource = barrier.Aliasing.pResourceAfter;
+            r.type     = static_cast<u32>(ResolvedBarrierType::Aliasing);
+            break;
+        default:
+            return;
+        }
+        Stream().Enqueue(RHICommandType::CmdResolvedBarrier, r);
+        return;
+    }
+    if (m_List) m_List->ResourceBarrier(1, &barrier);
+}
+
+void D3D12CommandList::EmitDiscard(ID3D12Resource* res) {
+    if (!res) return;
+    if (m_StreamMode) {
+        RHICommandResolvedBarrier r{};
+        r.resource = res;
+        r.type     = static_cast<u32>(ResolvedBarrierType::Discard);
+        Stream().Enqueue(RHICommandType::CmdResolvedBarrier, r);
+        return;
+    }
+    if (m_List) m_List->DiscardResource(res, nullptr);
+}
+
+void D3D12CommandList::EmitResolvedRenderTargets(const D3D12_CPU_DESCRIPTOR_HANDLE* rtvs, u32 count,
+                                                 const D3D12_CPU_DESCRIPTOR_HANDLE* dsv) {
+    const u32 n = count ? count : 0u;
+    if (m_StreamMode) {
+        RHICommandResolvedRenderTargets p{};
+        p.count = n;
+        p.dsv   = dsv ? reinterpret_cast<void*>(dsv->ptr) : nullptr;
+        if (n) {
+            void* dst = Stream().AllocArena(sizeof(void*) * n, 16);
+            for (u32 i = 0; i < n; ++i) {
+                static_cast<void**>(dst)[i] = rtvs ? reinterpret_cast<void*>(rtvs[i].ptr) : nullptr;
+            }
+            p.rtvsOffset = Stream().ArenaOffsetOf(dst);
+        }
+        Stream().Enqueue(RHICommandType::CmdResolvedRenderTargets, p);
+        return;
+    }
+    if (m_List) m_List->OMSetRenderTargets(n, (n && rtvs) ? rtvs : nullptr, FALSE, dsv);
+}
+
+void D3D12CommandList::ResolveAttachmentTransitions(const D3D12_CPU_DESCRIPTOR_HANDLE* rtvs, u32 rtvCount,
+                                                    const D3D12_CPU_DESCRIPTOR_HANDLE* dsv) {
+    if (!m_Device) return;
+    // 附件表：绘制前补纹理状态时要跳过正在作为附件的资源
+    SetPassAttachments(rtvs, rtvCount, dsv);
+    for (u32 i = 0; i < rtvCount; ++i) {
+        if (!rtvs[i].ptr) continue;
+        ID3D12Resource* res = m_Device->FindViewResource(static_cast<UINT64>(rtvs[i].ptr));
+        if (!res) continue;
+        ActivateAliasedTexture(res);   // 瞬态纹理首次使用：先激活
+        const D3D12_RESOURCE_STATES from = m_Device->GetResourceState(res);
+        if (from == D3D12_RESOURCE_STATE_RENDER_TARGET) continue;
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition.pResource   = res;
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = from;
+        b.Transition.StateAfter  = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        EmitBarrier(b);
+        m_Device->SetResourceState(res, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        SyncBackBufferStateForAttachment(res);   // 附件是交换链后缓冲时同步那份镜像
+    }
+    if (dsv && dsv->ptr) {
+        ID3D12Resource* res = m_Device->FindViewResource(static_cast<UINT64>(dsv->ptr));
+        if (res) {
+            ActivateAliasedTexture(res);
+            const D3D12_RESOURCE_STATES from = m_Device->GetResourceState(res);
+            if (from != D3D12_RESOURCE_STATE_DEPTH_WRITE) {
+                D3D12_RESOURCE_BARRIER b{};
+                b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                b.Transition.pResource   = res;
+                b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                b.Transition.StateBefore = from;
+                b.Transition.StateAfter  = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+                EmitBarrier(b);
+                m_Device->SetResourceState(res, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+            }
+            SyncBackBufferStateForAttachment(res);
+        }
     }
 }
 
 void D3D12CommandList::AfterDrawOrDispatch() {
-    if (m_PostDrawBarriers.empty() || !m_List) return;
-    m_List->ResourceBarrier(static_cast<UINT>(m_PostDrawBarriers.size()), m_PostDrawBarriers.data());
+    if (m_PostDrawBarriers.empty()) return;
+    for (const auto& b : m_PostDrawBarriers) EmitBarrier(b);
     m_PostDrawBarriers.clear();
 }
 
+// 【T10】流模式：绘制/派发前的录制期解析。顺序与原生路径一致（屏障 → 描述符表 → 绘制命令）
+void D3D12CommandList::StreamDrawPrologue() {
+    EnsureBoundResourceStates();
+    PrepareSetTables();
+}
+
+void D3D12CommandList::StreamDrawEpilogue() {
+    AfterDrawOrDispatch();   // 绘制后屏障：命令流里排在绘制命令之后
+    m_PushDirty = true;
+}
+
 void D3D12CommandList::EnsureBoundResourceStates() {
+    // 【T10】回放侧不再解析：模式 2 下回放落后录制线程一到两帧，这里查描述符集内容 / 设备状态表
+    // 拿到的是后面帧的数据（屏障 StateBefore 错位、转换到错误资源）⇒ GPU 挂起。录制期已把结果入流。
+    if (m_StreamReplay) return;
     // 光追状态对象没有普通 PSO，但仍要按库反射出来的资源用途补状态转换 ⇒ 允许 m_RtPipeline
-    if (!m_List || !m_Device || (!m_Pipeline && !m_RtPipeline)) return;
+    // （流模式下 m_List 不参与录制，屏障经 EmitBarrier 编码进命令流）
+    if (!m_Device || (!m_Pipeline && !m_RtPipeline)) return;
     if (m_IsBundle) {
         // bundle 不能发屏障：记下本次绘制的管线与绑定集（与上一条相同则不重复），由主列表执行前补转换
         BundleUsage u;
@@ -1117,8 +1256,7 @@ void D3D12CommandList::EnsureBoundResourceStates() {
     // 光追且库反射不可用：退回按描述符集里记录的类型保守转换（RT 里写 SSBO 的场景极少）
     if (m_RtPipeline && uses->empty()) {
         EnsureRTSetStatesByType();
-        if (!m_BarrierScratch.empty())
-            m_List->ResourceBarrier(static_cast<UINT>(m_BarrierScratch.size()), m_BarrierScratch.data());
+        for (const auto& b : m_BarrierScratch) EmitBarrier(b);
         return;
     }
 
@@ -1130,9 +1268,9 @@ void D3D12CommandList::EnsureBoundResourceStates() {
         b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         b.Transition.StateBefore = m_Device->GetResourceState(m_PassDsvRes);
         b.Transition.StateAfter  = D3D12_RESOURCE_STATE_DEPTH_WRITE;
-        m_List->ResourceBarrier(1, &b);
+        EmitBarrier(b);
         m_Device->SetResourceState(m_PassDsvRes, D3D12_RESOURCE_STATE_DEPTH_WRITE);
-        m_List->OMSetRenderTargets(m_PassRtvCount, m_PassRtvCount ? m_PassRtvs : nullptr, FALSE, &m_PassDsv);
+        EmitResolvedRenderTargets(m_PassRtvs, m_PassRtvCount, &m_PassDsv);
         m_DsvReadOnly = false;
     }
     bool needReadOnlyDsv = false;
@@ -1238,12 +1376,13 @@ void D3D12CommandList::EnsureBoundResourceStates() {
             m_Device->SetResourceState(m_PassDsvRes, want);
         }
     }
-    if (!m_BarrierScratch.empty())
-        m_List->ResourceBarrier(static_cast<UINT>(m_BarrierScratch.size()), m_BarrierScratch.data());
+    if (!m_BarrierScratch.empty()) {
+        for (const auto& b : m_BarrierScratch) EmitBarrier(b);
+    }
     if (roDsv) {
         D3D12_CPU_DESCRIPTOR_HANDLE ro{};
         ro.ptr = static_cast<SIZE_T>(roDsv);
-        m_List->OMSetRenderTargets(m_PassRtvCount, m_PassRtvCount ? m_PassRtvs : nullptr, FALSE, &ro);
+        EmitResolvedRenderTargets(m_PassRtvs, m_PassRtvCount, &ro);
         m_DsvReadOnly = true;
     }
 }
@@ -1256,14 +1395,20 @@ void D3D12CommandList::SetRootTable(u32 param, D3D12_GPU_DESCRIPTOR_HANDLE handl
 }
 
 void D3D12CommandList::BufferBarrier(IRHIBuffer* buffer, ResourceState srcState, ResourceState dstState) {
-    if (m_StreamMode) { Stream().Enqueue(RHICommandType::CmdBufferBarrier, RHICommandBufferBarrier{ buffer, static_cast<u32>(srcState), static_cast<u32>(dstState) }); return; }
-    if (!m_List || !buffer) return;
+    // 【T10】回放侧不再解析缓冲状态（录制期已把转换编码进命令流）
+    if (m_StreamReplay) return;
+    if (!buffer) return;
+    // 流模式下 TransitionBuffer 把屏障编码进命令流；普通列表直接下原生屏障
     TransitionBuffer(static_cast<D3D12Buffer*>(buffer)->GetResource(), ToD3D12ResourceState(dstState, false));
 }
 
 void D3D12CommandList::FlushRootArgs() {
     EmitDrawLabel();      // 逐绘制标签：插在本次绘制 / 派发的命令之前
-    PrepareSetTables();   // 集内容变了要换快照：会更新 SRV/UAV 表并标脏根参数
+    // 集内容变了要换快照：会更新 SRV/UAV 表并标脏根参数。
+    // 【T10】回放列表不再拍快照（那已是后面帧的内容），描述符表由命令流携带；
+    // bindless 表的句柄由设备常量决定，回放侧可以安全重算。
+    if (m_StreamReplay) PrepareBindlessTables();
+    else                PrepareSetTables();
     if (!m_List || (!m_Pipeline && !m_RtPipeline) || !m_RootArgsDirty) return;
     // 描述符表必须在 SetDescriptorHeaps 之后才能设置
     if (!m_HeapsSet && m_Device && m_Device->EnsureDescriptorHeaps()) {
@@ -1349,7 +1494,13 @@ void D3D12CommandList::SetPushConstants(u32 offset, u32 size, const void* data) 
 }
 
 void D3D12CommandList::Draw(u32 vertexCount, u32 instanceCount, u32 firstVertex, u32 firstInstance) {
-    if (m_StreamMode) { Stream().Enqueue(RHICommandType::CmdDraw, RHICommandDraw{ vertexCount, instanceCount, firstVertex, firstInstance }); return; }
+    if (m_StreamMode) {
+        // 【T10】录制期先解析资源状态与描述符表，再把绘制命令入流（回放跳过解析）
+        StreamDrawPrologue();
+        Stream().Enqueue(RHICommandType::CmdDraw, RHICommandDraw{ vertexCount, instanceCount, firstVertex, firstInstance });
+        StreamDrawEpilogue();
+        return;
+    }
     // 诊断：每 60 次绘制打印一次（D3D12 的 GraphicsCommandList 没有 Get* 查询接口，
     // 所以这里打印我们自己记录的状态）
     if (TraceEnabled()) {
@@ -1374,7 +1525,12 @@ void D3D12CommandList::Draw(u32 vertexCount, u32 instanceCount, u32 firstVertex,
 
 void D3D12CommandList::DrawIndexed(u32 indexCount, u32 instanceCount, u32 firstIndex,
                                    i32 vertexOffset, u32 firstInstance) {
-    if (m_StreamMode) { Stream().Enqueue(RHICommandType::DrawIndexed, RHICommandDrawIndexed{ indexCount, firstIndex, vertexOffset, instanceCount, firstInstance }); return; }
+    if (m_StreamMode) {
+        StreamDrawPrologue();
+        Stream().Enqueue(RHICommandType::DrawIndexed, RHICommandDrawIndexed{ indexCount, firstIndex, vertexOffset, instanceCount, firstInstance });
+        StreamDrawEpilogue();
+        return;
+    }
     static const bool s_NoDraw = (std::getenv("HE_D3D12_NO_DRAW") != nullptr);   // 实验开关：跳过实际绘制（只读一次环境变量）
     if (s_NoDraw) return;
     if (!m_List) return;
@@ -1418,7 +1574,15 @@ ID3D12CommandSignature* D3D12CommandList::GetCommandSignature(D3D12_INDIRECT_ARG
 }
 
 void D3D12CommandList::DrawIndexedIndirect(IRHIBuffer* buffer, u64 offset, u32 drawCount, u32 stride) {
-    if (m_StreamMode) { Stream().Enqueue(RHICommandType::CmdDrawIndexedIndirect, RHICommandDrawIndexedIndirect{ buffer, offset, drawCount, stride }); return; }
+    if (m_StreamMode) {
+        if (auto* b = static_cast<D3D12Buffer*>(buffer))
+            TransitionBuffer(b->GetResource(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+        StreamDrawPrologue();
+        Stream().Enqueue(RHICommandType::CmdDrawIndexedIndirect,
+                         RHICommandDrawIndexedIndirect{ buffer, offset, drawCount, stride });
+        StreamDrawEpilogue();
+        return;
+    }
     if (!m_List || !buffer) return;
     auto* b = static_cast<D3D12Buffer*>(buffer);
     ID3D12CommandSignature* sig = GetCommandSignature(D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED, stride);
@@ -1435,7 +1599,17 @@ void D3D12CommandList::DrawIndexedIndirect(IRHIBuffer* buffer, u64 offset, u32 d
 void D3D12CommandList::DrawIndexedIndirectCount(IRHIBuffer* buffer, u64 offset,
                                                 IRHIBuffer* countBuffer, u64 countOffset,
                                                 u32 maxDrawCount, u32 stride) {
-    if (m_StreamMode) { Stream().Enqueue(RHICommandType::CmdDrawIndexedIndirectCount, RHICommandDrawIndexedIndirectCount{ buffer, countBuffer, offset, countOffset, maxDrawCount, stride }); return; }
+    if (m_StreamMode) {
+        if (auto* b = static_cast<D3D12Buffer*>(buffer))
+            TransitionBuffer(b->GetResource(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+        if (auto* cb = static_cast<D3D12Buffer*>(countBuffer))
+            TransitionBuffer(cb->GetResource(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+        StreamDrawPrologue();
+        Stream().Enqueue(RHICommandType::CmdDrawIndexedIndirectCount,
+                         RHICommandDrawIndexedIndirectCount{ buffer, countBuffer, offset, countOffset, maxDrawCount, stride });
+        StreamDrawEpilogue();
+        return;
+    }
     if (!m_List || !buffer || !countBuffer) return;
     auto* b  = static_cast<D3D12Buffer*>(buffer);
     auto* cb = static_cast<D3D12Buffer*>(countBuffer);
@@ -1461,12 +1635,28 @@ void D3D12CommandList::DrawIndexedIndirectCount(IRHIBuffer* buffer, u64 offset,
 //  序列数取 min(maxSequenceCount, maxDrawCount)：Vulkan 的 maxDrawCount 也是本次绘制数的上限。
 // ---------------------------------------------------------------------------
 void D3D12CommandList::ExecuteGeneratedCommands(const DGCExecuteDesc& desc) {
-    if (m_StreamMode) { RHICommandExecuteGeneratedCommands p{};
+    if (m_StreamMode) {
+        // 【T10】录制期把序列 / 计数缓冲转到 INDIRECT_ARGUMENT（回放侧不再解析状态）
+        if (m_Device) {
+            u64 seqOffset = 0, countOffset = 0;
+            if (ID3D12Resource* seqRes = m_Device->FindBufferByAddress(desc.sequencesBufferAddr, seqOffset))
+                TransitionBuffer(seqRes, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+            if (desc.sequenceCountAddr) {
+                if (ID3D12Resource* countRes = m_Device->FindBufferByAddress(desc.sequenceCountAddr, countOffset))
+                    TransitionBuffer(countRes, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+            }
+        }
+        RHICommandExecuteGeneratedCommands p{};
+        // 【T10】录制期按执行集管线解析描述符表与资源状态：回放侧走 ExecuteGeneratedCommands 的
+        // 原生路径（内部是 ExecuteIndirect），它依赖的根参数必须与录制时一致。
+        if (auto* pso = static_cast<IRHIPipelineState*>(desc.indirectExecutionSet)) SetPipeline(pso);
+        StreamDrawPrologue();
         p.indirectCommandsLayout = desc.indirectCommandsLayout; p.indirectExecutionSet = desc.indirectExecutionSet;
         p.sequencesBufferAddr = desc.sequencesBufferAddr;       p.sequenceCountAddr = desc.sequenceCountAddr;
         p.preprocessBufferAddr = desc.preprocessBufferAddr;     p.preprocessBufferSize = desc.preprocessBufferSize;
         p.maxSequenceCount = desc.maxSequenceCount;             p.maxDrawCount = desc.maxDrawCount;
         Stream().Enqueue(RHICommandType::CmdExecuteGeneratedCommands, p);
+        StreamDrawEpilogue();
         return;
     }
     if (!m_List || !m_Device || IsComputeQueueList()) return;
@@ -1490,8 +1680,11 @@ void D3D12CommandList::ExecuteGeneratedCommands(const DGCExecuteDesc& desc) {
 
     if (m_Pipeline != pso) SetPipeline(pso);   // 执行集只有一条管线：相当于 EXECUTION_SET 令牌
     // 序列 / 计数缓冲由 GPU 剔除以 UAV 写出：执行前转到 INDIRECT_ARGUMENT
-    TransitionBuffer(seqRes, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
-    if (countRes) TransitionBuffer(countRes, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+    // 【T10】回放侧跳过：录制期已把转换编码进命令流
+    if (!m_StreamReplay) {
+        TransitionBuffer(seqRes, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+        if (countRes) TransitionBuffer(countRes, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+    }
     EnsureBoundResourceStates();
     FlushRootArgs();
     m_List->ExecuteIndirect(sig, maxCount, seqRes, seqOffset, countRes, countOffset);
@@ -1504,7 +1697,12 @@ void D3D12CommandList::ExecuteGeneratedCommands(const DGCExecuteDesc& desc) {
 //  与普通绘制同一套前置：补资源状态、下发根参数；之后标记常量槽已消费
 // ---------------------------------------------------------------------------
 void D3D12CommandList::DrawMeshTasks(u32 groupCountX, u32 groupCountY, u32 groupCountZ) {
-    if (m_StreamMode) { Stream().Enqueue(RHICommandType::CmdDrawMeshTasks, RHICommandDrawMeshTasks{ groupCountX, groupCountY, groupCountZ, 0u }); return; }
+    if (m_StreamMode) {
+        StreamDrawPrologue();
+        Stream().Enqueue(RHICommandType::CmdDrawMeshTasks, RHICommandDrawMeshTasks{ groupCountX, groupCountY, groupCountZ, 0u });
+        StreamDrawEpilogue();
+        return;
+    }
     if (!m_List || !m_List6 || IsComputeQueueList()) return;
     if (!m_Pipeline || !m_Pipeline->IsMesh()) {
         HE_CORE_WARN("D3D12CommandList::DrawMeshTasks: 当前未绑定网格管线，已忽略");
@@ -1518,7 +1716,14 @@ void D3D12CommandList::DrawMeshTasks(u32 groupCountX, u32 groupCountY, u32 group
 }
 
 void D3D12CommandList::DrawMeshTasksIndirect(IRHIBuffer* buffer, u64 offset, u32 drawCount, u32 stride) {
-    if (m_StreamMode) { Stream().Enqueue(RHICommandType::CmdDrawMeshTasksIndirect, RHICommandDrawIndexedIndirect{ buffer, offset, drawCount, stride }); return; }
+    if (m_StreamMode) {
+        if (auto* pb = static_cast<D3D12Buffer*>(buffer))
+            TransitionBuffer(pb->GetResource(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+        StreamDrawPrologue();
+        Stream().Enqueue(RHICommandType::CmdDrawMeshTasksIndirect, RHICommandDrawIndexedIndirect{ buffer, offset, drawCount, stride });
+        StreamDrawEpilogue();
+        return;
+    }
     if (!m_List || !m_List6 || !buffer || IsComputeQueueList()) return;
     if (!m_Pipeline || !m_Pipeline->IsMesh()) {
         HE_CORE_WARN("D3D12CommandList::DrawMeshTasksIndirect: 当前未绑定网格管线，已忽略");
@@ -1537,7 +1742,16 @@ void D3D12CommandList::DrawMeshTasksIndirect(IRHIBuffer* buffer, u64 offset, u32
 
 void D3D12CommandList::DrawMeshTasksIndirectCount(IRHIBuffer* buffer, u64 offset, IRHIBuffer* countBuffer,
                                                   u64 countOffset, u32 maxDrawCount, u32 stride) {
-    if (m_StreamMode) { Stream().Enqueue(RHICommandType::CmdDrawMeshTasksIndirectCount, RHICommandDrawIndexedIndirectCount{ buffer, countBuffer, offset, countOffset, maxDrawCount, stride }); return; }
+    if (m_StreamMode) {
+        if (auto* pb = static_cast<D3D12Buffer*>(buffer))
+            TransitionBuffer(pb->GetResource(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+        if (auto* pcb = static_cast<D3D12Buffer*>(countBuffer))
+            TransitionBuffer(pcb->GetResource(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+        StreamDrawPrologue();
+        Stream().Enqueue(RHICommandType::CmdDrawMeshTasksIndirectCount, RHICommandDrawIndexedIndirectCount{ buffer, countBuffer, offset, countOffset, maxDrawCount, stride });
+        StreamDrawEpilogue();
+        return;
+    }
     if (!m_List || !m_List6 || !buffer || !countBuffer || IsComputeQueueList()) return;
     if (!m_Pipeline || !m_Pipeline->IsMesh()) {
         HE_CORE_WARN("D3D12CommandList::DrawMeshTasksIndirectCount: 当前未绑定网格管线，已忽略");
@@ -1558,7 +1772,12 @@ void D3D12CommandList::DrawMeshTasksIndirectCount(IRHIBuffer* buffer, u64 offset
 }
 
 void D3D12CommandList::Dispatch(u32 x, u32 y, u32 z) {
-    if (m_StreamMode) { Stream().Enqueue(RHICommandType::CmdDispatch, RHICommandDispatch{ x, y, z, 0u }); return; }
+    if (m_StreamMode) {
+        StreamDrawPrologue();
+        Stream().Enqueue(RHICommandType::CmdDispatch, RHICommandDispatch{ x, y, z, 0u });
+        StreamDrawEpilogue();
+        return;
+    }
     if (!m_List) return;
     EnsureBoundResourceStates();
     FlushRootArgs();
@@ -1568,7 +1787,14 @@ void D3D12CommandList::Dispatch(u32 x, u32 y, u32 z) {
 }
 
 void D3D12CommandList::DispatchIndirect(IRHIBuffer* buffer, u64 offset) {
-    if (m_StreamMode) { Stream().Enqueue(RHICommandType::CmdDispatchIndirect, RHICommandDispatchIndirect{ buffer, offset }); return; }
+    if (m_StreamMode) {
+        if (auto* pb = static_cast<D3D12Buffer*>(buffer))
+            TransitionBuffer(pb->GetResource(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+        StreamDrawPrologue();
+        Stream().Enqueue(RHICommandType::CmdDispatchIndirect, RHICommandDispatchIndirect{ buffer, offset });
+        StreamDrawEpilogue();
+        return;
+    }
     if (!m_List || !buffer) return;
     auto* b = static_cast<D3D12Buffer*>(buffer);
     // 此前签名传空指针：ExecuteIndirect 要求有效的命令签名（派发参数 = 3 个 u32）
@@ -1600,7 +1826,11 @@ ID3D12GraphicsCommandList4* D3D12CommandList::GetList4() {
 
 void D3D12CommandList::BuildBLAS(IRHIAccelerationStructure* blas, IRHIBuffer* scratchBuffer,
                                  const BLASBuildDesc& desc, bool update) {
-    if (m_StreamMode) return;   // 命令流模式不支持光追（流里没有 AS 构建命令）
+    if (m_StreamMode) {
+        // 命令流无法承载该调用：跳过并触发回退（下一帧起直接录制，画面自下一帧恢复）
+        MarkStreamUnsupported("BLAS 构建");
+        return;
+    }   // 命令流模式不支持光追（流里没有 AS 构建命令）
     if (!m_List || !blas) return;
     auto* as = static_cast<D3D12AccelerationStructure*>(blas);
     ID3D12GraphicsCommandList4* list4 = GetList4();
@@ -1662,7 +1892,11 @@ void D3D12CommandList::BuildBLAS(IRHIAccelerationStructure* blas, IRHIBuffer* sc
 
 void D3D12CommandList::BuildTLAS(IRHIAccelerationStructure* tlas, IRHIBuffer* scratchBuffer,
                                  IRHIBuffer* instanceBuffer, u32 instanceCount, bool update) {
-    if (m_StreamMode) return;
+    if (m_StreamMode) {
+        // 命令流无法承载该调用：跳过并触发回退（下一帧起直接录制，画面自下一帧恢复）
+        MarkStreamUnsupported("TLAS 构建");
+        return;
+    }
     if (!m_List || !tlas || instanceCount == 0) return;
     auto* as = static_cast<D3D12AccelerationStructure*>(tlas);
     ID3D12GraphicsCommandList4* list4 = GetList4();
@@ -1714,7 +1948,11 @@ void D3D12CommandList::BuildTLAS(IRHIAccelerationStructure* tlas, IRHIBuffer* sc
 }
 
 void D3D12CommandList::BindRTPipeline(IRHIRayTracingPipelineState* rtPSO) {
-    if (m_StreamMode) return;
+    if (m_StreamMode) {
+        // 命令流无法承载该调用：跳过并触发回退（下一帧起直接录制，画面自下一帧恢复）
+        MarkStreamUnsupported("光追管线绑定");
+        return;
+    }
     if (!m_List || !rtPSO) return;
     auto* rt = static_cast<D3D12RayTracingPipelineState*>(rtPSO);
     ID3D12GraphicsCommandList4* list4 = GetList4();
@@ -1732,7 +1970,11 @@ void D3D12CommandList::BindRTPipeline(IRHIRayTracingPipelineState* rtPSO) {
 }
 
 void D3D12CommandList::TraceRays(const SBTDesc& sbt, u32 width, u32 height, u32 depth) {
-    if (m_StreamMode) return;
+    if (m_StreamMode) {
+        // 命令流无法承载该调用：跳过并触发回退（下一帧起直接录制，画面自下一帧恢复）
+        MarkStreamUnsupported("光线派发");
+        return;
+    }
     if (!m_List || !m_RtPipeline || !sbt.buffer) return;
     ID3D12GraphicsCommandList4* list4 = GetList4();
     if (!list4) return;
@@ -1833,11 +2075,9 @@ void D3D12CommandList::PipelineBarrier(PipelineStage srcStage, PipelineStage dst
 void D3D12CommandList::PipelineBarrier(PipelineStage srcStage, PipelineStage dstStage,
                                        ResourceState srcState, ResourceState dstState,
                                        IRHITexture* texture) {
-    if (m_StreamMode) { Stream().Enqueue(RHICommandType::CmdPipelineBarrierTexture, RHICommandPipelineBarrierTexture{ texture,
-            static_cast<u32>(srcStage), static_cast<u32>(dstStage), static_cast<u32>(srcState), static_cast<u32>(dstState) });
-        return;
-    }
-    if (!m_List || !texture || m_IsBundle) return;   // bundle 不能发屏障
+    // 【T10】回放侧不再解析：录制期已按设备状态表解析并编码进命令流（CmdResolvedBarrier）
+    if (m_StreamReplay) return;
+    if (!texture || m_IsBundle) return;   // bundle 不能发屏障
     auto* t = static_cast<D3D12Texture*>(texture);
     ActivateAliasedTexture(t->GetResource());   // 瞬态纹理首次使用：先激活
     D3D12_RESOURCE_STATES from = ToD3D12ResourceState(srcState, t->IsDepth());
@@ -1852,7 +2092,7 @@ void D3D12CommandList::PipelineBarrier(PipelineStage srcStage, PipelineStage dst
         D3D12_RESOURCE_BARRIER ub{};
         ub.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
         ub.UAV.pResource = t->GetResource();
-        m_List->ResourceBarrier(1, &ub);
+        EmitBarrier(ub);   // 流模式编码进命令流；普通列表直接下发
     };
     if (from == to) {
         if (to == D3D12_RESOURCE_STATE_UNORDERED_ACCESS &&
@@ -1875,20 +2115,31 @@ void D3D12CommandList::PipelineBarrier(PipelineStage srcStage, PipelineStage dst
         }
         b.Transition.StateBefore = actualFrom;
     b.Transition.StateAfter  = to;
-    m_List->ResourceBarrier(1, &b);
+    EmitBarrier(b);
         if (m_Device) m_Device->SetResourceState(bres, to);
 }
 
 void D3D12CommandList::CopyBuffer(IRHIBuffer* src, IRHIBuffer* dst, u64 size,
                                   u64 srcOffset, u64 dstOffset) {
-    if (m_StreamMode) { Stream().Enqueue(RHICommandType::CmdCopyBuffer, RHICommandCopyBuffer{ src, dst, size, srcOffset, dstOffset }); return; }
-    if (!m_List || !src || !dst) return;
+    if (!src || !dst) return;
+    if (m_StreamReplay) {   // 【T10】回放：缓冲状态转换已由录制期解析进命令流，只做拷贝
+        if (m_List) m_List->CopyBufferRegion(static_cast<D3D12Buffer*>(dst)->GetResource(), dstOffset,
+                                             static_cast<D3D12Buffer*>(src)->GetResource(), srcOffset, size);
+        return;
+    }
+    if (!m_List && !m_StreamMode) return;
     auto* s = static_cast<D3D12Buffer*>(src);
     auto* d = static_cast<D3D12Buffer*>(dst);
     // 拷贝要求源 / 目标分别处于 COPY_SOURCE / COPY_DEST：同一列表里缓冲可能已被提升为 UAV 等状态，
     // 这时必须显式转换（只处理 DEFAULT/CUSTOM 堆；UPLOAD/READBACK 堆的缓冲状态固定）
     TransitionBuffer(s->GetResource(), D3D12_RESOURCE_STATE_COPY_SOURCE);
     TransitionBuffer(d->GetResource(), D3D12_RESOURCE_STATE_COPY_DEST);
+    // 【T10】流模式：上面的转换已经编码进命令流，这里只把"拷贝"这一条命令入流
+    if (m_StreamMode) {
+        Stream().Enqueue(RHICommandType::CmdCopyBuffer,
+                         RHICommandCopyBuffer{ src, dst, size, srcOffset, dstOffset });
+        return;
+    }
     m_List->CopyBufferRegion(d->GetResource(), dstOffset, s->GetResource(), srcOffset, size);
 }
 
@@ -1950,14 +2201,14 @@ bool D3D12CommandList::FilterStateForQueue(D3D12_RESOURCE_STATES& state) const {
 //  Discard 只能在图形列表上做：计算列表上只发别名屏障（渲染目标 / 深度本就不会先在计算列表上用）。
 // ---------------------------------------------------------------------------
 void D3D12CommandList::ActivateAliasedTexture(ID3D12Resource* res) {
-    if (!m_List || !m_Device || !res || m_IsBundle) return;   // bundle 不能发屏障
+    if (!m_Device || !res || m_IsBundle) return;   // bundle 不能发屏障
     D3D12_RESOURCE_STATES discardState = D3D12_RESOURCE_STATE_COMMON;
     if (!m_Device->TakeAliasActivation(res, discardState)) return;
     D3D12_RESOURCE_BARRIER b{};
     b.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
     b.Aliasing.pResourceBefore = nullptr;
     b.Aliasing.pResourceAfter  = res;
-    m_List->ResourceBarrier(1, &b);
+    EmitBarrier(b);
     if (discardState == D3D12_RESOURCE_STATE_COMMON || IsComputeQueueList()) return;
     const D3D12_RESOURCE_STATES cur = m_Device->GetResourceState(res);
     if (cur != discardState) {
@@ -1967,10 +2218,10 @@ void D3D12CommandList::ActivateAliasedTexture(ID3D12Resource* res) {
         t.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         t.Transition.StateBefore = cur;
         t.Transition.StateAfter  = discardState;
-        m_List->ResourceBarrier(1, &t);
+        EmitBarrier(t);
         m_Device->SetResourceState(res, discardState);
     }
-    m_List->DiscardResource(res, nullptr);
+    EmitDiscard(res);
 }
 
 // ---------------------------------------------------------------------------
@@ -2012,6 +2263,8 @@ D3D12_RESOURCE_STATES D3D12CommandList::UsableTextureState(ID3D12Resource* res) 
 
 void D3D12CommandList::TransitionBuffer(ID3D12Resource* res, D3D12_RESOURCE_STATES want) {
     if (!res || !m_Device) return;
+    // 【T10】回放侧不再解析：录制期已把缓冲的状态转换编码进命令流
+    if (m_StreamReplay) return;
     if (m_IsBundle) { m_BundleBufferTransitions.emplace_back(res, want); return; }   // 由主列表补发
     D3D12_HEAP_PROPERTIES hp{};
     if (FAILED(res->GetHeapProperties(&hp, nullptr)) ||
@@ -2026,50 +2279,55 @@ void D3D12CommandList::TransitionBuffer(ID3D12Resource* res, D3D12_RESOURCE_STAT
     b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     b.Transition.StateBefore = cur;
     b.Transition.StateAfter  = want;
-    m_List->ResourceBarrier(1, &b);
+    EmitBarrier(b);               // 流模式编码进命令流，普通列表直接下发
     m_BufferStates[res] = want;   // 本列表内的缓冲状态（列表执行完后衰减回 COMMON，见 Begin）
 }
 
 void D3D12CommandList::CopyTextureToTexture(IRHITexture* src, IRHITexture* dst) {
-    if (m_StreamMode) { Stream().Enqueue(RHICommandType::CmdCopyTextureToTexture, RHICommandCopyTextureToTexture{ src, dst }); return; }
-    if (!m_List || !src || !dst) return;
+    if (!src || !dst) return;
     auto* s = static_cast<D3D12Texture*>(src);
     auto* d = static_cast<D3D12Texture*>(dst);
     ID3D12Resource* sr = s->GetResource();
     ID3D12Resource* dr = d->GetResource();
     if (!sr || !dr || sr == dr || !m_Device) return;
+    // 【T10】回放侧：临时转换已由录制期解析进命令流，这里只做拷贝
+    if (m_StreamReplay) {
+        if (m_List) m_List->CopyResource(dr, sr);
+        return;
+    }
+    if (!m_List && !m_StreamMode) return;
     // CopyResource 要求源 / 目标分别处于 COPY_SOURCE / COPY_DEST：临时转过去，拷完转回原状态
     //（设备级状态记录不变）。此前不做转换，渲染目标等状态下直接拷贝属非法调用
     // 计算列表：图形专用状态先交接到计算可用状态（拷完转回的也是交接后的状态）
     const D3D12_RESOURCE_STATES ss = UsableTextureState(sr);
     const D3D12_RESOURCE_STATES ds = UsableTextureState(dr);
-    D3D12_RESOURCE_BARRIER b[2]{};
-    UINT nb = 0;
-    auto add = [&](ID3D12Resource* r, D3D12_RESOURCE_STATES from, D3D12_RESOURCE_STATES to) {
-        if (from == to) return;
-        b[nb].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        b[nb].Transition.pResource   = r;
-        b[nb].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        b[nb].Transition.StateBefore = from;
-        b[nb].Transition.StateAfter  = to;
-        ++nb;
+    auto add = [&](ID3D12Resource* r, D3D12_RESOURCE_STATES fromState, D3D12_RESOURCE_STATES toState) {
+        if (fromState == toState) return;
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition.pResource   = r;
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = fromState;
+        b.Transition.StateAfter  = toState;
+        EmitBarrier(b);
     };
     add(sr, ss, D3D12_RESOURCE_STATE_COPY_SOURCE);
     add(dr, ds, D3D12_RESOURCE_STATE_COPY_DEST);
-    if (nb) m_List->ResourceBarrier(nb, b);
-    m_List->CopyResource(dr, sr);
-    nb = 0;
+    // 【T10】流模式：上面的转换已入流，这里把"拷贝"这一条命令入流（回放侧只做 CopyResource）
+    if (m_StreamMode) {
+        Stream().Enqueue(RHICommandType::CmdCopyTextureToTexture, RHICommandCopyTextureToTexture{ src, dst });
+    } else {
+        m_List->CopyResource(dr, sr);
+    }
     add(sr, D3D12_RESOURCE_STATE_COPY_SOURCE, ss);
     add(dr, D3D12_RESOURCE_STATE_COPY_DEST, ds);
-    if (nb) m_List->ResourceBarrier(nb, b);
 }
 
 // ClearDepthStencil —— 清除深度/模板纹理（对应 Vulkan 的 vkCmdClearDepthStencilImage）
 // D3D12 只能通过 DSV 清深度：先按设备登记的状态把资源转到 DEPTH_WRITE，再 ClearDepthStencilView。
 // 清除后资源留在 DEPTH_WRITE，正好供随后的深度测试 pass 使用（与 Vulkan 版末尾转到附件布局一致）。
 void D3D12CommandList::ClearDepthStencil(IRHITexture* texture, float depth) {
-    if (m_StreamMode) { Stream().Enqueue(RHICommandType::CmdClearDepthStencil, RHICommandClearDepthStencil{ texture, depth, 0u }); return; }
-    if (!m_List || !texture || m_IsBundle) return;   // bundle 不能发屏障与清除
+    if (!texture || m_IsBundle) return;   // bundle 不能发屏障与清除
     if (IsComputeQueueList()) {   // DEPTH_WRITE 与 ClearDepthStencilView 只能在图形列表上使用
         HE_CORE_WARN("D3D12CommandList::ClearDepthStencil: 计算列表上不能清除深度，已忽略");
         return;
@@ -2078,6 +2336,36 @@ void D3D12CommandList::ClearDepthStencil(IRHITexture* texture, float depth) {
     ID3D12Resource* res = t->GetResource();
     const D3D12_CPU_DESCRIPTOR_HANDLE dsv = t->GetDsv();
     if (!res || !dsv.ptr) return;   // 没有 DSV 的纹理无法清深度
+    // 带模板的格式同时清模板（与 Vulkan 版一致清成 0）
+    const Format fmt = t->GetFormat();
+    D3D12_CLEAR_FLAGS flags = D3D12_CLEAR_FLAG_DEPTH;
+    if (fmt == Format::D24_UNORM_S8_UINT || fmt == Format::D32_FLOAT_S8_UINT)
+        flags |= D3D12_CLEAR_FLAG_STENCIL;
+    if (m_StreamMode) {
+        // 【T10】录制期解析：转 DEPTH_WRITE + 清除命令一起入流
+        const D3D12_RESOURCE_STATES from = m_Device ? m_Device->GetResourceState(res)
+                                                     : D3D12_RESOURCE_STATE_COMMON;
+        ActivateAliasedTexture(res);
+        if (from != D3D12_RESOURCE_STATE_DEPTH_WRITE) {
+            D3D12_RESOURCE_BARRIER b{};
+            b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            b.Transition.pResource   = res;
+            b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            b.Transition.StateBefore = from;
+            b.Transition.StateAfter  = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+            EmitBarrier(b);
+            if (m_Device) m_Device->SetResourceState(res, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+        }
+        Stream().Enqueue(RHICommandType::CmdClearDepthStencil,
+                         RHICommandClearDepthStencil{ texture, depth, 0u });
+        return;
+    }
+    if (!m_List) return;
+    // 【T10】回放侧：状态转换已随命令流完成，只做清除
+    if (m_StreamReplay) {
+        m_List->ClearDepthStencilView(dsv, flags, depth, 0, 0, nullptr);
+        return;
+    }
     ActivateAliasedTexture(res);    // 瞬态纹理首次使用：先激活
 
     // 以设备登记的真实状态作屏障的 StateBefore（同 PipelineBarrier）
@@ -2090,27 +2378,51 @@ void D3D12CommandList::ClearDepthStencil(IRHITexture* texture, float depth) {
         b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         b.Transition.StateBefore = from;
         b.Transition.StateAfter  = D3D12_RESOURCE_STATE_DEPTH_WRITE;
-        m_List->ResourceBarrier(1, &b);
+        EmitBarrier(b);
         if (m_Device) m_Device->SetResourceState(res, D3D12_RESOURCE_STATE_DEPTH_WRITE);
     }
 
-    // 带模板的格式同时清模板（与 Vulkan 版一致清成 0）
-    const Format fmt = t->GetFormat();
-    D3D12_CLEAR_FLAGS flags = D3D12_CLEAR_FLAG_DEPTH;
-    if (fmt == Format::D24_UNORM_S8_UINT || fmt == Format::D32_FLOAT_S8_UINT)
-        flags |= D3D12_CLEAR_FLAG_STENCIL;
     m_List->ClearDepthStencilView(dsv, flags, depth, 0, 0, nullptr);
 }
 
 void D3D12CommandList::CopyTextureToBuffer(IRHITexture* src, IRHIBuffer* dst, u32 x, u32 y,
                                            u32 width, u32 height, u64 bufferOffset) {
-    if (m_StreamMode) { Stream().Enqueue(RHICommandType::CmdCopyTextureToBuffer, RHICommandCopyTextureToBuffer{ src, dst, x, y, width, height, 0u, bufferOffset }); return; }
-    if (!m_List || !m_Device || !m_Device->GetDevice() || !src || !dst) return;
+    if (!m_Device || !m_Device->GetDevice() || !src || !dst) return;
     auto* t = static_cast<D3D12Texture*>(src);
     auto* b = static_cast<D3D12Buffer*>(dst);
     ID3D12Resource* texRes = t->GetResource();
     ID3D12Resource* bufRes = b->GetResource();
     if (!texRes || !bufRes) return;
+    if (m_StreamMode) {
+        // 【T10】录制期解析：纹理临时转 COPY_SOURCE、目标缓冲转 COPY_DEST（回放侧不再解析）；
+        // 中转缓冲与逐行拷贝仍由回放侧完成（那是纯资源操作，不依赖引擎状态）。
+        ActivateAliasedTexture(texRes);
+        const D3D12_RESOURCE_STATES texState = UsableTextureState(texRes);
+        if (texState != D3D12_RESOURCE_STATE_COPY_SOURCE) {
+            D3D12_RESOURCE_BARRIER tb{};
+            tb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            tb.Transition.pResource   = texRes;
+            tb.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            tb.Transition.StateBefore = texState;
+            tb.Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_SOURCE;
+            EmitBarrier(tb);
+        }
+        TransitionBuffer(bufRes, D3D12_RESOURCE_STATE_COPY_DEST);
+        Stream().Enqueue(RHICommandType::CmdCopyTextureToBuffer,
+                         RHICommandCopyTextureToBuffer{ src, dst, x, y, width, height, 0u, bufferOffset });
+        // 拷完把纹理转回原状态（流里排在拷贝命令之后）
+        if (texState != D3D12_RESOURCE_STATE_COPY_SOURCE) {
+            D3D12_RESOURCE_BARRIER tb{};
+            tb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            tb.Transition.pResource   = texRes;
+            tb.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            tb.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+            tb.Transition.StateAfter  = texState;
+            EmitBarrier(tb);
+        }
+        return;
+    }
+    if (!m_List) return;
     const u32 w = width  ? width  : t->GetWidth();
     const u32 h = height ? height : t->GetHeight();
     if (w == 0 || h == 0 || x + w > t->GetWidth() || y + h > t->GetHeight()) return;
@@ -2156,14 +2468,17 @@ void D3D12CommandList::CopyTextureToBuffer(IRHITexture* src, IRHIBuffer* dst, u3
     m_TempResources[m_FrameSlot].push_back(staging);
 
     // 纹理临时转到 COPY_SOURCE，拷完转回原状态（设备级记录不变）
-    const D3D12_RESOURCE_STATES texState = UsableTextureState(texRes);   // 计算列表：图形专用状态先交接
+    // 【T10】回放侧跳过这两处共享资源转换：录制期已把它们编码进命令流（CmdResolvedBarrier）
+    const bool replay = m_StreamReplay;
+    const D3D12_RESOURCE_STATES texState =
+        replay ? D3D12_RESOURCE_STATE_COMMON : UsableTextureState(texRes);   // 计算列表：图形专用状态先交接
     D3D12_RESOURCE_BARRIER tb{};
     tb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     tb.Transition.pResource   = texRes;
     tb.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     tb.Transition.StateBefore = texState;
     tb.Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_SOURCE;
-    if (texState != D3D12_RESOURCE_STATE_COPY_SOURCE) m_List->ResourceBarrier(1, &tb);
+    if (!replay && texState != D3D12_RESOURCE_STATE_COPY_SOURCE) m_List->ResourceBarrier(1, &tb);
 
     D3D12_TEXTURE_COPY_LOCATION dstLoc{};
     dstLoc.pResource       = staging.Get();
@@ -2176,7 +2491,7 @@ void D3D12CommandList::CopyTextureToBuffer(IRHITexture* src, IRHIBuffer* dst, u3
     const D3D12_BOX box{ x, y, 0, x + w, y + h, 1 };
     m_List->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, &box);
 
-    if (texState != D3D12_RESOURCE_STATE_COPY_SOURCE) {
+    if (!replay && texState != D3D12_RESOURCE_STATE_COPY_SOURCE) {
         std::swap(tb.Transition.StateBefore, tb.Transition.StateAfter);
         m_List->ResourceBarrier(1, &tb);
     }
@@ -2189,7 +2504,7 @@ void D3D12CommandList::CopyTextureToBuffer(IRHITexture* src, IRHIBuffer* dst, u3
     sb.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
     sb.Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_SOURCE;
     m_List->ResourceBarrier(1, &sb);
-    TransitionBuffer(bufRes, D3D12_RESOURCE_STATE_COPY_DEST);
+    if (!replay) TransitionBuffer(bufRes, D3D12_RESOURCE_STATE_COPY_DEST);   // 回放：已随命令流解析
     if (fp.Footprint.RowPitch == rowBytes) {
         m_List->CopyBufferRegion(bufRes, bufferOffset, staging.Get(), 0, rowBytes * rows);
     } else {
@@ -2219,7 +2534,15 @@ void D3D12CommandList::SetTimelineWait(RHIFenceHandle fence, u64 value) {
 void D3D12CommandList::Submit() {
     if (TraceEnabled()) { std::printf("[TRACE] Submit\n"); std::fflush(stdout); }
     if (!m_Device) return;
-    if (m_StreamMode) { m_Device->ExecuteSubmit(this, GetRecordedStream()); return; }
+    if (m_StreamMode) {
+        // 命令流与"录制期用过的描述符快照块掩码"一起交出（回放提交后据此登记围栏）
+        RHICommandList* s = GetRecordedStream();
+        if (s) s->SetAuxMask(m_SetRingChunkMask);
+        // 影子列表在录制线程上先建出来（设备登记表非线程安全，见 D3D12Device::Submit）
+        (void)GetReplayList();
+        m_Device->ExecuteSubmit(this, s);
+        return;
+    }
     PackSubmission();
     m_Device->SubmitNow(this);
 }
@@ -2230,19 +2553,28 @@ void D3D12CommandList::Submit() {
 void D3D12CommandList::EnableCommandStream() {
     // 只有图形队列的主列表支持（bundle 与计算列表永远真实录制）
     const char* e = std::getenv("HE_RHI_COMMAND_STREAM");
-    m_StreamMode = (e && e[0] == '1') && !m_IsBundle && m_QueueType == QueueType::Graphics;
-    // 【模式 2 下不开流】有提交路由时回放在 RHI 线程上、落后渲染线程最多两帧，而描述符集内容不按帧
-    // 分版本：回放时拍的快照、按集内容推导的资源状态转换都已是后面帧写入的内容（实测 06.GILab
-    // 约 10 帧后 GPU 挂起）。要支持需在录制时拍快照并解析资源状态，此处先退回直接录制
-    if (m_StreamMode && m_Device && m_Device->GetSubmitRouter()) {
+    const bool want = (e && e[0] == '1') && !m_IsBundle && m_QueueType == QueueType::Graphics;
+    // 【T10】回退：录制中遇到过命令流无法承载的调用（光追构建 / 派发等）⇒ 从本帧起直接录制。
+    // 打印一次明确原因，绝不静默丢命令。
+    if (want && m_StreamFallback) {
         m_StreamMode = false;
         static bool s_Warned = false;
         if (!s_Warned) {
             s_Warned = true;
-            HE_CORE_WARN("[D3D12] 提交路由（模式 2）下暂不支持命令流模式，帧主列表改为直接录制");
+            HE_CORE_WARN("[D3D12] 命令流模式已回退为直接录制：录制期出现命令流无法承载的调用"
+                         "（原因见上一条 [D3D12] 警告）");
         }
+        return;
     }
+    m_StreamMode = want;
     if (m_StreamMode && !m_Streams[m_StreamSlot]) m_Streams[m_StreamSlot] = std::make_unique<RHICommandList>();
+}
+
+void D3D12CommandList::MarkStreamUnsupported(const char* what) {
+    if (m_StreamFallback) return;
+    m_StreamFallback = true;
+    HE_CORE_WARN("[D3D12] 命令流无法承载 {}：本帧继续按命令流提交（该调用被跳过），"
+                 "从下一帧起帧主列表回退为直接录制", what ? what : "该调用");
 }
 
 D3D12CommandList* D3D12CommandList::GetReplayList() {
@@ -2251,6 +2583,71 @@ D3D12CommandList* D3D12CommandList::GetReplayList() {
         if (r->Initialize(m_Device, m_QueueType)) m_ReplayList = std::move(r);
     }
     return m_ReplayList.get();
+}
+
+// ---------------------------------------------------------------------------
+//  【T10】命令流回放入口：只按录制期解析好的数据下原生指令，不查任何引擎侧可变状态
+// ---------------------------------------------------------------------------
+void D3D12CommandList::ApplyResolvedBarrier(void* resource, ResolvedBarrierType type,
+                                            u32 subresource, u32 before, u32 after) {
+    if (!m_List) return;
+    auto* res = static_cast<ID3D12Resource*>(resource);
+    switch (type) {
+    case ResolvedBarrierType::Transition: {
+        if (!res) return;
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition.pResource   = res;
+        b.Transition.Subresource = subresource;
+        b.Transition.StateBefore = static_cast<D3D12_RESOURCE_STATES>(before);
+        b.Transition.StateAfter  = static_cast<D3D12_RESOURCE_STATES>(after);
+        m_List->ResourceBarrier(1, &b);
+        return;
+    }
+    case ResolvedBarrierType::Uav: {
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        b.UAV.pResource = res;   // 空表示全局 UAV 屏障
+        m_List->ResourceBarrier(1, &b);
+        return;
+    }
+    case ResolvedBarrierType::Aliasing: {
+        if (!res) return;
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
+        b.Aliasing.pResourceBefore = nullptr;
+        b.Aliasing.pResourceAfter  = res;
+        m_List->ResourceBarrier(1, &b);
+        return;
+    }
+    case ResolvedBarrierType::Discard:
+        if (res) m_List->DiscardResource(res, nullptr);
+        return;
+    }
+}
+
+void D3D12CommandList::ApplyResolvedDescriptorTable(u32 setIndex, u64 set, u64 srv,
+                                                    u64 uav, u64 sampler) {
+    if (setIndex >= 8u) return;
+    if (set != static_cast<u64>(kInvalidSet))
+        m_BoundSets[setIndex] = static_cast<DescriptorSetHandle>(set);
+    D3D12_GPU_DESCRIPTOR_HANDLE s{}; s.ptr = srv;
+    D3D12_GPU_DESCRIPTOR_HANDLE u{}; u.ptr = uav;
+    D3D12_GPU_DESCRIPTOR_HANDLE m{}; m.ptr = sampler;
+    SetRootTable(8  + setIndex, s);
+    SetRootTable(16 + setIndex, u);
+    SetRootTable(24 + setIndex, m);
+}
+
+void D3D12CommandList::ApplyResolvedRenderTargets(void* const* rtvs, u32 count, void* dsv) {
+    if (!m_List) return;
+    D3D12_CPU_DESCRIPTOR_HANDLE handles[8]{};
+    const u32 n = (count < 8u) ? count : 8u;
+    for (u32 i = 0; i < n; ++i) handles[i] = ToCpuHandle(rtvs ? rtvs[i] : nullptr);
+    D3D12_CPU_DESCRIPTOR_HANDLE depth{};
+    depth.ptr = reinterpret_cast<SIZE_T>(dsv);
+    m_List->OMSetRenderTargets(n, (n && rtvs) ? handles : nullptr, FALSE, dsv ? &depth : nullptr);
+    m_HasRtv = n > 0;
 }
 
 void D3D12CommandList::StreamLabel(RHICommandType type, const char* name) {

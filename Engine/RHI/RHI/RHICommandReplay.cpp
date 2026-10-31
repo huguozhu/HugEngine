@@ -346,6 +346,35 @@ static u32 g_L43PassW = 0, g_L43PassH = 0;
             ++replayed;
             break;
         }
+        // 【T10】录制期已解析好的后端细节：回放只按数据下指令，不再查描述符集 / 设备状态表
+        case RHICommandType::CmdResolvedBarrier: {
+            const auto* d = stream.PayloadAt<RHICommandResolvedBarrier>(i);
+            if (!d) break;
+            // 类型数值与 IRHICommandList::ResolvedBarrierType 一一对应
+            cmd.ApplyResolvedBarrier(d->resource,
+                                     static_cast<IRHICommandList::ResolvedBarrierType>(d->type),
+                                     d->subresource, d->before, d->after);
+            ++replayed;
+            break;
+        }
+        case RHICommandType::CmdResolvedDescriptorTables: {
+            const auto* d = stream.PayloadAt<RHICommandDescriptorTables>(i);
+            if (!d) break;
+            cmd.ApplyResolvedDescriptorTable(d->setIndex, d->set, d->srv, d->uav, d->sampler);
+            ++replayed;
+            break;
+        }
+        case RHICommandType::CmdResolvedRenderTargets: {
+            const auto* d = stream.PayloadAt<RHICommandResolvedRenderTargets>(i);
+            if (!d) break;
+            const auto* rtvs = d->count
+                ? reinterpret_cast<void* const*>(stream.ArenaRawAt(d->rtvsOffset, sizeof(void*) * d->count))
+                : nullptr;
+            if (d->count && !rtvs) break;
+            cmd.ApplyResolvedRenderTargets(rtvs, d->count, d->dsv);
+            ++replayed;
+            break;
+        }
         case RHICommandType::MarkSubmitBoundary:
             // 提交边界由执行端（RHI 线程）自己按帧处理，这里不是一条 RHI 调用
             ++replayed;
