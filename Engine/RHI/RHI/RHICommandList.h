@@ -97,6 +97,9 @@ enum class RHICommandType : u32 {
     CmdResolvedBarrier          = 52,   // 一条已解析的原生资源屏障
     CmdResolvedDescriptorTables = 53,   // 已拍下的描述符表快照 GPU 句柄（按帧分版本）
     CmdResolvedRenderTargets    = 54,   // 已解析的 RTV/DSV 绑定（只读 DSV 切换等）
+    // 【P3】命令流承载光追：BLAS 构建、光线派发（TLAS 构建 / RT 管线绑定复用 34 / 35）
+    CmdBuildBLAS                = 55,   // 载荷 RHICommandBuildBLAS（几何数组在 arena）
+    CmdTraceRays                = 56,   // 载荷 RHICommandTraceRays（在 arena，超过 64B 内联上限）
 };
 
 /// 一条命令的载荷：类型擦除 + **内联存储**。
@@ -158,6 +161,40 @@ struct RHICommandExecuteGeneratedCommands {
     u64 sequencesBufferAddr = 0; u64 sequenceCountAddr = 0;
     u64 preprocessBufferAddr = 0; u64 preprocessBufferSize = 0;
     u32 maxSequenceCount = 0; u32 maxDrawCount = 0;
+};
+/// 【P3】BLAS 构建的单个几何：RTGeometryDesc 的 POD 版（命令流里不能带 std::vector）。
+/// 枚举字段一律按底层整数存，回放侧再转回 RHI 枚举。
+struct RHIBLASGeometry {
+    void* vertexBuffer    = nullptr;
+    void* indexBuffer     = nullptr;
+    void* transformBuffer = nullptr;
+    u64   vertexStride    = 12;
+    u32   vertexFormat    = 0;   // Format 的数值
+    u32   indexFormat     = 0;   // Format 的数值
+    u32   maxVertex       = 0;
+    u32   maxPrimitiveCount = 0;
+    u32   type            = 0;   // RTGeometryType 的数值
+    u32   pad             = 0;
+};
+/// 【P3】BLAS 构建命令：几何数组放在命令流 arena 里（`geometryOffset` 是 arena 偏移）
+struct RHICommandBuildBLAS {
+    void* blas        = nullptr;
+    void* scratch     = nullptr;
+    u64   geometryOffset = 0;
+    u32   geometryCount  = 0;
+    u32   flags          = 0;   // ASBuildFlags 的位掩码（u8）
+    u32   update         = 0;
+    u32   pad            = 0;
+};
+/// 【P3】光线派发命令：SBT 四个槽位的偏移 / 步长 + 派发尺寸。
+/// SBTDesc 的 u64 字段合计超过 64B 内联上限 ⇒ 走 arena（`EnqueueArena`）。
+struct RHICommandTraceRays {
+    void* buffer = nullptr;      // SBT 缓冲
+    u64   rayGenOffset = 0;  u64 rayGenStride = 0;
+    u64   missOffset = 0;    u64 missStride = 0;
+    u64   hitOffset = 0;     u64 hitStride = 0;
+    u64   callableOffset = 0; u64 callableStride = 0;
+    u32   width = 0, height = 0, depth = 1, pad = 0;
 };
 /// 【T10】一条已解析的原生资源屏障：类型数值与 IRHICommandList::ResolvedBarrierType 一致
 /// （1 = 状态转换、2 = UAV、3 = 别名、4 = Discard）。before/after 是后端的状态枚举数值。
@@ -231,6 +268,8 @@ static_assert(sizeof(RHICommandDrawIndexed)      <= kInlinePayloadBytes, "载荷
 static_assert(sizeof(RHICommandSetDebugLabel)    <= kInlinePayloadBytes, "载荷超过内联上限");
 static_assert(sizeof(RHICommandExecuteSecondary) <= kInlinePayloadBytes, "载荷超过内联上限");
 static_assert(sizeof(RHICommandExecuteIndirect)  <= kInlinePayloadBytes, "载荷超过内联上限");
+static_assert(sizeof(RHICommandBuildBLAS)        <= kInlinePayloadBytes, "载荷超过内联上限（几何数组走 arena）");
+static_assert(sizeof(RHIBLASGeometry)            <= kInlinePayloadBytes, "载荷超过内联上限");
 
 /// 命令列表：命令数组 + 参数 arena。记录端写，执行端读；交接后只读（铁律 2）。
 class RHICommandList {

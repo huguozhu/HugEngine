@@ -17,6 +17,30 @@
 
 namespace he::rhi::d3d12 {
 
+// ---------------------------------------------------------------------------
+// 【P3】命令流是否承载光追（实验开关，默认关闭）
+//
+// 背景：T10 的设计是「命中即回退」——BLAS / TLAS 构建、RT 管线绑定、DispatchRays 一律
+// 标记为无法承载，从下一帧起帧主列表改回直接录制（画面自下一帧恢复，绝不静默丢命令）。
+//
+// 现状（P3 落地后）：这四类命令的编码与回放链路已经打通（`CmdBuildBLAS` / `CmdBuildTLAS` /
+// `CmdBindRTPipeline` / `CmdTraceRays`，几何与 SBT 槽位随流 arena 走），回放侧确实下发了
+// 原生构建与 DispatchRays（HE_D3D12_STREAM_RT_DBG=1 可看到 replay=1 的执行记录），
+// 且 05 在模式 2 + 流下连续 130 s / 29761 帧 0 报错、无设备丢失。
+// **但画面不对**：05 的截图从 978 KB（模式 0）退化为 16 KB 的纯天空渐变 —— 光线打不到几何，
+// 说明回放侧拿到的是空 / 无效的 TLAS（尚未定位到具体环节）。
+// 因为「截图与模式 0 一致」这条判据没过，这里不能让流模式默认接管光追：
+//   · 默认（未设 HE_RHI_COMMAND_STREAM_RT）⇒ 保持 T10 的回退行为，画面与之前完全一致；
+//   · HE_RHI_COMMAND_STREAM_RT=1 ⇒ 启用流式光追，供继续排查上面那条现象。
+// ---------------------------------------------------------------------------
+static bool StreamRTCarryEnabled() {
+    static const bool s_on = [] {
+        const char* v = std::getenv("HE_RHI_COMMAND_STREAM_RT");
+        return (v != nullptr) && (v[0] != '0');
+    }();
+    return s_on;
+}
+
 D3D12CommandList::~D3D12CommandList() {
     if (!m_Device) return;
     m_Device->UnregisterCommandList(this);
@@ -1826,11 +1850,72 @@ ID3D12GraphicsCommandList4* D3D12CommandList::GetList4() {
 
 void D3D12CommandList::BuildBLAS(IRHIAccelerationStructure* blas, IRHIBuffer* scratchBuffer,
                                  const BLASBuildDesc& desc, bool update) {
-    if (m_StreamMode) {
-        // 命令流无法承载该调用：跳过并触发回退（下一帧起直接录制，画面自下一帧恢复）
+    if (m_StreamMode && !StreamRTCarryEnabled()) {
+        // 未启用流式光追：保持 T10 的行为（命中即回退直接录制，画面自下一帧恢复）
         MarkStreamUnsupported("BLAS 构建");
         return;
-    }   // 命令流模式不支持光追（流里没有 AS 构建命令）
+    }
+    if (m_StreamMode) {
+        // 【P3】把 BLAS 构建编码进命令流（此前命中即标记为无法承载、整帧跳过并回退直接录制）。
+        // 顺序与原生路径完全一致：构建输入转非像素可读 → scratch 转 UAV → 构建 → AS 的 UAV 屏障。
+        // 状态转换由录制期解析成 CmdResolvedBarrier 随流走；几何描述复制进流 arena
+        // （RTGeometryDesc 带 std::vector，不能直接放进命令流）。
+        if (!blas) return;
+        auto* as = static_cast<D3D12AccelerationStructure*>(blas);
+        const u32 geoCount = static_cast<u32>(desc.geometries.size());
+        if (geoCount == 0) return;
+        for (const auto& g : desc.geometries) {
+            if (auto* vb = static_cast<D3D12Buffer*>(g.vertexBuffer))
+                TransitionBuffer(vb->GetResource(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            if (auto* ib = static_cast<D3D12Buffer*>(g.indexBuffer))
+                TransitionBuffer(ib->GetResource(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            if (auto* tb = static_cast<D3D12Buffer*>(g.transformBuffer))
+                TransitionBuffer(tb->GetResource(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        }
+        D3D12_GPU_VIRTUAL_ADDRESS scratchAddr = 0;
+        if (auto* sb = static_cast<D3D12Buffer*>(scratchBuffer)) {
+            TransitionBuffer(sb->GetResource(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            scratchAddr = sb->GetGpuAddress();
+        }
+        if (scratchAddr == 0) {
+            HE_CORE_ERROR("BuildBLAS: 缺少 scratch 缓冲（构建被跳过）");
+            return;
+        }
+        void* dst = Stream().AllocArena(sizeof(RHIBLASGeometry) * geoCount, 8);
+        auto* geos = static_cast<RHIBLASGeometry*>(dst);
+        for (u32 i = 0; i < geoCount; ++i) {
+            const RTGeometryDesc& s = desc.geometries[i];
+            RHIBLASGeometry& d = geos[i];
+            d.vertexBuffer      = s.vertexBuffer;
+            d.indexBuffer       = s.indexBuffer;
+            d.transformBuffer   = s.transformBuffer;
+            d.vertexStride      = s.vertexStride;
+            d.vertexFormat      = static_cast<u32>(s.vertexFormat);
+            d.indexFormat       = static_cast<u32>(s.indexFormat);
+            d.maxVertex         = s.maxVertex;
+            d.maxPrimitiveCount = s.maxPrimitiveCount;
+            d.type              = static_cast<u32>(s.type);
+        }
+        RHICommandBuildBLAS p{};
+        p.blas           = blas;
+        p.scratch        = scratchBuffer;
+        p.geometryOffset = Stream().ArenaOffsetOf(dst);
+        p.geometryCount  = geoCount;
+        p.flags          = static_cast<u32>(desc.flags);
+        p.update         = update ? 1u : 0u;
+        Stream().EnqueueArena(RHICommandType::CmdBuildBLAS, p);
+        // 构建写入完成后要发 AS 的 UAV 屏障（同原生路径第 5 步）
+        D3D12_RESOURCE_BARRIER ub{};
+        ub.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        ub.UAV.pResource = as->GetResource();
+        EmitBarrier(ub);
+        static bool s_LoggedBLASStream = false;
+        if (!s_LoggedBLASStream) {
+            s_LoggedBLASStream = true;
+            HE_CORE_INFO("[D3D12] 命令流承载光追：BLAS 构建已编码进流（{} 个几何）", geoCount);
+        }
+        return;
+    }
     if (!m_List || !blas) return;
     auto* as = static_cast<D3D12AccelerationStructure*>(blas);
     ID3D12GraphicsCommandList4* list4 = GetList4();
@@ -1842,6 +1927,15 @@ void D3D12CommandList::BuildBLAS(IRHIAccelerationStructure* blas, IRHIBuffer* sc
     // 1. 几何描述：引擎的 RTGeometryDesc → D3D12 三角形几何
     const u32 geoCount = static_cast<u32>(desc.geometries.size());
     if (geoCount == 0) return;
+    // 【P3 诊断】HE_D3D12_STREAM_RT_DBG=1 时确认回放侧真的执行了原生构建
+    {
+        static const bool s_dbg = (std::getenv("HE_D3D12_STREAM_RT_DBG") != nullptr);
+        static u32 s_n = 0;
+        if (s_dbg && ++s_n <= 8u) {
+            HE_CORE_INFO("[RTDBG] 原生 BuildBLAS 执行：replay={} 几何={} update={}",
+                         m_StreamReplay ? 1 : 0, geoCount, update ? 1 : 0);
+        }
+    }
     std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> geos(geoCount);
     for (u32 i = 0; i < geoCount; ++i) FillD3D12GeometryDesc(desc.geometries[i], geos[i]);
 
@@ -1892,9 +1986,39 @@ void D3D12CommandList::BuildBLAS(IRHIAccelerationStructure* blas, IRHIBuffer* sc
 
 void D3D12CommandList::BuildTLAS(IRHIAccelerationStructure* tlas, IRHIBuffer* scratchBuffer,
                                  IRHIBuffer* instanceBuffer, u32 instanceCount, bool update) {
-    if (m_StreamMode) {
-        // 命令流无法承载该调用：跳过并触发回退（下一帧起直接录制，画面自下一帧恢复）
+    if (m_StreamMode && !StreamRTCarryEnabled()) {
         MarkStreamUnsupported("TLAS 构建");
+        return;
+    }
+    if (m_StreamMode) {
+        // 【P3】把 TLAS 构建编码进命令流（与 BuildBLAS 同一套思路；载荷结构 T10 时已存在，
+        // Vulkan 侧早就在用，D3D12 此前只是没有录制分支）。
+        if (!tlas || instanceCount == 0) return;
+        auto* as = static_cast<D3D12AccelerationStructure*>(tlas);
+        if (auto* ib = static_cast<D3D12Buffer*>(instanceBuffer))
+            TransitionBuffer(ib->GetResource(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        if (!instanceBuffer || instanceBuffer->GetDeviceAddress() == 0) {
+            HE_CORE_ERROR("BuildTLAS: 缺少实例缓冲（构建被跳过）");
+            return;
+        }
+        if (auto* sb = static_cast<D3D12Buffer*>(scratchBuffer))
+            TransitionBuffer(sb->GetResource(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        if (!scratchBuffer || scratchBuffer->GetDeviceAddress() == 0) {
+            HE_CORE_ERROR("BuildTLAS: 缺少 scratch 缓冲（构建被跳过）");
+            return;
+        }
+        Stream().Enqueue(RHICommandType::CmdBuildTLAS,
+                         RHICommandBuildTLAS{ tlas, scratchBuffer, instanceBuffer,
+                                              instanceCount, update ? 1u : 0u, 0u });
+        D3D12_RESOURCE_BARRIER ub{};
+        ub.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        ub.UAV.pResource = as->GetResource();
+        EmitBarrier(ub);
+        static bool s_LoggedTLASStream = false;
+        if (!s_LoggedTLASStream) {
+            s_LoggedTLASStream = true;
+            HE_CORE_INFO("[D3D12] 命令流承载光追：TLAS 构建已编码进流（{} 个实例）", instanceCount);
+        }
         return;
     }
     if (!m_List || !tlas || instanceCount == 0) return;
@@ -1930,6 +2054,15 @@ void D3D12CommandList::BuildTLAS(IRHIAccelerationStructure* tlas, IRHIBuffer* sc
     bd.DestAccelerationStructureData    = as->GetDeviceAddress();
     bd.ScratchAccelerationStructureData = scratchAddr;
     bd.Inputs.Type        = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+    // 【P3 诊断】HE_D3D12_STREAM_RT_DBG=1：确认回放侧执行了原生 TLAS 构建（实例数 / 实例地址）
+    {
+        static const bool s_dbg = (std::getenv("HE_D3D12_STREAM_RT_DBG") != nullptr);
+        static u32 s_n = 0;
+        if (s_dbg && ++s_n <= 8u) {
+            HE_CORE_INFO("[RTDBG] 原生 BuildTLAS 执行：replay={} 实例={} 实例地址=0x{:x} AS=0x{:x}",
+                         m_StreamReplay ? 1 : 0, instanceCount, instanceAddr, as->GetDeviceAddress());
+        }
+    }
     bd.Inputs.Flags       = ToD3D12ASBuildFlags(ASBuildFlags::PreferFastTrace);
     bd.Inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
     bd.Inputs.NumDescs    = instanceCount;
@@ -1948,9 +2081,22 @@ void D3D12CommandList::BuildTLAS(IRHIAccelerationStructure* tlas, IRHIBuffer* sc
 }
 
 void D3D12CommandList::BindRTPipeline(IRHIRayTracingPipelineState* rtPSO) {
-    if (m_StreamMode) {
-        // 命令流无法承载该调用：跳过并触发回退（下一帧起直接录制，画面自下一帧恢复）
+    if (m_StreamMode && !StreamRTCarryEnabled()) {
         MarkStreamUnsupported("光追管线绑定");
+        return;
+    }
+    if (m_StreamMode) {
+        // 【P3】RT 管线绑定编码进流：SetPipelineState1 + SetComputeRootSignature 由回放侧下发。
+        // 录制期这里只更新本列表的绑定状态（后续 TraceRays 的资源状态解析要按库反射查 m_RtPipeline），
+        // 并把"设了根签名 ⇒ 根参数全失效"这个副作用一并记下（回放列表会重走同一条原生路径）。
+        if (!rtPSO) return;
+        auto* rt = static_cast<D3D12RayTracingPipelineState*>(rtPSO);
+        if (!rt->GetStateObject()) return;
+        m_Pipeline          = nullptr;
+        m_RtPipeline        = rt;
+        m_IsComputePipeline = true;
+        m_RootArgsDirty     = true;
+        Stream().Enqueue(RHICommandType::CmdBindRTPipeline, RHICommandBindRTPipeline{ rtPSO });
         return;
     }
     if (!m_List || !rtPSO) return;
@@ -1970,13 +2116,60 @@ void D3D12CommandList::BindRTPipeline(IRHIRayTracingPipelineState* rtPSO) {
 }
 
 void D3D12CommandList::TraceRays(const SBTDesc& sbt, u32 width, u32 height, u32 depth) {
-    if (m_StreamMode) {
-        // 命令流无法承载该调用：跳过并触发回退（下一帧起直接录制，画面自下一帧恢复）
+    if (m_StreamMode && !StreamRTCarryEnabled()) {
         MarkStreamUnsupported("光线派发");
         return;
     }
-    if (!m_List || !m_RtPipeline || !sbt.buffer) return;
+    if (m_StreamMode) {
+        // 【P3】光线派发编码进流：与 Dispatch 同一套录制期解析（补资源状态 + 拍描述符表快照），
+        // 再把 SBT 四个槽位与派发尺寸写进流 arena（SBTDesc 的 u64 字段合计超过 64B 内联上限）。
+        if (!m_RtPipeline || !sbt.buffer) return;
+        StreamDrawPrologue();
+        RHICommandTraceRays p{};
+        p.buffer         = sbt.buffer;
+        p.rayGenOffset   = sbt.rayGen.handleOffset;   p.rayGenStride   = sbt.rayGen.stride;
+        p.missOffset     = sbt.miss.handleOffset;     p.missStride     = sbt.miss.stride;
+        p.hitOffset      = sbt.hit.handleOffset;      p.hitStride      = sbt.hit.stride;
+        p.callableOffset = sbt.callable.handleOffset; p.callableStride = sbt.callable.stride;
+        p.width  = width;
+        p.height = height;
+        p.depth  = depth;
+        Stream().EnqueueArena(RHICommandType::CmdTraceRays, p);
+        StreamDrawEpilogue();
+        static bool s_LoggedTraceStream = false;
+        if (!s_LoggedTraceStream) {
+            s_LoggedTraceStream = true;
+            HE_CORE_INFO("[D3D12] 命令流承载光追：DispatchRays 已编码进流（{}x{}x{}）", width, height, depth);
+        }
+        if (std::getenv("HE_D3D12_STREAM_RT_DBG")) {
+            static u32 s_dbgN = 0;
+            if (++s_dbgN <= 8u) {
+                HE_CORE_INFO("[RTDBG] 录制期编码 DispatchRays：rtPSO={} sbtBuf={} rg(off={},stride={}) "
+                             "miss(off={},stride={}) hit(off={},stride={})",
+                             (void*)m_RtPipeline, (void*)sbt.buffer, sbt.rayGen.handleOffset,
+                             sbt.rayGen.stride, sbt.miss.handleOffset, sbt.miss.stride,
+                             sbt.hit.handleOffset, sbt.hit.stride);
+            }
+        }
+        return;
+    }
+    if (!m_List || !m_RtPipeline || !sbt.buffer) {
+        // 【P3 诊断】HE_D3D12_STREAM_RT_DBG=1 时打印本次派发被跳过的原因
+        if (std::getenv("HE_D3D12_STREAM_RT_DBG")) {
+            HE_CORE_WARN("[RTDBG] TraceRays 跳过：list={} rtPSO={} sbtBuf={} replay={}",
+                         (void*)m_List.Get(), (void*)m_RtPipeline, (void*)sbt.buffer, m_StreamReplay ? 1 : 0);
+        }
+        return;
+    }
     ID3D12GraphicsCommandList4* list4 = GetList4();
+    {
+        static const bool s_dbg = (std::getenv("HE_D3D12_STREAM_RT_DBG") != nullptr);
+        static u32 s_n = 0;
+        if (s_dbg && ++s_n <= 8u) {
+            HE_CORE_INFO("[RTDBG] 原生 TraceRays 执行：replay={} {}x{}x{} sbtBuf={} list4={}",
+                         m_StreamReplay ? 1 : 0, width, height, depth, (void*)sbt.buffer, (void*)list4);
+        }
+    }
     if (!list4) return;
 
     // 与 Dispatch 一致：先按反射补资源状态、再下发根参数（描述符表 / 推送常量）

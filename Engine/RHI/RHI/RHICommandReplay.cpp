@@ -6,6 +6,7 @@
 #include "RHI/Buffer.h"           // IRHIBuffer
 #include "RHI/Shader.h"           // IRHIPipelineState
 #include "RHI/QueryPool.h"        // IRHIQueryPool（查询类命令的回放）
+#include "RHI/RayTracing.h"       // 【P3】BLAS 构建 / TraceRays 的 RHI 描述结构
 
 namespace he::rhi {
 
@@ -343,6 +344,48 @@ static u32 g_L43PassW = 0, g_L43PassH = 0;
             desc.preprocessBufferSize   = d->preprocessBufferSize;
             desc.maxDrawCount           = d->maxDrawCount;
             cmd.ExecuteGeneratedCommands(desc);
+            ++replayed;
+            break;
+        }
+        // 【P3】命令流承载光追：BLAS 构建 / 光线派发按录制期复制进流的数据在回放侧下发
+        case RHICommandType::CmdBuildBLAS: {
+            const auto* d = stream.PayloadAt<RHICommandBuildBLAS>(i);
+            if (!d || !d->blas || d->geometryCount == 0u) break;
+            const auto* geos = reinterpret_cast<const RHIBLASGeometry*>(
+                stream.ArenaRawAt(d->geometryOffset, sizeof(RHIBLASGeometry) * d->geometryCount));
+            if (!geos) break;
+            BLASBuildDesc desc{};
+            desc.geometries.resize(d->geometryCount);
+            for (u32 gi = 0; gi < d->geometryCount; ++gi) {
+                const RHIBLASGeometry& src = geos[gi];
+                RTGeometryDesc& dst = desc.geometries[gi];
+                dst.type              = static_cast<RTGeometryType>(src.type);
+                dst.vertexBuffer      = static_cast<IRHIBuffer*>(src.vertexBuffer);
+                dst.vertexFormat      = static_cast<Format>(src.vertexFormat);
+                dst.vertexStride      = src.vertexStride;
+                dst.maxVertex         = src.maxVertex;
+                dst.indexBuffer       = static_cast<IRHIBuffer*>(src.indexBuffer);
+                dst.indexFormat       = static_cast<Format>(src.indexFormat);
+                dst.maxPrimitiveCount = src.maxPrimitiveCount;
+                dst.transformBuffer   = static_cast<IRHIBuffer*>(src.transformBuffer);
+            }
+            desc.flags = static_cast<ASBuildFlags>(static_cast<u8>(d->flags));
+            cmd.BuildBLAS(static_cast<IRHIAccelerationStructure*>(d->blas),
+                          static_cast<IRHIBuffer*>(d->scratch), desc, d->update != 0u);
+            ++replayed;
+            break;
+        }
+        case RHICommandType::CmdTraceRays: {
+            const auto* d = stream.ArenaPayloadAt<RHICommandTraceRays>(i);
+            if (!d || !d->buffer) break;
+            SBTDesc sbt{};
+            sbt.buffer          = static_cast<IRHIBuffer*>(d->buffer);
+            sbt.rayGen.handleOffset = d->rayGenOffset;  sbt.rayGen.stride = d->rayGenStride;
+            sbt.miss.handleOffset   = d->missOffset;    sbt.miss.stride   = d->missStride;
+            sbt.hit.handleOffset    = d->hitOffset;     sbt.hit.stride    = d->hitStride;
+            sbt.callable.handleOffset = d->callableOffset;
+            sbt.callable.stride       = d->callableStride;
+            cmd.TraceRays(sbt, d->width, d->height, d->depth);
             ++replayed;
             break;
         }
