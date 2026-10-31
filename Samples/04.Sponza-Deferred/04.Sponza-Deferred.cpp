@@ -1,4 +1,4 @@
-﻿// ============================================================
+// ============================================================
 // 04.Sponza-Deferred — Sponza 场景 + 延迟渲染管线
 //
 // 与 03.Sponza-Forward 相同的 Sponza 场景（glTF 加载 + 纹理 + Skybox），
@@ -29,6 +29,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>   // 【P5】HE_NO_PARTICLES 读取（std::getenv）
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -450,7 +451,11 @@ int main() {
     pipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
 
     // ── 测试粒子效果 ──
-    {
+    // 【P5】`HE_NO_PARTICLES=1` 关闭本样例的粒子系统：粒子模拟是按帧 dt 推进的，
+    // 帧率不同（异步计算 / 全同步两条路径的帧时间不同）⇒ 同一帧号上粒子的位置/颜色不同
+    // ⇒ 截图无法逐像素对比。做「异步 vs 全同步」的画面判据时用这个开关把时域相关的
+    // 唯一来源去掉；默认（不开）行为与之前完全一致。
+    if (!std::getenv("HE_NO_PARTICLES")) {
         Entity particleEntity = world.CreateEntity("TestParticle");
         world.AddComponent<TransformComponent>(particleEntity);
         auto* pc = world.AddComponent<ParticleComponent>(particleEntity);
@@ -473,6 +478,8 @@ int main() {
         pipeline.AddParticleComponent(pid);
 
         HE_CORE_INFO("粒子系统已注册: id={} maxParticles={}", pid, pc->GetMaxParticles());
+    } else {
+        HE_CORE_INFO("粒子系统已关闭（HE_NO_PARTICLES=1）：用于逐像素画面对照");
     }
 
     // ── 从配置文件恢复管线 / GI / 后处理设置 ──
