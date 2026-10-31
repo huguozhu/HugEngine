@@ -2462,6 +2462,14 @@ void D3D12CommandList::ActivateAliasedTexture(ID3D12Resource* res) {
     if (!m_Device || !res || m_IsBundle) return;   // bundle 不能发屏障
     D3D12_RESOURCE_STATES discardState = D3D12_RESOURCE_STATE_COMMON;
     if (!m_Device->TakeAliasActivation(res, discardState)) return;
+    // 【P6】诊断（HE_TRACE_BARRIERS=1）：打印每一次别名激活，便于验证
+    // 「生命周期不重叠的瞬态纹理确实共用内存，并且都发了别名屏障 / Discard」。
+    // 与 Vulkan 侧同名的 HE_TRACE_BARRIERS 开关保持一致。
+    static const bool s_TraceAlias = (std::getenv("HE_TRACE_BARRIERS") != nullptr);
+    if (s_TraceAlias) {
+        HE_CORE_WARN("[alias] 激活瞬态纹理 {}：别名屏障(Before=null) + 目标状态 0x{:x} + Discard",
+                     static_cast<const void*>(res), static_cast<u32>(discardState));
+    }
     D3D12_RESOURCE_BARRIER b{};
     b.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
     b.Aliasing.pResourceBefore = nullptr;

@@ -114,6 +114,14 @@ public:
     }
     bool IsDepth() const { return m_IsDepth; }
 
+    // P6：瞬态纹理的占位信息（堆内偏移 + 分配大小）。普通纹理返回 false。
+    bool GetTransientPlacement(u64& offset, u64& size) const override {
+        if (!m_IsTransient) return false;
+        offset = m_TransientOffset;
+        size   = m_TransientSize;
+        return true;
+    }
+
 private:
     /// 上传 TextureDesc::initialData（各数组层的 mip 0，紧密排列，与 Vulkan 后端一致），
     /// 完成后把资源转成着色器可读状态。同步等待 GPU 拷贝完成。
@@ -141,6 +149,11 @@ private:
     Format m_Format = Format::RGBA8_UNORM;
     bool   m_IsDepth = false;
     D3D12Device* m_OwnerDevice = nullptr;   // 析构时注销视图映射用
+
+    // ── P6：瞬态分配记录（GetTransientPlacement 用）──
+    bool   m_IsTransient    = false;   // 是否放在设备的瞬态堆上（placed resource）
+    u64    m_TransientOffset = 0;      // 堆内字节偏移（内存别名的判据：偏移相同 = 共用内存）
+    u64    m_TransientSize   = 0;      // 本次分配占用的字节数
 };
 
 // ---------------------------------------------------------------------------

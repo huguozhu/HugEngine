@@ -765,6 +765,11 @@ bool D3D12Texture::Initialize(D3D12Device* device, const TextureDesc& desc, bool
                                         IID_PPV_ARGS(&m_Resource));
         if (SUCCEEDED(crh)) {
             device->TrackTransient(m_Resource);   // 保活到堆重置（GPU 用完之后）
+            // 【P6】记录占位信息：偏移相同即代表"生命周期不重叠的两张纹理共用同一段内存"
+            const D3D12_RESOURCE_ALLOCATION_INFO allocInfo = dev->GetResourceAllocationInfo(0, 1, &rd);
+            m_IsTransient     = true;
+            m_TransientOffset = offset;
+            m_TransientSize   = allocInfo.SizeInBytes;
             const D3D12_RESOURCE_STATES discardState =
                 m_IsDepth ? D3D12_RESOURCE_STATE_DEPTH_WRITE
                 : (rd.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) ? D3D12_RESOURCE_STATE_RENDER_TARGET

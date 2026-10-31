@@ -56,6 +56,7 @@
 #include "Asset/glTFLoader.h"
 #include "Editor/ImGuiIntegration.h"
 #include "imgui.h"
+#include "TransientAliasTest.h"   // P6：瞬态纹理 / 内存别名自检（HE_TRANSIENT_ALIAS_TEST=1）
 
 #include <cmath>
 #include <cstring>
@@ -211,11 +212,14 @@ int main() {
     // --- 2. 创建 RHI 设备 ---
     rhi::DeviceInitDesc rhiDesc;
     rhiDesc.backend          = rhi::ResolveBackendFromEnv();
+    // 【P6】瞬态别名自检需要后端校验来判定别名屏障 / 布局转换是否合法，故自检模式下打开
+    //（D3D12 还会额外看 HE_D3D12_DEBUG_LAYER / HE_D3D12_GPU_VALIDATION；Vulkan 看验证层）。
+    const bool transientSelfTest = (std::getenv("HE_TRANSIENT_ALIAS_TEST") != nullptr);
     // 注意：本机（Intel Arc B370 + 该版驱动 + Vulkan SDK 1.4.341 验证层）存在
     // 预先存在的驱动编译器崩溃（HEAD 同样复现）：开启验证层时 igc-default64.dll
     // 在 shader 编译线程随机 SIGSEGV。关闭验证层后稳定（RT 管线编译约 20s/个）。
     // 在 NVIDIA/其他稳定驱动上可恢复为 true 以获得验证信息。
-    rhiDesc.enableValidation = false;
+    rhiDesc.enableValidation = transientSelfTest;
     rhiDesc.windowHandle     = engine.GetWindow()->GetNativeHandleRaw();
 
     auto device = rhi::CreateDevice(rhiDesc.backend);
@@ -234,6 +238,22 @@ int main() {
     // 一次性验证日志：打印交换链实际协商到的颜色格式
     HE_CORE_INFO("[SwapChain] 颜色格式: {}", swapchain->GetColorFormat() == rhi::Format::A2B10G10R10_UNORM_PACK32
         ? "A2B10G10R10 (HDR10)" : "BGRA8 (SDR)");
+
+    // --- 3.5 【P6】瞬态纹理 / 内存别名自检（可独立运行）---
+    // 判据与打印内容见 Samples/Common/TransientAliasTest.h。跑完即退出，便于自动化：
+    //   HE_TRANSIENT_ALIAS_TEST=1 02.Cube.exe
+    // 同时建议开 HE_D3D12_DEBUG_LAYER=1 / HE_D3D12_GPU_VALIDATION=1（D3D12）与
+    // HE_TRACE_BARRIERS=1（看每次别名激活的日志）。
+    if (std::getenv("HE_TRANSIENT_ALIAS_TEST")) {
+        const bool ok = he::samples::RunTransientAliasTest(device.get());
+        device->WaitIdle();
+        HE_CORE_INFO("[P6] 自检结束：{}（退出码 {}）", ok ? "通过" : "失败", ok ? 0 : 1);
+        // 【为什么用 _Exit】自检是自动化入口：判据与数据已经在上面打印完、GPU 也已 WaitIdle。
+        // 样例的交互式关闭流程（窗口/设备销毁）在本机环境会挂住（与自检无关的既有问题），
+        // 这里直接以确定的退出码结束进程，避免自动化脚本超时。
+        std::fflush(nullptr);
+        std::_Exit(ok ? 0 : 1);
+    }
 
     // --- 4. 初始化场景 ---
     World world;

@@ -8,6 +8,7 @@
 #include "Core/Log.h"
 #include "Core/Assert.h"
 
+#include <algorithm>
 #include <cstring>
 
 namespace he::rhi {
@@ -123,6 +124,12 @@ void TransientResourceAllocator::Shutdown() {
 
 TransientResourceAllocator::PlacedImage
 TransientResourceAllocator::AllocateImage(const VkImageCreateInfo& info) {
+    // 没给生命周期（普通瞬态分配）⇒ 按「整帧存活」处理：与所有区段重叠，退化为线性分配
+    return AllocateImage(info, 0, ~0u);
+}
+
+TransientResourceAllocator::PlacedImage
+TransientResourceAllocator::AllocateImage(const VkImageCreateInfo& info, u32 firstPass, u32 lastPass) {
     Heap& heap = m_Heaps[m_CurrentHeap];
 
     // 1. 构建缓存键
@@ -159,8 +166,24 @@ TransientResourceAllocator::AllocateImage(const VkImageCreateInfo& info) {
     VkMemoryRequirements memReqs;
     vkGetImageMemoryRequirements(m_Device, image, &memReqs);
 
-    // 4. Bump 分配：对齐 offset
-    u64 alignedOffset = (heap.bumpOffset + memReqs.alignment - 1) & ~(memReqs.alignment - 1);
+    // 4. 【P6】按生命周期做 first-fit：只有与本请求生命周期重叠的区段才占位
+    //    （判据与 D3D12Device::AllocateTransient 一致：lastPass < firstPass 或 firstPass > lastPass 即不重叠）
+    if (firstPass > lastPass) { firstPass = 0; lastPass = ~0u; }   // 非法/未给区间：按整帧存活
+    std::vector<const Heap::Region*> busy;
+    for (const auto& r : heap.regions) {
+        if (!(r.lastPass < firstPass || r.firstPass > lastPass)) busy.push_back(&r);
+    }
+    std::sort(busy.begin(), busy.end(),
+              [](const Heap::Region* a, const Heap::Region* b) { return a->offset < b->offset; });
+
+    const u64 align = memReqs.alignment ? memReqs.alignment : 1ull;
+    u64 start = 0;
+    for (const Heap::Region* r : busy) {
+        const u64 aligned = (start + align - 1) & ~(align - 1);
+        if (aligned + memReqs.size <= r->offset) break;   // 这个空隙放得下
+        start = std::max(start, r->offset + r->size);
+    }
+    const u64 alignedOffset = (start + align - 1) & ~(align - 1);
 
     // 检查 Heap 空间是否足够
     if (alignedOffset + memReqs.size > heap.size) {
@@ -189,8 +212,10 @@ TransientResourceAllocator::AllocateImage(const VkImageCreateInfo& info) {
         return {};
     }
 
-    // 6. 更新 bump 指针
-    heap.bumpOffset = alignedOffset + memReqs.size;
+    // 6. 记录区段并更新统计（bumpOffset 仍然推进：它是"线性分配视角"的游标）
+    heap.regions.push_back({ alignedOffset, memReqs.size, firstPass, lastPass });
+    heap.bumpOffset = std::max(heap.bumpOffset, alignedOffset + memReqs.size);
+    heap.peak       = std::max(heap.peak, alignedOffset + memReqs.size);
 
     // 统计峰值
     if (heap.bumpOffset > m_PeakUsedMemory)
@@ -221,6 +246,8 @@ void TransientResourceAllocator::AdvanceFrame() {
     // 切换到下一个 Heap 并重置其 bump 指针
     u32 nextHeap = (m_CurrentHeap + 1) % kNumHeaps;
     m_Heaps[nextHeap].bumpOffset = 0;
+    m_Heaps[nextHeap].regions.clear();   // 【P6】上一轮（kNumHeaps 帧前）的区段作废，重新按生命周期分配
+    m_Heaps[nextHeap].peak = 0;
 
     m_CurrentHeap = nextHeap;
     m_FrameIndex++;
