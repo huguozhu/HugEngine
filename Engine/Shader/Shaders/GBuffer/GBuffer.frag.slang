@@ -44,7 +44,11 @@ struct FSOutput {
 };
 
 FSOutput fragmentMain(GBufferVSOutput input) {
-    GPUObjectData obj = u_Objects[objectIndex];
+    // 【T7】材质/包围盒必须用**顶点着色器实际使用的**物体下标（`input.objectIndex`）：
+    // GPU 驱动路径下它是 SV_InstanceID（= 间接命令 firstInstance = 合批序号），
+    // 而 push constant 的 objectIndex 在该模式下恒 0。此前这里读 push constant ⇒
+    // 所有像素都用物体 0 的材质，Sponza 的 alpha 裁剪把几何整体 discard 掉了（实测画面只剩天空盒）。
+    GPUObjectData obj = u_Objects[input.objectIndex];
 
     // ── MRT 0-2：PBR 材质（bindless 纹理数组采样，按 textureMask 判断槽有无纹理） ──
     uint texBase = obj.materialID;
@@ -58,6 +62,8 @@ FSOutput fragmentMain(GBufferVSOutput input) {
         : float4(0.0, 1.0, 0.0, 1.0);   // 中性：g=1(rough 不动) b=0(metallic 不动)
     float  metallic = obj.metallicFactor * mrSample.b;
 
+    // Alpha 裁剪（MASK 材质）：材质数据现在按 `input.objectIndex` 取，GPU 驱动路径下才是本物体的
+    // alphaCutoff / 基础色（此前读 push constant 的 0 ⇒ 全场景按物体 0 的材质裁剪）
     if (alpha < obj.alphaCutoff) discard;
 
     // 法线：有真实法线贴图才混合；无法线贴图（占位白会错误偏转 N）直接用几何法线
@@ -130,7 +136,7 @@ FSOutput fragmentMain(GBufferVSOutput input) {
         tuv.y = 1.0 - tuv.y;                 // 与引擎的 uv 约定（v 向下）一致
         const float2 tile = float2(1.0 / 3.0, 0.5);              // 3 列 × 2 行
         const float2 origin = float2(float(face % 3u) * tile.x, float(face / 3u) * tile.y);
-        output.lightmapKey = float4(origin + saturate(tuv) * tile, float(objectIndex), 0.0);
+        output.lightmapKey = float4(origin + saturate(tuv) * tile, float(input.objectIndex), 0.0);
     }
     return output;
 }

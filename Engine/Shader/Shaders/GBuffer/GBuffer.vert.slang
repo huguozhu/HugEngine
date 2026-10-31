@@ -66,5 +66,8 @@ GBufferVSOutput vertexMain(VSInput input, uint instanceID : HE_SV_INSTANCE) {
     output.worldPos    = worldPos.xyz;
     output.worldNormal = normalize(mul((float3x3)worldMatrix, input.normalOS));
     output.uv          = input.uv;
+    // 【T7】把**实际使用的物体下标**传给片元：GPU 驱动路径下 objectIndex 取 SV_InstanceID
+    //（= 间接命令 firstInstance = 合批序号），push constant 的 oi 在该模式下恒 0。
+    output.objectIndex = objIdx;
     return output;
 }
