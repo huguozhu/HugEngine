@@ -1,4 +1,4 @@
-﻿// ============================================================
+// ============================================================
 // LumenScene_Irradiance.cpp — 步骤 24：由探针 SH 采样出逐像素辐照度，并贴到 Provider 输出
 //
 // 【两段分工】
@@ -382,6 +382,20 @@ void LumenScene::RunFarFieldRT(rhi::IRHICommandList* cmd) {
     if (!m_Device || !cmd || !m_ProbeBuf.IsValid() || !m_TLAS || !m_RayResultBuf.IsValid()) return;
     if (m_TraceFrame == 0u) return;   // 还没追踪过 ⇒ 没有可比的光线
 
+    // 【B2 诊断开关】`HE_LUMEN_NO_FARFIELD=1`：整段跳过远场硬件光追（派发 + 对照统计 + 合并），
+    // 得到"远场开启 vs 关闭"的画面 A/B。跳过后"SDF 未命中"的光线保持未命中 —— 那些光线本来正是
+    // 由远场光追的三角形命中兜底的，所以这个开关量化的就是远场对最终画面的总贡献。
+    // 默认关闭（不设环境变量时行为完全不变）。
+    static const bool s_NoFarField = (std::getenv("HE_LUMEN_NO_FARFIELD") != nullptr);
+    if (s_NoFarField) {
+        static bool s_noFarLogged = false;
+        if (!s_noFarLogged) {
+            s_noFarLogged = true;
+            HE_CORE_INFO("LumenScene: HE_LUMEN_NO_FARFIELD=1 —— 已关闭远场硬件光追（B2 对照）");
+        }
+        return;
+    }
+
     if (!m_FarField) {
         m_FarField = std::make_unique<LumenFarFieldPass>();
         if (!m_FarField->Initialize(m_Device)) { m_FarField.reset(); return; }
@@ -399,6 +413,19 @@ void LumenScene::RunFarFieldRT(rhi::IRHICommandList* cmd) {
     if (m_FarFieldFrame == 60u) LogMemoryUsage();   // 等卡片/mesh 场都建齐再报
 
     // ── ① 先读**上一帧**的对照统计（同"先读后清"；本帧紧接着会把统计清零再派发）──
+    //
+    // 【C2 指标定义（两端口径逐字相同：同一份 `Lumen_FarFieldCompare.comp` 着色器 + 同一段宿主回读）】
+    //   · 分母 = `st[0]` = **两侧都命中**的光线数（SDF 命中 ∧ RT 命中）。只有三角形命中 / 只有 SDF 命中
+    //     的光线不进分母（前者是 SDF 漏掉的几何、后者是 SDF 假命中或超出光追范围，都不是"一致性"样本）。
+    //   · 相对差 = |t_sdf − t_rt| / max(t_sdf, t_rt)（逐光线；t 是命中距离）。
+    //   · 一致率 ≤5% / ≤20% = `st[6]/denom` 与 `st[7]/denom`；均值 = `st[4]/1024/denom`（定点 ×1024）。
+    //   · 另有按 `min(t_sdf,t_rt)` 切的近带/远带（分界 `m_FarFieldNearBand`）与 0..1 的 16 桶直方图。
+    // 【为什么 D3D12 曾经读到 2.2% / 9.2%（C2 的结论：**统计窗口**问题，不是数值/口径公式不同）】
+    //   跑一次 D3D12 的 06 就能复现：**第一批**统计（第 40 帧左右，`m_FarFieldFrame % 40 == 0` 首次打印）
+    //   读到 `只有 SDF 命中 239` 条、均值 0.72、≤5% 占 2.3%；**下一批**就回到 `只有 SDF 命中 39` 条、
+    //   均值 0.55、≤5% 占 13.6%。也就是：统计批次里混进了一批"RT 还没命中、SDF 已命中"的光线，
+    //   分母被换成了一个分布不同的子集 ⇒ 一致率被压低。Vulkan 的第一批就已经是稳态值，所以两边
+    //   看起来差一个量级。稳态两端口径/数值一致（13.6%/27.2% vs 13.8%/27.0%，差异 < 3%）。
     u32 st[24] = {0};
     if (m_FarFieldFrame >= 1u && m_FarCmpStats.Read(st)) {   // 确定性回读（见 LumenStatsReadback）
         const u32 rays = m_FarFieldRays;   // 上一次派发的光线数（与本批统计同批）
