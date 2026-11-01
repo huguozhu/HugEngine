@@ -432,6 +432,12 @@ static u32 g_L43PassW = 0, g_L43PassH = 0;
             ++replayed;
             break;
         }
+        case RHICommandType::CmdDrawOverlay:
+            // 【A2】UI 叠加：回放侧此刻正处于影子列表的 render pass 内部，可以安全地
+            // 调用上层的叠加记录器（ImGui 的 Vulkan 后端）把 UI 画进去。
+            cmd.DrawOverlay();
+            ++replayed;
+            break;
         case RHICommandType::MarkSubmitBoundary:
             // 提交边界由执行端（RHI 线程）自己按帧处理，这里不是一条 RHI 调用
             ++replayed;

@@ -45,6 +45,12 @@ public:
     virtual void ExecuteSecondary(IRHICommandList* secondary) = 0;
     virtual bool IsSecondary() const = 0;
 
+    // 【A2】UI 叠加（ImGui）绘制入口。
+    // 直接录制时它当场把 UI 画进命令缓冲；Vulkan 的命令流模式下，UI 必须在**回放**时
+    // 画进影子列表（那时才真正处于 render pass 内部），因此这里编码成一条流命令。
+    // 默认空实现：D3D12 走自己的 ImGui 专用列表，不经过这条路径。
+    virtual void DrawOverlay() {}
+
     // Render pass: binds framebuffer and clears
     virtual void BeginRenderPass(
         u32 colorCount,

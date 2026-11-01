@@ -100,6 +100,8 @@ enum class RHICommandType : u32 {
     // 【P3】命令流承载光追：BLAS 构建、光线派发（TLAS 构建 / RT 管线绑定复用 34 / 35）
     CmdBuildBLAS                = 55,   // 载荷 RHICommandBuildBLAS（几何数组在 arena）
     CmdTraceRays                = 56,   // 载荷 RHICommandTraceRays（在 arena，超过 64B 内联上限）
+    // 【A2】UI 叠加：回放侧在正确的渲染通道内调用上层的叠加记录器（ImGui）
+    CmdDrawOverlay              = 57,   // 无载荷
 };
 
 /// 一条命令的载荷：类型擦除 + **内联存储**。

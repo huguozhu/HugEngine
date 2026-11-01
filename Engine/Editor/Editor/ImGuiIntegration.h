@@ -38,6 +38,10 @@ private:
     void CreateImGuiResources(rhi::IRHIDevice* device, rhi::IRHISwapChain* swapchain);
     void DestroyImGuiResources(rhi::IRHIDevice* device);
 
+    /// 【A2】Vulkan 叠加记录器：由设备在"回放侧/直接录制"时调用，
+    /// 把 ImGui 的 draw data 编码进给定原生命令缓冲（VkCommandBuffer）。
+    static void RecordVulkanOverlay(void* nativeCmdBuffer);
+
     GLFWwindow*   m_Window     = nullptr;
     ImGuiContext* m_Context    = nullptr;
     bool          m_Initialized = false;

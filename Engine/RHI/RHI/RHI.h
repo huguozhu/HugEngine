@@ -222,6 +222,13 @@ public:
     /// 获取命令列表后端原生句柄（VkCommandBuffer / ID3D12CommandList），供 ImGui 渲染使用
     virtual void* GetImGuiCommandBuffer(IRHICommandList* cmd) const { return nullptr; }
 
+    /// 【A2】UI 叠加记录器：命令流模式把 UI 绘制推迟到回放侧（影子列表）才执行，
+    /// 那时只有后端拿得到"正在录制的原生命令缓冲"。由上层（ImGuiIntegration）注册一个
+    /// 把 ImGui draw data 画进给定命令缓冲的函数；Vulkan 后端在回放时调用它。
+    /// 默认空实现：D3D12 直接在自己的 ImGui 专用列表上录制，不经过这里。
+    using OverlayRecorder = void (*)(void* nativeCmdBuffer);
+    virtual void SetOverlayRecorder(OverlayRecorder /*recorder*/) {}
+
     // --- Commands ---
     /// `stream`（A-1，可选）：纯数据命令流，由执行端在提交前翻译进 `cmdList`。
     /// 默认 `nullptr` ⇒ 现有调用点一行不改、行为不变。

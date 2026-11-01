@@ -131,7 +131,17 @@ void ImGuiIntegration::CreateImGuiResources(rhi::IRHIDevice* device,
     // Upload fonts
     ImGui_ImplVulkan_CreateFontsTexture();
 
+    // 【A2】把"画 UI"这件事注册成后端的叠加记录器：直接录制时当场执行（与改造前等价），
+    // 命令流模式下则由影子列表回放时调用 —— 那时命令缓冲才真正处在 render pass 内部。
+    device->SetOverlayRecorder(&ImGuiIntegration::RecordVulkanOverlay);
+
     HE_CORE_INFO("ImGui Vulkan backend initialized");
+}
+
+void ImGuiIntegration::RecordVulkanOverlay(void* nativeCmdBuffer) {
+    // 静态回调：ImGui 的 draw data 是全局的，Vulkan 后端把它编码进给定命令缓冲。
+    ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(),
+                                    static_cast<VkCommandBuffer>(nativeCmdBuffer));
 }
 
 void ImGuiIntegration::DestroyImGuiResources(rhi::IRHIDevice* device) {
@@ -183,8 +193,9 @@ void ImGuiIntegration::EndFrame(rhi::IRHICommandList* cmd) {
     }
 #endif
     // 通过 RHI 接口获取 VkCommandBuffer，无需 static_cast<VulkanCommandList*>
-    auto* vkCmdBuf = static_cast<VkCommandBuffer>(m_Device->GetImGuiCommandBuffer(cmd));
-    ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), vkCmdBuf);
+    // 【A2】不能直接拿原生句柄画：命令流模式下源列表没有已开始录制的命令缓冲，
+    // 必须走 RHI 的叠加入口 —— 直接录制时同步绘制，流模式下转成一条回放命令。
+    cmd->DrawOverlay();
 }
 
 } // namespace he::editor
