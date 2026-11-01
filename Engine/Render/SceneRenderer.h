@@ -25,6 +25,11 @@ struct DrawItem {
     /// 渲染侧 mesh 注册表索引（阶段 1 附录 E / E-3）：快照条目透传。
     /// 0 = 未注册（消费侧 `Find(0)` 返回空并跳过 —— 可见化，而不是指错资源）。
     u32 meshIndex = 0;
+    /// 【A4】CPU 视锥剔除结果（只由 `PrepareBatched` 填写；`Prepare` 输出的条目恒为 false）。
+    /// 合批顺序的列表**不能**紧凑化（下标 = 间接命令 `firstInstance` = 物体缓冲下标），
+    /// 所以剔除结果只能逐条打标记：逐 draw 路径据此跳过不可见物体，GPU 驱动路径忽略它
+    /// （那条路径由 GPU 剔除决定画什么，CPU 不参与）。
+    bool bCPUCulled = false;
 };
 
 // ============================================================================
@@ -48,6 +53,31 @@ public:
     std::vector<DrawItem> Prepare(const FrameSceneSnapshot& snapshot,
                                   const CameraData& camera,
                                   rhi::IRHIBuffer* objectBuffer);
+
+    /// 【A4】按**合批顺序**准备物体数据（GPU 驱动的间接绘制路径专用）
+    ///
+    /// 与 `Prepare` 的区别（`Prepare` 只服务逐 draw 的 CPU 路径，契约不变）：
+    ///   · 条目顺序 = 合批顺序，**不紧凑化**（CPU 剔除只打 `bCPUCulled` 标记）——
+    ///     因为 GPU 剔除写出的间接命令用 `firstInstance = 合批序号`，顶点着色器再用它索引
+    ///     `GPUObjectData[]`；两处必须是同一个序号（04 的 GPU GBuffer 已按这条契约修过，
+    ///     Forward 此前没修：它把快照顺序的对象表与可见顺序的物体缓冲混着用 ⇒ 画到别的物体）。
+    ///   · 上传**全部**合批物体（不只是 CPU 可见的那些）：GPU 剔除可能保留 CPU 判为不可见的
+    ///     物体（它的判据更保守），若物体缓冲只写可见子集，`u_Objects[firstInstance]` 会读到
+    ///     未写入的尾部（脏矩阵 ⇒ 三角形被拉到屏幕外/糊满全屏，实测就是 A4 的画面差）。
+    ///   · 合批收集集**之外**的条目（Spline / Skeletal：顶点布局不同，不并入合批）追加在
+    ///     合批区间之后，让它们仍能走各自的专用路径（`objectIndex` 同样指向有效槽位）。
+    ///
+    /// 契约（四处同一个序号，与 `GBufferRenderer_GPU::BuildBatchDrawItemsAndUpload` 一致）：
+    ///   合批序号 = GPUScene 对象下标（`CollectBatchedFromSnapshot`）= 间接命令 `firstInstance`
+    ///            = 物体缓冲下标（本函数写入的位置）
+    ///
+    /// @param batchSnapshotIndices 合批命令 → 快照条目下标（`MeshBatcher::GetBatchSnapshotIndices`）
+    /// @return 与合批命令同序的绘制项（含追加的 Spline / Skeletal 条目）；
+    ///         `objectBuffer` 为空 / 映射失败 / 合批为空时返回空列表（调用方回退逐 draw）
+    std::vector<DrawItem> PrepareBatched(const FrameSceneSnapshot& snapshot,
+                                         const CameraData& camera,
+                                         rhi::IRHIBuffer* objectBuffer,
+                                         const std::vector<u32>& batchSnapshotIndices);
 };
 
 } // namespace he::render

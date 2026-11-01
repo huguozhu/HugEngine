@@ -12,6 +12,8 @@
 #include "Pipeline/GPUCulling.h"
 #include "Pipeline/GPUScene.h"
 #include "Pipeline/MeshBatcher.h"
+// 【A4】`DrawItem` 需要完整定义（成员里持有 `std::vector<DrawItem>` 的间接路径列表）
+#include "SceneRenderer.h"
 #include "Pipeline/InstanceCuller.h"   // 任务 25：逐实例 GPU 视锥剔除
 #include "Pipeline/ParallelRecordHelper.h"   // T3.1：并行录制骨架（池 + 分块 + 合并）
 #include "Pipeline/SkinnedMeshBuffers.h"   // 第③段：骨骼矩阵缓冲的渲染侧状态表
@@ -336,6 +338,14 @@ private:
     MeshBatcher m_MeshBatcher;
     bool       m_BatchBuilt = false;
     std::vector<u32> m_GPUVisibleIndices;
+    // ============================================================
+    // 【A4】本帧的绘制来源（两条路径的物体缓冲顺序不同，必须在一处决定、另一处只消费）
+    //   `m_UseIndirectThisFrame` —— 本帧是否走 GPU 驱动的间接绘制（`RunGPUCulling` 决定）
+    //   `m_BatchDrawItems`      —— 间接路径专用的逐 draw 列表：**合批顺序、含全部合批物体**，
+    //     下标 = 间接命令 `firstInstance` = 物体缓冲下标（见 `SceneRenderer::PrepareBatched`）
+    // ============================================================
+    bool m_UseIndirectThisFrame = false;
+    std::vector<DrawItem> m_BatchDrawItems;
     ProfilerManager m_Profiler;  // GPU 时间戳 Profiler
     u32 m_LastDrawCount = 0;
     u32 m_LastTriCount  = 0;

@@ -123,6 +123,25 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
         if (pCount) { *pCount = 0; if (auto* ub = ResB(m_DrawCountBuf)) ub->Unmap(); }
         device->UpdateDescriptorSet(m_DescSet, kCullBindDrawCount, rhi::DescriptorType::StorageBuffer, ResB(m_DrawCountBuf));
     }
+    {
+        // 【A4】常驻的「全 0 源」：每帧把绘制计数从这里拷 0（GPU 有序的清零，见 Dispatch）。
+        // 只需 16 字节（计数 + 保留位），只在 Initialize 写一次；`TransferSrc` 是 Vulkan
+        // `vkCmdCopyBuffer` 对源缓冲的硬要求（D3D12 无对应标志）。
+        rhi::BufferDesc d;
+        d.size      = sizeof(u32) * 4;
+        d.usage     = rhi::BufferUsage::TransferSrc;
+        d.cpuAccess = true;
+        d.debugName = "GPUCull.ClearZero";
+        m_ClearZeroBuf = device->CreateBufferHandle(d);   // A-3
+        HE_ASSERT(m_ClearZeroBuf.IsValid(), "GPUCulling: 清零源缓冲句柄创建失败");
+        if (m_ClearZeroBuf.IsValid()) {
+            auto* zB = ResB(m_ClearZeroBuf);
+            if (void* p = zB ? zB->Map() : nullptr) {
+                std::memset(p, 0, sizeof(u32) * 4);
+                if (auto* ub = ResB(m_ClearZeroBuf)) ub->Unmap();
+            }
+        }
+    }
 
     // Push constants: 6 planes + float4x4 VP + float2 screen + 2 uint
     rhi::PushConstantRange pcRange;
@@ -298,6 +317,7 @@ void GPUCulling::Shutdown(rhi::IRHIDevice* device) {
     m_Device->DestroyPipelineStateHandle(m_Phase2PSO); m_Phase2PSO = {};
     m_Device->DestroyBufferHandle(m_IndirectCmdBuf); m_IndirectCmdBuf = {};
     m_Device->DestroyBufferHandle(m_DrawCountBuf); m_DrawCountBuf = {};
+    m_Device->DestroyBufferHandle(m_ClearZeroBuf); m_ClearZeroBuf = {};   // 【A4】清零源
     m_Device->DestroyPipelineStateHandle(m_PSO); m_PSO = {};
     m_Device->DestroyTextureHandle(m_HiZTexture); m_HiZTexture = {};
     m_Device->DestroySamplerHandle(m_HiZSampler);
@@ -434,6 +454,33 @@ void GPUCulling::Dispatch(rhi::IRHICommandList* cmd,
 
     pc.mips  = hizMips;
     pc.count = objectCount;
+
+    // ============================================================
+    // 【A4】每帧清零「可见物体计数」——单阶段剔除路径此前**从未**清零
+    // ============================================================
+    // 着色器用 `InterlockedAdd(u_DrawCount[0], 1, idx)` 原子累加本帧的可见数，并把命令写在
+    // 第 idx 条。而这个计数缓冲只在 `Initialize` 里清过一次 ⇒ 计数跨帧累加：
+    // 实测 03.Sponza-Forward 第 120 次读回 5229、第 240 次 10674（≈ 每帧 +45，正是每帧的
+    // 可见数）。后果有三条，全都直接毁掉画面：
+    //   ① 绘制端按这个值决定「画几条」⇒ 除了本帧那 45 条，还会把前几十帧残留在缓冲里的
+    //      陈旧命令一起执行（同一个物体被反复画，物体缓冲下标还可能是上一帧的）；
+    //   ② `Readback` 把它截断到 `kMaxObjects`（2048）⇒ 面板读数「可见 2048/104」；
+    //   ③ 计数超过命令缓冲容量后，着色器的写入越界被硬件丢弃，计数与命令彻底脱钩。
+    // 修法：与 Nanite 的「任务 13」同一口径 —— 清零必须在**命令缓冲内**完成（GPU 有序），
+    // 不能在录制期由主机写：主机往往领先 GPU 一到两帧，写下去的 0 会与上一帧尚未执行的
+    // 绘制抢同一个缓冲（Nanite 实测到过"两帧原子累加叠加"的 2 倍计数）。
+    // 这里从常驻的 0 源缓冲拷 16 字节（计数 + 保留位）过去，再把状态交回 UAV。
+    if (ResB(m_ClearZeroBuf) && ResB(m_DrawCountBuf)) {
+        cmd->CopyBuffer(ResB(m_ClearZeroBuf), ResB(m_DrawCountBuf), sizeof(u32) * 4, 0, 0);
+        // 拷贝目标 → UAV：D3D12 侧是状态转换（缓冲已在 CopyBuffer 里转到 COPY_DEST），
+        // Vulkan 侧由下面这条全局内存屏障保证「传输写 → 着色器写」的可见性。
+        cmd->BufferBarrier(ResB(m_DrawCountBuf), rhi::ResourceState::CopyDst,
+                           rhi::ResourceState::UnorderedAccess);
+        cmd->PipelineBarrier(rhi::PipelineStage::Transfer, rhi::PipelineStage::ComputeShader,
+                             rhi::ResourceState::CopyDst, rhi::ResourceState::UnorderedAccess);
+    } else {
+        HE_CORE_WARN("GPUCulling::Dispatch: 清零源缓冲缺失，本帧可见计数可能残留上一帧的值");
+    }
 
     cmd->SetPipeline(ResP(m_PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSet);

@@ -1027,26 +1027,64 @@ void ForwardPipeline::OnResize(u32 width, u32 height) {
 // ============================================================
 void ForwardPipeline::RunGPUCulling(rhi::IRHICommandList* cmd, const CameraData& camera)
 {
+    m_UseIndirectThisFrame = false;
+    m_BatchDrawItems.clear();
     if (!m_GPUCulling.enabled) return;
 
     // 1) 读回上一帧 GPU culling 结果（该帧已 submit 执行完毕）
+    //    【A4】只作统计 / 面板读数：绘制条数**不再**由它决定（见下面的 DrawIndexedIndirectCount）
     m_GPUCulling.Readback(m_Device, m_GPUVisibleIndices);
 
-    // 2) 收集场景对象 → GPUScene SSBO
-    // 【第③段】GPUScene 不再自建快照：直接消费本帧快照（物体收集口径已由 `BuildObjects` 决定）
-    m_GPUScene.CollectFromSnapshot(FrameSnap());
-    // FillGPUScene 必须在 Collect 之后、Upload 之前（与 Deferred 一致）
-    // 【第③段第 4 批】MeshBatcher 改吃快照 + 网格注册表（它原先要遍历世界取顶点/索引与材质）
+    // 2) 合批 → 对象表 → 物体缓冲，三者的顺序必须是同一个「合批序号」
+    // ============================================================
+    // 【A4 根因②】此前这里是「先 `CollectFromSnapshot`（快照全量顺序）→ 再 `FillGPUScene`
+    // （按合批顺序写绘制参数）」，两个序号空间被混在一起：
+    //   · 对象表第 i 条的包围盒 / 世界矩阵来自**快照第 i 条**；
+    //   · 它的 indexCount / firstIndex 却来自**合批第 i 条**（`FillGPUScene` 按同序覆盖）。
+    // 只有当「合批序号 == 快照序号」时才碰巧对得上；一旦收集集与合批集不同（本例 104 条
+    // 快照 / 104 条合批命令其间还夹着实例化与骨骼条目），第 i 条就会被画成另一个物体的
+    // 几何 + 这一个物体的变换 ⇒ 大片错位几何（实测 78.6% 像素不同）。
+    // 修法与 04 的 GPU GBuffer 完全相同：**先建合批，再按合批顺序重建对象表**。
     if (!m_BatchBuilt) { m_MeshBatcher.Build(FrameSnap(), m_MeshRegistry); m_BatchBuilt = true; }
-    m_MeshBatcher.FillGPUScene(m_GPUScene);
+    m_GPUScene.CollectBatchedFromSnapshot(FrameSnap(), m_MeshBatcher.GetBatchSnapshotIndices());
+    m_MeshBatcher.FillGPUScene(m_GPUScene);   // 在 Upload 前写入 draw 参数（与对象表同序）
     m_GPUScene.Upload(m_Device);
 
-    // 3) 绑定 GPUScene SSBO / HDR 深度 → Dispatch Compute
+    // 3) 本帧是否走 GPU 驱动的间接绘制
+    //    判据只看「能力 / 资源是否就绪」，**不**看上帧读回的可见数：
+    //    真正要画的条数由本帧 GPU 写出的计数缓冲决定（`DrawIndexedIndirectCount`），
+    //    用它上一帧的值去决定「本帧画几条」会在可见数变化时画错条数（多画陈旧命令 / 少画）。
+    const bool wantIndirect = m_UseExecuteIndirect
+                           && m_MeshBatcher.GetCommandCount() > 0
+                           && m_MeshBatcher.GetVertexBuffer() != nullptr
+                           && m_MeshBatcher.GetIndexBuffer() != nullptr
+                           && m_GPUCulling.GetIndirectBuffer() != nullptr
+                           && m_GPUCulling.GetDrawCountBuffer() != nullptr;
+    if (wantIndirect) {
+        // 【A4 根因③】物体缓冲必须按**合批顺序、含全部合批物体**上传：
+        // 间接命令的 firstInstance = 合批序号，顶点着色器用它索引 GPUObjectData[]。
+        // 此前这里用的是 `SceneRenderer::Prepare`（CPU 剔除后的**可见子集**、自己的顺序），
+        // 下标完全对不上 ⇒ 顶点着色器读到未写入的尾部（脏世界矩阵）⇒ 几何被拉到别处。
+        m_BatchDrawItems = m_SceneRenderer->PrepareBatched(
+            FrameSnap(), camera, ResB(m_ObjectBuffers[RenderFrameSlot()]),
+            m_MeshBatcher.GetBatchSnapshotIndices());
+        m_UseIndirectThisFrame = !m_BatchDrawItems.empty();
+        if (!m_UseIndirectThisFrame) {
+            HE_CORE_WARN("ForwardPipeline: 合批物体缓冲准备失败，本帧回退逐 draw 绘制");
+        }
+    }
+
+    // 4) 绑定 GPUScene SSBO / HDR 深度 → Dispatch Compute
     m_GPUCulling.SetSceneBuffer(m_Device, m_GPUScene.GetObjectBuffer());
     if (m_HDRDepth[RenderFrameSlot()].IsValid()) m_GPUCulling.SetDepthTexture(m_Device, ResT(m_HDRDepth[RenderFrameSlot()]),
                                                  m_HDRWidth, m_HDRHeight);
     m_GPUCulling.Dispatch(cmd, camera.GetViewProjMatrix(), m_GPUScene.GetObjectCount(),
                           m_HDRWidth, m_HDRHeight);
+    // 【A4】剔除的产物（间接命令 + 可见计数）在**同一条命令缓冲**里紧接着被绘制端消费：
+    // Vulkan 下必须有显式的「UAV 写 → indirect 读」依赖，否则两次操作可以重叠执行
+    //（D3D12 侧等价于一条全局 UAV 屏障）。此前这条屏障只在 PTG 路径里有。
+    cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::DrawIndirect,
+                         rhi::ResourceState::UnorderedAccess, rhi::ResourceState::IndirectArgument);
     // Dispatch 会改绑 compute 管线：恢复后续绘制要用的 PBR 管线
     cmd->SetPipeline(m_PBR_PSO.get());
 }
@@ -1113,15 +1151,20 @@ void ForwardPipeline::RenderScene(rhi::IRHICommandList* cmd, const CameraData& c
     // BeginHDRPass 之前调用，两条路径都不再落在 render pass 里。
 
     // SceneRenderer 准备所有 draw items（阶段 1 §15.1 第②段：改吃快照，不再遍历世界）
-    auto allDrawItems = m_SceneRenderer->Prepare(FrameSnap(), camera,
-                                                 ResB(m_ObjectBuffers[RenderFrameSlot()]));
-
-    // GPU 剔除后过滤：构建可见 draw 列表
+    // 【A4】绘制来源必须与 `RunGPUCulling` 本帧上传进物体缓冲的内容**同序**：
+    //   · 间接路径：`PrepareBatched` 已按合批顺序写满物体缓冲（含全部合批物体），这里直接用它；
+    //   · 逐 draw 路径：`Prepare` 按 CPU 可见顺序紧凑上传（下标 = 可见序号），这里用它。
+    // 两条路径每帧只会走一条，所以物体缓冲每帧只被写一次。
     std::vector<DrawItem> filteredItems;
-    // GPU 剔除时，传统 draw 命令也使用全部对象列表。
-    // SceneRenderer 和 GPUScene 的 objectIndex 是独立索引空间，不能直接对号过滤。
-    // 实际剔除由后续 DrawIndexedIndirect 根据 GPU IndirectCmdBuf 完成。
-    filteredItems = std::move(allDrawItems);
+    if (m_UseIndirectThisFrame && !m_BatchDrawItems.empty()) {
+        filteredItems = m_BatchDrawItems;
+    } else {
+        filteredItems = m_SceneRenderer->Prepare(FrameSnap(), camera,
+                                                 ResB(m_ObjectBuffers[RenderFrameSlot()]));
+    }
+    // GPU 剔除后过滤：构建可见 draw 列表
+    // 【A4】间接路径的列表是**合批顺序、不紧凑**的：CPU 剔除结果在 `bCPUCulled` 里，
+    // 逐 draw 循环据此跳过不可见物体；GPU 驱动路径完全不看它（由 GPU 剔除决定画什么）。
     u32 totalDraws = (u32)filteredItems.size();
 
     // 上传去重材质到 bindless SSBO（须在 Flush 之前调用，Flush 才会把材质 buffer 推送到 binding 30）
@@ -1265,8 +1308,13 @@ void ForwardPipeline::RenderScene(rhi::IRHICommandList* cmd, const CameraData& c
     // ============================================================
     // 录制绘制命令（ForwardPipeline 特有：PBR PSO + bindless 描述符集）
     // ============================================================
+    // 【A4】本帧走哪条绘制路径已由 `RunGPUCulling` 定好（`m_UseIndirectThisFrame`）：
+    //   间接路径直接用 GPU 写出的命令 + 计数，**不**经 CPU 逐条提交，因此与「并行录制」互斥
+    //   （并行录制录的就是逐 draw 命令）。三条分支的顺序固定为：间接 → 并行 → 串行逐 draw。
+    const bool useIndirect = m_UseIndirectThisFrame && !filteredItems.empty();
+
     // 【T3.4】叠加最小规模阈值：draw 数太少时并行的固定开销大于收益 ⇒ 回落串行路径
-    if (m_MultiThreadRecord && m_ParallelRecorder.IsReady() && totalDraws > 0
+    if (!useIndirect && m_MultiThreadRecord && m_ParallelRecorder.IsReady() && totalDraws > 0
         && ParallelRecordHelper::ShouldRecordParallel(totalDraws)) {
         CpuScope mtcrScope(CpuSection::Mtcr);   // 【读数】并行录制 + 次级命令缓冲执行
         // T3.1：池 / 分块 / 归属声明 / 按块序合并都在 ParallelRecordHelper 里；
@@ -1279,6 +1327,7 @@ void ForwardPipeline::RenderScene(rhi::IRHICommandList* cmd, const CameraData& c
                 for (u32 i = start; i < end; ++i) {
                     auto& di = filteredItems[i];
                     if (di.bInstanced) continue;   // 实例化网格由专用 Pass 绘制
+                    if (di.bCPUCulled) continue;   // 【A4】CPU 剔除掉的物体（合批顺序列表用）
                     PushConstantData pc = framePC;
                     pc.objectIndex = di.objectIndex;
                     secCmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSets[RenderFrameSlot()]);  // set=0: per-frame + bindless
@@ -1297,51 +1346,56 @@ void ForwardPipeline::RenderScene(rhi::IRHICommandList* cmd, const CameraData& c
                 }
         });
         drawCount = totalDraws;
+    } else if (useIndirect) {
+        // ── GPU 驱动的间接绘制：命令与条数**全部**由本帧 GPU 剔除写出 ──
+        cmd->SetVertexBuffer(m_MeshBatcher.GetVertexBuffer(), 0);
+        cmd->SetIndexBuffer(m_MeshBatcher.GetIndexBuffer(), 0);
+        framePC.useInstanceID = 1;  // SV_InstanceID 模式（= 合批序号 = 物体缓冲下标）
+        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSets[RenderFrameSlot()]);
+        cmd->SetPushConstants(0, sizeof(PushConstantData), &framePC);
+        // 【A4 根因④】此前用 `DrawIndexedIndirect(..., GetLastVisibleCount(), ...)`：
+        // 那个数是**上一帧**读回的可见数，而命令缓冲里是本帧刚写出的命令 ⇒ 可见数一变就画错
+        // 条数（少画 / 多画上一帧残留的命令）。改成 `DrawIndexedIndirectCount`：条数直接读
+        // GPU 本帧写出的计数缓冲（与 04 的 GPU GBuffer 同一做法），CPU 不参与决定。
+        char label[64];
+        snprintf(label, sizeof(label), "Forward IndirectCount (max %u)", GPUCulling::kMaxObjects);
+        cmd->SetDrawDebugLabel(label);
+        cmd->DrawIndexedIndirectCount(m_GPUCulling.GetIndirectBuffer(), 0,
+                                      m_GPUCulling.GetDrawCountBuffer(), 0,
+                                      GPUCulling::kMaxObjects,
+                                      sizeof(IndirectDrawCommand));
+        // 统计用读数：滞后一帧的上帧可见数（真实绘制条数只有 GPU 知道）
+        drawCount = m_GPUCulling.GetLastVisibleCount();
     } else {
-        // ExecuteIndirect 路径（仅当 Batch 已构建且 GPU Culling 有结果）
-        bool useIndirect = m_UseExecuteIndirect && m_BatchBuilt && m_GPUCulling.enabled
-                        && m_MeshBatcher.GetTotalIndexCount() > 0
-                        && m_GPUCulling.GetLastVisibleCount() > 0;
-        if (useIndirect) {
-            cmd->SetVertexBuffer(m_MeshBatcher.GetVertexBuffer(), 0);
-            cmd->SetIndexBuffer(m_MeshBatcher.GetIndexBuffer(), 0);
-            framePC.useInstanceID = 1;  // SV_InstanceID 模式
+        framePC.useInstanceID = 0;  // push constant 模式
+        for (auto& di : filteredItems) {
+            if (di.bInstanced) continue;   // 实例化网格由专用 Pass 绘制
+            if (di.bCPUCulled) continue;   // 【A4】CPU 剔除掉的物体（合批顺序列表用）
+            PushConstantData pc = framePC;
+            pc.objectIndex = di.objectIndex;
             cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSets[RenderFrameSlot()]);
-            cmd->SetPushConstants(0, sizeof(PushConstantData), &framePC);
-            // DrawCall 调试 marker（RenderDoc 定位用）
+            // DrawCall 调试 marker：标记当前绘制的物体（RenderDoc 定位用）
             char label[64];
-            snprintf(label, sizeof(label), "Forward Indirect (%u)", m_GPUCulling.GetLastVisibleCount());
+            snprintf(label, sizeof(label), "Forward Obj#%u", di.objectIndex);
             cmd->SetDrawDebugLabel(label);
-            cmd->DrawIndexedIndirect(m_GPUCulling.GetIndirectBuffer(), 0,
-                m_GPUCulling.GetLastVisibleCount(), sizeof(IndirectDrawCommand));
-            drawCount = m_GPUCulling.GetLastVisibleCount();
-        } else {
-            framePC.useInstanceID = 0;  // push constant 模式
-            for (auto& di : filteredItems) {
-                if (di.bInstanced) continue;   // 实例化网格由专用 Pass 绘制
-                PushConstantData pc = framePC;
-                pc.objectIndex = di.objectIndex;
-                cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSets[RenderFrameSlot()]);
-                // DrawCall 调试 marker：标记当前绘制的物体（RenderDoc 定位用）
-                char label[64];
-                snprintf(label, sizeof(label), "Forward Obj#%u", di.objectIndex);
-                cmd->SetDrawDebugLabel(label);
-                cmd->SetPushConstants(0, sizeof(PushConstantData), &pc);
-                // 顶点/索引缓冲按 `meshIndex` 查注册表（第②段：DrawItem 不再持有组件指针）
-                const MeshRegistryEntry* me = m_MeshRegistry.Find(di.meshIndex);
-                if (!me || !me->vertexBuffer || !me->indexBuffer) continue;
-                cmd->SetVertexBuffer(me->vertexBuffer, 0);
-                cmd->SetIndexBuffer(me->indexBuffer);
-                cmd->DrawIndexed(me->indexCount);
-                drawCount++;
-            }
+            cmd->SetPushConstants(0, sizeof(PushConstantData), &pc);
+            // 顶点/索引缓冲按 `meshIndex` 查注册表（第②段：DrawItem 不再持有组件指针）
+            const MeshRegistryEntry* me = m_MeshRegistry.Find(di.meshIndex);
+            if (!me || !me->vertexBuffer || !me->indexBuffer) continue;
+            cmd->SetVertexBuffer(me->vertexBuffer, 0);
+            cmd->SetIndexBuffer(me->indexBuffer);
+            cmd->DrawIndexed(me->indexCount);
+            drawCount++;
         }
     }
 
     m_LastDrawCount = drawCount;
     m_LastTriCount  = 0;
     // 三角形计数（粗略估算：每个 draw 平均 indexCount/3）；索引数同样按 `meshIndex` 查注册表
+    // 【A4】只累加"会被画出来"的条目：间接路径的列表含全部合批物体（含 CPU 判为不可见的），
+    // 若不跳过 `bCPUCulled` 就会把看不见的三角形也算进来（虚高统计）。
     for (auto& di : filteredItems) {
+        if (di.bCPUCulled) continue;
         const MeshRegistryEntry* me = m_MeshRegistry.Find(di.meshIndex);
         if (me) m_LastTriCount += me->indexCount / 3;
     }
