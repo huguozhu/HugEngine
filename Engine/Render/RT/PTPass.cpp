@@ -1,4 +1,4 @@
-﻿// ============================================================
+// ============================================================
 // PTPass.cpp — 全路径追踪 Pass 实现
 // 迭代式路径追踪 RayGen 直接渲染整帧，输出 HDR + GBuffer（深度/法线/速度）
 // ============================================================
@@ -175,8 +175,17 @@ bool PTPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     d.mipLevels = 1;
     d.usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource
             | rhi::TextureUsage::TransferSrc;
+    // HDR 比其余四张多一个 **RenderTarget**：粒子 Billboard 是把它当**颜色附件**
+    // （LoadOp::Load）写进去的（见 PathTracingPipeline 的 ParticleRender pass）。
+    // 缺这个用途时 D3D12 侧看不出问题，但 Vulkan 会报
+    //   VUID-VkFramebufferCreateInfo-pAttachments-00877（附件视图缺 COLOR_ATTACHMENT 用途）
+    //   VUID-VkImageMemoryBarrier-oldLayout-01208（转换到 COLOR_ATTACHMENT_OPTIMAL 非法）
+    // 实测（B1）：05 一开粒子每帧 2 条。
     d.format = rhi::Format::RGBA16_FLOAT;
+    d.usage = d.usage | rhi::TextureUsage::RenderTarget;
     m_HDR = device->CreateTextureHandle(d);   // A-3
+    d.usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource
+            | rhi::TextureUsage::TransferSrc;
     d.format = rhi::Format::R32_FLOAT;
     m_Depth = device->CreateTextureHandle(d);
     d.format = rhi::Format::RGBA16_FLOAT;

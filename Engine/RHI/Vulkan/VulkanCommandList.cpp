@@ -1087,6 +1087,15 @@ void VulkanCommandList::ClearDepthStencil(IRHITexture* texture, float depth) {
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
                          VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
                          0, 0, nullptr, 0, nullptr, 1, &postBarrier);
+
+    // ── 4. 同步布局追踪器 ──
+    // 上面两步转换不经过 PipelineBarrier，追踪器不知道这张图已经停在 DEPTH_STENCIL_ATTACHMENT。
+    // 不同步的后果（B1 实测，05 开粒子）：紧随其后的 BeginOffscreenPass 会调
+    // EnsureDepthAttachmentLayout，它按"追踪器记的上帧状态 = DepthStencilRead"发一条
+    // oldLayout=DEPTH_STENCIL_READ_ONLY 的屏障，而图的**真实**布局是 ATTACHMENT ⇒
+    // VUID-VkImageMemoryBarrier-oldLayout-01197 + VUID-vkCmdBeginRenderPass-initialLayout-00895。
+    TrackTextureLayout(reinterpret_cast<void*>(vkTex->GetImageView()),
+                       rhi::ResourceState::DepthStencilWrite);
 }
 
 // ============================================================
