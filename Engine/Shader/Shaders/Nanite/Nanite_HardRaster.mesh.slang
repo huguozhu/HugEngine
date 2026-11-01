@@ -141,6 +141,13 @@ uint hardRasterSelectCluster(uint slot, out ClusterRef ref, out SoftRasterCluste
     return min(triangleCount, kHardMaxPrimitives);
 }
 
+// 【A5】组内广播用的共享内存（模块作用域：Slang 不允许在函数体内声明 groupshared）
+//   0 号线程算一次 → 全组 128 个线程读同一份，避免每线程各做一次取簇 + 页解析。
+groupshared uint                  gsTriangleCount;
+groupshared ClusterRef            gsRef;
+groupshared SoftRasterClusterView gsView;
+groupshared float3                gsTranslation;
+
 [numthreads(128, 1, 1)]
 [outputtopology("triangle")]
 void main(
@@ -168,10 +175,29 @@ void main(
     }
 
     // ── ①② 取簇 + 分流：与软光栅第 1/2 趟**逐字相同**的取簇逻辑（同一条可见簇列表 + 同一份资产）──
-    ClusterRef ref;
-    SoftRasterClusterView view;
-    float3 translation;
-    uint triangleCount = hardRasterSelectCluster(naniteRasterSlot(gid), ref, view, translation);   // 二维派发展开成槽位
+    // 【A5 修复：本组只算一次，用 groupshared 广播】`hardRasterSelectCluster` 的判据只依赖
+    //   工作组（`naniteRasterSlot(gid)`、可见计数、簇记录），对 128 个线程**完全一致**。
+    //   此前是让 128 个线程**各算一遍**：每线程都要读 `u_VisibleClusterCount[0]`（全局/ UAV）、
+    //   可见引用、实例表、簇记录与页解析 —— 而派发维度是按可见引用**上界**取的
+    //   （样例实测 530,368 个组 × 128 线程 = 6,800 万个线程 × 十余次全局读）。
+    //   实测 07.Nanite 因此每帧 2.07 s（`nanite_pass_ms=2063`，硬光栅一趟占 99.9%），
+    //   而真正需要处理的可见簇只有 23,851 条。改成"0 号线程算一次 + 组内同步"后，每组的
+    //   取簇/页解析只发生一次。
+    if (tid == 0u) {
+        ClusterRef            ref0;
+        SoftRasterClusterView view0;
+        float3                translation0;
+        gsTriangleCount = hardRasterSelectCluster(naniteRasterSlot(gid), ref0, view0, translation0);
+        gsRef           = ref0;
+        gsView          = view0;
+        gsTranslation   = translation0;
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    const uint                  triangleCount = gsTriangleCount;
+    const ClusterRef            ref           = gsRef;
+    const SoftRasterClusterView view          = gsView;
+    const float3                translation   = gsTranslation;
     NaniteCluster cluster = view.cluster;
 
     // 逐**角点**展开：三角形 `t` 用输出顶点 `3t / 3t+1 / 3t+2`。整个入口只调用这一次

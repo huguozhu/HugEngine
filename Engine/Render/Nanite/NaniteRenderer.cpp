@@ -380,8 +380,7 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
             if (!asset.clusters || !asset.vertices || !asset.indices) return;   // 资产未入库
 
             NaniteRaster::GBufferTargets targets;
-            targets.albedo      = gb.colorTextures[0];
-            targets.normal      = gb.colorTextures[1];
+            targets.albedo      = gb.colorTextures[0];            targets.normal      = gb.colorTextures[1];
             targets.emissive    = gb.colorTextures[2];
             targets.velocity    = gb.colorTextures[3];
             targets.worldPos    = gb.colorTextures[4];
@@ -390,6 +389,66 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
             targets.lightmapKey = gb.colorTextures[7];
             targets.depth       = gb.depthTexture;
             if (!targets.HasSoftRasterTargets()) return;
+
+            // 【A5】光栅派发的上界：**上一帧 GPU 写出的可见簇数** × 余量，并夹到静态上界内。
+            // 【为什么要用滞后一帧的读数】可见计数是同一帧 GPU 刚写出的值，本帧 CPU 拿不到；
+            //   而派发维度直接决定工作量：`GetVisibleRefBound()` 是"簇数 × 实例域"（样例 8287 × 64
+            //   = 530,368），实际可见只有 23,851 条 ⇒ 无论 shader 怎么早退，多出来的 506,517 个
+            //   网格着色器组仍要发射（每组声明 192 顶点 / 64 图元，实测 07 每帧 2.07 s 主要就是它）。
+            //   计数缓冲是 CPU 可见的持久映射内存（`cpuAccess=true`），读它**不需要**任何同步等待，
+            //   与 `GPUCulling::Readback` 的"滞后一帧统计"完全同一口径；留 25% + 1024 的增长余量，
+            //   突发增加时最多丢一帧的少量大簇（下一帧自动收敛）。
+            const u32 refBound    = m_Cull.GetVisibleRefBound();
+            const u32 lastSeenRaw = m_Cull.ReadLastVisibleClusterCount();
+            // 计数缓冲每帧开头会被 GPU 命令清 0（4B 拷贝）⇒ 主机偶尔会读到"清零后的 0"。
+            // 读到 0 时**保留上一次的非零值**（不把上界打回静态上界）。
+            if (lastSeenRaw > 0u) m_LastSeenVisibleClusters = lastSeenRaw;
+            const u32 lastSeen  = m_LastSeenVisibleClusters;
+            u32 dispatchBound   = refBound;
+            if (lastSeen > 0u) {
+                const u64 grown = static_cast<u64>(lastSeen) + static_cast<u64>(lastSeen) / 4u + 1024u;
+                if (grown < static_cast<u64>(refBound)) dispatchBound = static_cast<u32>(grown);
+            }
+
+            // ── 【A5】硬光栅的工作量门限：显式警告 + 优雅降级（不静默出错误画面）──
+            // 【判据】硬光栅每帧要发 `dispatchBound` 个网格着色器组，每组最多 64 个三角形
+            //   （192 个输出顶点）。`kNaniteHardRasterRefBudget` = 131,072 条引用 ≈ 830 万三角形，
+            //   在 960×540 + 8 张 MRT、且实例互相重叠（本样例 64 个合成实例覆盖同一批像素）时
+            //   实测约 0.2 s/帧 —— 已经不是实时路径。
+            // 【降级行为】超预算时**跳过本帧的硬光栅**（只跳它，软光栅/剔除链/GBuffer 全部照旧），
+            //   打一条一次性 HE_CORE_WARN 说明原因与对照开关。跳过意味着"大簇（>maxTriangles）
+            //   本帧不画"—— 这是明确的画面降级，而不是把错误画面当真。
+            // 【对照开关】`nanite_hard_raster=0` 永久关闭；`nanite_instance_test_count` 降低重叠实例数。
+            constexpr u32 kNaniteHardRasterRefBudget = 131072u;
+            const bool hardRasterOverBudget = (dispatchBound > kNaniteHardRasterRefBudget);
+            {
+                static bool s_loggedBound = false;
+                if (!s_loggedBound) {
+                    s_loggedBound = true;
+                    HE_CORE_INFO("[Nanite] 光栅派发上界 dispatch_bound={}（上帧可见 {}；静态上界 "
+                                 "{} = 簇数 {} × 实例域 {}；表容量 {}）",
+                                 dispatchBound, lastSeen, refBound,
+                                 m_Cull.GetBVHClusterCount(),
+                                 m_Cull.GetBVHInstanceDomain(),
+                                 m_Cull.GetBVHVisibleCapacity());
+                }
+                // 【降级是**永久关掉这个档位**，不是"只跳过这一帧的录制"】
+                //   实测（07.Nanite，64 个重叠合成实例）：把 `hardRaster` 从 1 改成 0 让帧时间从
+                //   2.07 s 降到 0.04 s；而"只跳过 RecordHardRasterPass 的录制、PSO/资源照建"仍然
+                //   是 2.06 s 级的长帧 ⇒ 代价与这个档位**存在**这件事本身绑定，只跳录制不够。
+                //   因此这里直接把档位关掉（等价于 cfg 的 `nanite_hard_raster=0`），并只警告一次。
+                static bool s_degraded = false;
+                if (hardRasterOverBudget && !s_degraded) {
+                    s_degraded = true;
+                    m_Settings.hardRaster = false;
+                    HE_CORE_WARN("[Nanite] 硬光栅工作量超预算（上界 {} > {} 条可见簇引用）："
+                                 "**已自动关闭硬光栅档位**（大簇不画，软光栅与其余链路照旧），"
+                                 "以免每帧 0.2 s 以上的长帧。对照开关：cfg 的 nanite_hard_raster=0"
+                                 "（永久关闭）或降低 nanite_instance_test_count（当前 {} 个合成实例）",
+                                 dispatchBound, kNaniteHardRasterRefBudget,
+                                 m_Cull.GetBVHInstanceDomain());
+                }
+            }
 
             NaniteRaster::AssetViews views;
             views.clusters = asset.clusters.get();
@@ -410,7 +469,7 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
                                           m_Cull.GetVisibleClusterBuffer(),
                                           m_Cull.GetVisibleClusterCountBuffer(),
                                           m_Cull.GetInstanceBuffer(),
-                                          m_Cull.GetBVHVisibleCapacity(),
+                                          dispatchBound,   // 【A5】派发上界（上帧可见数×余量，不是 1M 容量）
                                           1.0f /* 深度解析的清屏值：远平面 */);
 
             // ── §14.8 任务 22：硬光栅（大簇一侧）──
@@ -418,12 +477,12 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
             //   软光栅先把颜色与深度写进既有附件，硬光栅再以 `LessEqual + depthWrite` 画上去 ⇒
             //   更近的硬片元通过测试并覆盖软颜色（硬遮软 ✓），更远的被丢弃、软颜色保留（软遮硬 ✓）。
             //   完整推导与三条已知边界写在 `NaniteRaster::RecordHardRasterPass` 的注释里。
-            if (hardRasterOn) {
+            if (hardRasterOn && !hardRasterOverBudget) {
                 m_Raster.RecordHardRasterPass(cmd, targets, views, m_SoftParams,
                                               m_Cull.GetVisibleClusterBuffer(),
                                               m_Cull.GetVisibleClusterCountBuffer(),
                                               m_Cull.GetInstanceBuffer(),
-                                              m_Cull.GetBVHVisibleCapacity());
+                                              dispatchBound);   // 【A5】同上：上帧可见数×余量
             }
         });
 
@@ -723,7 +782,7 @@ void NaniteRenderer::RecordDebugViewPass(rhi::IRHICommandList* cmd) {
                                  m_Cull.GetVisibleClusterBuffer(),
                                  m_Cull.GetVisibleClusterCountBuffer(),
                                  m_Cull.GetInstanceBuffer(),
-                                 m_Cull.GetBVHVisibleCapacity(),
+                                 m_Cull.GetVisibleRefBound(),   // 【A5】同上：按引用数上界派发
                                  m_DebugParams);
 }
 

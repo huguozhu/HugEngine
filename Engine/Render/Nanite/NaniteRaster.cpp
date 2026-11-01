@@ -1263,10 +1263,14 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
                              tex);
     }
 
-    // ── ③ A 趟：逐簇一个工作组，dispatch 条数 = 可见簇容量（着色器按可见计数提前返回）──
+    // ── ③ A 趟：逐簇一个工作组，dispatch 条数 = 可见簇引用的**CPU 可算上界**（着色器按可见计数提前返回）──
     // 【为什么要按容量而不是按可见数派发】可见计数是**同一帧 GPU 刚写出的**值，CPU 读不到（读回
-    //   要等 GPU ⇒ 破坏无停顿）；按容量派发、由 shader 按 `slot >= visibleCount` 早退，是本引擎
-    //   既有的"GPU 驱动"写法。容量 = 可见引用表容量（`NaniteCull::GetBVHVisibleCapacity`）。
+    //   要等 GPU ⇒ 破坏无停顿）；按上界派发、由 shader 按 `slot >= visibleCount` 早退，是本引擎
+    //   既有的"GPU 驱动"写法。
+    // 【A5】上界由调用方给（`NaniteCull::GetVisibleRefBound` = 簇数 × 实例数 ≤ 容量）：此前这里
+    //   传的是**表容量** `GetBVHVisibleCapacity()`（64 × 16384 = 1,048,576），于是本函数的 3 趟
+    //   每帧各派发 1024×1024 个工作组 —— 实际引用只有 384 条。实测 07.Nanite 因此每帧 2.07 s
+    //   （关掉 Nanite 立刻 129 fps）。上界不改变正确性：引用表是紧凑的，槽位 ≥ 上界 的条目不存在。
     cmd->SetPipeline(ResP(m_SoftRasterPSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_SoftDepthSet);
     cmd->SetPushConstants(0, (u32)sizeof(NaniteSoftRasterParams), &paramsEff);
@@ -1642,8 +1646,11 @@ void NaniteRaster::RecordHardRasterPass(rhi::IRHICommandList* cmd,
     //   帧缓冲 y 向下"的差异；软光栅的 `softRasterNdcToPixel` 也是按这条约定把 NDC 映射到行列的
     //   ⇒ 只有用同一个负高度视口，两条光栅路径才会落在**同一批像素**上。
     cmd->SetFullscreenViewport(static_cast<u32>(w), static_cast<u32>(h));
-    // 任务数 = 可见簇容量（与软光栅同一条既有口径：可见计数是**同一帧 GPU 刚写出**的、CPU 读不到，
-    // 读回会破坏无停顿）⇒ 由 shader 按 `slot >= visibleCount` 与分流判据早退收口。
+    // 任务数 = 可见簇引用的**CPU 可算上界**（与软光栅同一条既有口径：可见计数是**同一帧 GPU
+    // 刚写出**的、CPU 读不到，读回会破坏无停顿）⇒ 由 shader 按 `slot >= visibleCount` 与分流
+    // 判据早退收口。
+    // 【A5】上界由调用方给（`NaniteCull::GetVisibleRefBound`）：此前用的是表容量 1,048,576 ⇒
+    //   每帧 1024×1024 = 1,048,576 个网格着色器组（每个 128 个顶点调用）恒被发射，实测 2.07 s/帧。
     cmd->SetDrawDebugLabel("Nanite_HardRaster (mesh, triangleCount > maxTriangles)");
     // 二维派发（同软光栅）：网格着色器组数单维同样不能超过 65535
     cmd->DrawMeshTasks(std::min(visibleCapacity, kNaniteRasterDispatchWidth),

@@ -1308,10 +1308,24 @@ void NaniteCull::EnsureHiZBuildViews(rhi::IRHITexture* pyramid) {
     }
 }
 
+// ============================================================
+// 【A5】上一帧可见簇数（主机侧直接 Map 读：滞后一帧、无同步、不停顿）
+// ============================================================
+u32 NaniteCull::ReadLastVisibleClusterCount() const {
+    if (!m_VisibleClusterCountBuf.IsValid()) return 0u;
+    auto* buf = ResB(m_VisibleClusterCountBuf);
+    if (!buf) return 0u;
+    u32 count = 0u;
+    if (void* p = buf->Map()) {
+        count = *static_cast<const u32*>(p);
+        buf->Unmap();
+    }
+    return count;
+}
+
 void NaniteCull::RecordCullChainPass(rhi::IRHICommandList* cmd,
                                      rhi::IRHITexture* hizTexture, rhi::IRHITexture* depthTexture,
-                                     bool enableOcclusion, bool hizFlipY) {
-    if (!cmd) return;
+                                     bool enableOcclusion, bool hizFlipY) {    if (!cmd) return;
 
     // ── Phase 1：实例剔除（写可见列表 + 可见性掩码）──
     // 【为什么和 Phase 2/3 挤在同一个 pass 里】帧图对"两个零资源 pass"的顺序**无法表达**
@@ -1416,7 +1430,6 @@ void NaniteCull::RecordCullChainPass(rhi::IRHICommandList* cmd,
     }
 
     if (m_BVHInstanceDomain == 0u) return;   // 0 实例 ⇒ 不派发；上面已把计数与读数清 0
-
     // push constant：6 个平面（本帧 viewProj 提取，与实例剔除**同一份**）+ 三个计数 + 容量
     NaniteClusterBVHParams pc{};
     std::memcpy(pc.planes, m_FrameFrustum.planes, sizeof(m_FrameFrustum.planes));
