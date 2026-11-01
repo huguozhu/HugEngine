@@ -38,10 +38,23 @@ bool IsOccluded(float3 mn, float3 mx) {
         float2 s=float2(ndc.x*0.5+0.5,0.5-ndc.y*0.5);rMin=min(rMin,s);rMax=max(rMax,s);nearestZ=min(nearestZ,ndc.z);}
     rMin=clamp(rMin,0,1);rMax=clamp(rMax,0,1);
     float2 sz=(rMax-rMin)*screenSize;float mip=clamp(ceil(log2(max(1,max(sz.x,sz.y)))),0,float(hizMipCount-1));
-    float4 d;d.x=u_HiZDepth.SampleLevel(u_HiZSampler,rMin,mip);d.y=u_HiZDepth.SampleLevel(u_HiZSampler,float2(rMax.x,rMin.y),mip);
-    d.z=u_HiZDepth.SampleLevel(u_HiZSampler,float2(rMin.x,rMax.y),mip);d.w=u_HiZDepth.SampleLevel(u_HiZSampler,rMax,mip);
-    // 与采样区域的**最远**深度（max 四个角样本）比较：最近点仍比它远才判被遮挡（宁可多画不可少画）
-    return nearestZ > max(max(d.x, d.y), max(d.z, d.w));
+    // 【C3 保守遮挡判定】原实现只采屏幕包围盒的 **4 个角**：min 深度金字塔的每个样本是
+    // "该 mip texel 覆盖盒内**最近**表面"，4 个角只约束了角上 texel，对**区域内部没有任何约束**
+    // —— 遮挡物只盖住包围盒中间时，4 角样本全是远处深度 ⇒ max(4 角) 偏小 ⇒ 判定更容易成立 ⇒
+    // 误剔除（与上面"取 max(ndc.z) 更容易成立"是同一类错误，出在**采样覆盖**而不是角点选择上）。
+    // 改成 3×3 覆盖采样（四个角 + 四个边中点 + 中心）：样本集合是原 4 角的超集，max 只可能变大
+    // ⇒ 判定单调更保守（宁多画不可少画）。mip 由包围盒尺寸选定（盒 ≈ 1 个 texel），故 3×3 恰好
+    // 覆盖盒跨 2×2 个 texel 的可能性。
+    float maxDepth = 0.0;
+    [unroll] for (int iy = 0; iy < 3; ++iy) {
+        [unroll] for (int ix = 0; ix < 3; ++ix) {
+            float2 uv = rMin + (rMax - rMin) * float2(float(ix) * 0.5, float(iy) * 0.5);
+            maxDepth = max(maxDepth, u_HiZDepth.SampleLevel(u_HiZSampler, uv, mip));
+        }
+    }
+    // 与采样区域的**最远**深度（3×3 覆盖采样的 max）比较：最近点仍比它远才判被遮挡。
+    // 末尾 1e-6 是浮点余量（只往"多画"方向偏，不改变遮挡语义）。
+    return nearestZ > maxDepth + 1e-6;
 }
 
 [numthreads(64,1,1)]

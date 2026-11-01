@@ -37,10 +37,17 @@ bool IsOccluded(float3 mn, float3 mx) {
         float2 s=float2(ndc.x*0.5+0.5,0.5-ndc.y*0.5);rMin=min(rMin,s);rMax=max(rMax,s);nearestZ=min(nearestZ,ndc.z);}
     rMin=clamp(rMin,0,1);rMax=clamp(rMax,0,1);
     float2 sz=(rMax-rMin)*screenSize;float mip=clamp(ceil(log2(max(1,max(sz.x,sz.y)))),0,float(hizMipCount-1));
-    float4 d;d.x=u_HiZDepth.SampleLevel(u_HiZSampler,rMin,mip);d.y=u_HiZDepth.SampleLevel(u_HiZSampler,float2(rMax.x,rMin.y),mip);
-    d.z=u_HiZDepth.SampleLevel(u_HiZSampler,float2(rMin.x,rMax.y),mip);d.w=u_HiZDepth.SampleLevel(u_HiZSampler,rMax,mip);
-    // 采样区域取最远深度（max 四角）：最近点仍更远 ⇒ 保守地判为被遮挡
-    return nearestZ > max(max(d.x, d.y), max(d.z, d.w));
+    // 【C3】与 GPUCull.comp.slang 同口径：4 角采样 → 3×3 覆盖采样后取 max。
+    // 样本集合是原 4 角的超集 ⇒ max 只可能变大 ⇒ 判定单调更保守（宁多画不可少画）。
+    float maxDepth = 0.0;
+    [unroll] for (int iy = 0; iy < 3; ++iy) {
+        [unroll] for (int ix = 0; ix < 3; ++ix) {
+            float2 uv = rMin + (rMax - rMin) * float2(float(ix) * 0.5, float(iy) * 0.5);
+            maxDepth = max(maxDepth, u_HiZDepth.SampleLevel(u_HiZSampler, uv, mip));
+        }
+    }
+    // 采样区域取最远深度（3×3 覆盖采样的 max）：最近点仍更远 ⇒ 保守地判为被遮挡
+    return nearestZ > maxDepth + 1e-6;
 }
 
 [numthreads(64,1,1)]
