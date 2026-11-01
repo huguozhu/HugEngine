@@ -222,7 +222,11 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
                 if (m_GBuffer->GetDepth()) m_GPUCulling.SetDepthTexture(m_Device, m_GBuffer->GetDepth(), w, h);
                 m_GPUCulling.DispatchPhase1(c, camera.GetViewProjMatrix(),
                                             m_GPUScene.GetObjectCount(), w, h);
-                c->SetPipeline(m_GBuffer->GetPSO());
+                // 【A1】这里**不得**再绑定 GBuffer 的图形 PSO：本 pass 的队列提示是 Compute，
+                // 会被 RenderGraph 提升到独立的 Compute 命令列表上录制，而 Vulkan 的 Compute
+                // 命令池不支持图形操作 —— 绑定图形管线是非法用法，提交后直接把 GPU 挂死
+                // （实测 04 / 06 第 1 帧 TDR，vkDeviceWaitIdle 返回 VK_ERROR_DEVICE_LOST）。
+                // 该行是 GBufferRenderer 重构时留下的残留：后面的 GBuffer pass 自己会绑定。
             },
             RGPassQueue::Compute);  // AsyncCompute: Phase 1 在 Compute 队列执行
     } else {
@@ -242,7 +246,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
                     m_GPUCulling.Dispatch(c, camera.GetViewProjMatrix(),
                                           m_GPUScene.GetObjectCount(), w, h);
                 }
-                c->SetPipeline(m_GBuffer->GetPSO());
+                // 【A1】同上：Compute 队列的 pass 内不绑定图形 PSO（见 GPU_Cull_Phase1 分支的说明）。
             },
             RGPassQueue::Compute);
     }

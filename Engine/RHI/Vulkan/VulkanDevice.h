@@ -177,6 +177,16 @@ public:
     void  DestroyImGuiRenderPass(void* rp) override;
     void* GetImGuiCommandBuffer(IRHICommandList* cmd) const override;
 
+    // 【A2】UI 叠加记录器：命令流模式下由影子列表回放时调用（见 IRHIDevice::SetOverlayRecorder）
+    void SetOverlayRecorder(OverlayRecorder recorder) override { m_OverlayRecorder = recorder; }
+    /// 有提交路由（模式 2）时，回放发生在 RHI 线程、可能晚于上层下一帧的 ImGui::NewFrame，
+    /// 叠加所需的 draw data 已失效 ⇒ 命令流模式下拒绝叠加并给出明确日志，绝不静默画错。
+    [[nodiscard]] bool HasSubmitRouter() const { return m_SubmitRouter != nullptr; }
+    /// 真正调用叠加记录器（只有 Vulkan 命令列表在"回放侧/直接录制"两处调用）
+    void InvokeOverlayRecorder(void* cmdBuffer) const {
+        if (m_OverlayRecorder) m_OverlayRecorder(cmdBuffer);
+    }
+
     // Debug Object Naming — 为 GPU 资源设置调试名称
     void SetResourceDebugName(IRHIBuffer* resource, const char* name) override;
     void SetResourceDebugName(IRHITexture* resource, const char* name) override;
@@ -344,6 +354,8 @@ private:
     VkDevice         m_Device          = VK_NULL_HANDLE;
     /// 提交路由（模式 2）：非空时 `Submit`/`Present` 交给它，由 RHI 线程真正提交（见 SubmitRouter.h）
     ISubmitRouter*   m_SubmitRouter    = nullptr;
+    /// 【A2】UI 叠加记录器（默认空：没有注册时命令流模式不画 UI）
+    OverlayRecorder  m_OverlayRecorder = nullptr;
     VkPipelineCache  m_PipelineCache   = VK_NULL_HANDLE;  // 持久化 PSO 编译缓存（磁盘 + GPU 驱动）
 
     // ============================================================

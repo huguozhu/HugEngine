@@ -148,11 +148,23 @@ bool VulkanDGC::Initialize(VkDevice device, VkPhysicalDevice physical,
     }
 
     // 5. 创建预处理缓冲
+    // 【A1 附带修复】预处理缓冲必须带 VK_BUFFER_USAGE_2_PREPROCESS_BUFFER_BIT_EXT：
+    // 规范要求 `VkGeneratedCommandsInfoEXT::preprocessAddress` 指向的缓冲由带该 usage 的缓冲
+    // 分配而来（VUID-VkGeneratedCommandsInfoEXT-preprocessAddress-11069）。此前漏了这一位，
+    // 04 的 GPU 驱动 GBuffer（DGC 路径）每次派发都会报 9 条校验错误。
+    // 该位属于 64 位的 buffer usage 集合，必须经 VkBufferUsageFlags2CreateInfoKHR（maintenance5）
+    // 传入，不能直接塞进 32 位的 VkBufferCreateInfo::usage。
+    VkBufferUsageFlags2CreateInfoKHR usage2{};
+    usage2.sType = VK_STRUCTURE_TYPE_BUFFER_USAGE_FLAGS_2_CREATE_INFO_KHR;
+    usage2.usage = VK_BUFFER_USAGE_2_INDIRECT_BUFFER_BIT
+                 | VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT
+                 | VK_BUFFER_USAGE_2_PREPROCESS_BUFFER_BIT_EXT;
+
     VkBufferCreateInfo bufInfo{};
     bufInfo.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufInfo.pNext       = &usage2;
     bufInfo.size        = m_PreprocessSize;
-    bufInfo.usage       = VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT
-                          | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    bufInfo.usage       = 0;   // 由 pNext 里的 flags2 决定
     bufInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
     result = vkCreateBuffer(device, &bufInfo, nullptr, &m_PreprocessBuffer);

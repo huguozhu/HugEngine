@@ -138,6 +138,28 @@ void VulkanDevice::FindQueueFamilies() {
         m_HasAsyncCompute  = false;
         HE_CORE_INFO("AsyncCompute: Tier 0 — 不支持，Compute 与 Graphics 共享队列");
     }
+
+    // ============================================================
+    // 【A1 回退】Vulkan 后端暂不启用异步计算
+    //
+    // 原因（实测，RTX 4060 Laptop / 干净的 9c0348b5）：一旦有独立的 Compute 队列族，
+    // RenderGraph 就会把 deferred 的 GPU_Cull 提升到 Compute 命令列表上录制。这条路径在
+    // Vulkan 上有两处未实现的规范要求：
+    //   ① 跨队列所有权转移：只下发了 acquire（src=Graphics→dst=Compute），图形队列一侧
+    //      没有对应的 release —— 校验层 VUID-vkQueueSubmit-pSubmits-02207；
+    //   ② GPU_Cull 要读**上一帧**的 GBuffer 深度，而帧图给的起始状态是 UNDEFINED，
+    //      Vulkan 下 oldLayout=UNDEFINED 会丢弃内容（D3D12 的 Undefined 只是 promote）。
+    // 结果是第 1 帧就把 GPU 挂死（nvlddmkm 13/153，vkDeviceWaitIdle 返回 -4），
+    // 后续帧全部空转。在补齐"release+acquire 两段式所有权转移 + 深度布局跨帧跟踪"之前，
+    // 这里显式拒绝异步计算并回退到 Tier 0 单队列路径（该路径已被 01/02/03/05 长期验证），
+    // 同时打一条明确警告，绝不允许静默设备丢失。
+    // ============================================================
+    if (m_HasAsyncCompute) {
+        HE_CORE_WARN("Vulkan 后端暂不支持异步计算（跨队列所有权转移未实现）："
+                     "已回退单队列录制（Tier 0），deferred 的 GPU_Cull 改在图形队列上执行");
+        m_ComputeFamily   = m_GraphicsFamily;
+        m_HasAsyncCompute = false;
+    }
 }
 
 // ============================================================
@@ -1067,8 +1089,13 @@ void VulkanDevice::Submit(IRHICommandList* cmdList, RHICommandList* stream) {
     HE_ASSERT_RENDER_THREAD();   // T0.1：提交只允许在拥有线程（渲染线程）发起
     // 模式 2：交给提交路由（RHI 线程稍后执行）；未注入路由时行为与改造前完全一致
     if (m_SubmitRouter && m_SubmitRouter->RouteSubmit(cmdList, stream)) return;
-    auto* vulkanCmd = static_cast<VulkanCommandList*>(cmdList);
-    vulkanCmd->Submit();
+    // 【A2】没有提交路由（模式 0/1，单线程样例都走这里）时，就地执行与 RHI 线程
+    // **同一套**提交逻辑（D3D12 侧一直是这么做的）：
+    //   流模式的源列表里只有纯数据，**没有**可提交的 VkCommandBuffer；此前这里直接调
+    //   `vulkanCmd->Submit()`，于是把一条从未 vkBeginCommandBuffer 的命令缓冲提交上去
+    //   —— 既不报错也不绘制，抓帧全黑 / 不出帧的直接原因。
+    //   ExecuteSubmit 内部会判断流模式并走 SubmitStreamReplay（回放到影子列表再提交）。
+    ExecuteSubmit(cmdList, stream);
 }
 
 void VulkanDevice::SetSubmitRouter(ISubmitRouter* router) {
@@ -1131,7 +1158,13 @@ void VulkanDevice::SubmitStreamReplay(VulkanCommandList* src) {
     const u32 replayed = ReplayCommandStream(*streamData, *replay);
     replay->End();
     replay->Submit();
-    HE_CORE_INFO("[CommandStream] replayed {} commands (slot {})", replayed, slot);
+    // 每帧一条 INFO 会刷屏（几十帧后就不好读日志）；改为按需打开 HE_L43_VERBOSE
+    {
+        static const bool s_logReplay = (std::getenv("HE_L43_VERBOSE") != nullptr);
+        if (s_logReplay) {
+            HE_CORE_INFO("[CommandStream] replayed {} commands (slot {})", replayed, slot);
+        }
+    }
 }
 
 void VulkanDevice::ExecutePresent(IRHISwapChain* swapChain, u32 imageIndex, void* waitSemaphore,
@@ -1312,7 +1345,20 @@ void VulkanDevice::ShutdownDGC() {
 }
 
 bool VulkanDevice::IsDGCReady() const {
-    return m_DGC.IsInitialized();
+    if (!m_DGC.IsInitialized()) return false;
+    // 【A1 回退】Vulkan 的 DGC（VK_EXT_device_generated_commands）绘制路径当前是坏的：
+    // 04.Sponza-Deferred 走「GBuffer GPU 绘制路径：DGC」时整帧只有天空（几何一个都没画出来），
+    // 而同一个场景把 DGC 关掉（HE_DISABLE_DGC=1）走 DrawIndexedIndirectCount 就完全正常。
+    // 这是与本次 TDR 无关的既有缺陷（DGC 的 sequenceCountAddress / execution set 还没对齐），
+    // 但它会让"修好 TDR 之后"的 deferred 画面看起来仍然不对。在把 DGC 的计数/布局修好之前，
+    // 这里显式报告"未就绪"，让上层退回传统间接绘制，并打一条明确警告 —— 绝不静默画空。
+    static bool s_warnedDGCFallback = false;
+    if (!s_warnedDGCFallback) {
+        s_warnedDGCFallback = true;
+        HE_CORE_WARN("Vulkan 的 DGC 绘制路径当前不可用（GBuffer 走 DGC 时画不出几何）："
+                     "已回退 DrawIndexedIndirectCount；对照实验可设 HE_DISABLE_DGC=1（同一路径）");
+    }
+    return false;
 }
 
 // ============================================================
