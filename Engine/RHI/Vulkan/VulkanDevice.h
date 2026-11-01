@@ -57,6 +57,11 @@ public:
     mutable DeviceCaps m_CapsCache{};
     mutable bool       m_CapsCacheValid = false;
 
+    /// 设备厂商 ID（`VkPhysicalDeviceProperties::vendorID`）。
+    /// 【C1】供渲染层按厂商决定是否启动 PSO 后台预编译（Intel 驱动会崩预编译线程）。
+    /// 查询结果只取一次（驱动查询，且厂商在设备生命周期内不变）。
+    u32 GetDeviceVendorId() const override;
+
     // 【§14.8 任务 18】该格式能否作为**存储图像**（UAV）。实现 = `vkGetPhysicalDeviceFormatProperties`
     //   查 `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT`；查询结果按格式缓存（见 .cpp 的成员）。
     bool SupportsStorageImage(he::rhi::Format format) const override;
@@ -357,6 +362,8 @@ private:
     /// 【A2】UI 叠加记录器（默认空：没有注册时命令流模式不画 UI）
     OverlayRecorder  m_OverlayRecorder = nullptr;
     VkPipelineCache  m_PipelineCache   = VK_NULL_HANDLE;  // 持久化 PSO 编译缓存（磁盘 + GPU 驱动）
+    /// 【C1】厂商 ID 的缓存（0 = 还没查过；`vendorID` 本身不会是 0）
+    mutable u32      m_VendorIdCache   = 0;
 
     // ============================================================
     // 瞬态资源分配器 — 帧内临时纹理内存池
@@ -368,6 +375,8 @@ private:
     // PSO 预热管理器 — 后台线程编译 PSO 预热驱动缓存
     // ============================================================
     PSOPrecompileManager m_PSOPrecompileManager;
+    /// 【C1】为 PSO 预编译建的 pipeline layout（worker 借用；设备在 Shutdown 里销毁它们）
+    std::vector<VkPipelineLayout> m_PrecompileLayouts;
 
     // PSO 创建限流队列（主线程写入 → NextFrame 逐帧 drain）
     std::deque<PipelineStateDesc> m_PendingCreates;

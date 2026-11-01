@@ -505,10 +505,22 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
     // 注意：本机（Intel Arc B370 + 该版驱动）Vulkan 预编译 worker 线程会在
     // igc-default64.dll 内随机 SIGSEGV（约 50% 概率，见 gdb 栈：线程 27 编译器崩溃），
     // 导致 02.Cube 启动随机崩溃。预编译是纯优化（PSO 缓存已按 hash 去重，
-    // 禁用后 PSO 仅在首次使用时惰性编译），故本机禁用。稳定驱动上可恢复。
-    // D3D12 的预编译只是在后台线程用同一设备建 PSO 并保存驱动缓存块（不经 Vulkan 驱动的编译线程），
-    // 不受上述崩溃影响，故仅在非 Vulkan 后端启动
-    if (device->GetBackend() != rhi::Backend::Vulkan) device->StartPSOPrecompile();
+    // 禁用后 PSO 仅在首次使用时惰性编译），故那台机器上禁用。
+    // 【C1】改按**厂商**判断而不是按后端一刀切：崩溃只发生在 Intel 驱动的 Vulkan 编译器线程里，
+    // NVIDIA/AMD 的 Vulkan 预编译是正常可用的（4060 上实测预编译计数 3、0 VUID、长跑稳定），
+    // 一刀切会让 NVIDIA 白白丢掉预编译收益。D3D12 侧不受此问题影响（它只是在后台线程用同一
+    // 设备建 PSO 并保存驱动缓存块，不经 Vulkan 驱动的编译线程），故 D3D12 一律启用。
+    {
+        const bool isVulkan = (device->GetBackend() == rhi::Backend::Vulkan);
+        const u32  vendor   = device->GetDeviceVendorId();
+        // 0x8086 = Intel 的 PCI vendor id
+        const bool intelOnVulkan = isVulkan && (vendor == 0x8086u);
+        if (!intelOnVulkan) device->StartPSOPrecompile();
+        HE_CORE_INFO("PSO 后台预编译：{}（后端={}，vendorId=0x{:04X}{}）",
+                     intelOnVulkan ? "关闭" : "启用",
+                     isVulkan ? "Vulkan" : "D3D12", vendor,
+                     intelOnVulkan ? "，Intel 驱动的 Vulkan 编译线程会崩，按厂商安全关闭" : "");
+    }
 
     // ── Nanite 模块（§14.8 任务 1 / N0）──
     // 放在 m_Ready 之前：模块不依赖任何 GI/Lumen/GBuffer 的运行时状态（§14.3 依赖禁令），

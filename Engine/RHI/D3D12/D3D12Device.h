@@ -49,6 +49,9 @@ public:
     const DeviceCaps& GetCaps() const override { return m_Caps; }
     /// 某格式能否作为存储图像（UAV）读写：CheckFeatureSupport 查询 TYPED_UNORDERED_ACCESS_VIEW，按格式缓存
     bool SupportsStorageImage(Format format) const override;
+    /// 设备厂商 ID（`DXGI_ADAPTER_DESC1::VendorId`）。【C1】与 Vulkan 侧同源的查询接口，
+    /// 便于渲染层用同一段"按厂商判定"的代码覆盖两个后端。
+    u32 GetDeviceVendorId() const override { return m_AdapterVendorId; }
 
     std::unique_ptr<IRHISwapChain>   CreateSwapChain(const SwapChainDesc& desc) override;
     std::unique_ptr<IRHICommandList> CreateCommandList(QueueType queue = QueueType::Graphics) override;
@@ -781,6 +784,8 @@ private:   // register -> 元素字节数
     ComPtr<ID3D12InfoQueue>     m_InfoQueue;
 
     DeviceCaps m_Caps{};
+    /// 【C1】所选适配器的厂商 ID（`DXGI_ADAPTER_DESC1::VendorId`），在 CreateDeviceAndQueue 里填入
+    u32        m_AdapterVendorId = 0;
     /// SupportsStorageImage 的查询缓存：0 = 未查询、1 = 支持、2 = 不支持（const 查询里填入，故 mutable）
     mutable i8 m_StorageImageSupport[(usize)Format::Count]{};
     UINT       m_RtvDescSize = 0;

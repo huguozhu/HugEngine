@@ -15,6 +15,10 @@
 // ============================================================
 
 #include "Core/Types.h"
+// 【C1】队列项要按值存 PipelineStateDesc（含它的 shader 指针与布局句柄）⇒ 需要完整定义。
+// 原先这里只有前向声明，因为队列只存描述本身、析构也在 .cpp 里；改成 struct QueueItem
+// 成员后前向声明不再够用。
+#include "RHI/Shader.h"
 
 #include <vulkan/vulkan.h>
 
@@ -24,8 +28,6 @@
 #include <vector>
 
 namespace he::rhi {
-
-struct PipelineStateDesc;
 
 class PSOPrecompileManager {
 public:
@@ -39,7 +41,10 @@ public:
     void Shutdown();
 
     /// 注册一个 PSO 到预热队列（线程安全）
-    void QueuePSO(const PipelineStateDesc& desc);
+    /// 【C1】`layout` = 主线程用**真实** descriptorSetLayouts 建好的 VkPipelineLayout（worker 只借用、
+    /// 不销毁）。传 VK_NULL_HANDLE 时 worker 退回"自建空布局"，那条路对声明了描述符的着色器会被
+    /// 校验层判 VUID-VkGraphicsPipelineCreateInfo-layout-07988（shader 有 set=0 但布局里 0 个 set）。
+    void QueuePSO(const PipelineStateDesc& desc, VkPipelineLayout layout = VK_NULL_HANDLE);
 
     /// 启动后台预热线程
     /// 线程从主缓存派生独立 VkPipelineCache，逐项编译队列中的 PSO
@@ -75,7 +80,12 @@ private:
     VkPipelineCache  m_WorkerCache  = VK_NULL_HANDLE;
 
     // PSO 描述符队列（主线程写入 → worker 线程读取）
-    std::vector<PipelineStateDesc> m_Queue;
+    /// 【C1】队列项把描述与"编译用的真实 pipeline layout"绑在一起（见 QueuePSO 的说明）
+    struct QueueItem {
+        PipelineStateDesc desc;
+        VkPipelineLayout  layout = VK_NULL_HANDLE;
+    };
+    std::vector<QueueItem>         m_Queue;
     mutable std::mutex             m_QueueMutex;
 
     // 进度追踪

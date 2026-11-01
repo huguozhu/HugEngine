@@ -405,14 +405,22 @@ void VulkanDevice::Shutdown() {
     // 1. 等待 GPU 完成所有工作
     if (m_Device) vkDeviceWaitIdle(m_Device);
 
-    // 1.5. 保存并销毁 VkPipelineCache 持久化缓存
+    // 1.5. 先收掉 PSO 预热管理器（等后台线程完成 + 把 worker 缓存合并进主缓存），
+    //      再保存并销毁 VkPipelineCache 持久化缓存 —— 顺序反过来会让预编译的结果
+    //      在落盘之后才合并，下一次启动就读不到（C1 的顺带修正）。
+    m_PSOPrecompileManager.Shutdown();
+
+    // 1.5b. 【C1】预编译专用的 pipeline layout（worker 只借用，必须等线程结束后再销毁）
+    for (auto l : m_PrecompileLayouts) {
+        if (l != VK_NULL_HANDLE) vkDestroyPipelineLayout(m_Device, l, nullptr);
+    }
+    m_PrecompileLayouts.clear();
+
+    // 1.6. 保存并销毁 VkPipelineCache 持久化缓存
     SavePipelineCache();
 
-    // 1.6. 销毁 TransientResourceAllocator（等待 GPU idle 后安全回收所有 Heap）
+    // 1.7. 销毁 TransientResourceAllocator（等待 GPU idle 后安全回收所有 Heap）
     m_TransientAllocator.Shutdown();
-
-    // 1.7. 销毁 PSO 预热管理器（等待后台线程完成 + 销毁 worker cache）
-    m_PSOPrecompileManager.Shutdown();
 
     // 1.8. 销毁 PipelineLibraryCache（延迟销毁四段库 VkPipeline）
     m_PipelineLibraryCache.Shutdown();
@@ -1330,6 +1338,21 @@ float VulkanDevice::GetTimestampPeriod() {
 }
 
 // ============================================================
+// 设备厂商 ID（C1：按厂商决定是否启动 PSO 后台预编译）
+//
+// 只查一次并缓存：`vkGetPhysicalDeviceProperties` 是驱动查询，而厂商 ID 在设备生命周期内
+// 不变；调用点（渲染管线初始化）也只调一次，缓存的意义是避免以后新增调用点时重复查驱动。
+// ============================================================
+u32 VulkanDevice::GetDeviceVendorId() const {
+    if (m_VendorIdCache == 0u && m_Physical != VK_NULL_HANDLE) {
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(m_Physical, &props);
+        m_VendorIdCache = props.vendorID;
+    }
+    return m_VendorIdCache;
+}
+
+// ============================================================
 // DGC（Device Generated Commands）— 封装 VulkanDGC
 // ============================================================
 
@@ -1582,7 +1605,50 @@ std::shared_ptr<u32> VulkanDevice::GetCachedPSORef(uint64_t hash,
 // PSO 预热管理器 — 后台编译 PSO 变体到独立 VkPipelineCache
 // ============================================================
 void VulkanDevice::PrecompileQueuePSO(const PipelineStateDesc& desc) {
-    m_PSOPrecompileManager.QueuePSO(desc);
+    // 【C1】为预编译建一个**真实**的 pipeline layout（用 desc 的 descriptorSetLayouts 解析出
+    // VkDescriptorSetLayout）。worker 原先用空布局建图形流水线，着色器声明了 set=0 却给 0 个 set
+    // ⇒ 校验层报 VUID-VkGraphicsPipelineCreateInfo-layout-07988。
+    // 布局由设备持有到 Shutdown（worker 只借用，不能自己销毁），因此和预热管理器同寿命。
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    {
+        std::vector<VkDescriptorSetLayout> sets;
+        sets.reserve(desc.descriptorSetLayouts.size());
+        for (const auto h : desc.descriptorSetLayouts) {
+            VkDescriptorSetLayout l = ResolveDescriptorSetLayout(h);
+            sets.push_back(l != VK_NULL_HANDLE ? l : VK_NULL_HANDLE);
+        }
+        std::vector<VkPushConstantRange> pcr;
+        pcr.reserve(desc.pushConstantRanges.size());
+        for (const auto& r : desc.pushConstantRanges) {
+            VkPushConstantRange range{};
+            range.stageFlags = r.stageMask;
+            range.offset     = r.offset;
+            range.size       = r.size;
+            pcr.push_back(range);
+        }
+        // 【C1】描述里没登记 push constant 范围、但着色器又用到了它时（例如 SSAO 的片段着色器），
+        // 空布局会让校验层报 VUID-VkGraphicsPipelineCreateInfo-layout-07987。这里的布局**只服务编译**、
+        // 不参与任何绘制，故给一条宽松的默认范围把这条噪声消掉（不影响生成到缓存里的流水线兼容性）。
+        if (pcr.empty()) {
+            VkPushConstantRange range{};
+            range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+            range.offset     = 0;
+            range.size       = 128;
+            pcr.push_back(range);
+        }
+        VkPipelineLayoutCreateInfo li{};
+        li.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        li.setLayoutCount         = static_cast<u32>(sets.size());
+        li.pSetLayouts            = sets.empty() ? nullptr : sets.data();
+        li.pushConstantRangeCount = static_cast<u32>(pcr.size());
+        li.pPushConstantRanges    = pcr.empty() ? nullptr : pcr.data();
+        if (vkCreatePipelineLayout(m_Device, &li, nullptr, &layout) != VK_SUCCESS) {
+            HE_CORE_WARN("VulkanDevice: 预编译用 pipeline layout 创建失败（worker 将退回空布局）");
+            layout = VK_NULL_HANDLE;
+        }
+    }
+    if (layout != VK_NULL_HANDLE) m_PrecompileLayouts.push_back(layout);
+    m_PSOPrecompileManager.QueuePSO(desc, layout);
 }
 
 void VulkanDevice::StartPSOPrecompile() {

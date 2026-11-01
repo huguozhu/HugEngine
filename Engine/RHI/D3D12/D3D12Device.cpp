@@ -326,9 +326,12 @@ bool D3D12Device::CreateDeviceAndQueue() {
     {
         DXGI_ADAPTER_DESC1 desc{};
         bestAdapter->GetDesc1(&desc);
-        HE_CORE_INFO("[D3D12] 使用适配器: {} (显存 {} MB)",
+        // 【C1】记下厂商 ID：渲染层要按厂商决定是否启动 PSO 后台预编译（与 Vulkan 侧同源判定）
+        m_AdapterVendorId = desc.VendorId;
+        HE_CORE_INFO("[D3D12] 使用适配器: {} (显存 {} MB, vendorId=0x{:04X})",
                      std::string(desc.Description, desc.Description + wcslen(desc.Description)).c_str(),
-                     static_cast<u32>(desc.DedicatedVideoMemory / (1024 * 1024)));
+                     static_cast<u32>(desc.DedicatedVideoMemory / (1024 * 1024)),
+                     static_cast<u32>(desc.VendorId));
     }
 
     // HE_D3D12_DRED=1：开启 DRED 自动面包屑与页错误记录，设备挂起时能定位到具体命令

@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "RHI/Types.h"
 #include "RHI/RHIHandles.h"   // A-3：句柄式资源（带代次校验）
@@ -42,6 +42,12 @@ public:
     /// 设备能力查询。**返回只读引用**：实现方须在内部缓存一次结果（原先按值返回 ⇒
     /// 每次调用都拷贝整个结构体；Vulkan 实现里还会重复驱动查询）。
     virtual const DeviceCaps& GetCaps() const = 0;
+
+    /// 设备厂商 ID（PCI vendor id：NVIDIA 0x10DE / AMD 0x1002 / Intel 0x8086）。
+    /// 【C1 用途】PSO 后台预编译在"Vulkan + Intel 驱动"上会让 worker 线程崩在编译器 DLL 里，
+    /// 因此是否启用预编译必须按**厂商**判断，而不是按后端一刀切。未知/未实现返回 0
+    /// （调用方按"非 Intel"处理：预编译只是纯优化，最坏情况退回惰性编译）。
+    virtual u32 GetDeviceVendorId() const { return 0; }
 
     // --- 格式能力查询（§14.8 任务 18 新增；最小扩展，性质同任务 3/6/12 的 RHI 补充）---
     // 该格式能否作为**存储图像**（UAV / `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT`）被着色器读写。
