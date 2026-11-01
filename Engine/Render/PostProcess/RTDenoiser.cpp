@@ -1,4 +1,4 @@
-﻿// PostProcess/RTDenoiser.cpp — RT 效果时域累积降噪器实现
+// PostProcess/RTDenoiser.cpp — RT 效果时域累积降噪器实现
 #include "PostProcess/RTDenoiser.h"
 #include <iterator>
 #include "Core/Log.h"
@@ -38,7 +38,12 @@ bool RTDenoiser::Initialize(rhi::IRHIDevice* device, const Config& cfg,
         {4, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // u_Velocity
     };
     m_Layout = device->CreateDescriptorSetLayout(layout);
-    m_Set    = device->AllocateDescriptorSet(m_Layout);
+    // 描述符集按飞行帧各一份（见 RTDenoiser.h 的 `SetFrameSlot` 说明）：
+    // 历史绑定点逐帧轮换，共享一份集会在"上一帧仍在执行"时被本帧改写。
+    for (u32 i = 0; i < rhi::kMaxFramesInFlight; ++i) {
+        m_Set[i] = device->AllocateDescriptorSet(m_Layout);
+        HE_ASSERT(m_Set[i] != rhi::kInvalidSet, "RTDenoiser: 描述符集分配失败");
+    }
 
     // ── 点采样器（所有输入均用最近邻，避免插值模糊信号）──
     rhi::SamplerDesc sd;
@@ -69,8 +74,10 @@ void RTDenoiser::CreateTextures(u32 w, u32 h) {
     d.width      = w;
     d.height     = h;
     d.mipLevels  = 1;
-    // RenderTarget：累积 Pass 写入；ShaderResource：下帧作为历史被采样
-    d.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
+    // RenderTarget：累积 Pass 写入；ShaderResource：下帧作为历史被采样；
+    // TransferSrc：供 05 的 HE_DUMP_PT 把"降噪输出"整幅拷回 host 核对（A3 的验收证据）
+    d.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource
+            | rhi::TextureUsage::TransferSrc;
     m_OwnedOutput = m_Device->CreateTexture(d);
     m_Output      = m_OwnedOutput.get();
     if (m_HistoryPool) {
@@ -126,7 +133,7 @@ void RTDenoiser::CreatePSO() {
 // Shutdown — 释放资源
 // ============================================================
 void RTDenoiser::Shutdown() {
-    if (m_Device && m_Set != rhi::kInvalidSet) m_Set = rhi::kInvalidSet;
+    for (auto& set : m_Set) set = rhi::kInvalidSet;   // 集由 RHI 池持有，这里只断句柄
     if (m_Device && m_Layout != rhi::kInvalidLayout) {
         m_Device->DestroyDescriptorSetLayout(m_Layout);
         m_Layout = rhi::kInvalidLayout;
@@ -169,7 +176,7 @@ void RTDenoiser::SetInputs(rhi::IRHITexture* noisyColor, rhi::IRHITexture* depth
 
     // 全部使用点采样，避免深度边界/法线方向因线性滤波失真
     auto bind = [&](u32 b, rhi::IRHITexture* t) {
-        if (t) m_Device->UpdateDescriptorSet(m_Set, b,
+        if (t) m_Device->UpdateDescriptorSet(CurrentSet(), b,
             rhi::DescriptorType::CombinedImageSampler, t, m_PointSampler.get());
     };
     bind(0, noisyColor);
@@ -190,7 +197,7 @@ void RTDenoiser::PreBind(rhi::IRHICommandList* cmd) {
     if (!m_Ready || !cmd) return;
     cmd->SetPipeline(ResP(m_PSO));
     cmd->SetFullscreenViewport(static_cast<u32>(m_Width), static_cast<u32>(m_Height));
-    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, CurrentSet());
 }
 
 // ============================================================
@@ -199,8 +206,10 @@ void RTDenoiser::PreBind(rhi::IRHICommandList* cmd) {
 void RTDenoiser::Render(rhi::IRHICommandList* cmd) {
     if (!m_Ready) return;
 
-    // 历史绑定：上一帧累积结果作为当前帧采样输入
-    m_Device->UpdateDescriptorSet(m_Set, kRTDenoiseBindHistory,
+    // 历史绑定：上一帧累积结果作为当前帧采样输入。
+    // 写的是**本槽位**的集（见 SetFrameSlot）：仍在飞的上两帧读的是它们各自的集，
+    // 不会被本帧这次改写影响。
+    m_Device->UpdateDescriptorSet(CurrentSet(), kRTDenoiseBindHistory,
         rhi::DescriptorType::CombinedImageSampler,
         m_History, m_PointSampler.get());
 

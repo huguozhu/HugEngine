@@ -53,6 +53,22 @@ public:
     void SetInputs(rhi::IRHITexture* noisyColor, rhi::IRHITexture* depth,
                    rhi::IRHITexture* normal, rhi::IRHITexture* velocity);
 
+    // ============================================================
+    // 设置当前**飞行帧槽位**（`[0, kMaxFramesInFlight)`）。
+    // 调用顺序：SetFrameSlot → SetInputs → PreBind → Render（与 ToneMapPass 同一约定）。
+    //
+    // 【为什么必须有】历史纹理在两张之间逐帧轮换，因此"上一帧历史"这个描述符绑定点
+    // **每帧都在变**。若只有一份描述符集，本帧改写它时，上一帧那条命令可能**仍在 GPU 上执行**
+    // （RHI 有 kMaxFramesInFlight 个命令缓冲槽位）⇒ 上一帧的着色器读到的其实是本帧才绑上去的
+    // 纹理；而本帧那张纹理正是上一帧自己正在写的输出（该 pass 开始时会按 clear 值清成 0），
+    // 于是历史采样恒为 0、画面亮度随"CPU 是否跑到 GPU 前面"变化。
+    // 实测（A3，05.Sponza-PathTracing / Vulkan）：未分槽时后缓冲均亮度在
+    // 58.36 / 66.24 / 74.23 / 76.33 间跳变；D3D12 恒为 80.86（其 Present 恰好把在飞帧压到 1，
+    // 竞争不显形 —— 但那是时序巧合，不是设计保证）。
+    // 描述符集按槽位各一份之后，本帧只写本槽位的集，仍在飞的帧读的是它自己那份。
+    // ============================================================
+    void SetFrameSlot(u32 slot) { m_Slot = slot % rhi::kMaxFramesInFlight; }
+
     // 运行时更新时域混合因子（CVar 热更新用；Render 时写入 push constant）
     void SetTemporalBlend(float blend) { m_Cfg.temporalBlend = blend; }
 
@@ -73,6 +89,11 @@ public:
     // ── 访问器 ──
     // 返回当前帧写入目标（Render 前导入 RG；Render 后即最新累积结果）
     rhi::IRHITexture* GetOutput() const { return m_Output; }
+    /// 本帧应使用的描述符集（每飞行帧一份，见 `SetFrameSlot`）
+    [[nodiscard]] rhi::DescriptorSetHandle CurrentSet() const { return m_Set[m_Slot]; }
+    /// 本帧**刚写入**的那张历史纹理（Render 之后 = swap 到 m_History 的那张）。
+    /// 仅供诊断/落盘使用（05.Sponza-PathTracing 的 HE_DUMP_PT 用它落"降噪输出"），不参与渲染。
+    rhi::IRHITexture* GetLastWritten() const { return m_History; }
     u32 GetWidth()  const { return m_Width; }
     u32 GetHeight() const { return m_Height; }
     bool IsReady()  const { return m_Ready; }
@@ -133,7 +154,11 @@ public:
     // PSO + 描述符
     rhi::RHIPipelineStateHandle m_PSO{};   // A-3：句柄持有
     rhi::DescriptorSetLayoutHandle m_Layout = rhi::kInvalidLayout;
-    rhi::DescriptorSetHandle       m_Set    = rhi::kInvalidSet;
+    // 描述符集**每飞行帧一份**（理由见 `SetFrameSlot` 的长注释）。
+    // 注意：这里不能退回成一份共享集 —— 历史绑定逐帧轮换，共享集会在帧还在飞时被改写，
+    // 表现为 Vulkan 上 PT 时域降噪结果每次运行都不同。
+    rhi::DescriptorSetHandle       m_Set[rhi::kMaxFramesInFlight] = {};
+    u32                            m_Slot = 0;   // 当前飞行帧槽位（`SetFrameSlot` 写入）
 
     // 外部注入的输入（不持有所有权）
     rhi::IRHITexture* m_NoisyColor = nullptr;

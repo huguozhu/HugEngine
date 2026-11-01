@@ -93,7 +93,11 @@ bool PathTracingPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 hei
         dd.format = rhi::Format::D32_FLOAT;
         dd.width  = m_Width;
         dd.height = m_Height;
-        dd.usage  = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource;
+        // TransferDst：`ClearDepthStencil` 走的是 vkCmdClearDepthStencilImage（TRANSFER_DST 布局），
+        // 缺这个用途 Vulkan 会报 VUID-vkCmdClearDepthStencilImage-pRanges-02659/02660 与
+        // VkImageMemoryBarrier-oldLayout-01213（实测 B1：05 一开粒子每帧 3 条）。D3D12 侧不要求。
+        dd.usage  = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource
+                  | rhi::TextureUsage::TransferDst;
         m_ParticleDepth = device->CreateTexture(dd);
 
         rhi::SamplerDesc sd;
@@ -270,7 +274,9 @@ void PathTracingPipeline::OnResize(u32 w, u32 h) {
         dd.format = rhi::Format::D32_FLOAT;
         dd.width  = w;
         dd.height = h;
-        dd.usage  = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource;
+        // 与 Initialize 同一用途集（TransferDst 见该处的说明）
+        dd.usage  = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource
+                  | rhi::TextureUsage::TransferDst;
         m_ParticleDepth = m_Device->CreateTexture(dd);
         m_ParticleRenderer.SetSceneDepth(m_ParticleDepth.get(), m_ParticleDepthSampler.get());
     }
@@ -369,6 +375,25 @@ void PathTracingPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& cam
     m_CurrViewProj = camera.GetViewProjMatrix();
     static bool firstFrame = true;
     if (firstFrame) { m_PrevViewProj = m_CurrViewProj; firstFrame = false; }
+
+    // ── A3：把本帧的**飞行帧槽位**派给"输入纹理逐帧轮换"的三个后处理 pass ──
+    //
+    // 时域降噪的历史、A-Trous 的输入（降噪输出）、ToneMap 的输入（A-Trous 输出 / 降噪输出）
+    // 都在**成对的两张纹理之间轮换** ⇒ 它们的描述符绑定内容每帧都变。若这些 pass 只备
+    // 一份描述符集，本帧改写它时，仍在 GPU 上执行的上两帧读到的会是本帧刚写进去的绑定 ——
+    // 实测表现就是 05 在 Vulkan 上重复运行后缓冲亮度在 58.36/66.24/74.23/76.33 之间跳变
+    // （D3D12 因 Present 恰好把在飞帧压到 1 而未显形）。
+    // 按槽位各备一份描述符集 + 本帧只写本槽位，就能与 RHI 的 kMaxFramesInFlight 个命令缓冲
+    // 槽位（`VulkanCommandList::Begin` 复用槽位前会 vkWaitForFences）对齐：本帧用过的集
+    // 要再过 kMaxFramesInFlight 帧才会被重写，那时它那一帧的栅栏早已等到。
+    // 这与 ForwardPipeline（`m_ToneMap->SetFrameSlot(RenderFrameSlot())`）、ToneMapPass 的
+    // 既有约定完全一致。
+    {
+        const u32 slot = RenderFrameSlot();
+        if (m_PTDenoiser) m_PTDenoiser->SetFrameSlot(slot);
+        if (m_PTAtrous)   m_PTAtrous->SetFrameSlot(slot);
+        if (auto* toneMap = m_PostProcess.GetToneMap()) toneMap->SetFrameSlot(slot);
+    }
 
     // 相机运动自适应降噪：静止时低混合高质量累积；运动时抬升混合缩短历史拖影。
     // （快速旋转时 PT 无累积、图像变噪，为路径追踪固有取舍，停下后自动恢复）
@@ -479,7 +504,11 @@ void PathTracingPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& cam
                 {{ptHDRHandle, ResourceAccess::Write}},
                 [this, pid, &camera, w, h](rhi::IRHICommandList* c) {
                     // 先把粒子深度附件清成远平面（内容确定 + 保证粒子通过深度测试）
-                    c->ClearDepthStencil(m_ParticleDepth.get(), 1.0f);
+                    // 【B1 临时开关】HE_PT_NO_PARTICLE_DEPTH_CLEAR=1 跳过这次清除，用于
+                    // "Clear vs 不 Clear" 的对照实验（验证完即删）
+                    static const bool s_skipClear =
+                        std::getenv("HE_PT_NO_PARTICLE_DEPTH_CLEAR") != nullptr;
+                    if (!s_skipClear) c->ClearDepthStencil(m_ParticleDepth.get(), 1.0f);
                     // 先设置粒子 PSO（BeginOffscreenPass 需要预绑定 PSO 来创建 RenderPass）
                     c->SetPipeline(m_ParticleRenderer.GetRenderPSO());
                     c->BeginOffscreenPass(

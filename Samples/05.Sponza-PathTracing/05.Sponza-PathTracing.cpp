@@ -1,4 +1,4 @@
-﻿// ============================================================
+// ============================================================
 // 05.Sponza-PathTracing — Sponza 场景 + 全路径追踪管线
 //
 // 与 03.Sponza-Forward / 04.Sponza-Deferred 相同的 Sponza 场景
@@ -626,6 +626,66 @@ int main() {
         camCtrl.SetPosition(float3(0.0f, 3.0f, 0.0f));
         camCtrl.SetOrientation(-1.57f, -0.1f);
     }
+
+    // ============================================================
+    // 9.5 测试粒子 —— `ClearDepthStencil` / 粒子遮挡专项验证（B1）
+    // ============================================================
+    // 【为什么这里要加】05 此前**完全没有粒子**，而 `ClearDepthStencil` 全引擎唯一的调用方
+    // 就是本管线的 ParticleRender pass（每帧"清粒子深度附件 + LoadOp::Load 写 PT HDR"）。
+    // 也就是说这条路径此前从未在真实场景里被执行过，状态文档里一直标"未在实际场景验证"。
+    // 加一团挂在相机前方的粒子（位置按相机位姿算，不靠手调坐标）之后，那条路径才真正跑起来。
+    //
+    // 【为什么**默认关闭**、要用 `HE_PARTICLES=1` 打开】
+    // 粒子的实例数是从 GPU 计数器**不定时读回**的（`ParticleRenderer` 缓存上一帧 renderCount），
+    // 读回的时机会随"CPU 是否跑到 GPU 前面"变化 ⇒ 同一帧号上的粒子数量/位置每次运行都不同
+    // （实测两次运行 MAD≈2.5）。而 05 的定位是**参考渲染器**：它的价值在于同配置可复现，
+    // A3 的验收判据（三次运行后缓冲亮度差 < 1、同帧 MAD < 3）也必须在这个默认配置下成立。
+    // 所以粒子做成显式开关，只在进行 B1 这类"要看粒子"的验证时打开。
+    //
+    // 三个开关（都只为对照/复现服务）：
+    //   · `HE_PARTICLES=1`：创建并注册这团粒子（B1 判据用）。
+    //   · `HE_PARTICLE_FIXED_DT=<秒>`：用**固定步长**推进粒子模拟。粒子模拟按真实帧 dt 推进，
+    //     dt 不可复现 ⇒ 同一帧号上粒子状态每次运行都不同。做"Clear vs 不 Clear"这类对照时
+    //     用它把 dt 钉死（配合 HE_PARTICLES=1 一起用）。
+    //   · `HE_PT_NO_PARTICLE_DEPTH_CLEAR=1`：跳过每帧的 `ClearDepthStencil`（见 PathTracingPipeline），
+    //     用于"清 / 不清"的对照实验。
+    if (std::getenv("HE_PARTICLES")) {
+        Entity particleEntity = world.CreateEntity("TestParticle");
+        auto* tf = world.AddComponent<TransformComponent>(particleEntity);
+        auto* pc = world.AddComponent<ParticleComponent>(particleEntity);
+        // 发射器放在相机前方 35 单位、并**向右偏 14 单位**：粒子云落在画面右侧。
+        // 左 2/3 被 ImGui 面板（alpha 0.55 的深色底）盖住，粒子画在那里截图里就看不出来 ——
+        // 而 B1 的判据要的就是"截图里能逐像素看到粒子"，所以刻意避开面板区域。
+        const float3 camPos = camCtrl.GetCamera().position;
+        const float3 camFwd = camCtrl.GetCamera().forward;
+        const float3 camRight = glm::normalize(glm::cross(camFwd, float3(0.0f, 1.0f, 0.0f)));
+        tf->position = camPos + camFwd * 35.0f + camRight * 14.0f;
+
+        auto& pp            = pc->GetParam();
+        pp.particlesPerSec  = 240.0f;
+        pp.minLifeTime      = 0.8f;
+        pp.maxLifeTime      = 2.0f;
+        pp.minInitSpeed     = 1.0f;
+        pp.maxInitSpeed     = 5.0f;
+        pp.emitShape        = EmitShapeType::Sphere;
+        pp.sphereRadius     = 6.0f;
+        pp.emitDirectionType = EmitDirectionType::Uniform_3D;
+        pp.gravity          = float3(0.0f, -2.0f, 0.0f);
+        pp.duration         = -1.0f;            // 无限
+        // 尺寸放大到"远处也看得见"的量级（默认 0.25~0.5 在 35 单位外只有几个像素）
+        pp.minSize          = 2.0f;
+        pp.maxSize          = 4.0f;
+        pc->Play();
+
+        sceneGraph.SetParent(particleEntity, Entity{kInvalidEntity});
+        const u32 pid = pathTracingPipeline.GetParticleRenderer().RegisterComponent(pc, device.get());
+        pc->rendererId = pid;                          // 快照收集器据此产出 {id, 发射位置}
+        pathTracingPipeline.AddParticleComponent(pid);  // 才会往帧图里加 ParticleRender pass
+        HE_CORE_INFO("测试粒子已注册（B1 验证用）：id={} maxParticles={} 位置=({:.1f},{:.1f},{:.1f})",
+                     pid, pc->GetMaxParticles(),
+                     tf->position.x, tf->position.y, tf->position.z);
+    }
+
     // ============================================================
     // 8.5 相机平移动画（AnimationComponent 演示）
     // ============================================================
@@ -783,7 +843,14 @@ int main() {
             } else {
                 pathTracingPipeline.NextFrame();
                 pathTracingPipeline.GetFrameAssembler().AssembleScene(world, sceneGraph, camCtrl.GetCamera());
-                pathTracingPipeline.Render(cmdList.get(), pathTracingPipeline.GetFrameSnapshot(), camCtrl.GetCamera(), deltaTime);
+                // 【B1】粒子模拟的步长：默认用真实帧时间；做对照判据时用 HE_PARTICLE_FIXED_DT
+                // 把唯一的时域来源（dt）钉死，否则同一帧号上的粒子状态每次运行都不同。
+                float simDt = deltaTime;
+                if (const char* fixedDtEnv = std::getenv("HE_PARTICLE_FIXED_DT")) {
+                    const float fixedDt = static_cast<float>(std::atof(fixedDtEnv));
+                    if (fixedDt > 0.0f) simDt = fixedDt;
+                }
+                pathTracingPipeline.Render(cmdList.get(), pathTracingPipeline.GetFrameSnapshot(), camCtrl.GetCamera(), simDt);
             }
 
             // ── PT 参考图落盘：整幅 CopyTextureToBuffer 到 host 可见缓冲（仅对照路径）──
@@ -810,6 +877,12 @@ int main() {
                     // （排查"渲染一片黑"时，先分清是渲染还是显示链路）
                     if (auto* pp = pathTracingPipeline.GetPostProcess())
                         addTarget("ldr", pp->GetLDRTarget(), 4, "BGRA8");
+                    // 时域降噪结果与 A-Trous 结果也落盘：A3 的验收要求把"差异落在哪一级"
+                    // 变成可核对的读数（PT HDR 一致而 denoised/atrous 不同 ⇒ 问题在降噪链路）。
+                    if (auto* t = pathTracingPipeline.GetPTDenoisedOut())
+                        addTarget("denoised", t, 8, "RGBA16F");
+                    if (auto* t = pathTracingPipeline.GetPTAtrousOut())
+                        addTarget("atrous", t, 8, "RGBA16F");
                 }
                 ptDump.FinishRecording(device.get(), cmdList.get());   // 挂本帧 timeline
             }
