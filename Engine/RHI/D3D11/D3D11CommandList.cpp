@@ -249,9 +249,9 @@ void D3D11CommandList::BeginPassTargets(ID3D11RenderTargetView* const* rtvs, u32
     if (!m_IsSecondary) m_Device->SetActivePassList(this);   // 二级列表从它继承渲染目标（M7.3）
 
     if (clearColor) {
-        static const float kZero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
         for (u32 i = 0; i < m_RtvCount; ++i) {
-            if (m_Rtvs[i]) ctx->ClearRenderTargetView(m_Rtvs[i], colorClears ? colorClears[i].color : kZero);
+            // 不传 clear：用三后端统一的默认清除色（见 RHI/CommandList.h 的 kDefaultClearValue）
+            if (m_Rtvs[i]) ctx->ClearRenderTargetView(m_Rtvs[i], colorClears ? colorClears[i].color : kDefaultClearValue.color);
         }
     }
     if (clearDepth && m_DepthTexture) {
@@ -272,8 +272,8 @@ void D3D11CommandList::BeginRenderPass(u32 colorCount, Format, Format, const Cle
     auto* sc = static_cast<D3D11SwapChain*>(m_SwapChain);
     ID3D11RenderTargetView* rtv = sc ? sc->GetRtv() : nullptr;
     const u32 w = sc ? sc->GetWidth() : 0u, h = sc ? sc->GetHeight() : 0u;
-    // 主通道的清屏值默认黑色、alpha = 1（与 D3D12 一致）
-    ClearValue c = clear ? *clear : ClearValue{};
+    // 主通道的清屏值：不传 clear 时用三后端统一的默认清除色（与 Vulkan / D3D12 一致）
+    ClearValue c = clear ? *clear : kDefaultClearValue;
     BeginPassTargets(&rtv, (rtv && colorCount) ? 1u : 0u, sc ? sc->GetDepthBufferView() : nullptr, w, h,
                      loadOp == LoadOp::Clear, &c, false, 1.0f, 0);
 }

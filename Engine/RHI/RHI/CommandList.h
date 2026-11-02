@@ -16,6 +16,11 @@ struct ClearValue {
     u8    stencil  = 0;
 };
 
+/// 【三后端统一的默认清除色】`BeginRenderPass` 不传 clear 指针时用它。
+/// 此前三个后端各用各的默认（Vulkan 深蓝 0.1/0.1/0.15、D3D11 / D3D12 纯黑），
+/// 表现为"同一个样例换后端后背景色变了"。这里取 Vulkan 侧原有的取值作为唯一口径。
+constexpr ClearValue kDefaultClearValue = { {0.1f, 0.1f, 0.15f, 1.0f}, 1.0f, 0 };
+
 struct Viewport {
     float x = 0, y = 0;
     float width  = kDefaultBackBufferWidth;

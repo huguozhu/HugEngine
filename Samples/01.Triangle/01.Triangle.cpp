@@ -82,8 +82,11 @@ int main() {
     // 3. 光栅化路径
     // ============================================================
     struct Vertex { float x, y; };
+    // 【Y 方向】引擎的裁剪空间约定是 **Y 向上（D3D 风格）**：Vulkan 后端的
+    // `SetFullscreenViewport` 用负高度视口把 Y 翻过来，D3D 用正高度、不翻。
+    // 因此这里的顶点按 "y = +0.5 是屏幕上方" 写：顶点 0 在上、底边在下。
     const Vertex kVertices[] = {
-        { 0.0f, -0.5f }, { 0.5f, 0.5f }, {-0.5f, 0.5f },
+        { 0.0f, 0.5f }, { 0.5f, -0.5f }, {-0.5f, -0.5f },
     };
     auto vertexBuffer = device->CreateBuffer({
         .size = sizeof(kVertices), .usage = he::rhi::BufferUsage::Vertex,
@@ -216,6 +219,9 @@ int main() {
     // 8. 主渲染循环
     // ============================================================
     int renderMode = rtRenderable ? 1 : 0;  // 0=光栅化, 1=RT, 2=Mesh Shader
+    // 【自动化用】HE_TRIANGLE_MODE=0/1/2 可强制渲染模式：跨后端截图对比时不必手点面板
+    // （Vulkan 默认走 RT、D3D 因后缓冲不可写只能走光栅化，不带这个开关就无法做同路径对比）
+    if (const char* modeEnv = std::getenv("HE_TRIANGLE_MODE")) renderMode = std::atoi(modeEnv);
     HE_CORE_INFO("01.Triangle started — ImGui 切换渲染模式");
     u64 frameIndex = 0;
 
@@ -264,21 +270,21 @@ int main() {
             // ── Mesh Shader 模式：三色渐变三角形，无 VB/IB ──
             cmdList->SetPipeline(meshPSO.get());
             cmdList->BeginRenderPass(1, swapchain->GetColorFormat());
-            cmdList->SetViewport({0, 0, static_cast<float>(w), static_cast<float>(h), 0.0f, 1.0f});
-            cmdList->SetScissor({0, 0, w, h});
+            // 全屏视口：走引擎统一入口（Vulkan 会设负高度翻转 Y，与 D3D 的 Y 向上约定对齐）
+            cmdList->SetFullscreenViewport(w, h);
             cmdList->DrawMeshTasks(1, 1, 1);  // 1 个工作组，3 个线程输出 1 个三角形
         } else {
             // 光栅化模式：红色三角形
             cmdList->SetPipeline(pipeline.get());
             cmdList->BeginRenderPass(1, swapchain->GetColorFormat());
-            cmdList->SetViewport({0, 0, static_cast<float>(w), static_cast<float>(h), 0.0f, 1.0f});
-            cmdList->SetScissor({0, 0, w, h});
+            // 同上：用 SetFullscreenViewport 而不是裸 SetViewport（裸调用会绕过后端的 Y 约定）
+            cmdList->SetFullscreenViewport(w, h);
             cmdList->SetVertexBuffer(vertexBuffer.get(), 0);
             cmdList->Draw(3);
         }
 
         // ── ImGui（在主 RP 内渲染，覆盖在场景之上）──
-        if (imgui.IsInitialized()) imgui.BeginFrame();   // 非 Vulkan 后端没有 UI
+        if (imgui.IsInitialized()) imgui.BeginFrame();   // 三个后端都已支持 UI（D3D11 / D3D12 走各自的 ImGui 后端）
         if (imgui.IsInitialized()) {
             ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_FirstUseEver);
             ImGui::SetNextWindowSize(ImVec2(260, 160), ImGuiCond_FirstUseEver);

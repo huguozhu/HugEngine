@@ -657,11 +657,13 @@ void D3D12CommandList::BeginRenderPass(u32 colorCount, Format colorFormat,
     }
 
     if (hasRtv && loadOp == LoadOp::Clear) {
+        // 不传 clear：用三后端统一的默认清除色（见 RHI/CommandList.h 的 kDefaultClearValue），
+        // 否则同一个样例在 Vulkan（深蓝）与 D3D（纯黑）下背景色不一致
         const float c[4] = {
-            clear ? clear->color[0] : 0.0f,
-            clear ? clear->color[1] : 0.0f,
-            clear ? clear->color[2] : 0.0f,
-            clear ? clear->color[3] : 1.0f,
+            clear ? clear->color[0] : kDefaultClearValue.color[0],
+            clear ? clear->color[1] : kDefaultClearValue.color[1],
+            clear ? clear->color[2] : kDefaultClearValue.color[2],
+            clear ? clear->color[3] : kDefaultClearValue.color[3],
         };
         m_List->ClearRenderTargetView(rtv, c, 0, nullptr);
     }
@@ -879,11 +881,11 @@ void D3D12CommandList::BindPassTargets(const D3D12_CPU_DESCRIPTOR_HANDLE* rtvs, 
     const bool gfxPso     = m_Pipeline && !m_IsComputePipeline;
     const bool clearColor = gfxPso ? (m_Pipeline->GetColorLoadOp() == LoadOp::Clear) : (clears != nullptr);
     const bool clearDepth = gfxPso ? (m_Pipeline->GetDepthLoadOp() == LoadOp::Clear) : (clears != nullptr);
-    static const float kZeroColor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
     if (clearColor) {
         for (u32 i = 0; i < n; ++i) {
             if (!rtvs || !rtvs[i].ptr) continue;
-            m_List->ClearRenderTargetView(rtvs[i], clears ? clears[i].color : kZeroColor, 0, nullptr);
+            // 不传 clear：用三后端统一的默认清除色（见 RHI/CommandList.h 的 kDefaultClearValue）
+            m_List->ClearRenderTargetView(rtvs[i], clears ? clears[i].color : kDefaultClearValue.color, 0, nullptr);
         }
     }
     if (hasDsv && clearDepth) {
