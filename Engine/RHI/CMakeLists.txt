@@ -155,6 +155,7 @@ endif()
         set(RHI_D3D11_SOURCES
             D3D11/D3D11Common.h
             D3D11/D3D11BindlessHeap.h
+            D3D11/D3D11BindlessHeap.cpp
             D3D11/D3D11Device.h
             D3D11/D3D11Device.cpp
             D3D11/D3D11Converters.h

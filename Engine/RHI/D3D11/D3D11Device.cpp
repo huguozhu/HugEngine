@@ -49,6 +49,7 @@ static std::string AdapterName(const DXGI_ADAPTER_DESC1& desc) {
 bool D3D11Device::Initialize() {
     if (!CreateDeviceAndContext()) return false;
     QueryCaps();
+    m_BindlessHeap.Attach(this);   // 纹理数组桶要用设备与 immediate context（M6）
     // 时间戳频率：先同步测一次（之后每帧由 OnPresent 更新），再开始第一个 disjoint 查询
     {
         D3D11_QUERY_DESC qd{ D3D11_QUERY_TIMESTAMP_DISJOINT, 0 };
