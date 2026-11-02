@@ -85,6 +85,8 @@ void D3D11SwapChain::Resize(u32 width, u32 height) {
     m_Width  = width;
     m_Height = height;
     if (width == 0 || height == 0) return;   // 最小化：等恢复尺寸后再重建
+    // 模式 2：RHI 线程上可能还有引用旧后缓冲的命令未执行，先全部落地
+    if (auto* router = m_Device->GetSubmitRouter()) router->FlushAndWait();
     // ResizeBuffers 要求后缓冲没有任何外部引用：先解绑上下文里的渲染目标并释放包装
     ID3D11DeviceContext4* ctx = m_Device->GetContext();
     ctx->OMSetRenderTargets(0, nullptr, nullptr);
@@ -105,6 +107,12 @@ ID3D11RenderTargetView* D3D11SwapChain::GetRtv() const {
 }
 
 void D3D11SwapChain::Present(bool vsync) {
+    // 模式 2：交给 RHI 线程，排在同一帧的提交之后（返回 false 表示路由尚未就绪，退回就地执行）
+    if (auto* router = m_Device->GetSubmitRouter(); router && router->RoutePresent(this, 0, nullptr, vsync)) return;
+    PresentNow(vsync);
+}
+
+void D3D11SwapChain::PresentNow(bool vsync) {
     if (!m_SwapChain) return;
     ++m_FrameCount;
     CaptureIfRequested();

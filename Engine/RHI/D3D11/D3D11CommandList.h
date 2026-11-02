@@ -17,7 +17,9 @@
 #if defined(_WIN32)
 
 #include "D3D11Common.h"
+#include <deque>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -46,7 +48,7 @@ public:
     /// 主列表执行一条已录好的二级列表（ExecuteCommandList）；之后 immediate context 回到默认状态，
     /// 本列表下次使用时重新应用自己的状态
     void ExecuteSecondary(IRHICommandList* secondary) override;
-    bool IsSecondary() const override { return m_Deferred != nullptr; }
+    bool IsSecondary() const override { return m_IsSecondary; }
 
     // ---- Render pass：设置渲染目标并按加载操作清除；D3D11 没有 render pass 对象 ----
     void BeginRenderPass(u32 colorCount, Format colorFormat, Format depthFormat = Format::Unknown,
@@ -179,10 +181,22 @@ private:
 
     D3D11Device*        m_Device    = nullptr;
     D3D11ContextState*  m_State     = nullptr;   // 本列表录制所用上下文的状态（immediate 或自己的 deferred context）
-    // 二级列表专用（M7.3）
-    ComPtr<ID3D11DeviceContext4>       m_Deferred;    // 自己的 deferred context
+    // deferred context 录制（二级列表 M7.3；模式 2 下的主列表 M7.4）
+    bool                               m_IsSecondary = false;
+    bool                               m_RecordDeferred = false;   // 本轮录制是否在 m_Deferred 上
+    ComPtr<ID3D11DeviceContext4>       m_Deferred;    // 自己的 deferred context（懒创建）
     std::unique_ptr<D3D11ContextState> m_OwnState;    // deferred context 的状态
-    ComPtr<ID3D11CommandList>          m_Recorded;    // End 时 FinishCommandList 得到的命令列表
+    ComPtr<ID3D11CommandList>          m_Recorded;    // 二级列表：End 时 FinishCommandList 得到的命令列表
+    /// 模式 2 的主列表：录好、等 RHI 线程执行的一帧（命令列表 + 本帧要发的时间线信号）。
+    /// 渲染线程可能在 RHI 线程执行上一帧之前就开始录下一帧，所以排成队列
+    struct RecordedFrame {
+        ComPtr<ID3D11CommandList>                   list;
+        std::vector<std::pair<RHIFenceHandle, u64>> signals;
+    };
+    std::deque<RecordedFrame>          m_Ready;
+    std::mutex                         m_ReadyMutex;
+    /// 确保有自己的 deferred context 与状态（第一次用到时创建）
+    bool EnsureDeferredContext();
     IRHISwapChain*      m_SwapChain = nullptr;
 
     // ---- 本列表的完整绑定状态（EnsureOwner 据此重新应用）----

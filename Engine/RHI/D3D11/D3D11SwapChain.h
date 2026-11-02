@@ -34,6 +34,8 @@ public:
     /// 窗口最小化（尺寸为 0）时返回 false，调用方跳过本帧
     bool   AcquireNextImage() override { return m_Width > 0 && m_Height > 0 && m_BackBuffer != nullptr; }
     void   Present(bool vsync) override;
+    /// 真正呈现（模式 2 下由 RHI 线程经 D3D11Device::ExecutePresent 调用）
+    void   PresentNow(bool vsync);
     void*  GetCurrentBackBufferView() const override;
     void*  GetDepthBufferView()       const override { return nullptr; }
     u32    GetBackendFormat()    const override { return static_cast<u32>(m_DxgiFormat); }

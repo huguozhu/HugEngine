@@ -5,6 +5,7 @@
 #include "D3D11CommandList.h"
 #include "D3D11Resources.h"
 #include "D3D11SwapChain.h"
+#include "RHI/RHICommandList.h"   // ExecuteSubmit 检查附带的命令流
 
 #include <d3dcompiler.h>   // D3DCompile：内置的参数整形 CS
 #include <cstring>
@@ -474,6 +475,7 @@ void D3D11Device::InitContextState(D3D11ContextState& state, ID3D11DeviceContext
 // ---------------------------------------------------------------------------
 void D3D11Device::DrainDebugMessages() {
     if (!m_InfoQueue) return;
+    std::lock_guard<std::mutex> lock(m_DebugMutex);
     // 同一消息 ID 只打前 kMaxPerId 次（很多问题每帧都会重复报告）
     static constexpr u32 kMaxPerId = 5;
     static std::unordered_map<u32, u32> s_Counts;
@@ -504,6 +506,10 @@ std::unique_ptr<IRHISwapChain> D3D11Device::CreateSwapChain(const SwapChainDesc&
     auto sc = std::make_unique<D3D11SwapChain>();
     if (!sc->Initialize(this, desc)) return nullptr;
     return sc;
+}
+
+void D3D11Device::ExecutePresent(IRHISwapChain* swapChain, u32, void*, bool vsync) {
+    if (swapChain) static_cast<D3D11SwapChain*>(swapChain)->PresentNow(vsync);
 }
 
 std::unique_ptr<IRHICommandList> D3D11Device::CreateSecondaryCommandList() {
@@ -732,8 +738,19 @@ void D3D11Device::UpdateDescriptorSetWithImageView(DescriptorSetHandle set, u32 
 // ---------------------------------------------------------------------------
 //  提交与同步
 // ---------------------------------------------------------------------------
-void D3D11Device::Submit(IRHICommandList* cmdList, RHICommandList*) {
-    // immediate context 的命令在录制时就已发出；这里只下发本次提交的时间线信号（命令之后到达）
+void D3D11Device::Submit(IRHICommandList* cmdList, RHICommandList* stream) {
+    // 模式 2：交给 RHI 线程（返回 false 表示路由尚未就绪，退回就地执行）
+    if (m_SubmitRouter && m_SubmitRouter->RouteSubmit(cmdList, stream)) return;
+    ExecuteSubmit(cmdList, stream);
+}
+
+void D3D11Device::ExecuteSubmit(IRHICommandList* cmdList, RHICommandList* stream) {
+    if (stream && stream->CommandCount() > 0) {
+        // D3D11 的模式 2 交接的是录好的 deferred context 命令列表，不用纯数据命令流
+        static bool s_Warned = false;
+        if (!s_Warned) { s_Warned = true; HE_CORE_WARN("[D3D11] 提交附带的命令流被忽略（D3D11 用 deferred context 交接命令）"); }
+    }
+    // 录在 immediate context 上的列表命令早已发出，只发信号；录在 deferred context 上的在这里执行
     if (cmdList) cmdList->Submit();
     // 持久映射缓冲：把本次提交里 GPU 写过的内容取回影子内存，CPU 下一帧读到的就是它
     RefreshOpenMaps();
@@ -757,6 +774,7 @@ static bool WaitFenceValue(ID3D11Fence* fence, u64 value, DWORD timeoutMs) {
 
 void D3D11Device::WaitIdle() {
     if (!m_Device || !m_Context) return;
+    if (m_SubmitRouter) m_SubmitRouter->FlushAndWait();   // 已路由的提交先全部落地
     if (!m_IdleFence && FAILED(m_Device->CreateFence(0, D3D11_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_IdleFence)))) return;
     m_Context->Signal(m_IdleFence.Get(), ++m_IdleValue);
     m_Context->Flush();

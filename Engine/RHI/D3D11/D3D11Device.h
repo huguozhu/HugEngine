@@ -15,6 +15,7 @@
 #include "D3D11Common.h"
 #include "D3D11BindlessHeap.h"
 #include "RHI/RHIHandles.h"
+#include "RHI/SubmitRouter.h"
 
 #include <atomic>
 #include <memory>
@@ -219,6 +220,16 @@ public:
     void SubmitAll(Span<IRHICommandList*> cmdLists) override;
     void WaitIdle() override;
 
+    // ---- 提交路由（模式 2：RHI 线程是唯一提交者，M7.4）----
+    //  装了路由后，主命令列表录在各自的 deferred context 上（见 D3D11CommandList::Begin），
+    //  Submit / Present 交给 RHI 线程；RHI 线程在 immediate context 上执行录好的命令、发信号、呈现
+    void           SetSubmitRouter(ISubmitRouter* router) override { m_SubmitRouter = router; }
+    ISubmitRouter* GetSubmitRouter() const override { return m_SubmitRouter; }
+    /// 【RHI 线程】真正提交：执行列表录好的命令、发时间线信号、回读持久映射缓冲
+    void ExecuteSubmit(IRHICommandList* cmdList, RHICommandList* stream) override;
+    /// 【RHI 线程】真正呈现（imageIndex / waitSemaphore 在 D3D11 下没有意义）
+    void ExecutePresent(IRHISwapChain* swapChain, u32 imageIndex, void* waitSemaphore, bool vsync) override;
+
     /// D3D11 只有一个 immediate context：没有独立计算队列，RenderGraph 走单队列路径
     bool HasAsyncComputeQueue() const override { return false; }
     u32  GetQueueFamily(QueueType) const override { return 0; }
@@ -325,6 +336,8 @@ private:
     ComPtr<ID3D11Buffer>         m_InstanceIndexBuffer;   // 懒创建
     D3D11ContextState            m_Immediate;   // immediate context 的状态（所有者、SRV 冲突跟踪、常量环）
     D3D11CommandList*            m_ActivePassList = nullptr;   // 见 GetActivePassList
+    ISubmitRouter*               m_SubmitRouter = nullptr;     // 模式 2 的提交路由（RHI 线程）
+    std::mutex                   m_DebugMutex;                 // 调试层消息可能由渲染线程与 RHI 线程同时取
     // PSO 预编译队列（描述里的着色器字节码已深拷贝，调用方的临时对象失效后仍可用）
     struct PrecompileItem {
         PipelineStateDesc                            desc;

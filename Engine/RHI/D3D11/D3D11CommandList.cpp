@@ -20,9 +20,20 @@ D3D11CommandList::D3D11CommandList(D3D11Device* device)
     : m_Device(device), m_State(&device->GetImmediateState()) {}
 
 D3D11CommandList::D3D11CommandList(D3D11Device* device, ComPtr<ID3D11DeviceContext4> deferred)
-    : m_Device(device), m_Deferred(std::move(deferred)), m_OwnState(std::make_unique<D3D11ContextState>()) {
+    : m_Device(device), m_IsSecondary(true), m_RecordDeferred(true), m_Deferred(std::move(deferred)),
+      m_OwnState(std::make_unique<D3D11ContextState>()) {
     device->InitContextState(*m_OwnState, m_Deferred.Get());
     m_State = m_OwnState.get();
+}
+
+bool D3D11CommandList::EnsureDeferredContext() {
+    if (m_Deferred) return true;
+    ComPtr<ID3D11DeviceContext3> ctx3;
+    if (!HE_D3D11_CHECK(m_Device->GetDevice()->CreateDeferredContext3(0, &ctx3), "CreateDeferredContext3")) return false;
+    if (FAILED(ctx3.As(&m_Deferred))) return false;
+    m_OwnState = std::make_unique<D3D11ContextState>();
+    m_Device->InitContextState(*m_OwnState, m_Deferred.Get());
+    return true;
 }
 
 D3D11CommandList::~D3D11CommandList() {
@@ -52,6 +63,16 @@ void D3D11CommandList::Begin() {
     m_PushGeneration = 0;
     m_PendingSignals.clear();
     m_NonBindless.clear();
+    // 【模式 2（M7.4）】装了提交路由时，主列表改录到自己的 deferred context：RHI 线程稍后在
+    // immediate context 上执行它，渲染线程与 RHI 线程不会同时往 immediate context 里录命令
+    if (!m_IsSecondary) {
+        m_RecordDeferred = (m_Device->GetSubmitRouter() != nullptr) && EnsureDeferredContext();
+        m_State = m_RecordDeferred ? m_OwnState.get() : &m_Device->GetImmediateState();
+        if (m_RecordDeferred) {
+            m_State->ResetBindings();          // 上一轮 FinishCommandList 后 deferred context 已回到默认状态
+            m_State->pushNeedsDiscard = true;  // deferred context 每一轮录制的第一次 Map 必须是 DISCARD
+        }
+    }
     // 让下一次改动上下文时重新应用（即使上下文的上一个使用者就是本列表的上一轮录制）
     if (m_State->owner == this) m_State->owner = nullptr;
 }
@@ -61,9 +82,18 @@ void D3D11CommandList::End() {
     while (m_LabelDepth > 0) EndDebugLabel();
     // 二级列表：把 deferred context 里录下的命令封成命令列表，等主列表 ExecuteSecondary。
     // FALSE：不保存 deferred context 的状态，下一轮录制从默认状态开始（BeginSecondary 会重新应用）
-    if (m_Deferred) {
+    if (m_IsSecondary) {
         m_Recorded.Reset();
         HE_D3D11_CHECK(m_Deferred->FinishCommandList(FALSE, &m_Recorded), "FinishCommandList");
+    } else if (m_RecordDeferred) {
+        // 模式 2 的主列表：连同本帧的时间线信号一起排队，Submit（RHI 线程）时执行
+        RecordedFrame frame;
+        if (HE_D3D11_CHECK(m_Deferred->FinishCommandList(FALSE, &frame.list), "FinishCommandList")) {
+            frame.signals = std::move(m_PendingSignals);
+            m_PendingSignals.clear();
+            std::lock_guard<std::mutex> lock(m_ReadyMutex);
+            m_Ready.push_back(std::move(frame));
+        }
     }
 }
 
@@ -216,7 +246,7 @@ void D3D11CommandList::BeginPassTargets(ID3D11RenderTargetView* const* rtvs, u32
         }
     }
     ApplyRenderTargets();
-    if (!m_Deferred) m_Device->SetActivePassList(this);   // 二级列表从它继承渲染目标（M7.3）
+    if (!m_IsSecondary) m_Device->SetActivePassList(this);   // 二级列表从它继承渲染目标（M7.3）
 
     if (clearColor) {
         static const float kZero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
@@ -426,8 +456,29 @@ void D3D11CommandList::SetTimelineSignal(RHIFenceHandle fence, u64 value) {
 }
 
 void D3D11CommandList::Submit() {
+    ID3D11DeviceContext4* immediate = m_Device->GetContext();
+    // 模式 2：执行最早录好的一帧，再发它的时间线信号（信号排在命令之后）
+    RecordedFrame frame;
+    bool queued = false;
+    {
+        std::lock_guard<std::mutex> lock(m_ReadyMutex);
+        if (!m_Ready.empty()) {
+            frame = std::move(m_Ready.front());
+            m_Ready.pop_front();
+            queued = true;
+        }
+    }
+    if (queued) {
+        immediate->ExecuteCommandList(frame.list.Get(), FALSE);
+        m_Device->GetImmediateState().ResetBindings();   // 执行后 immediate context 回到默认状态
+        for (const auto& [fence, value] : frame.signals) {
+            if (ID3D11Fence* f = m_Device->FindFence(fence)) immediate->Signal(f, value);
+        }
+        return;
+    }
+    // 录在 immediate context 上的列表：命令早已发出，只发信号
     for (const auto& [fence, value] : m_PendingSignals) {
-        if (ID3D11Fence* f = m_Device->FindFence(fence)) m_State->context->Signal(f, value);
+        if (ID3D11Fence* f = m_Device->FindFence(fence)) immediate->Signal(f, value);
     }
     m_PendingSignals.clear();
 }
@@ -656,7 +707,7 @@ bool D3D11CommandList::PrepareDrawOrDispatch(bool compute) {
     // 持久映射缓冲里 CPU 改过的内容先上传，再执行读它的命令（规划 3.10）。
     // 二级列表不在这里做：工作线程并发录制时它会让所有线程在同一把锁上逐条比较映射内容，
     // 改由主列表在 ExecuteSecondary 执行前做一次（上传立即生效，早于二级列表的命令执行）
-    if (!m_Deferred) m_Device->FlushOpenMaps();
+    if (!m_IsSecondary) m_Device->FlushOpenMaps();
     FlushBindings();
     BindPushConstants();
     return true;
