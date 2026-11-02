@@ -83,9 +83,11 @@ struct InstanceObject {
 #if !defined(HE_SHADER_D3D11)
 [[vk::binding(13, 0)]] Texture2D<float4>                     u_MaterialTextures[];
 [[vk::binding(14, 0)]] SamplerState                          u_MaterialSamplers[];
+#else
+// D3D11（SM 5.0）没有无界资源数组：材质纹理从后端的纹理数组桶取（按 bindless 句柄查表，
+// D3D11 后端实现规划 M6）；没分桶的纹理不采样，只用材质常量（baseColorFactor / metallic / roughness）
+#include "TexBuckets.slang"
 #endif
-// D3D11（SM 5.0）没有无界资源数组：材质只用常量（baseColorFactor / metallic / roughness），
-// 不采样材质纹理（D3D11 后端实现规划 5.3；纹理数组桶方案见 M6）
 
 // ── 【任务 24】LOD 流式的五 + 一个视图（bindings 15..20）──
 // 【口径：0/1/2 号槽一槽两用】流式开启时，binding 0/1/2 绑的是**页池**的簇段/顶点段/三角形段，
@@ -249,6 +251,20 @@ bool softRasterEvaluateMaterial(uint materialIndex, float2 uv,
     if ((material.textureMask & NANITE_TEXMASK_METALLICROUGH) != 0u) {
         uint slot = material.bindlessTextureBase + NANITE_TEXSLOT_METALLICROUGH;
         float4 mr = u_MaterialTextures[slot].SampleLevel(u_MaterialSamplers[slot], uv, 0.0);
+        mrG = mr.g;
+        mrB = mr.b;
+    }
+#else
+    // 与上面同一口径（显式 LOD 0）；句柄没有分桶时跳过该纹理（等同于没有这张纹理）
+    uint  bucket;
+    float layer;
+    if ((material.textureMask & NANITE_TEXMASK_BASECOLOR) != 0u &&
+        HE_TexBucketLookup(material.bindlessTextureBase + NANITE_TEXSLOT_BASECOLOR, bucket, layer)) {
+        outAlbedo *= HE_TexBucketSampleLevel(bucket, float3(uv, layer), 0.0).rgb;
+    }
+    if ((material.textureMask & NANITE_TEXMASK_METALLICROUGH) != 0u &&
+        HE_TexBucketLookup(material.bindlessTextureBase + NANITE_TEXSLOT_METALLICROUGH, bucket, layer)) {
+        float4 mr = HE_TexBucketSampleLevel(bucket, float3(uv, layer), 0.0);
         mrG = mr.g;
         mrB = mr.b;
     }

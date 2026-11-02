@@ -45,9 +45,10 @@ constexpr u32 kNonBindlessNone           = ~0u;
 // 纹理数组桶（与 ShaderTypes: kGPUBinding_NB_TexBucket* 一致）：由后端按 bindless 堆内容自行提供，不经 SetNonBindlessHandle
 constexpr u32 kBindingNBTexBuckets       = 114; // 纹理数组桶 t114..t121
 constexpr u32 kBindingNBTexBucketCount   = 8;
-constexpr u32 kBindingNBTexBucketMap     = 122; // 句柄 → (桶号 << 24 | 层号)
+constexpr u32 kBindingNBTexBucketMap     = 122; // 句柄 → (1 << 31 | 桶号 << 24 | 层号)
 constexpr u32 kBindingNBTexBucketSampler = 123; // 桶路径的采样器
-constexpr u32 kTexBucketNone             = ~0u; // 映射表里「未分桶」
+constexpr u32 kTexBucketNone             = 0;   // 映射表里「未分桶」（空表 / 越界读到的 0 也就是未分桶）
+constexpr u32 kTexBucketValid            = 1u << 31; // 已分桶的标志位
 constexpr u32 kBindingLightGrid        = 7;   // 光源网格（Clustered Shading SSBO）
 constexpr u32 kBindingLightIndexList   = 8;   // 光源索引列表（Clustered Shading SSBO）
 

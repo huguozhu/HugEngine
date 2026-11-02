@@ -9,6 +9,7 @@
 
 #include "ShaderTypes.slang"  // GPU struct + 常量（kGPU*）共享定义
 #include "MathCommon.slang"   // 纯数学/颜色工具（PI、sRGB、Luminance、ACES、PQ）
+#include "TexBuckets.slang"   // D3D11 的纹理数组桶（只在 HE_SHADER_D3D11 下有内容）
 
 // Bindless 纹理数组（全局共享，所有 mesh 共用 set=0）
 // ---- D3D12 专用：register() 只接受 token，故另定一组宏 ----
@@ -54,9 +55,27 @@ float4 HE_D3D11_SampleMaterial(uint slot, float2 uv) {
         default: return u_MatTex3.Sample(u_MatSmp3, uv);
     }
 }
-// base 在 D3D11 下不参与寻址（基址已经由渲染层交给后端）
-#define HE_MAT_SAMPLE(base, slot, uv) HE_D3D11_SampleMaterial(slot, uv)
-#define HE_TEX_SAMPLE(handle, uv)     u_MatTex0.Sample(u_MatSmp0, uv)
+// 【纹理数组桶（M6）】先按句柄查桶：已分桶就从纹理数组采样（一次绘制覆盖多个材质的 GPU 驱动路径
+// 也能取到正确纹理）；未分桶的退回逐绘制绑定的固定槽位（渲染层交给后端的基址）。
+// 导数在分支外取好，桶号是动态值，switch 里用 SampleGrad
+float4 HE_D3D11_SampleMaterialBucket(uint base, uint slot, float2 uv) {
+    const float2 dx = ddx(uv);
+    const float2 dy = ddy(uv);
+    uint  bucket;
+    float layer;
+    if (HE_TexBucketLookup(base + slot, bucket, layer)) return HE_TexBucketSampleGrad(bucket, float3(uv, layer), dx, dy);
+    return HE_D3D11_SampleMaterial(slot, uv);
+}
+float4 HE_D3D11_SampleHandle(uint handle, float2 uv) {
+    const float2 dx = ddx(uv);
+    const float2 dy = ddy(uv);
+    uint  bucket;
+    float layer;
+    if (HE_TexBucketLookup(handle, bucket, layer)) return HE_TexBucketSampleGrad(bucket, float3(uv, layer), dx, dy);
+    return u_MatTex0.Sample(u_MatSmp0, uv);
+}
+#define HE_MAT_SAMPLE(base, slot, uv) HE_D3D11_SampleMaterialBucket(base, slot, uv)
+#define HE_TEX_SAMPLE(handle, uv)     HE_D3D11_SampleHandle(handle, uv)
 #else
 [[vk::binding(kGPUBinding_BindlessTextures, kGPUDescSet_PerFrame)]] Texture2D<float4> u_Textures[HE_BINDLESS_DIM] : register(kGPUBinding_BindlessTextures_hlsl, kGPUDescSet_Bindless_hlsl);
 [[vk::binding(kGPUBinding_BindlessSamplers, kGPUDescSet_PerFrame)]] SamplerState      u_Samplers[HE_BINDLESS_DIM] : register(kGPUBinding_BindlessSamplers_hlsl, kGPUDescSet_Bindless_hlsl);

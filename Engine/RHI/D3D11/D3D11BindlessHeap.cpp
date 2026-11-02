@@ -133,7 +133,7 @@ void D3D11BindlessHeap::EnsureBuckets() {
             ctx->CopySubresourceRegion(b.array.Get(), D3D11CalcSubresource(m, layer, b.mips), 0, 0, 0,
                                        tex.Get(), D3D11CalcSubresource(m, 0, td.MipLevels), nullptr);
         }
-        m_Map[h] = (static_cast<u32>(k) << 24) | layer;
+        m_Map[h] = kTexBucketValid | (static_cast<u32>(k) << 24) | layer;
         m_MapDirty = true;
     }
     m_PendingBucket.clear();

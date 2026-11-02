@@ -15,7 +15,7 @@
 //
 //  【纹理数组桶（M6）】一次绘制覆盖多个材质的 GPU 驱动路径拿不到逐绘制句柄：这里把可分桶的
 //  静态纹理按（宽, 高, mip 数, 格式）拷进 ≤ 8 个 Texture2DArray，并维护「句柄 → (桶号, 层号)」
-//  映射表，着色器按句柄查表后对字面量下标的桶采样（见 common.slang 的 HE_SHADER_D3D11 分支）。
+//  映射表（未分桶为 0，空表 / 越界读到 0 同样安全），着色器按句柄查表后对字面量下标的桶采样（见 common.slang 的 HE_SHADER_D3D11 分支）。
 //  拷贝在 Flush / 首次绑定前集中进行（EnsureBuckets）。
 // ============================================================================
 #pragma once
@@ -76,7 +76,7 @@ public:
     void EnsureBuckets();
     /// 第 k 个桶的 SRV（Texture2DArray，全部 mip / 层）；还没建的桶返回空（映射表不会指向它）
     ID3D11ShaderResourceView* GetBucketSrv(u32 k) const;
-    /// 句柄 → (桶号 << 24 | 层号) 的映射表（StructuredBuffer<uint>）
+    /// 句柄 → (1 << 31 | 桶号 << 24 | 层号) 的映射表（StructuredBuffer<uint>，未分桶为 0）
     ID3D11ShaderResourceView* GetBucketMapSrv() const { return m_MapSrv.Get(); }
     /// 桶路径的采样器（线性、重复寻址）
     ID3D11SamplerState*       GetBucketSampler() const { return m_BucketSampler.Get(); }
@@ -119,7 +119,7 @@ private:
     ComPtr<ID3D11SamplerState>              m_DefaultSampler;
 
     std::vector<Bucket>                     m_Buckets;          // 最多 kBindingNBTexBucketCount 个
-    std::vector<u32>                        m_Map;              // 句柄 → (桶号 << 24 | 层号)，CPU 副本
+    std::vector<u32>                        m_Map;              // 句柄 → (1 << 31 | 桶号 << 24 | 层号)，CPU 副本
     std::vector<BindlessHandle>             m_PendingBucket;    // 已登记、还没拷进桶的句柄
     bool                                    m_MapDirty = false;
     u32                                     m_MapCapacity = 0;  // GPU 映射表的元素数

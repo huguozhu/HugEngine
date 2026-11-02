@@ -276,6 +276,9 @@ if(SLANGC)
         # 纯数学/颜色工具（PI、sRGB、Luminance、ACES、PQ、BT.709→2020）——**零绑定**，
         # 任何 pass 都可安全引用，不必为此继承 common.slang 的 bindless 描述符布局。
         "${SHADER_DIR}/MathCommon.slang"
+        # D3D11 的纹理数组桶（M6）：按 bindless 句柄查表后对字面量下标的 Texture2DArray 采样；
+        # 只在 HE_SHADER_D3D11 下有内容
+        "${SHADER_DIR}/TexBuckets.slang"
         # 采样工具（余弦半球采样、Hammersley 低差异序列）——PT 与 RT 共用。
         "${SHADER_DIR}/Sampling.slang"
         # RT pass 共用小工具（Hash / Rand / 深度→世界坐标）——此前 4 个 rgen 各抄一份。
