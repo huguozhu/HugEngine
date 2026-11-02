@@ -30,6 +30,9 @@ struct DrawItem {
     /// 所以剔除结果只能逐条打标记：逐 draw 路径据此跳过不可见物体，GPU 驱动路径忽略它
     /// （那条路径由 GPU 剔除决定画什么，CPU 不参与）。
     bool bCPUCulled = false;
+    /// bindless 材质纹理基址（= GPUObjectData::materialID）。Vulkan / D3D12 由着色器从对象数据读取；
+    /// 非 bindless 后端（D3D11）需要渲染层逐次绘制交给命令列表（SetNonBindlessHandle）
+    u32 materialID = 0;
 };
 
 // ============================================================================

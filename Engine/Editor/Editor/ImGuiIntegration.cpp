@@ -1,5 +1,5 @@
 ﻿// ============================================================
-// ImGuiIntegration.cpp — ImGui v1.91 + GLFW + Vulkan
+// ImGuiIntegration.cpp — ImGui v1.91 + GLFW + Vulkan / D3D12 / D3D11
 //
 // Vulkan 特定资源（RenderPass / DescriptorPool）通过 RHI 接口创建，
 // 不直接调用 vkCreate* / vkDestroy*。
@@ -15,10 +15,14 @@
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_vulkan.h"
-#if defined(_WIN32)
+#if defined(HE_RHI_D3D12)
 #include "D3D12/D3D12Device.h"   // D3D12 原生句柄（imgui_impl_dx12 需要）
 #include "D3D12/D3D12Converters.h"   // ToDxgiFormat
 #include "imgui_impl_dx12.h"
+#endif
+#if defined(HE_RHI_D3D11)
+#include "D3D11/D3D11Device.h"   // D3D11 原生设备 / 上下文（imgui_impl_dx11 需要）
+#include "imgui_impl_dx11.h"
 #endif
 
 namespace he::editor {
@@ -31,15 +35,19 @@ void ImGuiIntegration::Initialize(GLFWwindow* window, rhi::IRHIDevice* device,
     m_Window = window;
     m_Device = device;
 
-    // 【多后端】Vulkan 用 imgui_impl_vulkan，D3D12 用 imgui_impl_dx12。
+    // 【多后端】Vulkan 用 imgui_impl_vulkan，D3D12 用 imgui_impl_dx12，D3D11 用 imgui_impl_dx11。
     // 其它后端直接跳过：调用方（样例）已经用 `if (imgui.IsInitialized())` 守卫所有
     // UI 代码，跳过只是没有 UI，渲染照常。注意不能对非 Vulkan 设备走 Vulkan 路径——
     // static_cast<VulkanDevice*> 会拿到垃圾指针，实测表现为进程死等、不出帧。
     m_IsD3D12 = device && device->GetBackend() == rhi::Backend::D3D12;
-#if !defined(_WIN32)
+#if !defined(HE_RHI_D3D12)
     m_IsD3D12 = false;
 #endif
-    if (device && device->GetBackend() != rhi::Backend::Vulkan && !m_IsD3D12) {
+    m_IsD3D11 = device && device->GetBackend() == rhi::Backend::D3D11;
+#if !defined(HE_RHI_D3D11)
+    m_IsD3D11 = false;
+#endif
+    if (device && device->GetBackend() != rhi::Backend::Vulkan && !m_IsD3D12 && !m_IsD3D11) {
         HE_CORE_INFO("ImGui: 当前后端不是 Vulkan（{}），跳过 UI 初始化",
                      static_cast<int>(device->GetBackend()));
         m_Initialized = false;
@@ -75,7 +83,7 @@ void ImGuiIntegration::Initialize(GLFWwindow* window, rhi::IRHIDevice* device,
         }
     }
 
-    if (m_IsD3D12) ImGui_ImplGlfw_InitForOther(window, true);
+    if (m_IsD3D12 || m_IsD3D11) ImGui_ImplGlfw_InitForOther(window, true);
     else           ImGui_ImplGlfw_InitForVulkan(window, true);
     CreateImGuiResources(device, swapchain);
 
@@ -85,7 +93,7 @@ void ImGuiIntegration::Initialize(GLFWwindow* window, rhi::IRHIDevice* device,
 
 void ImGuiIntegration::CreateImGuiResources(rhi::IRHIDevice* device,
                                              rhi::IRHISwapChain* swapchain) {
-#if defined(_WIN32)
+#if defined(HE_RHI_D3D12)
     if (m_IsD3D12) {
         // 字体 SRV 放在主 CBV_SRV_UAV 堆的保留槽位，渲染时与场景共用同一张堆
         auto* d3d = static_cast<rhi::d3d12::D3D12Device*>(device);
@@ -95,6 +103,15 @@ void ImGuiIntegration::CreateImGuiResources(rhi::IRHIDevice* device,
                             static_cast<ID3D12DescriptorHeap*>(m_DescPool),
                             d3d->GetImGuiFontSrvCpu(), d3d->GetImGuiFontSrvGpu());
         HE_CORE_INFO("ImGui D3D12 backend initialized");
+        return;
+    }
+#endif
+#if defined(HE_RHI_D3D11)
+    if (m_IsD3D11) {
+        // D3D11 没有描述符堆 / render pass：ImGui 直接用设备与 immediate context，字体纹理由后端自建
+        auto* d3d = static_cast<rhi::d3d11::D3D11Device*>(device);
+        ImGui_ImplDX11_Init(d3d->GetDevice(), d3d->GetContext());
+        HE_CORE_INFO("ImGui D3D11 backend initialized");
         return;
     }
 #endif
@@ -145,7 +162,7 @@ void ImGuiIntegration::RecordVulkanOverlay(void* nativeCmdBuffer) {
 }
 
 void ImGuiIntegration::DestroyImGuiResources(rhi::IRHIDevice* device) {
-    if (device && !m_IsD3D12) {
+    if (device && !m_IsD3D12 && !m_IsD3D11) {
         device->DestroyImGuiRenderPass(m_RenderPass);
         device->DestroyImGuiDescriptorPool(m_DescPool);
     }
@@ -156,10 +173,15 @@ void ImGuiIntegration::DestroyImGuiResources(rhi::IRHIDevice* device) {
 void ImGuiIntegration::Shutdown() {
     if (!m_Initialized) return;
     m_Initialized = false;
-#if defined(_WIN32)
+#if defined(HE_RHI_D3D12)
     if (m_IsD3D12) {
         if (m_Device) m_Device->WaitIdle();   // ImGui 的顶点/索引缓冲可能仍被在飞帧使用
         ImGui_ImplDX12_Shutdown();
+    } else
+#endif
+#if defined(HE_RHI_D3D11)
+    if (m_IsD3D11) {
+        ImGui_ImplDX11_Shutdown();
     } else
 #endif
     ImGui_ImplVulkan_Shutdown();
@@ -173,8 +195,12 @@ void ImGuiIntegration::Shutdown() {
 }
 
 void ImGuiIntegration::BeginFrame() {
-#if defined(_WIN32)
+#if defined(HE_RHI_D3D12)
     if (m_IsD3D12) ImGui_ImplDX12_NewFrame();
+    else
+#endif
+#if defined(HE_RHI_D3D11)
+    if (m_IsD3D11) ImGui_ImplDX11_NewFrame();
     else
 #endif
     ImGui_ImplVulkan_NewFrame();
@@ -184,11 +210,22 @@ void ImGuiIntegration::BeginFrame() {
 
 void ImGuiIntegration::EndFrame(rhi::IRHICommandList* cmd) {
     ImGui::Render();
-#if defined(_WIN32)
+#if defined(HE_RHI_D3D12)
     if (m_IsD3D12) {
         // 返回原生列表前已绑定引擎的描述符堆（含 ImGui 字体 SRV 槽位）
         auto* list = static_cast<ID3D12GraphicsCommandList*>(m_Device->GetImGuiCommandBuffer(cmd));
         if (list) ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), list);
+        return;
+    }
+#endif
+#if defined(HE_RHI_D3D11)
+    if (m_IsD3D11) {
+        // 先让上下文装上该命令列表的渲染目标与视口，ImGui 画在当前绑定的目标上（结束后它会恢复上下文状态）。
+        // 返回的是命令列表录制所用的上下文：模式 2 下是 deferred context，ImGui 要画进同一个上下文
+        if (auto* ctx = static_cast<ID3D11DeviceContext*>(m_Device->GetImGuiCommandBuffer(cmd))) {
+            ImGui_ImplDX11_SetDeviceContext(ctx);
+            ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+        }
         return;
     }
 #endif

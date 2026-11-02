@@ -24,6 +24,12 @@ struct PBRVertexInput {
 // set=0, binding=2: GPU 对象数据数组
 [[vk::binding(kGPUBinding_ObjectData, kGPUDescSet_PerFrame)]] StructuredBuffer<GPUObjectData> u_Objects : register(t2, space0);
 
+#if defined(HE_SHADER_D3D11)
+// D3D11（SM 5.0）不能按句柄索引缓冲数组：换成单个缓冲，句柄由渲染层经 SetNonBindlessHandle 指定
+[[vk::binding(kGPUBinding_NB_InstanceTransforms, kGPUDescSet_PerFrame)]] StructuredBuffer<float4x4> u_InstanceTransforms;
+[[vk::binding(kGPUBinding_NB_VisibleInstances, kGPUDescSet_PerFrame)]] StructuredBuffer<uint> u_VisibleInstanceIndices;
+[[vk::binding(kGPUBinding_NB_BoneMatrices, kGPUDescSet_PerFrame)]] StructuredBuffer<float4x4> u_BoneMatrices;
+#else
 // bindless SSBO 数组：实例化网格的实例变换（float4x4 元素缓冲，按句柄索引）
 [[vk::binding(kGPUBinding_BindlessSSBO, kGPUDescSet_PerFrame)]] StructuredBuffer<float4x4> u_InstanceTransforms[256] : register(t1024, space2);
 // bindless SSBO 数组：逐实例剔除后的可见实例索引（u32 列表，任务 25）
@@ -31,6 +37,7 @@ struct PBRVertexInput {
 [[vk::binding(kGPUBinding_BindlessSSBO, kGPUDescSet_PerFrame)]] StructuredBuffer<uint> u_VisibleInstanceIndices[256] : register(t1280, space2);
 // bindless SSBO 数组：骨骼蒙皮矩阵（world × inverseBind，按句柄索引）
 [[vk::binding(kGPUBinding_BindlessSSBO, kGPUDescSet_PerFrame)]] StructuredBuffer<float4x4> u_BoneMatrices[256] : register(t1536, space2);
+#endif
 
 // 帧级 Push Constants（Forward+ 扩展，与 FS 对齐）
 [[vk::push_constant]] cbuffer FrameConstants {
@@ -55,9 +62,9 @@ struct PBRVertexInput {
 
 // 实例号语义：Vulkan 下 Slang 把 SV_InstanceID 编成 gl_InstanceIndex - gl_BaseInstance（不含 firstInstance），
 // 而本引擎用 firstInstance 传对象号 / 簇号（GPU 剔除、Nanite），需要含 firstInstance 的 gl_InstanceIndex（SV_VulkanInstanceID）。
-// D3D12 仍写 SV_InstanceID，由 ShaderToDxil 改为读逐实例序号缓冲（同样含起始实例）
+// D3D 后端（D3D11 / D3D12，定义了 HE_SHADER_HLSL）仍写 SV_InstanceID，由 ShaderToDxil 改为读逐实例序号缓冲（同样含起始实例）
 #ifndef HE_SV_INSTANCE
-#if defined(HE_SHADER_D3D12)
+#if defined(HE_SHADER_HLSL)
 #define HE_SV_INSTANCE SV_InstanceID
 #else
 #define HE_SV_INSTANCE SV_VulkanInstanceID
@@ -88,15 +95,15 @@ PBRVSOutput vertexMain(PBRVertexInput vin, uint instanceID : HE_SV_INSTANCE) {
         // 于是只有通过视锥测试的实例才会被顶点着色器处理。
         uint instIdx = instanceID;
         if (instanceVisibleHandle != 0u)
-            instIdx = u_VisibleInstanceIndices[instanceVisibleHandle][instanceID];
-        worldMatrix = u_InstanceTransforms[instanceSSBOHandle][instIdx];
+            instIdx = HE_BINDLESS_BUF(u_VisibleInstanceIndices, instanceVisibleHandle)[instanceID];
+        worldMatrix = HE_BINDLESS_BUF(u_InstanceTransforms, instanceSSBOHandle)[instIdx];
     } else if (useInstanceID == 3u) {
         // 骨骼蒙皮（C1b）：4 骨骼矩阵按权重加权；
         // 再乘实体世界矩阵（glTF 骨骼定义在网格节点局部空间）
-        float4x4 skinMat  = u_BoneMatrices[instanceSSBOHandle][inJoints.x] * inWeights.x;
-        skinMat += u_BoneMatrices[instanceSSBOHandle][inJoints.y] * inWeights.y;
-        skinMat += u_BoneMatrices[instanceSSBOHandle][inJoints.z] * inWeights.z;
-        skinMat += u_BoneMatrices[instanceSSBOHandle][inJoints.w] * inWeights.w;
+        float4x4 skinMat  = HE_BINDLESS_BUF(u_BoneMatrices, instanceSSBOHandle)[inJoints.x] * inWeights.x;
+        skinMat += HE_BINDLESS_BUF(u_BoneMatrices, instanceSSBOHandle)[inJoints.y] * inWeights.y;
+        skinMat += HE_BINDLESS_BUF(u_BoneMatrices, instanceSSBOHandle)[inJoints.z] * inWeights.z;
+        skinMat += HE_BINDLESS_BUF(u_BoneMatrices, instanceSSBOHandle)[inJoints.w] * inWeights.w;
         worldMatrix = mul(obj.worldMatrix, skinMat);
     }
 

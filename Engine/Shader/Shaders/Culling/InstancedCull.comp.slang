@@ -19,7 +19,12 @@
 
 // bindless SSBO 数组（binding 30，与引擎其它 shader 一致），全部按 push constant 里的句柄索引
 #include "ShaderTypes.slang"   // IndirectCmd / GPUSceneObject / LightUB 等共享契约结构体
-#if defined(HE_SHADER_D3D12)
+#if defined(HE_SHADER_D3D11)
+// D3D11（SM 5.0）不能按句柄索引缓冲数组：换成单个缓冲，句柄由渲染层经 SetNonBindlessHandle 指定
+[[vk::binding(kGPUBinding_NB_InstanceTransforms, 0)]] StructuredBuffer<float4x4> u_Instances;
+[[vk::binding(kGPUBinding_NB_CullVisibleOut, 0)]] RWStructuredBuffer<uint>        u_VisibleIndices;
+[[vk::binding(kGPUBinding_NB_CullCommandOut, 0)]] RWStructuredBuffer<IndirectCmd> u_Commands;
+#elif defined(HE_SHADER_D3D12)
 // D3D12：无界数组不写 register 时 dxc 自动分配到 space1/2/3，而那些表从未绑定（GPU 验证 id=935：
 // 读未初始化的根参数）。改为 bindless 区间：只读实例矩阵与 PBR / GBuffer 的 u_InstanceTransforms
 // 同区（t1024，float4x4）；两个可写数组在 space2 的 UAV 区间（u0 可见索引、u256 间接命令，各 256 个）
@@ -58,7 +63,7 @@ void main(uint3 id : SV_DispatchThreadID) {
     if (id.x >= instanceCount) return;
 
     // 1. 实例世界矩阵 → 局部包围盒的 8 个角变换到世界空间求 AABB
-    float4x4 M = u_Instances[instanceBufferHandle][id.x];
+    float4x4 M = HE_BINDLESS_BUF(u_Instances, instanceBufferHandle)[id.x];
     float3 mn = float3(1e30, 1e30, 1e30);
     float3 mx = float3(-1e30, -1e30, -1e30);
     [unroll]
@@ -78,6 +83,6 @@ void main(uint3 id : SV_DispatchThreadID) {
 
     // 3. 通过 → 压缩写入可见列表，并原子累加本组件的实例计数
     uint slot;
-    InterlockedAdd(u_Commands[commandHandle][0].instanceCount, 1u, slot);
-    u_VisibleIndices[visibleBufferHandle][slot] = id.x;
+    InterlockedAdd(HE_BINDLESS_BUF(u_Commands, commandHandle)[0].instanceCount, 1u, slot);
+    HE_BINDLESS_BUF(u_VisibleIndices, visibleBufferHandle)[slot] = id.x;
 }

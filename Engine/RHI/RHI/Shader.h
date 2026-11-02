@@ -6,6 +6,7 @@
 #include "Core/Types.h"
 
 #include <span>
+#include <type_traits>
 #include <vector>
 
 // ============================================================
@@ -33,6 +34,8 @@ struct ShaderBytecode {
     std::vector<u32>        spirv;    // SPIR-V binary
     // For D3D12: DXIL
     std::vector<u8>         dxil;
+    // For D3D11: DXBC（SM 5.0，由 ShaderToDxil --dxbc 生成）
+    std::vector<u8>         dxbc;
     String                  entryPoint = kDefaultShaderEntryPoint;
 };
 
@@ -58,6 +61,22 @@ inline ShaderBytecode MakeShaderBytecode(ShaderStage stage,
     bc.spirv.assign(std::begin(spv), std::end(spv));
     bc.dxil.assign(std::begin(dxil), std::end(dxil));
     bc.entryPoint = entry ? entry : kDefaultShaderEntryPoint;
+    return bc;
+}
+
+/// 三套字节码（再加 D3D11 的 DXBC）。
+///
+/// 【requires 约束】老调用点 `MakeShaderBytecode(stage, spv, dxil, "main")` 的第 4 个
+/// 参数是入口名字符串；若不加约束，本模板会把 "main" 当成 DXBC 容器精确匹配而抢走重载。
+template <class TSpv, class TDxil, class TDxbc>
+    requires (!std::is_convertible_v<const TDxbc&, const char*>)
+inline ShaderBytecode MakeShaderBytecode(ShaderStage stage,
+                                         const TSpv& spv,
+                                         const TDxil& dxil,
+                                         const TDxbc& dxbc,
+                                         const char* entry = kDefaultShaderEntryPoint) {
+    ShaderBytecode bc = MakeShaderBytecode(stage, spv, dxil, entry);
+    bc.dxbc.assign(std::begin(dxbc), std::end(dxbc));
     return bc;
 }
 

@@ -86,12 +86,16 @@ struct InstanceObject {
 static const uint kNaniteRasterDispatchWidth = 1024u;
 uint naniteRasterSlot(uint3 gid) { return gid.x + gid.y * kNaniteRasterDispatchWidth; }
 
+#if defined(HE_SHADER_D3D11)
+// D3D11（SM 5.0）没有无界资源数组：材质纹理从后端的纹理数组桶取（按 bindless 句柄查表，
+// D3D11 后端实现规划 M6）；没分桶的纹理不采样，只用材质常量（baseColorFactor / metallic / roughness）
+#include "TexBuckets.slang"
+#elif defined(HE_SHADER_D3D12)
 // 13/14 是 bindless 纹理 / 采样器数组（与 GBuffer 路径同一个堆、同一套下标）。
 // 【D3D12 必须显式写寄存器】未写 register 的无界数组会被 dxc 自动分到 t0,space1 / s0,space2：
 //   space1 是别的描述符集（本模块只绑 set 0），读到错误资源或未初始化的根参数。这里与 common.slang 的
 //   u_Textures / u_Samplers 同一约定：放进 space2 的 bindless 表、定长 1024（D3D12 后端每次绘制 /
 //   派发前都把 space2 的 SRV / 采样器表指向 bindless 堆）。Vulkan 仍是 set 0 的 binding 13/14 无界数组
-#if defined(HE_SHADER_D3D12)
 [[vk::binding(13, 0)]] Texture2D<float4>                     u_MaterialTextures[1024] : register(t0, space2);
 [[vk::binding(14, 0)]] SamplerState                          u_MaterialSamplers[1024] : register(s0, space2);
 #else
@@ -247,6 +251,7 @@ bool softRasterEvaluateMaterial(uint materialIndex, float2 uv,
     outAlbedo = material.baseColorFactor.rgb;
     float mrG = 1.0;   // 无 MetallicRough 纹理：g（粗糙度）不调制
     float mrB = 0.0;   // 无 MetallicRough 纹理：b（金属度）为 0（与 GBuffer 路径的中性值一致）
+#if !defined(HE_SHADER_D3D11)
     if ((material.textureMask & NANITE_TEXMASK_BASECOLOR) != 0u) {
         uint slot = material.bindlessTextureBase + NANITE_TEXSLOT_BASECOLOR;
         // 【为什么是 `SampleLevel(..., 0)` 而不是 `Sample`】compute 入口没有导数（quad）语义：
@@ -263,6 +268,21 @@ bool softRasterEvaluateMaterial(uint materialIndex, float2 uv,
         mrG = mr.g;
         mrB = mr.b;
     }
+#else
+    // 与上面同一口径（显式 LOD 0）；句柄没有分桶时跳过该纹理（等同于没有这张纹理）
+    uint  bucket;
+    float layer;
+    if ((material.textureMask & NANITE_TEXMASK_BASECOLOR) != 0u &&
+        HE_TexBucketLookup(material.bindlessTextureBase + NANITE_TEXSLOT_BASECOLOR, bucket, layer)) {
+        outAlbedo *= HE_TexBucketSampleLevel(bucket, float3(uv, layer), 0.0).rgb;
+    }
+    if ((material.textureMask & NANITE_TEXMASK_METALLICROUGH) != 0u &&
+        HE_TexBucketLookup(material.bindlessTextureBase + NANITE_TEXSLOT_METALLICROUGH, bucket, layer)) {
+        float4 mr = HE_TexBucketSampleLevel(bucket, float3(uv, layer), 0.0);
+        mrG = mr.g;
+        mrB = mr.b;
+    }
+#endif
     metallic  = material.metallicFactor * mrB;
     roughness = clamp(material.roughnessFactor * mrG, 0.04, 1.0);
     return true;

@@ -28,8 +28,10 @@
 #include <unordered_set>
 #include "Fullscreen.vert.spv.h"
 #include "Fullscreen.vert.dxil.h"
+#include "Fullscreen.vert.dxbc.h"
 #include "FullscreenCopy.frag.spv.h"
 #include "FullscreenCopy.frag.dxil.h"
+#include "FullscreenCopy.frag.dxbc.h"
 
 // ── DGC 开关（Device Generated Commands，VK_EXT_device_generated_commands）──
 // 语义：`true` = 让 **GPU 自己生成绘制命令**（GPU-driven 绘制）——GPU 侧的实例剔除与
@@ -627,6 +629,13 @@ void DeferredPipeline::Shutdown() {
 // CreateTextureDescriptorSet 已移除 — 使用全局 bindless 纹理数组替代
 
 void DeferredPipeline::SetGBufferMode(GBufferRenderer::Mode mode) {
+    // GPU 驱动路径一次间接绘制覆盖多个材质，材质纹理只能按物体取（bindless 或 D3D11 的纹理数组桶）：
+    // 两者都没有的后端强制走 CPU 路径（D3D11 后端实现规划 3.2 的 C 类、M6）
+    if (mode == GBufferRenderer::Mode::GPU && m_Device && m_Device->GetCaps().maxBindlessResources == 0 &&
+        !m_Device->GetCaps().supportsTextureArrayMaterials) {
+        HE_CORE_WARN("DeferredPipeline: 当前后端没有 bindless，GBuffer 的 GPU 驱动路径不可用，改用 CPU 路径");
+        mode = GBufferRenderer::Mode::CPU;
+    }
     if (m_GBuffer) m_GBuffer->SetMode(mode);
 }
 

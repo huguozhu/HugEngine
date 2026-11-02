@@ -30,6 +30,23 @@
     #define GPU_CONST_BEGIN
     #define GPU_CONST_END
     #define GPU_CONST(decl) static const decl
+
+    // bindless 缓冲数组的访问：Vulkan / D3D12 按句柄取数组元素；D3D11（SM 5.0 不能动态索引资源数组）
+    // 下同名资源是单个缓冲，句柄由渲染层经 SetNonBindlessHandle 交给后端（见 kGPUBinding_NB_*）
+    #if defined(HE_SHADER_D3D11)
+        #define HE_BINDLESS_BUF(name, handle) name
+    #else
+        #define HE_BINDLESS_BUF(name, handle) name[handle]
+    #endif
+
+    // 单 mip 纹理（阴影贴图、RSM 等渲染目标）的采样：D3D11（fxc / SM 5.0）不允许隐式导数采样
+    // 出现在动态次数的循环里（光源循环里的 PCF 等，报 X3511 / X3531），对只有 1 级 mip 的
+    // 纹理改用 SampleLevel(…, 0) 结果完全相同；其它后端展开后与原写法逐字相同
+    #if defined(HE_SHADER_D3D11)
+        #define HE_SAMPLE_L0(tex, smp, uv) tex.SampleLevel(smp, uv, 0)
+    #else
+        #define HE_SAMPLE_L0(tex, smp, uv) tex.Sample(smp, uv)
+    #endif
 #endif
 
 // ============================================================
@@ -48,6 +65,25 @@ GPU_CONST(GPU_UINT kGPUBinding_ObjectData       = 2);   // Object SSBO
 GPU_CONST(GPU_UINT kGPUBinding_BindlessTextures = 5);   // Bindless 纹理数组
 GPU_CONST(GPU_UINT kGPUBinding_BindlessSamplers = 6);   // Bindless 采样器数组
 GPU_CONST(GPU_UINT kGPUBinding_BindlessSSBO     = 30);  // Bindless SSBO 数组（最高 binding，VARIABLE_COUNT）
+
+// --- 非 bindless 后端（D3D11 / SM 5.0）的替代绑定（set=0，只出现在 HE_SHADER_D3D11 的声明里）---
+// SM 5.0 不能用运行时句柄索引资源数组：bindless 数组在 D3D11 下换成下面这些单个资源，
+// 由渲染层调用 IRHICommandList::SetNonBindlessHandle(binding, 句柄) 指定本次绘制用 bindless 堆里的哪个资源。
+// 编号选在 Vulkan 布局用不到的范围；UAV 的槽位上限是 63，所以可写缓冲用 60 / 61。
+GPU_CONST(GPU_UINT kGPUBinding_NB_MaterialTextures = 100);  // 材质 4 张纹理 t100..t103（句柄 = 材质纹理基址）
+GPU_CONST(GPU_UINT kGPUBinding_NB_MaterialSamplers = 104);  // 对应的 4 个采样器（与纹理同一个基址）
+GPU_CONST(GPU_UINT kGPUBinding_NB_InstanceTransforms = 110); // 实例世界矩阵 StructuredBuffer<float4x4>
+GPU_CONST(GPU_UINT kGPUBinding_NB_VisibleInstances  = 111); // 剔除后可见实例下标 StructuredBuffer<uint>
+GPU_CONST(GPU_UINT kGPUBinding_NB_BoneMatrices      = 112); // 骨骼矩阵 StructuredBuffer<float4x4>
+GPU_CONST(GPU_UINT kGPUBinding_NB_Materials         = 113); // 材质参数 StructuredBuffer<GPUMaterialData>
+// 纹理数组桶（M6）：后端把静态纹理按（宽, 高, mip 数, 格式）拷进 ≤ 8 个 Texture2DArray，
+// 并维护「bindless 纹理句柄 → (桶号, 层号)」映射表；着色器先查表，未分桶时退回逐绘制绑定
+GPU_CONST(GPU_UINT kGPUBinding_NB_TexBuckets        = 114); // 纹理数组桶 t114..t121
+GPU_CONST(GPU_UINT kGPUTexBucketCount               = 8);   // 桶数（着色器按字面量下标 switch）
+GPU_CONST(GPU_UINT kGPUBinding_NB_TexBucketMap      = 122); // 句柄 → (1 << 31 | 桶号 << 24 | 层号)，未分桶为 0
+GPU_CONST(GPU_UINT kGPUBinding_NB_TexBucketSampler  = 123); // 桶路径的采样器（线性、重复寻址）
+GPU_CONST(GPU_UINT kGPUBinding_NB_CullVisibleOut    = 60);  // 实例剔除：可见下标（RWStructuredBuffer<uint>）
+GPU_CONST(GPU_UINT kGPUBinding_NB_CullCommandOut    = 61);  // 实例剔除：间接命令（RWStructuredBuffer<IndirectCmd>）
 GPU_CONST(GPU_UINT kGPUBinding_LightGrid        = 7);   // 光源网格 SSBO
 GPU_CONST(GPU_UINT kGPUBinding_LightIndexList   = 8);   // 光源索引列表 SSBO
 // --- 网格着色器几何 SSBO（P9；只出现在 GBuffer 的 per-frame set 里）---

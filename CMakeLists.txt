@@ -34,6 +34,9 @@ option(HUGENGINE_BUILD_SAMPLES   "Build sample projects" ON)
 option(HUGENGINE_BUILD_EDITOR    "Build editor"          ON)
 option(HUGENGINE_BUILD_TESTS     "Build tests"           OFF)
 option(HUGENGINE_RHI_VULKAN      "Enable Vulkan backend" ON)
+# D3D 后端只在 Windows 上可用；非 Windows 平台即使打开也会被忽略
+option(HUGENGINE_RHI_D3D12       "Enable D3D12 backend (Windows only)" ON)
+option(HUGENGINE_RHI_D3D11       "Enable D3D11 backend (Windows only)" ON)
 
 # Vulkan SDK（ImGui Vulkan 后端 + RHI 均需要）
 if(HUGENGINE_RHI_VULKAN)

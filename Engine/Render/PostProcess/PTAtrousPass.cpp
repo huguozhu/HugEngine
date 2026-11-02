@@ -4,6 +4,7 @@
 #include "Core/Assert.h"
 #include "PT_Atrous.comp.spv.h"
 #include "PT_Atrous.comp.dxil.h"   // k_PT_Atrous_comp_spv
+#include "PT_Atrous.comp.dxbc.h"
 
 #include <algorithm>   // std::clamp
 
@@ -63,6 +64,7 @@ bool PTAtrousPass::Initialize(rhi::IRHIDevice* device, const Config& cfg) {
     cs.dxil.assign(std::begin(k_PT_Atrous_comp_dxil), std::end(k_PT_Atrous_comp_dxil));
     cs.dxil.assign(std::begin(k_PT_Atrous_comp_dxil), std::end(k_PT_Atrous_comp_dxil));
     cs.dxil.assign(std::begin(k_PT_Atrous_comp_dxil), std::end(k_PT_Atrous_comp_dxil));
+    cs.dxbc.assign(std::begin(k_PT_Atrous_comp_dxbc), std::end(k_PT_Atrous_comp_dxbc));
     cs.entryPoint = "main";
     rhi::PushConstantRange pc;
     pc.stageMask = rhi::kStageMaskCompute;

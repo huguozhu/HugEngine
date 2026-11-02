@@ -76,7 +76,7 @@ FSOutput fragmentMain(float4 position : SV_Position) {
     float4 texColor = float4(1.0, 1.0, 1.0, 1.0);
     if ((flags & 1u) != 0u) {
         uint handle = (uint)params.y;
-        texColor = u_Textures[handle].Sample(u_Samplers[handle], decalUV);
+        texColor = HE_TEX_SAMPLE(handle, decalUV);
     }
 
     // 7. 不透明度：贴花自身的 opacity × 纹理 alpha（两者都参与，便于用纹理做镂空）

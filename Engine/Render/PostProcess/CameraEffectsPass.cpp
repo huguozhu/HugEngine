@@ -5,8 +5,10 @@
 #include "Core/Assert.h"
 #include "SSAO.vert.spv.h"
 #include "SSAO.vert.dxil.h"
+#include "SSAO.vert.dxbc.h"
 #include "CameraEffects.frag.spv.h"
 #include "CameraEffects.frag.dxil.h"
+#include "CameraEffects.frag.dxbc.h"
 
 namespace he::render {
 
@@ -29,12 +31,14 @@ bool CameraEffectsPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 heigh
     vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
     vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
     vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+    vs.dxbc.assign(std::begin(k_SSAO_vert_dxbc), std::end(k_SSAO_vert_dxbc));
     vs.entryPoint = "main";
     fs.stage = rhi::ShaderStage::Pixel;
     fs.spirv = k_CameraEffects_frag_spv;
     fs.dxil.assign(std::begin(k_CameraEffects_frag_dxil), std::end(k_CameraEffects_frag_dxil));
     fs.dxil.assign(std::begin(k_CameraEffects_frag_dxil), std::end(k_CameraEffects_frag_dxil));
     fs.dxil.assign(std::begin(k_CameraEffects_frag_dxil), std::end(k_CameraEffects_frag_dxil));
+    fs.dxbc.assign(std::begin(k_CameraEffects_frag_dxbc), std::end(k_CameraEffects_frag_dxbc));
     fs.entryPoint = "main";
 
     rhi::PushConstantRange pc;

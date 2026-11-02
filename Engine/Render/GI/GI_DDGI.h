@@ -230,6 +230,9 @@ private:
     u32   m_ScreenCellsX = 0, m_ScreenCellsY = 0, m_ScreenW = 0, m_ScreenH = 0;
     float m_ScreenMaxMatchDistance = 0.0f;
     rhi::RHIBufferHandle m_StatsBuffer{};   // A-3
+    // 可选输入（RSM / 光追射线辐射度 / Screen Probe）的占位：保证静态引用的描述符始终有效
+    rhi::RHITextureHandle m_PlaceholderTex{};       // RSM 位置 / 辐射度（1×1 黑）
+    rhi::RHIBufferHandle  m_PlaceholderBufs[3]{};   // 射线辐射度、Screen Probe、单元映射
     void* m_StatsMapped = nullptr;
     u32   m_StatsFrame = 0;
     float m_ProbeRelChange = 0.0f;

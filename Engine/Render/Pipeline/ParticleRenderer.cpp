@@ -12,18 +12,25 @@
 // Slang → SPIR-V headers
 #include "ParticleInit.comp.spv.h"
 #include "ParticleInit.comp.dxil.h"
+#include "ParticleInit.comp.dxbc.h"
 #include "ParticleEmit.comp.spv.h"
 #include "ParticleEmit.comp.dxil.h"
+#include "ParticleEmit.comp.dxbc.h"
 #include "ParticleSimulate.comp.spv.h"
 #include "ParticleSimulate.comp.dxil.h"
+#include "ParticleSimulate.comp.dxbc.h"
 #include "ParticleCulling.comp.spv.h"
 #include "ParticleCulling.comp.dxil.h"
+#include "ParticleCulling.comp.dxbc.h"
 #include "ParticleSort.comp.spv.h"
 #include "ParticleSort.comp.dxil.h"
+#include "ParticleSort.comp.dxbc.h"
 #include "ParticleRender.vert.spv.h"
 #include "ParticleRender.vert.dxil.h"
+#include "ParticleRender.vert.dxbc.h"
 #include "ParticleRender.frag.spv.h"
 #include "ParticleRender.frag.dxil.h"
+#include "ParticleRender.frag.dxbc.h"
 
 namespace he::render {
 
@@ -237,6 +244,7 @@ bool ParticleRenderer::Initialize(rhi::IRHIDevice* device) {
     m_InitCS.dxil.assign(std::begin(k_ParticleInit_comp_dxil), std::end(k_ParticleInit_comp_dxil));
     m_InitCS.dxil.assign(std::begin(k_ParticleInit_comp_dxil), std::end(k_ParticleInit_comp_dxil));
     m_InitCS.dxil.assign(std::begin(k_ParticleInit_comp_dxil), std::end(k_ParticleInit_comp_dxil));
+    m_InitCS.dxbc.assign(std::begin(k_ParticleInit_comp_dxbc), std::end(k_ParticleInit_comp_dxbc));
     m_InitCS.entryPoint = "main";
 
     m_EmitCS.stage      = rhi::ShaderStage::Compute;
@@ -244,6 +252,7 @@ bool ParticleRenderer::Initialize(rhi::IRHIDevice* device) {
     m_EmitCS.dxil.assign(std::begin(k_ParticleEmit_comp_dxil), std::end(k_ParticleEmit_comp_dxil));
     m_EmitCS.dxil.assign(std::begin(k_ParticleEmit_comp_dxil), std::end(k_ParticleEmit_comp_dxil));
     m_EmitCS.dxil.assign(std::begin(k_ParticleEmit_comp_dxil), std::end(k_ParticleEmit_comp_dxil));
+    m_EmitCS.dxbc.assign(std::begin(k_ParticleEmit_comp_dxbc), std::end(k_ParticleEmit_comp_dxbc));
     m_EmitCS.entryPoint = "main";
 
     m_SimCS.stage       = rhi::ShaderStage::Compute;
@@ -251,6 +260,7 @@ bool ParticleRenderer::Initialize(rhi::IRHIDevice* device) {
     m_SimCS.dxil.assign(std::begin(k_ParticleSimulate_comp_dxil), std::end(k_ParticleSimulate_comp_dxil));
     m_SimCS.dxil.assign(std::begin(k_ParticleSimulate_comp_dxil), std::end(k_ParticleSimulate_comp_dxil));
     m_SimCS.dxil.assign(std::begin(k_ParticleSimulate_comp_dxil), std::end(k_ParticleSimulate_comp_dxil));
+    m_SimCS.dxbc.assign(std::begin(k_ParticleSimulate_comp_dxbc), std::end(k_ParticleSimulate_comp_dxbc));
     m_SimCS.entryPoint  = "main";
 
     m_CullingCS.stage      = rhi::ShaderStage::Compute;
@@ -258,6 +268,7 @@ bool ParticleRenderer::Initialize(rhi::IRHIDevice* device) {
     m_CullingCS.dxil.assign(std::begin(k_ParticleCulling_comp_dxil), std::end(k_ParticleCulling_comp_dxil));
     m_CullingCS.dxil.assign(std::begin(k_ParticleCulling_comp_dxil), std::end(k_ParticleCulling_comp_dxil));
     m_CullingCS.dxil.assign(std::begin(k_ParticleCulling_comp_dxil), std::end(k_ParticleCulling_comp_dxil));
+    m_CullingCS.dxbc.assign(std::begin(k_ParticleCulling_comp_dxbc), std::end(k_ParticleCulling_comp_dxbc));
     m_CullingCS.entryPoint = "main";
 
     m_SortCS.stage      = rhi::ShaderStage::Compute;
@@ -265,6 +276,7 @@ bool ParticleRenderer::Initialize(rhi::IRHIDevice* device) {
     m_SortCS.dxil.assign(std::begin(k_ParticleSort_comp_dxil), std::end(k_ParticleSort_comp_dxil));
     m_SortCS.dxil.assign(std::begin(k_ParticleSort_comp_dxil), std::end(k_ParticleSort_comp_dxil));
     m_SortCS.dxil.assign(std::begin(k_ParticleSort_comp_dxil), std::end(k_ParticleSort_comp_dxil));
+    m_SortCS.dxbc.assign(std::begin(k_ParticleSort_comp_dxbc), std::end(k_ParticleSort_comp_dxbc));
     m_SortCS.entryPoint = "main";
 
     // Layouts
@@ -332,6 +344,7 @@ bool ParticleRenderer::Initialize(rhi::IRHIDevice* device) {
     m_RenderVS.dxil.assign(std::begin(k_ParticleRender_vert_dxil), std::end(k_ParticleRender_vert_dxil));
     m_RenderVS.dxil.assign(std::begin(k_ParticleRender_vert_dxil), std::end(k_ParticleRender_vert_dxil));
     m_RenderVS.dxil.assign(std::begin(k_ParticleRender_vert_dxil), std::end(k_ParticleRender_vert_dxil));
+    m_RenderVS.dxbc.assign(std::begin(k_ParticleRender_vert_dxbc), std::end(k_ParticleRender_vert_dxbc));
     m_RenderVS.entryPoint = "vertexMain";
 
     m_RenderFS.stage      = rhi::ShaderStage::Pixel;
@@ -339,6 +352,7 @@ bool ParticleRenderer::Initialize(rhi::IRHIDevice* device) {
     m_RenderFS.dxil.assign(std::begin(k_ParticleRender_frag_dxil), std::end(k_ParticleRender_frag_dxil));
     m_RenderFS.dxil.assign(std::begin(k_ParticleRender_frag_dxil), std::end(k_ParticleRender_frag_dxil));
     m_RenderFS.dxil.assign(std::begin(k_ParticleRender_frag_dxil), std::end(k_ParticleRender_frag_dxil));
+    m_RenderFS.dxbc.assign(std::begin(k_ParticleRender_frag_dxbc), std::end(k_ParticleRender_frag_dxbc));
     m_RenderFS.entryPoint = "fragmentMain";
 
     {

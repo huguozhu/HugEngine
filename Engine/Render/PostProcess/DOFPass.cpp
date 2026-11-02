@@ -7,10 +7,13 @@
 
 #include "SSAO.vert.spv.h"
 #include "SSAO.vert.dxil.h"
+#include "SSAO.vert.dxbc.h"
 #include "DOF_CoC.frag.spv.h"
 #include "DOF_CoC.frag.dxil.h"
+#include "DOF_CoC.frag.dxbc.h"
 #include "DOF_Composite.frag.spv.h"
 #include "DOF_Composite.frag.dxil.h"
+#include "DOF_Composite.frag.dxbc.h"
 
 namespace he::render {
 
@@ -40,12 +43,14 @@ bool DOFPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
         vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
         vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+        vs.dxbc.assign(std::begin(k_SSAO_vert_dxbc), std::end(k_SSAO_vert_dxbc));
         vs.entryPoint = "vertexMain";
         fs.stage = rhi::ShaderStage::Pixel;
         fs.spirv = k_DOF_CoC_frag_spv;
         fs.dxil.assign(std::begin(k_DOF_CoC_frag_dxil), std::end(k_DOF_CoC_frag_dxil));
         fs.dxil.assign(std::begin(k_DOF_CoC_frag_dxil), std::end(k_DOF_CoC_frag_dxil));
         fs.dxil.assign(std::begin(k_DOF_CoC_frag_dxil), std::end(k_DOF_CoC_frag_dxil));
+        fs.dxbc.assign(std::begin(k_DOF_CoC_frag_dxbc), std::end(k_DOF_CoC_frag_dxbc));
         fs.entryPoint = "fragmentMain";
 
         rhi::PushConstantRange pc;
@@ -93,12 +98,14 @@ bool DOFPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
         vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
         vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+        vs.dxbc.assign(std::begin(k_SSAO_vert_dxbc), std::end(k_SSAO_vert_dxbc));
         vs.entryPoint = "vertexMain";
         fs.stage = rhi::ShaderStage::Pixel;
         fs.spirv = k_DOF_Composite_frag_spv;
         fs.dxil.assign(std::begin(k_DOF_Composite_frag_dxil), std::end(k_DOF_Composite_frag_dxil));
         fs.dxil.assign(std::begin(k_DOF_Composite_frag_dxil), std::end(k_DOF_Composite_frag_dxil));
         fs.dxil.assign(std::begin(k_DOF_Composite_frag_dxil), std::end(k_DOF_Composite_frag_dxil));
+        fs.dxbc.assign(std::begin(k_DOF_Composite_frag_dxbc), std::end(k_DOF_Composite_frag_dxbc));
         fs.entryPoint = "fragmentMain";
 
         rhi::PushConstantRange pc;

@@ -14,18 +14,25 @@
 #include "Lumen/SurfaceCache.slang"     // 共享布局（与 C++ 镜像同源）
 #include "SurfaceCache_Capture.comp.spv.h"
 #include "SurfaceCache_Capture.comp.dxil.h"
+#include "SurfaceCache_Capture.comp.dxbc.h"
 #include "ScreenProbe_Gather.comp.spv.h"
 #include "ScreenProbe_Gather.comp.dxil.h"
+#include "ScreenProbe_Gather.comp.dxbc.h"
 #include "Lumen_SurfaceCacheSample.comp.spv.h"
 #include "Lumen_SurfaceCacheSample.comp.dxil.h"
+#include "Lumen_SurfaceCacheSample.comp.dxbc.h"
 #include "Lumen_ScreenProbe_SHProject.comp.spv.h"
 #include "Lumen_ScreenProbe_SHProject.comp.dxil.h"
+#include "Lumen_ScreenProbe_SHProject.comp.dxbc.h"
 #include "ScreenProbe_Trace.comp.spv.h"
 #include "ScreenProbe_Trace.comp.dxil.h"
+#include "ScreenProbe_Trace.comp.dxbc.h"
 #include "SurfaceCache_Feedback.comp.spv.h"
 #include "SurfaceCache_Feedback.comp.dxil.h"
+#include "SurfaceCache_Feedback.comp.dxbc.h"
 #include "SurfaceCache_PageCheck.comp.spv.h"
 #include "SurfaceCache_PageCheck.comp.dxil.h"
+#include "SurfaceCache_PageCheck.comp.dxbc.h"
 
 #include <algorithm>
 #include <chrono>   // 步骤 37：页表上传三段耗时
@@ -187,6 +194,7 @@ void LumenScene::CreatePageCheckGPUObjects() {
     cs.dxil.assign(std::begin(k_SurfaceCache_PageCheck_comp_dxil), std::end(k_SurfaceCache_PageCheck_comp_dxil));
     cs.dxil.assign(std::begin(k_SurfaceCache_PageCheck_comp_dxil), std::end(k_SurfaceCache_PageCheck_comp_dxil));
     cs.dxil.assign(std::begin(k_SurfaceCache_PageCheck_comp_dxil), std::end(k_SurfaceCache_PageCheck_comp_dxil));
+    cs.dxbc.assign(std::begin(k_SurfaceCache_PageCheck_comp_dxbc), std::end(k_SurfaceCache_PageCheck_comp_dxbc));
     cs.entryPoint = "main";
 
     rhi::PipelineStateDesc pso;
@@ -287,6 +295,7 @@ void LumenScene::CreateCaptureGPUObjects() {
     cs.dxil.assign(std::begin(k_SurfaceCache_Capture_comp_dxil), std::end(k_SurfaceCache_Capture_comp_dxil));
     cs.dxil.assign(std::begin(k_SurfaceCache_Capture_comp_dxil), std::end(k_SurfaceCache_Capture_comp_dxil));
     cs.dxil.assign(std::begin(k_SurfaceCache_Capture_comp_dxil), std::end(k_SurfaceCache_Capture_comp_dxil));
+    cs.dxbc.assign(std::begin(k_SurfaceCache_Capture_comp_dxbc), std::end(k_SurfaceCache_Capture_comp_dxbc));
     cs.entryPoint = "main";
 
     rhi::PipelineStateDesc pso;
@@ -552,6 +561,7 @@ void LumenScene::CreateShadeGPUObjects() {
     cs.dxil.assign(std::begin(k_Lumen_SurfaceCacheSample_comp_dxil), std::end(k_Lumen_SurfaceCacheSample_comp_dxil));
     cs.dxil.assign(std::begin(k_Lumen_SurfaceCacheSample_comp_dxil), std::end(k_Lumen_SurfaceCacheSample_comp_dxil));
     cs.dxil.assign(std::begin(k_Lumen_SurfaceCacheSample_comp_dxil), std::end(k_Lumen_SurfaceCacheSample_comp_dxil));
+    cs.dxbc.assign(std::begin(k_Lumen_SurfaceCacheSample_comp_dxbc), std::end(k_Lumen_SurfaceCacheSample_comp_dxbc));
     cs.entryPoint = "main";
 
     rhi::PipelineStateDesc pso;
@@ -798,6 +808,7 @@ void LumenScene::CreateProbeTraceGPUObjects() {
     cs.dxil.assign(std::begin(k_ScreenProbe_Trace_comp_dxil), std::end(k_ScreenProbe_Trace_comp_dxil));
     cs.dxil.assign(std::begin(k_ScreenProbe_Trace_comp_dxil), std::end(k_ScreenProbe_Trace_comp_dxil));
     cs.dxil.assign(std::begin(k_ScreenProbe_Trace_comp_dxil), std::end(k_ScreenProbe_Trace_comp_dxil));
+    cs.dxbc.assign(std::begin(k_ScreenProbe_Trace_comp_dxbc), std::end(k_ScreenProbe_Trace_comp_dxbc));
     cs.entryPoint = "main";
 
     rhi::PipelineStateDesc pso;
@@ -951,6 +962,7 @@ void LumenScene::CreateProbeGPUObjects() {
     cs.dxil.assign(std::begin(k_ScreenProbe_Gather_comp_dxil), std::end(k_ScreenProbe_Gather_comp_dxil));
     cs.dxil.assign(std::begin(k_ScreenProbe_Gather_comp_dxil), std::end(k_ScreenProbe_Gather_comp_dxil));
     cs.dxil.assign(std::begin(k_ScreenProbe_Gather_comp_dxil), std::end(k_ScreenProbe_Gather_comp_dxil));
+    cs.dxbc.assign(std::begin(k_ScreenProbe_Gather_comp_dxbc), std::end(k_ScreenProbe_Gather_comp_dxbc));
     cs.entryPoint = "main";
 
     rhi::PipelineStateDesc pso;
@@ -1118,6 +1130,7 @@ void LumenScene::CreateFeedbackGPUObjects() {
     cs.dxil.assign(std::begin(k_SurfaceCache_Feedback_comp_dxil), std::end(k_SurfaceCache_Feedback_comp_dxil));
     cs.dxil.assign(std::begin(k_SurfaceCache_Feedback_comp_dxil), std::end(k_SurfaceCache_Feedback_comp_dxil));
     cs.dxil.assign(std::begin(k_SurfaceCache_Feedback_comp_dxil), std::end(k_SurfaceCache_Feedback_comp_dxil));
+    cs.dxbc.assign(std::begin(k_SurfaceCache_Feedback_comp_dxbc), std::end(k_SurfaceCache_Feedback_comp_dxbc));
     cs.entryPoint = "main";
 
     rhi::PipelineStateDesc pso;
@@ -1370,6 +1383,7 @@ void LumenScene::CreateSHGPUObjects() {
     cs.dxil.assign(std::begin(k_Lumen_ScreenProbe_SHProject_comp_dxil), std::end(k_Lumen_ScreenProbe_SHProject_comp_dxil));
     cs.dxil.assign(std::begin(k_Lumen_ScreenProbe_SHProject_comp_dxil), std::end(k_Lumen_ScreenProbe_SHProject_comp_dxil));
     cs.dxil.assign(std::begin(k_Lumen_ScreenProbe_SHProject_comp_dxil), std::end(k_Lumen_ScreenProbe_SHProject_comp_dxil));
+    cs.dxbc.assign(std::begin(k_Lumen_ScreenProbe_SHProject_comp_dxbc), std::end(k_Lumen_ScreenProbe_SHProject_comp_dxbc));
     cs.entryPoint = "main";
 
     rhi::PipelineStateDesc pso;

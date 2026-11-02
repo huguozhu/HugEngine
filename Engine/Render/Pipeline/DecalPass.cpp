@@ -3,6 +3,7 @@
 // ============================================================
 
 #include "Pipeline/DecalPass.h"
+#include "Pipeline/NonBindless.h"   // kGPUBinding_NB_*（非 bindless 后端的贴花纹理句柄）
 #include "Pipeline/GBufferRenderer.h"
 #include "Pipeline/Camera.h"
 #include "Scene/DecalComponent.h"
@@ -12,8 +13,10 @@
 
 #include "DecalProject.vert.spv.h"
 #include "DecalProject.vert.dxil.h"
+#include "DecalProject.vert.dxbc.h"
 #include "DecalProject.frag.spv.h"
 #include "DecalProject.frag.dxil.h"
+#include "DecalProject.frag.dxbc.h"
 
 #include <algorithm>
 #include <cmath>
@@ -115,9 +118,9 @@ bool DecalPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     // 同一图像既做附件又做采样 = feedback loop（校验层会直接报错）。
     // 同时带上 SPIR-V 与 DXIL：此前只给了 SPIR-V，D3D12 下 PSO 因缺少着色器而创建失败
     rhi::ShaderBytecode vs = rhi::MakeShaderBytecode(rhi::ShaderStage::Vertex,
-        k_DecalProject_vert_spv, k_DecalProject_vert_dxil, "main");
+        k_DecalProject_vert_spv, k_DecalProject_vert_dxil, k_DecalProject_vert_dxbc, "main");
     rhi::ShaderBytecode fs = rhi::MakeShaderBytecode(rhi::ShaderStage::Pixel,
-        k_DecalProject_frag_spv, k_DecalProject_frag_dxil, "main");
+        k_DecalProject_frag_spv, k_DecalProject_frag_dxil, k_DecalProject_frag_dxbc, "main");
 
     rhi::VertexInputLayout vl;
     vl.stride = sizeof(float3);
@@ -292,6 +295,8 @@ void DecalPass::Render(rhi::IRHICommandList* cmd, const FrameSceneSnapshot& snap
         snprintf(label, sizeof(label), "Decal Project #%u", m_LastDecalCount);
         cmd->SetDrawDebugLabel(label);
         cmd->SetPushConstants(0, sizeof(pcs), &pcs);
+        // 非 bindless 后端：贴花纹理按句柄取（着色器用 HE_TEX_SAMPLE，取材质纹理槽 0）
+        cmd->SetNonBindlessHandle(kGPUBinding_NB_MaterialTextures, hasTex ? d.materialID : 0u);
         cmd->SetVertexBuffer(ResB(m_CubeVB), 0);
         cmd->SetIndexBuffer(ResB(m_CubeIB));
         cmd->DrawIndexed(36, 1, 0, 0);

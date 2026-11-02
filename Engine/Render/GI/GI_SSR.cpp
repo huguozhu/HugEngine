@@ -5,8 +5,10 @@
 #include "Core/Log.h"
 #include "SSAO.vert.spv.h"
 #include "SSAO.vert.dxil.h"
+#include "SSAO.vert.dxbc.h"
 #include "SSR.frag.spv.h"
 #include "SSR.frag.dxil.h"
+#include "SSR.frag.dxbc.h"
 #include <glm/gtc/matrix_transform.hpp>
 #include <cstring>
 
@@ -69,12 +71,14 @@ bool GI_SSR::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
     vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
     vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+    vs.dxbc.assign(std::begin(k_SSAO_vert_dxbc), std::end(k_SSAO_vert_dxbc));
     vs.entryPoint = "vertexMain";
     fs.stage = rhi::ShaderStage::Pixel;
     fs.spirv = k_SSR_frag_spv;
     fs.dxil.assign(std::begin(k_SSR_frag_dxil), std::end(k_SSR_frag_dxil));
     fs.dxil.assign(std::begin(k_SSR_frag_dxil), std::end(k_SSR_frag_dxil));
     fs.dxil.assign(std::begin(k_SSR_frag_dxil), std::end(k_SSR_frag_dxil));
+    fs.dxbc.assign(std::begin(k_SSR_frag_dxbc), std::end(k_SSR_frag_dxbc));
     fs.entryPoint = "fragmentMain";
     rhi::PipelineStateDesc d;
     d.vertexShader = &vs;

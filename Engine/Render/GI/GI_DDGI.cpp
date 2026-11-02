@@ -6,6 +6,7 @@
 #include "Subsystem/RenderSubsystem.h"
 #include "DDGI.comp.spv.h"
 #include "DDGI.comp.dxil.h"
+#include "DDGI.comp.dxbc.h"
 #include <cstring>
 #include <cstdio>
 
@@ -127,6 +128,40 @@ bool GI_DDGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         }
     }
 
+    // 可选输入的占位（RSM、光追射线辐射度、Screen Probe）：功能未启用时着色器按标志位不采样它们，
+    // 但描述符仍要指向有效资源 —— 只要着色器静态引用了某个 binding，未写入的描述符就是非法的
+    // （D3D11 下按空资源绑定并告警；Vulkan 要求静态使用的描述符必须有效）。启用时由
+    // SetRSM / SetTracedRadiance / SetScreenProbeInput 覆盖
+    {
+        u8 black[4] = { 0, 0, 0, 0 };
+        rhi::TextureDesc td;
+        td.format      = rhi::Format::RGBA8_UNORM;
+        td.width       = 1;
+        td.height      = 1;
+        td.mipLevels   = 1;
+        td.usage       = rhi::TextureUsage::ShaderResource;
+        td.initialData = black;
+        m_PlaceholderTex = device->CreateTextureHandle(td);
+        if (m_PlaceholderTex.IsValid()) {
+            device->UpdateDescriptorSet(m_Set, kDDGIBindRSMPosition, rhi::DescriptorType::CombinedImageSampler,
+                                        ResT(m_PlaceholderTex), ResS(m_LinearSampler));
+            device->UpdateDescriptorSet(m_Set, kDDGIBindRSMRadiance, rhi::DescriptorType::CombinedImageSampler,
+                                        ResT(m_PlaceholderTex), ResS(m_LinearSampler));
+        }
+        // 三个缓冲的元素类型不同（float4 / ScreenProbe / uint）：每个 binding 一个，步长交给后端按着色器定
+        const u32 bufBindings[3] = { kDDGIBindTracedRadiance, kDDGIBindScreenProbes, kDDGIBindScreenCells };
+        for (u32 i = 0; i < 3; ++i) {
+            rhi::BufferDesc bd;
+            bd.size  = 256;
+            bd.usage = rhi::BufferUsage::Storage;
+            m_PlaceholderBufs[i] = device->CreateBufferHandle(bd);
+            if (m_PlaceholderBufs[i].IsValid()) {
+                device->UpdateDescriptorSet(m_Set, bufBindings[i], rhi::DescriptorType::StorageBuffer,
+                                            ResB(m_PlaceholderBufs[i]));
+            }
+        }
+    }
+
     // 预绑定前帧 HDR：纹理由共享组件持有，可能因 resize 被重建，故按代次判断是否重绑
     BindRadianceHistory();
 
@@ -140,6 +175,7 @@ bool GI_DDGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     cs.dxil.assign(std::begin(k_DDGI_comp_dxil), std::end(k_DDGI_comp_dxil));
     cs.dxil.assign(std::begin(k_DDGI_comp_dxil), std::end(k_DDGI_comp_dxil));
     cs.dxil.assign(std::begin(k_DDGI_comp_dxil), std::end(k_DDGI_comp_dxil));
+    cs.dxbc.assign(std::begin(k_DDGI_comp_dxbc), std::end(k_DDGI_comp_dxbc));
     cs.entryPoint = "main";
 
     rhi::PipelineStateDesc psoDesc;
@@ -171,6 +207,8 @@ void GI_DDGI::Shutdown() {
     m_Device->DestroyBufferHandle(m_GridUniform); m_GridUniform = {};
     m_Device->DestroySamplerHandle(m_PointSampler); m_PointSampler = {};
     m_Device->DestroySamplerHandle(m_LinearSampler); m_LinearSampler = {};
+    m_Device->DestroyTextureHandle(m_PlaceholderTex); m_PlaceholderTex = {};
+    for (auto& b : m_PlaceholderBufs) { m_Device->DestroyBufferHandle(b); b = {}; }
     m_Radiance = nullptr;              // 非拥有，仅清引用
     m_RadianceGeneration = 0;
     m_Device = nullptr;

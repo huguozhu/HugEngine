@@ -161,7 +161,7 @@ float3 ShadeWithLight(GPULight light, float3 worldPos, float3 N, float3 V,
             if (spotUv.x > 0.0 && spotUv.x < 1.0 && spotUv.y > 0.0 && spotUv.y < 1.0) {
                 for (int sx = -1; sx <= 1; sx++)
                     for (int sy = -1; sy <= 1; sy++)
-                        spotShadow += (spotZ <= u_SpotShadowMap.Sample(u_SpotShadowSampler, spotUv + float2(sx, sy) * ts)) ? 1.0 : 0.0;
+                        spotShadow += (spotZ <= HE_SAMPLE_L0(u_SpotShadowMap, u_SpotShadowSampler, spotUv + float2(sx, sy) * ts)) ? 1.0 : 0.0;
                 shadow = spotShadow / 9.0;
             }
             shadow = lerp(1.0, shadow, sm.shadowParams.z);
@@ -177,7 +177,7 @@ float3 ShadeWithLight(GPULight light, float3 worldPos, float3 N, float3 V,
             if (rectUv.x > 0.0 && rectUv.x < 1.0 && rectUv.y > 0.0 && rectUv.y < 1.0) {
                 for (int sx = -2; sx <= 2; sx++)
                     for (int sy = -2; sy <= 2; sy++)
-                        rectShadow += (rectZ <= u_RectShadowMap.Sample(u_RectShadowSampler, rectUv + float2(sx, sy) * ts)) ? 1.0 : 0.0;
+                        rectShadow += (rectZ <= HE_SAMPLE_L0(u_RectShadowMap, u_RectShadowSampler, rectUv + float2(sx, sy) * ts)) ? 1.0 : 0.0;
                 shadow = rectShadow / 25.0;
             }
             shadow = lerp(1.0, shadow, sm.shadowParams.z);
@@ -228,9 +228,9 @@ float3 FwdSampleRSMIndirect(float3 worldPos, float3 N) {
     for (int dx = -2; dx <= 2; dx++) {
         for (int dy = -2; dy <= 2; dy++) {
             float2 uv = saturate(rsmCoord + float2(dx, dy) * rsmRadius);
-            float4 posSample  = u_RSMPositionMap.Sample(u_RSMSampler, uv);
-            float3 sampleN    = normalize(u_RSMNormalMap.Sample(u_RSMSampler, uv).rgb * 2.0 - 1.0);
-            float3 vplRad     = u_RSMRadianceMap.Sample(u_RSMSampler, uv).rgb;
+            float4 posSample  = HE_SAMPLE_L0(u_RSMPositionMap, u_RSMSampler, uv);
+            float3 sampleN    = normalize(HE_SAMPLE_L0(u_RSMNormalMap, u_RSMSampler, uv).rgb * 2.0 - 1.0);
+            float3 vplRad     = HE_SAMPLE_L0(u_RSMRadianceMap, u_RSMSampler, uv).rgb;
             float3 dir        = posSample.xyz - worldPos;
             float  dist2      = max(dot(dir, dir), 0.01);
             float  cosDir     = max(dot(sampleN, -normalize(dir)), 0.0);
@@ -276,7 +276,7 @@ float4 fragmentMain(PBRVSOutput input) : SV_Target0 {
     uint   texMask;                    // 纹理存在位掩码（bit=槽有真实纹理）
     float4 disneyA, disneyB; float disneyC;
     if (useBindlessMaterial != 0u) {
-        GPUMaterialData m = u_Materials[0][obj.materialID >> 2];  // [0]=材质 buffer，[materialID>>2]=buffer 内元素
+        GPUMaterialData m = HE_BINDLESS_BUF(u_Materials, 0)[obj.materialID >> 2];  // [0]=材质 buffer，[materialID>>2]=buffer 内元素
         baseColorF = m.baseColorFactor; emissiveF = m.emissiveFactor;
         metallicF = m.metallicFactor; roughnessF = m.roughnessFactor; aoF = m.aoFactor;
         alphaCutoffF = m.alphaCutoff; dielectricF0F = m.dielectricF0; matFlags = m.materialFlags;
@@ -292,7 +292,7 @@ float4 fragmentMain(PBRVSOutput input) : SV_Target0 {
 
     // 各纹理槽：有真实纹理才采样（无纹理用中性默认，避免占位纹理污染）
     float4 baseColorSample = (texMask & kGPUMaterialTexMask_BaseColor) != 0u
-        ? u_Textures[texBase + kGPUMaterialTexSlot_BaseColor].Sample(u_Samplers[texBase + kGPUMaterialTexSlot_BaseColor], input.uv)
+        ? HE_MAT_SAMPLE(texBase, kGPUMaterialTexSlot_BaseColor, input.uv)
         : float4(1.0);
     float3 albedo = baseColorF.rgb * baseColorSample.rgb;
         float alpha   = baseColorF.a * baseColorSample.a;
@@ -306,20 +306,20 @@ float4 fragmentMain(PBRVSOutput input) : SV_Target0 {
     // 导致 +Y 表面被下方光源照亮的穿透问题）时直接用几何法线
     float3 N = normalize(input.worldNormal);
     if ((texMask & kGPUMaterialTexMask_Normal) != 0u) {
-        float3 texNormal = u_Textures[texBase + kGPUMaterialTexSlot_Normal]
-            .Sample(u_Samplers[texBase + kGPUMaterialTexSlot_Normal], input.uv).rgb * 2.0 - 1.0;
+        float3 texNormal = HE_MAT_SAMPLE(texBase, kGPUMaterialTexSlot_Normal,
+            input.uv).rgb * 2.0 - 1.0;
         N = normalize(N + texNormal * 0.5);
     }
     float3 V = normalize(cameraPosition.xyz - input.worldPos);
 
     // 金属度/粗糙度/环境光遮蔽：无纹理时用因子本身
     float4 mrSample = (texMask & kGPUMaterialTexMask_MetallicRough) != 0u
-        ? u_Textures[texBase + kGPUMaterialTexSlot_MetallicRough].Sample(u_Samplers[texBase + kGPUMaterialTexSlot_MetallicRough], input.uv)
+        ? HE_MAT_SAMPLE(texBase, kGPUMaterialTexSlot_MetallicRough, input.uv)
         : float4(0.0, 1.0, 0.0, 1.0);   // 中性：g=1(rough 不动) b=0(metallic 不动)
     float metallic  = metallicF  * mrSample.b;
     float roughness = clamp(roughnessF * mrSample.g, 0.04, 1.0);
     float ao = aoF * (((texMask & kGPUMaterialTexMask_Occlusion) != 0u)
-        ? u_Textures[texBase + kGPUMaterialTexSlot_Occlusion].Sample(u_Samplers[texBase + kGPUMaterialTexSlot_Occlusion], input.uv).r
+        ? HE_MAT_SAMPLE(texBase, kGPUMaterialTexSlot_Occlusion, input.uv).r
         : 1.0);
 
     // BRDF LUT：用于直接光照的多重散射能量补偿，IBL 镜面项复用同一采样

@@ -2,8 +2,10 @@
 #include <iterator>
 #include "TAA_Resolve.vert.spv.h"
 #include "TAA_Resolve.vert.dxil.h"
+#include "TAA_Resolve.vert.dxbc.h"
 #include "TAA_Resolve.frag.spv.h"
 #include "TAA_Resolve.frag.dxil.h"
+#include "TAA_Resolve.frag.dxbc.h"
 #include "Core/Log.h"
 #include "Core/Assert.h"
 #include <glm/gtc/matrix_transform.hpp>
@@ -93,12 +95,14 @@ void AA_TAA::CreatePSO() {
     vs.dxil.assign(std::begin(k_TAA_Resolve_vert_dxil), std::end(k_TAA_Resolve_vert_dxil));
     vs.dxil.assign(std::begin(k_TAA_Resolve_vert_dxil), std::end(k_TAA_Resolve_vert_dxil));
     vs.dxil.assign(std::begin(k_TAA_Resolve_vert_dxil), std::end(k_TAA_Resolve_vert_dxil));
+    vs.dxbc.assign(std::begin(k_TAA_Resolve_vert_dxbc), std::end(k_TAA_Resolve_vert_dxbc));
     vs.entryPoint = "main";
     fs.stage      = rhi::ShaderStage::Pixel;
     fs.spirv      = k_TAA_Resolve_frag_spv;
     fs.dxil.assign(std::begin(k_TAA_Resolve_frag_dxil), std::end(k_TAA_Resolve_frag_dxil));
     fs.dxil.assign(std::begin(k_TAA_Resolve_frag_dxil), std::end(k_TAA_Resolve_frag_dxil));
     fs.dxil.assign(std::begin(k_TAA_Resolve_frag_dxil), std::end(k_TAA_Resolve_frag_dxil));
+    fs.dxbc.assign(std::begin(k_TAA_Resolve_frag_dxbc), std::end(k_TAA_Resolve_frag_dxbc));
     fs.entryPoint = "main";
 
     rhi::PushConstantRange pc;

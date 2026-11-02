@@ -18,6 +18,10 @@ struct BufferDesc {
     bool        cpuAccess   = false;      // Mappable from CPU
     const void* initialData = nullptr;    // Optional initial upload
     usize       stride      = 0;          // For vertex/index buffers
+    /// 结构化缓冲（StructuredBuffer<T>）的元素字节数 sizeof(T)，0 = 未知。
+    /// D3D11 必须在**创建缓冲时**给出元素大小；不填时 D3D11 后端在该缓冲第一次以结构化视图
+    /// 绑定时按着色器反射出的步长重建缓冲（会多一次拷贝并打印提示）。其它后端忽略此字段。
+    usize       structureStride = 0;
     // 【P10】调试名（仅用于统计 / 诊断；不改变任何行为）。
     // Storage 缓冲的堆类型统计（`HE_STORAGE_HEAP_STATS=1`）按它列清单，
     // 便于把"GPU 频繁读写的大缓冲"和"CPU 每帧 Map 的小缓冲"区分开。

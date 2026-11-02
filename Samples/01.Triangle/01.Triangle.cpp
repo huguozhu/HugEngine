@@ -15,8 +15,10 @@
 #include "Editor/ImGuiIntegration.h"
 #include "Triangle.vert.spv.h"
 #include "Triangle.vert.dxil.h"
+#include "Triangle.vert.dxbc.h"
 #include "Triangle.frag.spv.h"
 #include "Triangle.frag.dxil.h"
+#include "Triangle.frag.dxbc.h"
 #include "RT_Triangle.rgen.spv.h"
 #include "RT_Triangle.rgen.dxil.h"
 #include "RT_Background.rmiss.spv.h"
@@ -25,6 +27,7 @@
 #include "Triangle.mesh.dxil.h"
 #include "TriangleMesh.frag.spv.h"
 #include "TriangleMesh.frag.dxil.h"
+#include "TriangleMesh.frag.dxbc.h"
 #include "imgui.h"
 
 #include <iterator>   // std::begin / std::end（填 dxil 字节码用）
@@ -87,8 +90,8 @@ int main() {
         .initialData = kVertices, .stride = sizeof(Vertex),
     });
 
-    he::rhi::ShaderBytecode vertShader = he::rhi::MakeShaderBytecode(he::rhi::ShaderStage::Vertex, k_Triangle_vert_spv, k_Triangle_vert_dxil, "main");
-    he::rhi::ShaderBytecode fragShader = he::rhi::MakeShaderBytecode(he::rhi::ShaderStage::Pixel, k_Triangle_frag_spv, k_Triangle_frag_dxil, "main");
+    he::rhi::ShaderBytecode vertShader = he::rhi::MakeShaderBytecode(he::rhi::ShaderStage::Vertex, k_Triangle_vert_spv, k_Triangle_vert_dxil, k_Triangle_vert_dxbc, "main");
+    he::rhi::ShaderBytecode fragShader = he::rhi::MakeShaderBytecode(he::rhi::ShaderStage::Pixel, k_Triangle_frag_spv, k_Triangle_frag_dxil, k_Triangle_frag_dxbc, "main");
 
     auto pipeline = device->CreatePipelineState({
         .vertexShader = &vertShader, .pixelShader = &fragShader,
@@ -175,8 +178,10 @@ int main() {
     std::unique_ptr<he::rhi::IRHIPipelineState> meshPSO;
 
     if (meshSupported) {
+        // 网格着色器只有 SPIR-V / DXIL（D3D11 不支持网格着色器，故无 DXBC）；
+        // 片元着色器三套都给：D3D11 走 DXBC，Vulkan 走 SPIR-V，D3D12 走 DXIL
         he::rhi::ShaderBytecode meshShader = he::rhi::MakeShaderBytecode(he::rhi::ShaderStage::Mesh, k_Triangle_mesh_spv, k_Triangle_mesh_dxil, "main");
-        he::rhi::ShaderBytecode meshFrag = he::rhi::MakeShaderBytecode(he::rhi::ShaderStage::Pixel, k_TriangleMesh_frag_spv, k_TriangleMesh_frag_dxil, "main");
+        he::rhi::ShaderBytecode meshFrag = he::rhi::MakeShaderBytecode(he::rhi::ShaderStage::Pixel, k_TriangleMesh_frag_spv, k_TriangleMesh_frag_dxil, k_TriangleMesh_frag_dxbc, "main");
 
         meshPSO = device->CreatePipelineState({
             .pixelShader = &meshFrag,

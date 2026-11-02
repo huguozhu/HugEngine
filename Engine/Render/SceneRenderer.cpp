@@ -76,6 +76,7 @@ std::vector<DrawItem> SceneRenderer::Prepare(const FrameSceneSnapshot& snapshot,
         di.objectIndex = vi;
         di.bInstanced  = item.bInstanced;
         di.meshIndex   = item.meshIndex;   // 顶点/索引缓冲由消费侧按它查注册表
+        di.materialID  = item.object.materialID;   // 非 bindless 后端逐次绘制绑定材质纹理用
         result.push_back(di);
     }
     objectBuffer->Unmap();
@@ -137,6 +138,8 @@ std::vector<DrawItem> SceneRenderer::PrepareBatched(const FrameSceneSnapshot& sn
             objData[i] = item.object;
             di.bInstanced = item.bInstanced;
             di.meshIndex  = item.meshIndex;
+            // 非 bindless 后端（D3D11）逐次绘制要用的材质纹理基址：与 CPU 路径同源
+            di.materialID = item.object.materialID;
             di.bCPUCulled = (visible[drawIndex] == 0u);
             inBatch[drawIndex] = 1u;
         } else {
@@ -166,6 +169,8 @@ std::vector<DrawItem> SceneRenderer::PrepareBatched(const FrameSceneSnapshot& sn
         di.objectIndex = nextSlot;
         di.bInstanced  = item.bInstanced;
         di.meshIndex   = item.meshIndex;
+        // 非 bindless 后端（D3D11）逐次绘制要用的材质纹理基址：与 CPU 路径同源
+        di.materialID  = item.object.materialID;
         di.bCPUCulled  = false;
         result.push_back(di);
         ++nextSlot;

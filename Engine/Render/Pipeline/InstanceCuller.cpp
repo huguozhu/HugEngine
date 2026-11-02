@@ -5,6 +5,7 @@
 // ============================================================
 
 #include "Pipeline/InstanceCuller.h"
+#include "Pipeline/NonBindless.h"          // 非 bindless 后端（D3D11）的句柄交接
 #include "Threading/MeshRegistry.h"          // PrepareInstances：按 meshIndex 取索引数
 #include "Threading/FrameSceneSnapshot.h"    // PrepareInstances：快照里的实例条目
 #include <iterator>
@@ -13,6 +14,7 @@
 
 #include "InstancedCull.comp.spv.h"
 #include "InstancedCull.comp.dxil.h"
+#include "InstancedCull.comp.dxbc.h"
 
 #include <cstdio>
 #include <cstring>
@@ -60,6 +62,7 @@ bool InstanceCuller::Initialize(rhi::IRHIDevice* device) {
     m_CS.dxil.assign(std::begin(k_InstancedCull_comp_dxil), std::end(k_InstancedCull_comp_dxil));
     m_CS.dxil.assign(std::begin(k_InstancedCull_comp_dxil), std::end(k_InstancedCull_comp_dxil));
     m_CS.dxil.assign(std::begin(k_InstancedCull_comp_dxil), std::end(k_InstancedCull_comp_dxil));
+    m_CS.dxbc.assign(std::begin(k_InstancedCull_comp_dxbc), std::end(k_InstancedCull_comp_dxbc));
     m_CS.entryPoint = "main";
 
     rhi::PushConstantRange pc;
@@ -350,6 +353,10 @@ u32 InstanceCuller::Cull(rhi::IRHICommandList* cmd,
     cmd->SetPipeline(ResP(m_PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
     cmd->SetPushConstants(0, sizeof(pcs), &pcs);
+    // 非 bindless 后端：三个按句柄访问的缓冲（实例变换、可见下标、间接命令）
+    cmd->SetNonBindlessHandle(kGPUBinding_NB_InstanceTransforms, pcs.instanceBufferHandle);
+    cmd->SetNonBindlessHandle(kGPUBinding_NB_CullVisibleOut, pcs.visibleBufferHandle);
+    cmd->SetNonBindlessHandle(kGPUBinding_NB_CullCommandOut, pcs.commandHandle);
 
     char label[64];
     snprintf(label, sizeof(label), "InstancedCull (%u inst)", instanceCount);

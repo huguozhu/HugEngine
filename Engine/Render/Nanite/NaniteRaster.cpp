@@ -31,35 +31,47 @@
 
 #include "Nanite_Raster.vert.spv.h"
 #include "Nanite_Raster.vert.dxil.h"   // k_Nanite_Raster_vert_spv
+#include "Nanite_Raster.vert.dxbc.h"
 #include "Nanite_Raster.frag.spv.h"
 #include "Nanite_Raster.frag.dxil.h"   // k_Nanite_Raster_frag_spv
+#include "Nanite_Raster.frag.dxbc.h"
 #include "Nanite_TestWrite.comp.spv.h"
 #include "Nanite_TestWrite.comp.dxil.h"   // k_Nanite_TestWrite_comp_spv（§14.8 任务 4 的 UAV 自证通道）
+#include "Nanite_TestWrite.comp.dxbc.h"
 #include "Nanite_MeshTest.mesh.spv.h"
 #include "Nanite_MeshTest.mesh.dxil.h"    // k_Nanite_MeshTest_mesh_dxil（§14.8 任务 6 的 mesh 通道）
 #include "Nanite_MeshTest.frag.spv.h"
 #include "Nanite_MeshTest.frag.dxil.h"    // k_Nanite_MeshTest_frag_spv
+#include "Nanite_MeshTest.frag.dxbc.h"
 // 【§14.8 任务 18】软光栅三趟：深度键 / 写 GBuffer / 深度解析
 #include "Nanite_SoftRasterDepth.comp.spv.h"
 #include "Nanite_SoftRasterDepth.comp.dxil.h"   // k_Nanite_SoftRasterDepth_comp_spv
+#include "Nanite_SoftRasterDepth.comp.dxbc.h"
 #include "Nanite_SoftRaster.comp.spv.h"
 #include "Nanite_SoftRaster.comp.dxil.h"        // k_Nanite_SoftRaster_comp_spv
+#include "Nanite_SoftRaster.comp.dxbc.h"
 // 【确定性赢家选择】第 2.5 趟：赢家候选号仲裁（夹在第 1 趟与第 3 趟之间）
 #include "Nanite_SoftRasterWinner.comp.spv.h"
 #include "Nanite_SoftRasterWinner.comp.dxil.h"  // k_Nanite_SoftRasterWinner_comp_spv
+#include "Nanite_SoftRasterWinner.comp.dxbc.h"
 #include "Nanite_DepthResolve.vert.spv.h"
 #include "Nanite_DepthResolve.vert.dxil.h"      // k_Nanite_DepthResolve_vert_spv
+#include "Nanite_DepthResolve.vert.dxbc.h"
 #include "Nanite_DepthResolve.frag.spv.h"
 #include "Nanite_DepthResolve.frag.dxil.h"      // k_Nanite_DepthResolve_frag_spv
+#include "Nanite_DepthResolve.frag.dxbc.h"
 #include "Nanite_GBufferClear.comp.spv.h"
 #include "Nanite_GBufferClear.comp.dxil.h"     // k_Nanite_GBufferClear_comp_spv（compute 清屏 8 张颜色目标）
+#include "Nanite_GBufferClear.comp.dxbc.h"
 // 【§14.8 任务 22】硬光栅（mesh shader 分流）
 #include "Nanite_HardRaster.mesh.spv.h"
 #include "Nanite_HardRaster.mesh.dxil.h"       // k_Nanite_HardRaster_mesh_dxil
 #include "Nanite_HardRaster.frag.spv.h"
 #include "Nanite_HardRaster.frag.dxil.h"       // k_Nanite_HardRaster_frag_spv
+#include "Nanite_HardRaster.frag.dxbc.h"
 #include "Nanite_DebugView.comp.spv.h"
 #include "Nanite_DebugView.comp.dxil.h"        // k_Nanite_DebugView_comp_spv（§14.8 任务 26 的可视化）
+#include "Nanite_DebugView.comp.dxbc.h"
 
 #include <cstring>   // std::memcpy（占位顶点/索引缓冲的初值）
 
@@ -182,12 +194,14 @@ bool NaniteRaster::Initialize(rhi::IRHIDevice* device, u32 width, u32 height,
     m_VS.dxil.assign(std::begin(k_Nanite_Raster_vert_dxil), std::end(k_Nanite_Raster_vert_dxil));
     m_VS.dxil.assign(std::begin(k_Nanite_Raster_vert_dxil), std::end(k_Nanite_Raster_vert_dxil));
     m_VS.dxil.assign(std::begin(k_Nanite_Raster_vert_dxil), std::end(k_Nanite_Raster_vert_dxil));
+    m_VS.dxbc.assign(std::begin(k_Nanite_Raster_vert_dxbc), std::end(k_Nanite_Raster_vert_dxbc));
     m_VS.entryPoint = "main";
     m_FS.stage      = rhi::ShaderStage::Pixel;
     m_FS.spirv      = k_Nanite_Raster_frag_spv;
     m_FS.dxil.assign(std::begin(k_Nanite_Raster_frag_dxil), std::end(k_Nanite_Raster_frag_dxil));
     m_FS.dxil.assign(std::begin(k_Nanite_Raster_frag_dxil), std::end(k_Nanite_Raster_frag_dxil));
     m_FS.dxil.assign(std::begin(k_Nanite_Raster_frag_dxil), std::end(k_Nanite_Raster_frag_dxil));
+    m_FS.dxbc.assign(std::begin(k_Nanite_Raster_frag_dxbc), std::end(k_Nanite_Raster_frag_dxbc));
     m_FS.entryPoint = "main";
 
     rhi::PipelineStateDesc desc;
@@ -446,6 +460,7 @@ bool NaniteRaster::EnsureTestWriteResources() {
     m_TestWriteCS.dxil.assign(std::begin(k_Nanite_TestWrite_comp_dxil), std::end(k_Nanite_TestWrite_comp_dxil));
     m_TestWriteCS.dxil.assign(std::begin(k_Nanite_TestWrite_comp_dxil), std::end(k_Nanite_TestWrite_comp_dxil));
     m_TestWriteCS.dxil.assign(std::begin(k_Nanite_TestWrite_comp_dxil), std::end(k_Nanite_TestWrite_comp_dxil));
+    m_TestWriteCS.dxbc.assign(std::begin(k_Nanite_TestWrite_comp_dxbc), std::end(k_Nanite_TestWrite_comp_dxbc));
     m_TestWriteCS.entryPoint = "main";
 
     rhi::PipelineStateDesc desc;
@@ -585,6 +600,7 @@ bool NaniteRaster::EnsureMeshTestResources() {
     m_MeshTestFS.dxil.assign(std::begin(k_Nanite_MeshTest_frag_dxil), std::end(k_Nanite_MeshTest_frag_dxil));
     m_MeshTestFS.dxil.assign(std::begin(k_Nanite_MeshTest_frag_dxil), std::end(k_Nanite_MeshTest_frag_dxil));
     m_MeshTestFS.dxil.assign(std::begin(k_Nanite_MeshTest_frag_dxil), std::end(k_Nanite_MeshTest_frag_dxil));
+    m_MeshTestFS.dxbc.assign(std::begin(k_Nanite_MeshTest_frag_dxbc), std::end(k_Nanite_MeshTest_frag_dxbc));
     m_MeshTestFS.entryPoint = "main";
 
     rhi::PipelineStateDesc desc;
@@ -728,6 +744,7 @@ bool NaniteRaster::EnsureSoftRasterResources(const GBufferTargets& targets) {
         m_SoftDepthCS.dxil.assign(std::begin(k_Nanite_SoftRasterDepth_comp_dxil), std::end(k_Nanite_SoftRasterDepth_comp_dxil));
         m_SoftDepthCS.dxil.assign(std::begin(k_Nanite_SoftRasterDepth_comp_dxil), std::end(k_Nanite_SoftRasterDepth_comp_dxil));
         m_SoftDepthCS.dxil.assign(std::begin(k_Nanite_SoftRasterDepth_comp_dxil), std::end(k_Nanite_SoftRasterDepth_comp_dxil));
+        m_SoftDepthCS.dxbc.assign(std::begin(k_Nanite_SoftRasterDepth_comp_dxbc), std::end(k_Nanite_SoftRasterDepth_comp_dxbc));
         m_SoftDepthCS.entryPoint = "main";
 
         rhi::PushConstantRange pc;
@@ -815,6 +832,7 @@ bool NaniteRaster::EnsureSoftRasterResources(const GBufferTargets& targets) {
         m_SoftColorCS.dxil.assign(std::begin(k_Nanite_SoftRaster_comp_dxil), std::end(k_Nanite_SoftRaster_comp_dxil));
         m_SoftColorCS.dxil.assign(std::begin(k_Nanite_SoftRaster_comp_dxil), std::end(k_Nanite_SoftRaster_comp_dxil));
         m_SoftColorCS.dxil.assign(std::begin(k_Nanite_SoftRaster_comp_dxil), std::end(k_Nanite_SoftRaster_comp_dxil));
+        m_SoftColorCS.dxbc.assign(std::begin(k_Nanite_SoftRaster_comp_dxbc), std::end(k_Nanite_SoftRaster_comp_dxbc));
         m_SoftColorCS.entryPoint = "main";
 
         rhi::PushConstantRange pc;
@@ -842,6 +860,7 @@ bool NaniteRaster::EnsureSoftRasterResources(const GBufferTargets& targets) {
         m_SoftWinnerCS.dxil.assign(std::begin(k_Nanite_SoftRasterWinner_comp_dxil), std::end(k_Nanite_SoftRasterWinner_comp_dxil));
         m_SoftWinnerCS.dxil.assign(std::begin(k_Nanite_SoftRasterWinner_comp_dxil), std::end(k_Nanite_SoftRasterWinner_comp_dxil));
         m_SoftWinnerCS.dxil.assign(std::begin(k_Nanite_SoftRasterWinner_comp_dxil), std::end(k_Nanite_SoftRasterWinner_comp_dxil));
+        m_SoftWinnerCS.dxbc.assign(std::begin(k_Nanite_SoftRasterWinner_comp_dxbc), std::end(k_Nanite_SoftRasterWinner_comp_dxbc));
         m_SoftWinnerCS.entryPoint = "main";
 
         rhi::PushConstantRange winnerPc;
@@ -879,12 +898,14 @@ bool NaniteRaster::EnsureSoftRasterResources(const GBufferTargets& targets) {
         m_DepthResolveVS.dxil.assign(std::begin(k_Nanite_DepthResolve_vert_dxil), std::end(k_Nanite_DepthResolve_vert_dxil));
         m_DepthResolveVS.dxil.assign(std::begin(k_Nanite_DepthResolve_vert_dxil), std::end(k_Nanite_DepthResolve_vert_dxil));
         m_DepthResolveVS.dxil.assign(std::begin(k_Nanite_DepthResolve_vert_dxil), std::end(k_Nanite_DepthResolve_vert_dxil));
+        m_DepthResolveVS.dxbc.assign(std::begin(k_Nanite_DepthResolve_vert_dxbc), std::end(k_Nanite_DepthResolve_vert_dxbc));
         m_DepthResolveVS.entryPoint = "main";
         m_DepthResolveFS.stage      = rhi::ShaderStage::Pixel;
         m_DepthResolveFS.spirv      = k_Nanite_DepthResolve_frag_spv;
         m_DepthResolveFS.dxil.assign(std::begin(k_Nanite_DepthResolve_frag_dxil), std::end(k_Nanite_DepthResolve_frag_dxil));
         m_DepthResolveFS.dxil.assign(std::begin(k_Nanite_DepthResolve_frag_dxil), std::end(k_Nanite_DepthResolve_frag_dxil));
         m_DepthResolveFS.dxil.assign(std::begin(k_Nanite_DepthResolve_frag_dxil), std::end(k_Nanite_DepthResolve_frag_dxil));
+        m_DepthResolveFS.dxbc.assign(std::begin(k_Nanite_DepthResolve_frag_dxbc), std::end(k_Nanite_DepthResolve_frag_dxbc));
         m_DepthResolveFS.entryPoint = "main";
 
         rhi::PushConstantRange resolvePc;
@@ -1059,6 +1080,7 @@ bool NaniteRaster::EnsureGBufferClearResources() {
     m_ClearCS.dxil.assign(std::begin(k_Nanite_GBufferClear_comp_dxil), std::end(k_Nanite_GBufferClear_comp_dxil));
     m_ClearCS.dxil.assign(std::begin(k_Nanite_GBufferClear_comp_dxil), std::end(k_Nanite_GBufferClear_comp_dxil));
     m_ClearCS.dxil.assign(std::begin(k_Nanite_GBufferClear_comp_dxil), std::end(k_Nanite_GBufferClear_comp_dxil));
+    m_ClearCS.dxbc.assign(std::begin(k_Nanite_GBufferClear_comp_dxbc), std::end(k_Nanite_GBufferClear_comp_dxbc));
     m_ClearCS.entryPoint = "main";
 
     rhi::PushConstantRange pc;
@@ -1445,6 +1467,7 @@ bool NaniteRaster::EnsureHardRasterResources(const GBufferTargets& targets) {
     m_HardRasterFS.dxil.assign(std::begin(k_Nanite_HardRaster_frag_dxil), std::end(k_Nanite_HardRaster_frag_dxil));
     m_HardRasterFS.dxil.assign(std::begin(k_Nanite_HardRaster_frag_dxil), std::end(k_Nanite_HardRaster_frag_dxil));
     m_HardRasterFS.dxil.assign(std::begin(k_Nanite_HardRaster_frag_dxil), std::end(k_Nanite_HardRaster_frag_dxil));
+    m_HardRasterFS.dxbc.assign(std::begin(k_Nanite_HardRaster_frag_dxbc), std::end(k_Nanite_HardRaster_frag_dxbc));
     m_HardRasterFS.entryPoint = "main";
 
     rhi::PushConstantRange pc;
@@ -1780,6 +1803,7 @@ bool NaniteRaster::EnsureDebugViewResources(u32 mode,
     m_DebugCS.dxil.assign(std::begin(k_Nanite_DebugView_comp_dxil), std::end(k_Nanite_DebugView_comp_dxil));
     m_DebugCS.dxil.assign(std::begin(k_Nanite_DebugView_comp_dxil), std::end(k_Nanite_DebugView_comp_dxil));
     m_DebugCS.dxil.assign(std::begin(k_Nanite_DebugView_comp_dxil), std::end(k_Nanite_DebugView_comp_dxil));
+    m_DebugCS.dxbc.assign(std::begin(k_Nanite_DebugView_comp_dxbc), std::end(k_Nanite_DebugView_comp_dxbc));
     m_DebugCS.entryPoint = "main";
 
     rhi::PushConstantRange pc;

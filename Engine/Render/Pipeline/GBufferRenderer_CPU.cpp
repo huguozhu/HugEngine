@@ -1,6 +1,7 @@
 // Pipeline/GBufferRenderer_CPU.cpp — CPU Driven GBuffer 渲染
 // 从 DeferredPipeline::BuildFrameGraph 提取的逐对象绘制逻辑
 #include "Pipeline/GBufferRenderer_CPU.h"
+#include "Pipeline/NonBindless.h"          // 非 bindless 后端（D3D11）的逐绘制句柄交接
 #include "Pipeline/ParallelRecordHelper.h"   // T3.2：GBuffer 的并行录制骨架
 #include "Threading/JobSystem.h"             // T3.2：按线程数建录制池
 #include "Pipeline/InstanceCuller.h"   // 任务 25：逐实例剔除（状态表也在它这里）
@@ -124,6 +125,7 @@ void GBufferRenderer_CPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
         pc.useInstanceID      = 0;
         pc.instanceSSBOHandle = 0;
         pc.instanceVisibleHandle = 0;
+        SetDrawNonBindlessHandles(c, di.materialID);
         // DrawCall 调试 marker：标记当前绘制的物体（RenderDoc 定位用）
         char label[64];
         snprintf(label, sizeof(label), "GBuffer Obj#%u", di.objectIndex);
@@ -188,11 +190,12 @@ void GBufferRenderer_CPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
 
             // 定位对象条目（材质/世界变换），与 Forward 一致：一个对象条目服务 N 个实例
             u32 objIndex = 0;
+            u32 matTexBase = 0;   // 非 bindless 后端：本次绘制的材质纹理基址
             bool found = false;
             for (auto& di : filteredItems) {
                 // E-3②：按 meshIndex（整数）对齐对象条目 —— 组件地址比较已随组件指针一起退出
                 if (si.meshIndex != 0u && si.meshIndex == di.meshIndex) {
-                    objIndex = di.objectIndex; found = true; break;
+                    objIndex = di.objectIndex; matTexBase = di.materialID; found = true; break;
                 }
             }
             if (!found) continue;
@@ -228,6 +231,7 @@ void GBufferRenderer_CPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
             if (st->culledThisFrame) {
                 const u32 prevVisible = st->visibleInstanceCount;   // 上一轮 GPU 写入的可见数（统计用）
                 pc.instanceVisibleHandle = ctx.instanceCuller->GetVisibleIndicesHandle(slot);
+                SetDrawNonBindlessHandles(cmd, matTexBase, instHandle, pc.instanceVisibleHandle);
                 // 首帧诊断：确认 Deferred 这条路径确实进来并拿到有效句柄
                 static bool s_DbgOnce = false;
                 if (!s_DbgOnce) {
@@ -246,6 +250,7 @@ void GBufferRenderer_CPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
                 continue;
             }
 
+            SetDrawNonBindlessHandles(cmd, matTexBase, instHandle, 0);
             cmd->SetDrawDebugLabel("GBuffer InstancedMesh");
             cmd->SetPushConstants(0, sizeof(pc), &pc);
             cmd->SetVertexBuffer(me->vertexBuffer, 0);

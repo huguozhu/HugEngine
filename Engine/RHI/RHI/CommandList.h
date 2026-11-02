@@ -204,6 +204,13 @@ public:
                                             IRHIBuffer* countBuffer, u64 countOffset,
                                             u32 maxDrawCount, u32 stride) = 0;
 
+    /// 【非 bindless 后端（D3D11）专用，其它后端为空操作】着色器在没有 bindless 的后端上用单个资源
+    /// 替代 bindless 数组（见 ShaderTypes.slang 的 kGPUBinding_NB_* 与 D3D11 后端实现规划 3.2）：
+    /// 声明在 set 0 的 `binding` 上的替代资源，本次及之后的绘制 / 派发取 bindless 堆里句柄 `handle`
+    /// 对应的资源（材质纹理按 kBindingNBMaterialTextures 给基址，4 张纹理 / 采样器依次取 handle..handle+3）。
+    /// 调用方在把句柄写进推送常量的同一处调用它即可，值一直有效直到被覆盖或下次 Begin。
+    virtual void SetNonBindlessHandle(u32 binding, u32 handle) { (void)binding; (void)handle; }
+
     // Push constants（小型常量数据，直接推送到 GPU 寄存器）
     virtual void BindDescriptorSet(u32 setIndex, DescriptorSetHandle set) = 0;
 

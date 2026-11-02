@@ -5,6 +5,7 @@
 #include "Pipeline/MeshBatcher.h"
 #include "Pipeline/GBufferMeshMode.h"   // 【P9】HE_GBUFFER_MESH 开关 + 每工作组三角形数
 #include "Pipeline/InstanceCuller.h"   // 任务 25：逐实例剔除（状态表也在它这里）
+#include "Pipeline/NonBindless.h"      // 非 bindless 后端（D3D11）的逐绘制句柄交接
 #include "Threading/MeshRegistry.h"    // 阶段 1 第①段：按 meshIndex 取顶点/索引缓冲
 #include "Scene/MeshComponent.h"
 #include "Scene/World.h"
@@ -137,6 +138,8 @@ void GBufferRenderer_GPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
                                              ctx.frameSlot, camera.GetViewProjMatrix());
     cmd->SetPipeline(ctx.pso);
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, ctx.descSet);
+    // 非 bindless 后端：GPU 驱动路径按物体从纹理数组桶取材质纹理，逐绘制的实例 / 骨骼 / 可见列表都不用
+    SetDrawNonBindlessHandles(cmd, 0);
 
     // ── 物体数据：GPU 模式按合批顺序写全部条目；回退模式沿用 CPU 视锥裁剪版 Prepare ──
     std::vector<DrawItem> drawItems;

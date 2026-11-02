@@ -31,6 +31,7 @@
 #include "Lumen/ScreenProbe.slang"
 #include "ScreenProbe_Filter.comp.spv.h"
 #include "ScreenProbe_Filter.comp.dxil.h"
+#include "ScreenProbe_Filter.comp.dxbc.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -89,6 +90,7 @@ void LumenScene::CreateProbeFilterGPUObjects() {
     cs.dxil.assign(std::begin(k_ScreenProbe_Filter_comp_dxil), std::end(k_ScreenProbe_Filter_comp_dxil));
     cs.dxil.assign(std::begin(k_ScreenProbe_Filter_comp_dxil), std::end(k_ScreenProbe_Filter_comp_dxil));
     cs.dxil.assign(std::begin(k_ScreenProbe_Filter_comp_dxil), std::end(k_ScreenProbe_Filter_comp_dxil));
+    cs.dxbc.assign(std::begin(k_ScreenProbe_Filter_comp_dxbc), std::end(k_ScreenProbe_Filter_comp_dxbc));
     cs.entryPoint = "main";
 
     rhi::PipelineStateDesc pso;

@@ -5,22 +5,31 @@
 #include "Core/Log.h"
 #include "SDF_DebugView.comp.spv.h"
 #include "SDF_DebugView.comp.dxil.h"
+#include "SDF_DebugView.comp.dxbc.h"
 #include "SDF_GlobalBuild.comp.spv.h"
 #include "SDF_GlobalBuild.comp.dxil.h"
+#include "SDF_GlobalBuild.comp.dxbc.h"
 #include "SDF_LayerProbe.comp.spv.h"
 #include "SDF_LayerProbe.comp.dxil.h"
+#include "SDF_LayerProbe.comp.dxbc.h"
 #include "SDF_MeshConvert.comp.spv.h"
 #include "SDF_MeshConvert.comp.dxil.h"
+#include "SDF_MeshConvert.comp.dxbc.h"
 #include "SDF_MeshFlood.comp.spv.h"
 #include "SDF_MeshFlood.comp.dxil.h"
+#include "SDF_MeshFlood.comp.dxbc.h"
 #include "SDF_MeshFloodSeeds.comp.spv.h"
 #include "SDF_MeshFloodSeeds.comp.dxil.h"
+#include "SDF_MeshFloodSeeds.comp.dxbc.h"
 #include "SDF_MeshScatter.comp.spv.h"
 #include "SDF_MeshScatter.comp.dxil.h"
+#include "SDF_MeshScatter.comp.dxbc.h"
 #include "SDF_RayMarch.comp.spv.h"
 #include "SDF_RayMarch.comp.dxil.h"
+#include "SDF_RayMarch.comp.dxbc.h"
 #include "SDF_RayMarchDetail.comp.spv.h"
 #include "SDF_RayMarchDetail.comp.dxil.h"
+#include "SDF_RayMarchDetail.comp.dxbc.h"
 
 #include <algorithm>
 #include <cmath>
@@ -139,6 +148,7 @@ void LumenSDF::CreateGPUObjects() {
     cs.dxil.assign(std::begin(k_SDF_MeshScatter_comp_dxil), std::end(k_SDF_MeshScatter_comp_dxil));
     cs.dxil.assign(std::begin(k_SDF_MeshScatter_comp_dxil), std::end(k_SDF_MeshScatter_comp_dxil));
     cs.dxil.assign(std::begin(k_SDF_MeshScatter_comp_dxil), std::end(k_SDF_MeshScatter_comp_dxil));
+    cs.dxbc.assign(std::begin(k_SDF_MeshScatter_comp_dxbc), std::end(k_SDF_MeshScatter_comp_dxbc));
     cs.entryPoint = "main";
 
     rhi::PipelineStateDesc pso;
@@ -172,6 +182,7 @@ void LumenSDF::CreateGPUObjects() {
     ccs.dxil.assign(std::begin(k_SDF_MeshConvert_comp_dxil), std::end(k_SDF_MeshConvert_comp_dxil));
     ccs.dxil.assign(std::begin(k_SDF_MeshConvert_comp_dxil), std::end(k_SDF_MeshConvert_comp_dxil));
     ccs.dxil.assign(std::begin(k_SDF_MeshConvert_comp_dxil), std::end(k_SDF_MeshConvert_comp_dxil));
+    ccs.dxbc.assign(std::begin(k_SDF_MeshConvert_comp_dxbc), std::end(k_SDF_MeshConvert_comp_dxbc));
     ccs.entryPoint = "main";
 
     rhi::PipelineStateDesc cpso;
@@ -190,6 +201,7 @@ void LumenSDF::CreateGPUObjects() {
     fcs.dxil.assign(std::begin(k_SDF_MeshFlood_comp_dxil), std::end(k_SDF_MeshFlood_comp_dxil));
     fcs.dxil.assign(std::begin(k_SDF_MeshFlood_comp_dxil), std::end(k_SDF_MeshFlood_comp_dxil));
     fcs.dxil.assign(std::begin(k_SDF_MeshFlood_comp_dxil), std::end(k_SDF_MeshFlood_comp_dxil));
+    fcs.dxbc.assign(std::begin(k_SDF_MeshFlood_comp_dxbc), std::end(k_SDF_MeshFlood_comp_dxbc));
     fcs.entryPoint = "main";
 
     rhi::PipelineStateDesc fpso;
@@ -215,6 +227,7 @@ void LumenSDF::CreateGPUObjects() {
     scs.dxil.assign(std::begin(k_SDF_MeshFloodSeeds_comp_dxil), std::end(k_SDF_MeshFloodSeeds_comp_dxil));
     scs.dxil.assign(std::begin(k_SDF_MeshFloodSeeds_comp_dxil), std::end(k_SDF_MeshFloodSeeds_comp_dxil));
     scs.dxil.assign(std::begin(k_SDF_MeshFloodSeeds_comp_dxil), std::end(k_SDF_MeshFloodSeeds_comp_dxil));
+    scs.dxbc.assign(std::begin(k_SDF_MeshFloodSeeds_comp_dxbc), std::end(k_SDF_MeshFloodSeeds_comp_dxbc));
     scs.entryPoint = "main";
     rhi::PipelineStateDesc spso;
     spso.bindPoint            = rhi::PipelineBindPoint::Compute;
@@ -529,6 +542,7 @@ void LumenSDF::CreateGlobalGPUObjects() {
     cs.dxil.assign(std::begin(k_SDF_GlobalBuild_comp_dxil), std::end(k_SDF_GlobalBuild_comp_dxil));
     cs.dxil.assign(std::begin(k_SDF_GlobalBuild_comp_dxil), std::end(k_SDF_GlobalBuild_comp_dxil));
     cs.dxil.assign(std::begin(k_SDF_GlobalBuild_comp_dxil), std::end(k_SDF_GlobalBuild_comp_dxil));
+    cs.dxbc.assign(std::begin(k_SDF_GlobalBuild_comp_dxbc), std::end(k_SDF_GlobalBuild_comp_dxbc));
     cs.entryPoint = "main";
 
     rhi::PipelineStateDesc pso;
@@ -554,6 +568,7 @@ void LumenSDF::CreateGlobalGPUObjects() {
     fcs.dxil.assign(std::begin(k_SDF_MeshFlood_comp_dxil), std::end(k_SDF_MeshFlood_comp_dxil));
     fcs.dxil.assign(std::begin(k_SDF_MeshFlood_comp_dxil), std::end(k_SDF_MeshFlood_comp_dxil));
     fcs.dxil.assign(std::begin(k_SDF_MeshFlood_comp_dxil), std::end(k_SDF_MeshFlood_comp_dxil));
+    fcs.dxbc.assign(std::begin(k_SDF_MeshFlood_comp_dxbc), std::end(k_SDF_MeshFlood_comp_dxbc));
     fcs.entryPoint = "main";
 
     rhi::PipelineStateDesc fpso;
@@ -591,6 +606,7 @@ void LumenSDF::CreateGlobalGPUObjects() {
     pcs.dxil.assign(std::begin(k_SDF_LayerProbe_comp_dxil), std::end(k_SDF_LayerProbe_comp_dxil));
     pcs.dxil.assign(std::begin(k_SDF_LayerProbe_comp_dxil), std::end(k_SDF_LayerProbe_comp_dxil));
     pcs.dxil.assign(std::begin(k_SDF_LayerProbe_comp_dxil), std::end(k_SDF_LayerProbe_comp_dxil));
+    pcs.dxbc.assign(std::begin(k_SDF_LayerProbe_comp_dxbc), std::end(k_SDF_LayerProbe_comp_dxbc));
     pcs.entryPoint = "main";
 
     rhi::PipelineStateDesc ppso;
@@ -1281,6 +1297,7 @@ void LumenSDF::CreateMarchGPUObjects() {
     cs.dxil.assign(std::begin(k_SDF_RayMarch_comp_dxil), std::end(k_SDF_RayMarch_comp_dxil));
     cs.dxil.assign(std::begin(k_SDF_RayMarch_comp_dxil), std::end(k_SDF_RayMarch_comp_dxil));
     cs.dxil.assign(std::begin(k_SDF_RayMarch_comp_dxil), std::end(k_SDF_RayMarch_comp_dxil));
+    cs.dxbc.assign(std::begin(k_SDF_RayMarch_comp_dxbc), std::end(k_SDF_RayMarch_comp_dxbc));
     cs.entryPoint = "main";
 
     rhi::PipelineStateDesc pso;
@@ -1312,6 +1329,7 @@ void LumenSDF::CreateMarchGPUObjects() {
     dcs.dxil.assign(std::begin(k_SDF_RayMarchDetail_comp_dxil), std::end(k_SDF_RayMarchDetail_comp_dxil));
     dcs.dxil.assign(std::begin(k_SDF_RayMarchDetail_comp_dxil), std::end(k_SDF_RayMarchDetail_comp_dxil));
     dcs.dxil.assign(std::begin(k_SDF_RayMarchDetail_comp_dxil), std::end(k_SDF_RayMarchDetail_comp_dxil));
+    dcs.dxbc.assign(std::begin(k_SDF_RayMarchDetail_comp_dxbc), std::end(k_SDF_RayMarchDetail_comp_dxbc));
     dcs.entryPoint = "main";
 
     rhi::PipelineStateDesc dpso;
@@ -1813,6 +1831,7 @@ void LumenSDF::CreateDebugGPUObjects() {
         cs.dxil.assign(std::begin(k_SDF_DebugView_comp_dxil), std::end(k_SDF_DebugView_comp_dxil));
         cs.dxil.assign(std::begin(k_SDF_DebugView_comp_dxil), std::end(k_SDF_DebugView_comp_dxil));
         cs.dxil.assign(std::begin(k_SDF_DebugView_comp_dxil), std::end(k_SDF_DebugView_comp_dxil));
+        cs.dxbc.assign(std::begin(k_SDF_DebugView_comp_dxbc), std::end(k_SDF_DebugView_comp_dxbc));
         cs.entryPoint = "main";
 
         rhi::PipelineStateDesc pso;

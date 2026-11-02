@@ -28,12 +28,16 @@
 
 #include "Nanite_Cull.comp.spv.h"
 #include "Nanite_Cull.comp.dxil.h"             // 由 Shader 编译管线生成（slangc → SPIR-V → spv_to_header.py）
+#include "Nanite_Cull.comp.dxbc.h"
 #include "Nanite_InstanceCull.comp.spv.h"
 #include "Nanite_InstanceCull.comp.dxil.h"     // 【任务 13】同上
+#include "Nanite_InstanceCull.comp.dxbc.h"
 #include "Nanite_ClusterBVH.comp.spv.h"
 #include "Nanite_ClusterBVH.comp.dxil.h"       // 【任务 14】per-instance cluster BVH 的 DFS 遍历
+#include "Nanite_ClusterBVH.comp.dxbc.h"
 #include "Nanite_HiZDownsample.comp.spv.h"
 #include "Nanite_HiZDownsample.comp.dxil.h"    // 【任务 15】模块自持的 Hi-Z 下采样（与既有 HiZDownsample 同口径）
+#include "Nanite_HiZDownsample.comp.dxbc.h"
 
 // 【任务 13 的契约交叉验证】`NaniteInstanceGpuObject` 是 `GPUSceneObject` 的 RHI-free 镜像。
 // 只有本 .cpp（Render 目标）能 include 真身，因此把"逐字段同布局"这条硬契约钉在这里：
@@ -214,6 +218,7 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_CS.dxil.assign(std::begin(k_Nanite_Cull_comp_dxil), std::end(k_Nanite_Cull_comp_dxil));
     m_CS.dxil.assign(std::begin(k_Nanite_Cull_comp_dxil), std::end(k_Nanite_Cull_comp_dxil));
     m_CS.dxil.assign(std::begin(k_Nanite_Cull_comp_dxil), std::end(k_Nanite_Cull_comp_dxil));
+    m_CS.dxbc.assign(std::begin(k_Nanite_Cull_comp_dxbc), std::end(k_Nanite_Cull_comp_dxbc));
     m_CS.entryPoint = "main";
 
     rhi::PushConstantRange pc;
@@ -253,6 +258,7 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         m_InstanceCullCS.dxil.assign(std::begin(k_Nanite_InstanceCull_comp_dxil), std::end(k_Nanite_InstanceCull_comp_dxil));
         m_InstanceCullCS.dxil.assign(std::begin(k_Nanite_InstanceCull_comp_dxil), std::end(k_Nanite_InstanceCull_comp_dxil));
         m_InstanceCullCS.dxil.assign(std::begin(k_Nanite_InstanceCull_comp_dxil), std::end(k_Nanite_InstanceCull_comp_dxil));
+        m_InstanceCullCS.dxbc.assign(std::begin(k_Nanite_InstanceCull_comp_dxbc), std::end(k_Nanite_InstanceCull_comp_dxbc));
         m_InstanceCullCS.entryPoint = "main";
 
         rhi::PushConstantRange cullPc;
@@ -458,6 +464,7 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         m_BVHCS.dxil.assign(std::begin(k_Nanite_ClusterBVH_comp_dxil), std::end(k_Nanite_ClusterBVH_comp_dxil));
         m_BVHCS.dxil.assign(std::begin(k_Nanite_ClusterBVH_comp_dxil), std::end(k_Nanite_ClusterBVH_comp_dxil));
         m_BVHCS.dxil.assign(std::begin(k_Nanite_ClusterBVH_comp_dxil), std::end(k_Nanite_ClusterBVH_comp_dxil));
+        m_BVHCS.dxbc.assign(std::begin(k_Nanite_ClusterBVH_comp_dxbc), std::end(k_Nanite_ClusterBVH_comp_dxbc));
         m_BVHCS.entryPoint = "main";
 
         rhi::PushConstantRange bvhPc;
@@ -502,6 +509,7 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         m_HiZBuildCS.dxil.assign(std::begin(k_Nanite_HiZDownsample_comp_dxil), std::end(k_Nanite_HiZDownsample_comp_dxil));
         m_HiZBuildCS.dxil.assign(std::begin(k_Nanite_HiZDownsample_comp_dxil), std::end(k_Nanite_HiZDownsample_comp_dxil));
         m_HiZBuildCS.dxil.assign(std::begin(k_Nanite_HiZDownsample_comp_dxil), std::end(k_Nanite_HiZDownsample_comp_dxil));
+        m_HiZBuildCS.dxbc.assign(std::begin(k_Nanite_HiZDownsample_comp_dxbc), std::end(k_Nanite_HiZDownsample_comp_dxbc));
         m_HiZBuildCS.entryPoint = "main";
 
         rhi::PushConstantRange hizPc;

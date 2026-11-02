@@ -5,8 +5,10 @@
 #include "Pipeline/Camera.h"
 #include "Shadow.vert.spv.h"
 #include "Shadow.vert.dxil.h"
+#include "Shadow.vert.dxbc.h"
 #include "Shadow.frag.spv.h"
 #include "Shadow.frag.dxil.h"
+#include "Shadow.frag.dxbc.h"
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
 #include "Scene/MeshComponent.h"
@@ -36,12 +38,14 @@ bool PointShadowTechnique::Initialize(rhi::IRHIDevice* device){
     m_ShadowVS.dxil.assign(std::begin(k_Shadow_vert_dxil), std::end(k_Shadow_vert_dxil));
     m_ShadowVS.dxil.assign(std::begin(k_Shadow_vert_dxil), std::end(k_Shadow_vert_dxil));
     m_ShadowVS.dxil.assign(std::begin(k_Shadow_vert_dxil), std::end(k_Shadow_vert_dxil));
+    m_ShadowVS.dxbc.assign(std::begin(k_Shadow_vert_dxbc), std::end(k_Shadow_vert_dxbc));
     m_ShadowVS.entryPoint="main";
     m_ShadowFS.stage=rhi::ShaderStage::Pixel;
     m_ShadowFS.spirv=k_Shadow_frag_spv;
     m_ShadowFS.dxil.assign(std::begin(k_Shadow_frag_dxil), std::end(k_Shadow_frag_dxil));
     m_ShadowFS.dxil.assign(std::begin(k_Shadow_frag_dxil), std::end(k_Shadow_frag_dxil));
     m_ShadowFS.dxil.assign(std::begin(k_Shadow_frag_dxil), std::end(k_Shadow_frag_dxil));
+    m_ShadowFS.dxbc.assign(std::begin(k_Shadow_frag_dxbc), std::end(k_Shadow_frag_dxbc));
     m_ShadowFS.entryPoint="main";
     rhi::TextureDesc d;
     d.format=rhi::Format::D32_FLOAT;
@@ -140,11 +144,11 @@ void PointShadowTechnique::Render(rhi::IRHICommandList* cmd,const FrameSceneSnap
         float3 lp(sd[li].pointLightData);
         float rng=sd[li].pointLightData.w;
         float4x4 proj=glm::perspectiveRH_ZO(glm::radians(90.f),1.f,.1f,rng);
-        // 【D3D12 复现 Vulkan 正高度视口】下面用正高度视口（不翻转 Y）渲染各面，Vulkan 下
-        // NDC -1 落在第 0 行；D3D12 没有这种视口（高度不能为负，NDC +1 恒在第 0 行），
+        // 【D3D 后端复现 Vulkan 正高度视口】下面用正高度视口（不翻转 Y）渲染各面，Vulkan 下
+        // NDC -1 落在第 0 行；D3D11 / D3D12 没有这种视口（高度不能为负，NDC +1 恒在第 0 行），
         // 各面会上下颠倒，采样时阴影错位（实测地面出现楔形阴影）。在裁剪空间翻转 Y 与
-        // Vulkan 正高度视口完全等价（含屏幕空间绕序），两后端的立方体面内容因此一致。
-        if(m_Device&&m_Device->GetBackend()==rhi::Backend::D3D12) proj[1][1]=-proj[1][1];
+        // Vulkan 正高度视口完全等价（含屏幕空间绕序），各后端的立方体面内容因此一致。
+        if(m_Device&&rhi::IsD3DStyleClipSpace(m_Device->GetBackend())) proj[1][1]=-proj[1][1];
         for(u32 face=0;face<6;++face){
             float4x4 view=glm::lookAtRH(lp,lp+kCubeFaces[face].dir,kCubeFaces[face].up);
             void*fv=cube->GetNativeHandle(face);

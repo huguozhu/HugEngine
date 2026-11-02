@@ -4,14 +4,19 @@
 #include "Pipeline/MeshBatcher.h"  // IndirectDrawCommand
 #include "GPUCull.comp.spv.h"
 #include "GPUCull.comp.dxil.h"
+#include "GPUCull.comp.dxbc.h"
 #include "GPUCull_Phase1.comp.spv.h"
 #include "GPUCull_Phase1.comp.dxil.h"
+#include "GPUCull_Phase1.comp.dxbc.h"
 #include "GPUCull_TwoPhase.comp.spv.h"
 #include "GPUCull_TwoPhase.comp.dxil.h"
+#include "GPUCull_TwoPhase.comp.dxbc.h"
 #include "HiZDownsample.comp.spv.h"
 #include "HiZDownsample.comp.dxil.h"
+#include "HiZDownsample.comp.dxbc.h"
 #include "PersistentCull.comp.spv.h"
 #include "PersistentCull.comp.dxil.h"
+#include "PersistentCull.comp.dxbc.h"
 #include "Core/Log.h"
 #include "Core/Assert.h"
 #include <cstring>
@@ -82,6 +87,7 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
     m_CS.dxil.assign(std::begin(k_GPUCull_comp_dxil), std::end(k_GPUCull_comp_dxil));
     m_CS.dxil.assign(std::begin(k_GPUCull_comp_dxil), std::end(k_GPUCull_comp_dxil));
     m_CS.dxil.assign(std::begin(k_GPUCull_comp_dxil), std::end(k_GPUCull_comp_dxil));
+    m_CS.dxbc.assign(std::begin(k_GPUCull_comp_dxbc), std::end(k_GPUCull_comp_dxbc));
     m_CS.entryPoint = "main";
 
     rhi::DescriptorSetLayoutDesc layoutDesc;
@@ -165,6 +171,7 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
     m_Phase1CS.dxil.assign(std::begin(k_GPUCull_Phase1_comp_dxil), std::end(k_GPUCull_Phase1_comp_dxil));
     m_Phase1CS.dxil.assign(std::begin(k_GPUCull_Phase1_comp_dxil), std::end(k_GPUCull_Phase1_comp_dxil));
     m_Phase1CS.dxil.assign(std::begin(k_GPUCull_Phase1_comp_dxil), std::end(k_GPUCull_Phase1_comp_dxil));
+    m_Phase1CS.dxbc.assign(std::begin(k_GPUCull_Phase1_comp_dxbc), std::end(k_GPUCull_Phase1_comp_dxbc));
     m_Phase1CS.entryPoint = "main";
 
     m_Phase1Layout = device->CreateDescriptorSetLayout(layoutDesc);
@@ -206,6 +213,7 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
     m_Phase2CS.dxil.assign(std::begin(k_GPUCull_TwoPhase_comp_dxil), std::end(k_GPUCull_TwoPhase_comp_dxil));
     m_Phase2CS.dxil.assign(std::begin(k_GPUCull_TwoPhase_comp_dxil), std::end(k_GPUCull_TwoPhase_comp_dxil));
     m_Phase2CS.dxil.assign(std::begin(k_GPUCull_TwoPhase_comp_dxil), std::end(k_GPUCull_TwoPhase_comp_dxil));
+    m_Phase2CS.dxbc.assign(std::begin(k_GPUCull_TwoPhase_comp_dxbc), std::end(k_GPUCull_TwoPhase_comp_dxbc));
     m_Phase2CS.entryPoint = "main";
 
     rhi::DescriptorSetLayoutDesc p2Layout;
@@ -254,6 +262,7 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
         hizCS.dxil.assign(std::begin(k_HiZDownsample_comp_dxil), std::end(k_HiZDownsample_comp_dxil));
         hizCS.dxil.assign(std::begin(k_HiZDownsample_comp_dxil), std::end(k_HiZDownsample_comp_dxil));
         hizCS.dxil.assign(std::begin(k_HiZDownsample_comp_dxil), std::end(k_HiZDownsample_comp_dxil));
+        hizCS.dxbc.assign(std::begin(k_HiZDownsample_comp_dxbc), std::end(k_HiZDownsample_comp_dxbc));
         hizCS.entryPoint = "main";
 
         rhi::PushConstantRange hizPCR;
@@ -764,6 +773,7 @@ bool GPUCulling::InitializePTG(rhi::IRHIDevice* device) {
     m_PTGCS.dxil.assign(std::begin(k_PersistentCull_comp_dxil), std::end(k_PersistentCull_comp_dxil));
     m_PTGCS.dxil.assign(std::begin(k_PersistentCull_comp_dxil), std::end(k_PersistentCull_comp_dxil));
     m_PTGCS.dxil.assign(std::begin(k_PersistentCull_comp_dxil), std::end(k_PersistentCull_comp_dxil));
+    m_PTGCS.dxbc.assign(std::begin(k_PersistentCull_comp_dxbc), std::end(k_PersistentCull_comp_dxbc));
     m_PTGCS.entryPoint = "main";
 
     // 3. 创建 PTG 描述符布局（5 个 binding）

@@ -7,6 +7,7 @@
 // 由 shader 编译管线生成：slangc → SPIR-V → spv_to_header.py → .spv.h
 #include "WorkGraph_Entry.comp.spv.h"
 #include "WorkGraph_Entry.comp.dxil.h"
+#include "WorkGraph_Entry.comp.dxbc.h"
 
 namespace he::render {
 

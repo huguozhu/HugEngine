@@ -2,10 +2,13 @@
 
 #include "AITensorScale.comp.spv.h"
 #include "AITensorScale.comp.dxil.h"    // k_AITensorScale_comp_spv（内置：逐元素缩放）
+#include "AITensorScale.comp.dxbc.h"
 #include "AITextureSample.comp.spv.h"
 #include "AITextureSample.comp.dxil.h"  // k_AITextureSample_comp_spv（内置：纹理采样）
+#include "AITextureSample.comp.dxbc.h"
 #include "AITextureGen.comp.spv.h"
 #include "AITextureGen.comp.dxil.h"     // k_AITextureGen_comp_spv（内置：GPU 生成纹理）
+#include "AITextureGen.comp.dxbc.h"
 #include "Core/Log.h"
 
 #include <cstring>

@@ -3,6 +3,7 @@
 #include "AI/Runtime/AIDevice.h"
 #include "AITensorAdd.comp.spv.h"
 #include "AITensorAdd.comp.dxil.h"   // k_AITensorAdd_comp_spv（外部核 SPIR-V）
+#include "AITensorAdd.comp.dxbc.h"
 #include "Core/Log.h"
 #include "imgui.h"
 

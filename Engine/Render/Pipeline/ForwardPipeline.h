@@ -295,6 +295,7 @@ private:
     /// 注意：这条路径会在**帧内**因材质数变化而重建（`UploadMaterialBindless` 扩容）——
     /// 重建时必须先销毁旧句柄再建新的，否则资源表里会堆积旧缓冲。
     rhi::RHIBufferHandle m_MaterialBuffer{};
+    u32                  m_MaterialBindlessHandle = 0;   // 材质缓冲在 bindless 堆里的句柄（非 bindless 后端要显式交给命令列表）
     u32 m_MaterialCount = 0;                            // 已注册材质数（buffer 内元素数）
     bool m_UseBindlessMaterial = false;  // 默认走内联路径（GPUObjectData 字段读材质参数）；验证 bindless 后切换
 

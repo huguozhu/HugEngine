@@ -354,7 +354,7 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
                 if (spotUv.x > 0.0 && spotUv.x < 1.0 && spotUv.y > 0.0 && spotUv.y < 1.0) {
                     for (int sx = -1; sx <= 1; sx++)
                         for (int sy = -1; sy <= 1; sy++)
-                            spotShadow += (spotZ <= u_SpotShadowMap.Sample(u_ShadowSampler, spotUv + float2(sx, sy) * ts)) ? 1.0 : 0.0;
+                            spotShadow += (spotZ <= HE_SAMPLE_L0(u_SpotShadowMap, u_ShadowSampler, spotUv + float2(sx, sy) * ts)) ? 1.0 : 0.0;
                     shadow = spotShadow / 9.0;
                 }
             }
@@ -399,7 +399,7 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
                 if (spotUv.x > 0.0 && spotUv.x < 1.0 && spotUv.y > 0.0 && spotUv.y < 1.0) {
                     for (int sx = -1; sx <= 1; sx++)
                         for (int sy = -1; sy <= 1; sy++)
-                            spotShadow += (spotZ <= u_SpotShadowMap.Sample(u_ShadowSampler, spotUv + float2(sx, sy) * ts)) ? 1.0 : 0.0;
+                            spotShadow += (spotZ <= HE_SAMPLE_L0(u_SpotShadowMap, u_ShadowSampler, spotUv + float2(sx, sy) * ts)) ? 1.0 : 0.0;
                     shadow = spotShadow / 9.0;
                 }
             }
