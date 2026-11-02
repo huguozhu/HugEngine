@@ -16,9 +16,12 @@ namespace he::rhi::d3d11 {
 
 using dxbc::DxbcBindType;
 
+D3D11CommandList::D3D11CommandList(D3D11Device* device)
+    : m_Device(device), m_State(&device->GetImmediateState()) {}
+
 D3D11CommandList::~D3D11CommandList() {
     // 上下文所有者只做指针比较：本列表销毁后若有新列表恰好分配到同一地址，会误以为状态仍在上下文里
-    if (m_Device && m_Device->GetContextOwner() == this) m_Device->SetContextOwner(nullptr);
+    if (m_State && m_State->owner == this) m_State->owner = nullptr;
 }
 
 // ---------------------------------------------------------------------------
@@ -44,7 +47,7 @@ void D3D11CommandList::Begin() {
     m_PendingSignals.clear();
     m_NonBindless.clear();
     // 让下一次改动上下文时重新应用（即使上下文的上一个使用者就是本列表的上一轮录制）
-    if (m_Device->GetContextOwner() == this) m_Device->SetContextOwner(nullptr);
+    if (m_State->owner == this) m_State->owner = nullptr;
 }
 
 void D3D11CommandList::End() {
@@ -56,8 +59,8 @@ void D3D11CommandList::End() {
 //  上下文所有权与状态应用
 // ---------------------------------------------------------------------------
 void D3D11CommandList::EnsureOwner() {
-    if (m_Device->GetContextOwner() == this) return;
-    m_Device->SetContextOwner(this);
+    if (m_State->owner == this) return;
+    m_State->owner = this;
     ApplyPipeline();
     ApplyRenderTargets();
     ApplyInputAssembler();
@@ -67,7 +70,7 @@ void D3D11CommandList::EnsureOwner() {
 
 void D3D11CommandList::ApplyPipeline() {
     if (!m_Pipeline || !m_Pipeline->IsValid()) return;
-    ID3D11DeviceContext4* ctx = m_Device->GetContext();
+    ID3D11DeviceContext4* ctx = m_State->context;
     if (m_Pipeline->IsCompute()) {
         ctx->CSSetShader(m_Pipeline->GetCS(), nullptr, 0);
         return;
@@ -97,12 +100,12 @@ void D3D11CommandList::ApplyRenderTargets() {
         if (outputs[outputCount]) outputs[outputCount++]->Release();   // 只取指针作比较
     }
     if (m_DepthTexture && !readOnly) outputs[outputCount++] = m_DepthTexture->GetResource();
-    if (outputCount) m_Device->UnbindSrvsOf(outputs, outputCount);
-    m_Device->GetContext()->OMSetRenderTargets(m_RtvCount, m_RtvCount ? m_Rtvs : nullptr, dsv);
+    if (outputCount) m_State->UnbindSrvsOf(outputs, outputCount);
+    m_State->context->OMSetRenderTargets(m_RtvCount, m_RtvCount ? m_Rtvs : nullptr, dsv);
 }
 
 void D3D11CommandList::ApplyInputAssembler() {
-    ID3D11DeviceContext4* ctx = m_Device->GetContext();
+    ID3D11DeviceContext4* ctx = m_State->context;
     ID3D11Buffer* buffers[D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT] = {};
     UINT strides[D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT] = {};
     UINT offsets[D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT] = {};
@@ -137,7 +140,7 @@ void D3D11CommandList::ApplyInputAssembler() {
 }
 
 void D3D11CommandList::ApplyViewportScissor() {
-    ID3D11DeviceContext4* ctx = m_Device->GetContext();
+    ID3D11DeviceContext4* ctx = m_State->context;
     if (m_Viewport.Width > 0.0f && m_Viewport.Height > 0.0f) ctx->RSSetViewports(1, &m_Viewport);
     if (m_Scissor.right > m_Scissor.left && m_Scissor.bottom > m_Scissor.top) ctx->RSSetScissorRects(1, &m_Scissor);
 }
@@ -156,7 +159,7 @@ void D3D11CommandList::BeginPassTargets(ID3D11RenderTargetView* const* rtvs, u32
                                         u32 width, u32 height, bool clearColor, const ClearValue* colorClears,
                                         bool clearDepth, float depth, u8 stencil) {
     EnsureOwner();
-    ID3D11DeviceContext4* ctx = m_Device->GetContext();
+    ID3D11DeviceContext4* ctx = m_State->context;
 
     m_RtvCount = std::min<u32>(rtvCount, kMaxColorAttachments);
     for (u32 i = 0; i < kMaxColorAttachments; ++i) m_Rtvs[i] = (i < m_RtvCount) ? rtvs[i] : nullptr;
@@ -234,7 +237,7 @@ void D3D11CommandList::EndOffscreenPass() {
     for (auto& r : m_Rtvs) r = nullptr;
     m_RtvCount = 0;
     m_DepthTexture = nullptr;
-    m_Device->GetContext()->OMSetRenderTargets(0, nullptr, nullptr);
+    m_State->context->OMSetRenderTargets(0, nullptr, nullptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -350,12 +353,12 @@ void D3D11CommandList::SetPushConstants(u32 offset, u32 size, const void* data) 
 void D3D11CommandList::BindPushConstants() {
     if (!m_Pipeline->UsesPushConstants()) return;
     // 数据改过，或常量环转了一圈（旧槽位已作废）：写进新槽
-    if (m_PushDirty || m_PushGeneration != m_Device->GetPushRingGeneration()) {
-        if (!m_Device->AllocatePushConstants(m_PushData, m_PushFirstConstant, m_PushGeneration)) return;
+    if (m_PushDirty || m_PushGeneration != m_State->pushGeneration) {
+        if (!m_Device->AllocatePushConstants(*m_State, m_PushData, m_PushFirstConstant, m_PushGeneration)) return;
         m_PushDirty = false;
     }
-    ID3D11DeviceContext4* ctx = m_Device->GetContext();
-    ID3D11Buffer* ring = m_Device->GetPushConstantRing();
+    ID3D11DeviceContext4* ctx = m_State->context;
+    ID3D11Buffer* ring = m_State->pushRing.Get();
     const UINT first = m_PushFirstConstant;
     const UINT count = D3D11Device::kPushSlotSize / 16u;
     // 同一缓冲只换偏移重新绑定时，部分运行时会把它当冗余调用过滤掉：先绑空再绑（规划 3.5）
@@ -378,7 +381,7 @@ void D3D11CommandList::SetTimelineSignal(RHIFenceHandle fence, u64 value) {
 
 void D3D11CommandList::Submit() {
     for (const auto& [fence, value] : m_PendingSignals) {
-        if (ID3D11Fence* f = m_Device->FindFence(fence)) m_Device->GetContext()->Signal(f, value);
+        if (ID3D11Fence* f = m_Device->FindFence(fence)) m_State->context->Signal(f, value);
     }
     m_PendingSignals.clear();
 }
@@ -387,7 +390,7 @@ void D3D11CommandList::Submit() {
 //  查询（M3.7）
 // ---------------------------------------------------------------------------
 void D3D11CommandList::WriteTimestamp(IRHIQueryPool* pool, u32 queryIndex) {
-    if (pool) static_cast<D3D11QueryPool*>(pool)->WriteTimestamp(queryIndex);
+    if (pool) static_cast<D3D11QueryPool*>(pool)->WriteTimestamp(m_State->context, queryIndex);
 }
 
 void D3D11CommandList::ResetQueryPool(IRHIQueryPool* pool) {
@@ -403,16 +406,16 @@ bool D3D11CommandList::TryGetQueryResults(IRHIQueryPool* pool, u32 first, u32 co
 }
 
 void D3D11CommandList::BeginQuery(IRHIQueryPool* pool, u32 queryIndex) {
-    if (pool) static_cast<D3D11QueryPool*>(pool)->Begin(queryIndex);
+    if (pool) static_cast<D3D11QueryPool*>(pool)->Begin(m_State->context, queryIndex);
 }
 
 void D3D11CommandList::EndQuery(IRHIQueryPool* pool, u32 queryIndex) {
-    if (pool) static_cast<D3D11QueryPool*>(pool)->End(queryIndex);
+    if (pool) static_cast<D3D11QueryPool*>(pool)->End(m_State->context, queryIndex);
 }
 
 ID3D11DeviceContext4* D3D11CommandList::PrepareExternalRendering() {
     EnsureOwner();
-    return m_Device->GetContext();
+    return m_State->context;
 }
 
 void D3D11CommandList::ReportMissing(u32 set, u32 binding, const char* what) {
@@ -426,7 +429,7 @@ void D3D11CommandList::ReportMissing(u32 set, u32 binding, const char* what) {
 }
 
 void D3D11CommandList::FlushBindings() {
-    ID3D11DeviceContext4* ctx = m_Device->GetContext();
+    ID3D11DeviceContext4* ctx = m_State->context;
     const bool compute = m_Pipeline->IsCompute();
 
     // 图形管线里所有阶段的 UAV 要和渲染目标一起设置（OMSetRenderTargetsAndUnorderedAccessViews）
@@ -478,7 +481,7 @@ void D3D11CommandList::FlushBindings() {
                     if (stage == D3D11PipelineState::VS)      ctx->VSSetShaderResources(b.slot, b.count, views.data());
                     else if (stage == D3D11PipelineState::PS) ctx->PSSetShaderResources(b.slot, b.count, views.data());
                     else                                      ctx->CSSetShaderResources(b.slot, b.count, views.data());
-                    m_Device->TrackSrvs(stage, b.slot, b.count, views.data());   // 冲突解绑要知道 SRV 指向谁
+                    m_State->TrackSrvs(stage, b.slot, b.count, views.data());   // 冲突解绑要知道 SRV 指向谁
                     break;
                 }
                 case DxbcBindType::UAV: {
@@ -587,7 +590,7 @@ void D3D11CommandList::UnbindSrvsOfUavs(ID3D11UnorderedAccessView* const* uavs, 
         uavs[i]->GetResource(&r);
         if (r) { resources.push_back(r); r->Release(); }   // 只取指针作比较
     }
-    if (!resources.empty()) m_Device->UnbindSrvsOf(resources.data(), static_cast<u32>(resources.size()));
+    if (!resources.empty()) m_State->UnbindSrvsOf(resources.data(), static_cast<u32>(resources.size()));
 }
 
 bool D3D11CommandList::PrepareDrawOrDispatch(bool compute) {
@@ -617,14 +620,14 @@ bool D3D11CommandList::PrepareDrawOrDispatch(bool compute) {
 void D3D11CommandList::Draw(u32 vertexCount, u32 instanceCount, u32 firstVertex, u32 firstInstance) {
     if (!PrepareDrawOrDispatch(false)) return;
     m_Device->NoteExecuted(m_Pipeline->GetName());   // 诊断：GPU 等待超时时打印最近的 PSO
-    m_Device->GetContext()->DrawInstanced(vertexCount, instanceCount, firstVertex, firstInstance);
+    m_State->context->DrawInstanced(vertexCount, instanceCount, firstVertex, firstInstance);
 }
 
 void D3D11CommandList::DrawIndexed(u32 indexCount, u32 instanceCount, u32 firstIndex,
                                    i32 vertexOffset, u32 firstInstance) {
     if (!PrepareDrawOrDispatch(false)) return;
     m_Device->NoteExecuted(m_Pipeline->GetName());   // 诊断：GPU 等待超时时打印最近的 PSO
-    m_Device->GetContext()->DrawIndexedInstanced(indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
+    m_State->context->DrawIndexedInstanced(indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
 }
 
 void D3D11CommandList::DrawIndexedIndirect(IRHIBuffer* buffer, u64 offset, u32 drawCount, u32 stride) {
@@ -633,11 +636,11 @@ void D3D11CommandList::DrawIndexedIndirect(IRHIBuffer* buffer, u64 offset, u32 d
     const u32 step = stride ? stride : static_cast<u32>(sizeof(IndirectDrawIndexedCommand));
     // 由计算着色器写入的参数缓冲先拷进影子参数缓冲（规划 3.3）；拷贝在 PrepareDrawOrDispatch 之前，
     // 不影响已下发的绘制状态
-    ID3D11Buffer* argBuf = args->PrepareIndirectArgs(offset, u64(drawCount - 1) * step + sizeof(IndirectDrawIndexedCommand));
+    ID3D11Buffer* argBuf = args->PrepareIndirectArgs(m_State->context, offset, u64(drawCount - 1) * step + sizeof(IndirectDrawIndexedCommand));
     if (!argBuf || !PrepareDrawOrDispatch(false)) return;
     m_Device->NoteExecuted(m_Pipeline->GetName());   // 诊断：GPU 等待超时时打印最近的 PSO
     // D3D11 一次只能画一条间接命令：逐条调用
-    ID3D11DeviceContext4* ctx = m_Device->GetContext();
+    ID3D11DeviceContext4* ctx = m_State->context;
     for (u32 i = 0; i < drawCount; ++i) {
         ctx->DrawIndexedInstancedIndirect(argBuf, static_cast<UINT>(offset + u64(i) * step));
     }
@@ -652,9 +655,9 @@ void D3D11CommandList::DrawIndexedIndirectCount(IRHIBuffer* buffer, u64 offset, 
     // 参数整形（规划 3.3）：拷进影子参数缓冲，再由内置 CS 把序号 ≥ GPU 计数的命令 instanceCount 置 0，
     // 然后逐条绘制（条数见 EstimateIndirectCount，多出来的是空绘制）。整形 CS 会改动 CS 阶段状态，
     // 所以放在 PrepareDrawOrDispatch 之前，后者会重新应用本列表的状态
-    ID3D11Buffer* argBuf = args->PrepareIndirectArgs(offset, u64(maxDrawCount - 1) * step + sizeof(IndirectDrawIndexedCommand));
+    ID3D11Buffer* argBuf = args->PrepareIndirectArgs(m_State->context, offset, u64(maxDrawCount - 1) * step + sizeof(IndirectDrawIndexedCommand));
     if (!argBuf) return;
-    if (!m_Device->ClampIndirectCount(count, countOffset, args->GetIndirectArgsUav(), offset, step, maxDrawCount)) {
+    if (!m_Device->ClampIndirectCount(*m_State, count, countOffset, args->GetIndirectArgsUav(), offset, step, maxDrawCount)) {
         if (!m_WarnedIndirectCount) {
             m_WarnedIndirectCount = true;
             HE_CORE_WARN("[D3D11] DrawIndexedIndirectCount 的参数整形失败（计数缓冲或影子参数缓冲不可用），间接绘制被跳过");
@@ -663,9 +666,9 @@ void D3D11CommandList::DrawIndexedIndirectCount(IRHIBuffer* buffer, u64 offset, 
     }
     if (!PrepareDrawOrDispatch(false)) return;
     m_Device->NoteExecuted(m_Pipeline->GetName());   // 诊断：GPU 等待超时时打印最近的 PSO
-    ID3D11DeviceContext4* ctx = m_Device->GetContext();
+    ID3D11DeviceContext4* ctx = m_State->context;
     // 逐条调用的次数按前几帧回读的计数估计（maxDrawCount 常是容量，如 Nanite 的 1M 条）
-    const u32 loops = m_Device->EstimateIndirectCount(count, countOffset, maxDrawCount);
+    const u32 loops = m_Device->EstimateIndirectCount(*m_State, count, countOffset, maxDrawCount);
     for (u32 i = 0; i < loops; ++i) {
         ctx->DrawIndexedInstancedIndirect(argBuf, static_cast<UINT>(offset + u64(i) * step));
     }
@@ -674,7 +677,7 @@ void D3D11CommandList::DrawIndexedIndirectCount(IRHIBuffer* buffer, u64 offset, 
 void D3D11CommandList::Dispatch(u32 x, u32 y, u32 z) {
     if (!PrepareDrawOrDispatch(true)) return;
     m_Device->NoteExecuted(m_Pipeline->GetName());   // 诊断：GPU 等待超时时打印最近的 PSO
-    ID3D11DeviceContext4* ctx = m_Device->GetContext();
+    ID3D11DeviceContext4* ctx = m_State->context;
     // D3D11 每一维最多 65535 个工作组。引擎有「按容量派发、着色器按实际计数早退」的写法
     // （如 Nanite 软光栅按可见簇容量 1M 派发），超出部分截断：只有实际数量也超过上限时才会漏算
     constexpr u32 kMaxGroups = D3D11_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION;
@@ -696,11 +699,11 @@ void D3D11CommandList::DispatchIndirect(IRHIBuffer* buffer, u64 offset) {
     auto* args = static_cast<D3D11Buffer*>(buffer);
     if (!args) return;
     // 由计算着色器写入的参数缓冲先拷进影子参数缓冲（规划 3.3）
-    ID3D11Buffer* argBuf = args->PrepareIndirectArgs(offset, 3u * sizeof(u32));
+    ID3D11Buffer* argBuf = args->PrepareIndirectArgs(m_State->context, offset, 3u * sizeof(u32));
     if (!argBuf) return;
     if (!PrepareDrawOrDispatch(true)) return;
     m_Device->NoteExecuted(m_Pipeline->GetName());   // 诊断：GPU 等待超时时打印最近的 PSO
-    ID3D11DeviceContext4* ctx = m_Device->GetContext();
+    ID3D11DeviceContext4* ctx = m_State->context;
     ctx->DispatchIndirect(argBuf, static_cast<UINT>(offset));
     ID3D11UnorderedAccessView* nullUavs[dxbc::kDxbcMaxUAVSlots] = {};
     ctx->CSSetUnorderedAccessViews(0, dxbc::kDxbcMaxUAVSlots, nullUavs, nullptr);
@@ -727,7 +730,7 @@ void D3D11CommandList::CopyBuffer(IRHIBuffer* src, IRHIBuffer* dst, u64 size, u6
         return;
     }
     D3D11_BOX box{ static_cast<UINT>(srcOffset), 0, 0, static_cast<UINT>(srcOffset + size), 1, 1 };
-    m_Device->GetContext()->CopySubresourceRegion(d->GetBuffer(), 0, static_cast<UINT>(dstOffset), 0, 0,
+    m_State->context->CopySubresourceRegion(d->GetBuffer(), 0, static_cast<UINT>(dstOffset), 0, 0,
                                                   s->GetBuffer(), 0, &box);
     d->MarkGpuWritten();
 }
@@ -736,7 +739,7 @@ void D3D11CommandList::CopyTextureToTexture(IRHITexture* src, IRHITexture* dst) 
     auto* s = static_cast<D3D11Texture*>(src);
     auto* d = static_cast<D3D11Texture*>(dst);
     if (!s || !d || s == d) return;
-    m_Device->GetContext()->CopyResource(d->GetResource(), s->GetResource());
+    m_State->context->CopyResource(d->GetResource(), s->GetResource());
 }
 
 void D3D11CommandList::CopyTextureToBuffer(IRHITexture* src, IRHIBuffer* dst, u32 x, u32 y,
@@ -762,6 +765,8 @@ void D3D11CommandList::CopyTextureToBuffer(IRHITexture* src, IRHIBuffer* dst, u3
     ComPtr<ID3D11Texture2D> staging;
     if (!HE_D3D11_CHECK(m_Device->GetDevice()->CreateTexture2D(&td, nullptr, &staging), "CreateTexture2D(回读)")) return;
 
+    // 同步回读只能在 immediate context 上做（deferred context 不能 Map 读）：二级列表里调用时
+    // 拷贝会立刻执行，早于该列表之前录下的命令（引擎只在主列表里调用它）
     ID3D11DeviceContext4* ctx = m_Device->GetContext();
     D3D11_BOX box{ x, y, 0, x + w, y + h, 1 };
     ctx->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, t->GetResource(), 0, &box);
@@ -782,14 +787,14 @@ void D3D11CommandList::ClearDepthStencil(IRHITexture* texture, float depth) {
     if (!t || !t->IsDepth()) return;
     UINT flags = D3D11_CLEAR_DEPTH;
     if (HasStencil(t->GetFormat())) flags |= D3D11_CLEAR_STENCIL;
-    m_Device->GetContext()->ClearDepthStencilView(t->GetDsv(0, 0, false), flags, depth, 0);
+    m_State->context->ClearDepthStencilView(t->GetDsv(0, 0, false), flags, depth, 0);
 }
 
 // ---------------------------------------------------------------------------
 //  调试标签
 // ---------------------------------------------------------------------------
 void D3D11CommandList::BeginDebugLabel(const char* name, const float*) {
-    if (auto* a = m_Device->GetAnnotation()) {
+    if (auto* a = m_State->annotation.Get()) {
         a->BeginEvent(Utf8ToWide(name).c_str());
         ++m_LabelDepth;
     }
@@ -797,12 +802,12 @@ void D3D11CommandList::BeginDebugLabel(const char* name, const float*) {
 
 void D3D11CommandList::EndDebugLabel() {
     if (m_LabelDepth == 0) return;
-    if (auto* a = m_Device->GetAnnotation()) a->EndEvent();
+    if (auto* a = m_State->annotation.Get()) a->EndEvent();
     --m_LabelDepth;
 }
 
 void D3D11CommandList::InsertDebugLabel(const char* name, const float*) {
-    if (auto* a = m_Device->GetAnnotation()) a->SetMarker(Utf8ToWide(name).c_str());
+    if (auto* a = m_State->annotation.Get()) a->SetMarker(Utf8ToWide(name).c_str());
 }
 
 } // namespace he::rhi::d3d11

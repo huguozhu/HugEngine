@@ -24,12 +24,14 @@
 namespace he::rhi::d3d11 {
 
 class D3D11Device;
+struct D3D11ContextState;
 class D3D11PipelineState;
 class D3D11Texture;
 
 class D3D11CommandList final : public IRHICommandList {
 public:
-    explicit D3D11CommandList(D3D11Device* device) : m_Device(device) {}
+    /// 主命令列表：录在设备的 immediate context 上
+    explicit D3D11CommandList(D3D11Device* device);
     ~D3D11CommandList() override;
 
     // ---- 生命周期 ----
@@ -170,6 +172,7 @@ private:
     ID3D11RenderTargetView* ResolveRtv(void* view) const;
 
     D3D11Device*        m_Device    = nullptr;
+    D3D11ContextState*  m_State     = nullptr;   // 本列表录制所用上下文的状态（immediate 或自己的 deferred context）
     IRHISwapChain*      m_SwapChain = nullptr;
 
     // ---- 本列表的完整绑定状态（EnsureOwner 据此重新应用）----

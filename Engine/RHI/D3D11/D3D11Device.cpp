@@ -136,7 +136,7 @@ bool D3D11Device::CreateDeviceAndContext() {
         return false;
     }
 
-    m_Context.As(&m_Annotation);   // 调试标注（失败不影响运行）
+    InitContextState(m_Immediate, m_Context.Get());   // 主命令列表都录在 immediate context 上
 
     // 调试层消息：只记录、不中断（SetBreakOnSeverity 在没有调试器时会让进程永久等待，
     // D3D12 后端“静默挂起”教训 #1）。消息在每次提交后由 DrainDebugMessages 写进日志
@@ -288,7 +288,8 @@ void main(uint3 id : SV_DispatchThreadID) {
 }
 )";
 
-bool D3D11Device::ClampIndirectCount(D3D11Buffer* countBuffer, u64 countOffset, ID3D11UnorderedAccessView* argsUav,
+bool D3D11Device::ClampIndirectCount(D3D11ContextState& state, D3D11Buffer* countBuffer, u64 countOffset,
+                                     ID3D11UnorderedAccessView* argsUav,
                                      u64 argsOffset, u32 stride, u32 maxDraw) {
     if (!countBuffer || !argsUav || maxDraw == 0) return false;
     // 第一次用到时编译着色器、建常量缓冲
@@ -342,34 +343,35 @@ bool D3D11Device::ClampIndirectCount(D3D11Buffer* countBuffer, u64 countOffset, 
         m_CountScratchSize = need;
     }
     const D3D11_BOX box{ static_cast<UINT>(begin), 0, 0, static_cast<UINT>(begin + align), 1, 1 };
-    m_Context->CopySubresourceRegion(m_CountScratch.Get(), 0, 0, 0, 0, countBuffer->GetBuffer(), 0, &box);
+    ID3D11DeviceContext4* ctx = state.context;   // 录在调用者的上下文上（immediate 或 deferred）
+    ctx->CopySubresourceRegion(m_CountScratch.Get(), 0, 0, 0, 0, countBuffer->GetBuffer(), 0, &box);
 
     D3D11_MAPPED_SUBRESOURCE ms{};
-    if (FAILED(m_Context->Map(m_ClampParams.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &ms))) return false;
+    if (FAILED(ctx->Map(m_ClampParams.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &ms))) return false;
     const u32 params[4] = { static_cast<u32>(argsOffset), stride, maxDraw, static_cast<u32>(countOffset - begin) };
     std::memcpy(ms.pData, params, sizeof(params));
-    m_Context->Unmap(m_ClampParams.Get(), 0);
+    ctx->Unmap(m_ClampParams.Get(), 0);
 
     // 派发：CS 阶段的状态被改动，结束后解绑并让命令列表重新应用自己的状态
     ID3D11ShaderResourceView* srv = m_CountScratchSrv.Get();
     ID3D11Buffer* cb = m_ClampParams.Get();
-    m_Context->CSSetShader(m_ClampCS.Get(), nullptr, 0);
-    m_Context->CSSetConstantBuffers(0, 1, &cb);
-    m_Context->CSSetShaderResources(0, 1, &srv);
-    m_Context->CSSetUnorderedAccessViews(0, 1, &argsUav, nullptr);
-    m_Context->Dispatch((maxDraw + 63u) / 64u, 1, 1);
+    ctx->CSSetShader(m_ClampCS.Get(), nullptr, 0);
+    ctx->CSSetConstantBuffers(0, 1, &cb);
+    ctx->CSSetShaderResources(0, 1, &srv);
+    ctx->CSSetUnorderedAccessViews(0, 1, &argsUav, nullptr);
+    ctx->Dispatch((maxDraw + 63u) / 64u, 1, 1);
     ID3D11ShaderResourceView* noSrv = nullptr;
     ID3D11UnorderedAccessView* noUav = nullptr;
     ID3D11Buffer* noCb = nullptr;
-    m_Context->CSSetShaderResources(0, 1, &noSrv);
-    m_Context->CSSetUnorderedAccessViews(0, 1, &noUav, nullptr);
-    m_Context->CSSetConstantBuffers(0, 1, &noCb);
-    TrackSrvs(2, 0, 1, &noSrv);   // CS 的 t0 已置空
-    m_ContextOwner = nullptr;
+    ctx->CSSetShaderResources(0, 1, &noSrv);
+    ctx->CSSetUnorderedAccessViews(0, 1, &noUav, nullptr);
+    ctx->CSSetConstantBuffers(0, 1, &noCb);
+    state.TrackSrvs(2, 0, 1, &noSrv);   // CS 的 t0 已置空
+    state.owner = nullptr;
     return true;
 }
 
-u32 D3D11Device::EstimateIndirectCount(D3D11Buffer* countBuffer, u64 countOffset, u32 maxDraw) {
+u32 D3D11Device::EstimateIndirectCount(D3D11ContextState& state, D3D11Buffer* countBuffer, u64 countOffset, u32 maxDraw) {
     if (!countBuffer || maxDraw == 0) return maxDraw;
     // 同一计数缓冲 + 偏移共用一组回读（键里放缓冲地址与偏移）
     const u64 key = (reinterpret_cast<u64>(countBuffer) << 8) ^ countOffset;
@@ -406,7 +408,8 @@ u32 D3D11Device::EstimateIndirectCount(D3D11Buffer* countBuffer, u64 countOffset
         }
         if (rb.staging[slot]) {
             const D3D11_BOX box{ static_cast<UINT>(begin), 0, 0, static_cast<UINT>(begin + align), 1, 1 };
-            m_Context->CopySubresourceRegion(rb.staging[slot].Get(), 0, 0, 0, 0, countBuffer->GetBuffer(), 0, &box);
+            // 拷贝录在调用者的上下文上（deferred context 的命令要等执行时才发生），结果在 immediate 上取
+            state.context->CopySubresourceRegion(rb.staging[slot].Get(), 0, 0, 0, 0, countBuffer->GetBuffer(), 0, &box);
             rb.offset = static_cast<u32>(countOffset - begin);
             rb.pending[slot] = true;
             rb.cursor = (slot + 1) % CountReadback::kRing;
@@ -419,30 +422,43 @@ u32 D3D11Device::EstimateIndirectCount(D3D11Buffer* countBuffer, u64 countOffset
     return static_cast<u32>(std::min<u64>(maxDraw, bound));
 }
 
-void D3D11Device::TrackSrvs(u32 stage, u32 slot, u32 count, ID3D11ShaderResourceView* const* views) {
+void D3D11ContextState::TrackSrvs(u32 stage, u32 slot, u32 count, ID3D11ShaderResourceView* const* views) {
     if (stage >= kSrvStageCount) return;
     for (u32 i = 0; i < count && slot + i < kSrvSlotCount; ++i) {
         ID3D11Resource* r = ResourceOf(views[i]);
-        m_SrvResources[stage][slot + i] = r;
-        if (r) m_SrvHigh[stage] = std::max(m_SrvHigh[stage], slot + i + 1);
+        srvResources[stage][slot + i] = r;
+        if (r) srvHigh[stage] = std::max(srvHigh[stage], slot + i + 1);
     }
 }
 
-void D3D11Device::UnbindSrvsOf(ID3D11Resource* const* resources, u32 count) {
+void D3D11ContextState::UnbindSrvsOf(ID3D11Resource* const* resources, u32 count) {
     ID3D11ShaderResourceView* none = nullptr;
     for (u32 stage = 0; stage < kSrvStageCount; ++stage) {
-        for (u32 slot = 0; slot < m_SrvHigh[stage]; ++slot) {
-            ID3D11Resource* bound = m_SrvResources[stage][slot];
+        for (u32 slot = 0; slot < srvHigh[stage]; ++slot) {
+            ID3D11Resource* bound = srvResources[stage][slot];
             if (!bound) continue;
             bool hit = false;
             for (u32 i = 0; i < count && !hit; ++i) hit = (resources[i] == bound);
             if (!hit) continue;
-            if (stage == 0)      m_Context->VSSetShaderResources(slot, 1, &none);
-            else if (stage == 1) m_Context->PSSetShaderResources(slot, 1, &none);
-            else                 m_Context->CSSetShaderResources(slot, 1, &none);
-            m_SrvResources[stage][slot] = nullptr;
+            if (stage == 0)      context->VSSetShaderResources(slot, 1, &none);
+            else if (stage == 1) context->PSSetShaderResources(slot, 1, &none);
+            else                 context->CSSetShaderResources(slot, 1, &none);
+            srvResources[stage][slot] = nullptr;
         }
     }
+}
+
+void D3D11ContextState::ResetBindings() {
+    std::memset(srvResources, 0, sizeof(srvResources));
+    std::memset(srvHigh, 0, sizeof(srvHigh));
+    owner = nullptr;
+}
+
+void D3D11Device::InitContextState(D3D11ContextState& state, ID3D11DeviceContext4* context) {
+    state.context = context;
+    state.annotation.Reset();
+    if (context) context->QueryInterface(IID_PPV_ARGS(&state.annotation));   // 调试标注（失败不影响运行）
+    state.ResetBindings();
 }
 
 // ---------------------------------------------------------------------------
@@ -773,30 +789,31 @@ void D3D11Device::WaitFenceOnQueue(QueueType, RHIFenceHandle, u64) {
 // ---------------------------------------------------------------------------
 //  推送常量的常量环
 // ---------------------------------------------------------------------------
-bool D3D11Device::AllocatePushConstants(const void* data, u32& firstConstant, u64& generation) {
-    if (!m_PushRing) {
+bool D3D11Device::AllocatePushConstants(D3D11ContextState& state, const void* data, u32& firstConstant, u64& generation) {
+    if (!state.pushRing) {
         D3D11_BUFFER_DESC bd{};
         bd.ByteWidth      = kPushSlotSize * kPushSlotCount;
         bd.Usage          = D3D11_USAGE_DYNAMIC;
         bd.BindFlags      = D3D11_BIND_CONSTANT_BUFFER;
         bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-        if (!HE_D3D11_CHECK(m_Device->CreateBuffer(&bd, nullptr, &m_PushRing), "CreateBuffer(推送常量环)")) return false;
-        m_PushCursor = kPushSlotCount;   // 第一次分配走 DISCARD 分支
+        if (!HE_D3D11_CHECK(m_Device->CreateBuffer(&bd, nullptr, &state.pushRing), "CreateBuffer(推送常量环)")) return false;
+        state.pushNeedsDiscard = true;
     }
     D3D11_MAP mapType = D3D11_MAP_WRITE_NO_OVERWRITE;
-    if (m_PushCursor >= kPushSlotCount) {
-        // 用完一圈：DISCARD 换一块新内存（已发出的命令仍读旧内存），旧槽位从此作废
+    if (state.pushNeedsDiscard || state.pushCursor >= kPushSlotCount) {
+        // 用完一圈（或 deferred context 新一轮录制）：DISCARD 换一块新内存（已发出的命令仍读旧内存），旧槽位从此作废
         mapType = D3D11_MAP_WRITE_DISCARD;
-        m_PushCursor = 0;
-        ++m_PushRingGeneration;
+        state.pushCursor = 0;
+        ++state.pushGeneration;
+        state.pushNeedsDiscard = false;
     }
     D3D11_MAPPED_SUBRESOURCE ms{};
-    if (FAILED(m_Context->Map(m_PushRing.Get(), 0, mapType, 0, &ms))) return false;
-    std::memcpy(static_cast<u8*>(ms.pData) + static_cast<size_t>(m_PushCursor) * kPushSlotSize, data, kPushSlotSize);
-    m_Context->Unmap(m_PushRing.Get(), 0);
-    firstConstant = m_PushCursor * (kPushSlotSize / 16u);
-    generation    = m_PushRingGeneration;
-    ++m_PushCursor;
+    if (FAILED(state.context->Map(state.pushRing.Get(), 0, mapType, 0, &ms))) return false;
+    std::memcpy(static_cast<u8*>(ms.pData) + static_cast<size_t>(state.pushCursor) * kPushSlotSize, data, kPushSlotSize);
+    state.context->Unmap(state.pushRing.Get(), 0);
+    firstConstant = state.pushCursor * (kPushSlotSize / 16u);
+    generation    = state.pushGeneration;
+    ++state.pushCursor;
     return true;
 }
 

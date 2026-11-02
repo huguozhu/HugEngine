@@ -88,7 +88,7 @@ void D3D11SwapChain::Resize(u32 width, u32 height) {
     // ResizeBuffers 要求后缓冲没有任何外部引用：先解绑上下文里的渲染目标并释放包装
     ID3D11DeviceContext4* ctx = m_Device->GetContext();
     ctx->OMSetRenderTargets(0, nullptr, nullptr);
-    m_Device->SetContextOwner(nullptr);   // 各命令列表下次改动上下文时重新应用自己的状态
+    m_Device->GetImmediateState().owner = nullptr;   // 各命令列表下次改动上下文时重新应用自己的状态
     m_BackBuffer.reset();
     ctx->Flush();
     const UINT flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH | (m_Tearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0u);

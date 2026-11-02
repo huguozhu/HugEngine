@@ -39,6 +39,38 @@ struct D3D11ViewInfo {
     bool          single  = false;   // true：只覆盖 (mip, layer) 这一个子资源
 };
 
+class D3D11CommandList;
+
+/// 一个 D3D11 上下文（immediate，或某个二级列表的 deferred context）上的状态（M7.1）：
+/// 上下文里当前装着哪个命令列表的绑定、各阶段 SRV 槽位指向的资源（冲突解绑，规划 3.7）、推送常量环
+struct D3D11ContextState {
+    static constexpr u32 kSrvStageCount = 3;   // 与 D3D11PipelineState::Stage 的 VS / PS / CS 一致
+    static constexpr u32 kSrvSlotCount  = D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT;
+
+    ID3D11DeviceContext4*             context = nullptr;
+    ComPtr<ID3DUserDefinedAnnotation> annotation;   // 调试标注（RenderDoc / PIX 的分组与标记）；不支持时为空
+    D3D11CommandList*                 owner = nullptr;   // 上下文当前装着谁的状态（多个列表共用 immediate）
+
+    // 资源冲突解绑：D3D11 运行时会把同时作为输出（RTV / DSV / UAV）与输入（SRV）绑定的资源静默解绑
+    // 并告警。这里记录各阶段 SRV 槽位当前指向的资源（只作比较，不持有引用）与可能非空的槽位上界；
+    // 绑定输出之前先把仍以 SRV 挂着同一资源的槽位清空
+    ID3D11Resource* srvResources[kSrvStageCount][kSrvSlotCount] = {};
+    u32             srvHigh[kSrvStageCount] = {};
+
+    // 推送常量环（见 D3D11Device::AllocatePushConstants）
+    ComPtr<ID3D11Buffer> pushRing;
+    u32                  pushCursor = 0;          // 下一个可用槽
+    u64                  pushGeneration = 1;      // 每次 DISCARD 换内存加一
+    bool                 pushNeedsDiscard = true; // 下一次 Map 必须 DISCARD（新建 / deferred context 新一轮录制）
+
+    /// 记录 stage 阶段 [slot, slot + count) 新绑定的 SRV（命令列表每次下发 SRV 后调用）
+    void TrackSrvs(u32 stage, u32 slot, u32 count, ID3D11ShaderResourceView* const* views);
+    /// 把所有阶段里以 SRV 绑着 resources 中任一资源的槽位置空（绑定 RTV / DSV / UAV 前调用）
+    void UnbindSrvsOf(ID3D11Resource* const* resources, u32 count);
+    /// 上下文被清空（deferred context 开始新一轮录制）：跟踪表与所有者一并清空
+    void ResetBindings();
+};
+
 class D3D11Device final : public IRHIDevice {
 public:
     D3D11Device() = default;
@@ -193,50 +225,37 @@ public:
     }
 
     // ---- 推送常量的常量环（规划 3.5）----
-    //  一块 D3D11_USAGE_DYNAMIC 的常量缓冲，按 256 字节一槽环形分配，所有命令列表共用
-    //  （只有一个 immediate context）。分配时用 MAP_WRITE_NO_OVERWRITE 写入新槽，转回开头时用
-    //  MAP_WRITE_DISCARD 换一块新内存（已发出的命令仍引用旧内存）。换内存后旧槽位的内容不再
-    //  有效，所以带一个「代次」：命令列表记下的槽位代次与当前不同就要重新分配。
+    //  每个上下文一块 D3D11_USAGE_DYNAMIC 的常量缓冲（见 D3D11ContextState），按 256 字节一槽环形分配。
+    //  分配时用 MAP_WRITE_NO_OVERWRITE 写入新槽，转回开头时用 MAP_WRITE_DISCARD 换一块新内存
+    //  （已发出的命令仍引用旧内存）。换内存后旧槽位的内容不再有效，所以带一个「代次」：
+    //  命令列表记下的槽位代次与当前不同就要重新分配。deferred context 每次录制的第一次 Map 必须是 DISCARD
     static constexpr u32 kPushSlotSize  = 256;
     static constexpr u32 kPushSlotCount = 4096;   // 1 MB
-    /// 写入一槽推送常量，返回该槽的常量起点（以 16 字节常量计，供 *SetConstantBuffers1 使用）
-    bool  AllocatePushConstants(const void* data, u32& firstConstant, u64& generation);
-    ID3D11Buffer* GetPushConstantRing() const { return m_PushRing.Get(); }
-    u64   GetPushRingGeneration() const { return m_PushRingGeneration; }
+    /// 在 state 的常量环里写入一槽推送常量，返回该槽的常量起点（以 16 字节常量计，供 *SetConstantBuffers1 使用）
+    bool  AllocatePushConstants(D3D11ContextState& state, const void* data, u32& firstConstant, u64& generation);
 
     // ---- 内部访问（供命令列表 / 资源使用，非 RHI 接口）----
     ID3D11Device5*        GetDevice()  const { return m_Device.Get(); }
+    /// immediate context：资源的 Map / 回读 / 上传、呈现、查询结果都在它上面
     ID3D11DeviceContext4* GetContext() const { return m_Context.Get(); }
     IDXGIFactory2*        GetFactory() const { return m_Factory.Get(); }
-    /// 调试标注（RenderDoc / PIX 里显示的分组与标记）；运行时不支持时为空
-    ID3DUserDefinedAnnotation* GetAnnotation() const { return m_Annotation.Get(); }
-
-    /// immediate context 当前装着哪个命令列表的状态（多个列表共用一个上下文，见 D3D11CommandList）
-    class D3D11CommandList* GetContextOwner() const { return m_ContextOwner; }
-    void SetContextOwner(class D3D11CommandList* cl) { m_ContextOwner = cl; }
-
-    // ---- 资源冲突解绑（规划 3.7）----
-    //  D3D11 运行时会把同时作为输出（RTV / DSV / UAV）与输入（SRV）绑定的资源静默解绑并告警。
-    //  这里记录 immediate context 上各阶段 SRV 槽位当前指向的资源（上下文是所有命令列表共用的，
-    //  所以放在设备上）；绑定输出之前先把仍以 SRV 挂着同一资源的槽位清空。
-    static constexpr u32 kSrvStageCount = 3;   // 与 D3D11PipelineState::Stage 的 VS / PS / CS 一致
-    static constexpr u32 kSrvSlotCount  = D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT;
-    /// 记录 stage 阶段 [slot, slot + count) 新绑定的 SRV（命令列表每次下发 SRV 后调用）
-    void TrackSrvs(u32 stage, u32 slot, u32 count, ID3D11ShaderResourceView* const* views);
-    /// 把所有阶段里以 SRV 绑着 resources 中任一资源的槽位置空（绑定 RTV / DSV / UAV 前调用）
-    void UnbindSrvsOf(ID3D11Resource* const* resources, u32 count);
+    /// immediate context 的状态（主命令列表都录在它上面）
+    D3D11ContextState&    GetImmediateState() { return m_Immediate; }
+    /// 为一个上下文准备状态（取调试标注接口）；immediate 在设备创建时调用，deferred 由二级列表调用
+    void InitContextState(D3D11ContextState& state, ID3D11DeviceContext4* context);
 
     // ---- 间接参数整形（规划 3.3）----
     /// DrawIndexedIndirectCount 用：影子参数缓冲里从 argsOffset 起的 maxDraw 条命令，序号 ≥ 计数缓冲
     /// countOffset 处的值的，instanceCount 置 0（内置小 CS，在 GPU 上完成，不回读计数）。
     /// 会改动 CS 阶段的着色器与绑定：调用后清空上下文所有者，命令列表下次使用时重新应用自己的状态
-    bool ClampIndirectCount(D3D11Buffer* countBuffer, u64 countOffset, ID3D11UnorderedAccessView* argsUav,
-                            u64 argsOffset, u32 stride, u32 maxDraw);
+    bool ClampIndirectCount(D3D11ContextState& state, D3D11Buffer* countBuffer, u64 countOffset,
+                            ID3D11UnorderedAccessView* argsUav, u64 argsOffset, u32 stride, u32 maxDraw);
     /// DrawIndexedIndirectCount 在 CPU 上要逐条调用 maxDrawCount 次，而引擎常把 maxDrawCount 设为
     /// 容量（如 Nanite 的 1M 条）。这里异步回读计数（不等待 GPU，用前几帧已完成的值），返回本次
     /// 需要循环的条数：min(maxDraw, 2 × 最近计数 + 64)；还没有回读结果时为 min(maxDraw, 65536)。
     /// 多画的命令已被 ClampIndirectCount 置为 0 实例，只影响 CPU 开销
-    u32  EstimateIndirectCount(D3D11Buffer* countBuffer, u64 countOffset, u32 maxDraw);
+    /// 回读的拷贝录在 state 的上下文上，结果在 immediate context 上取
+    u32  EstimateIndirectCount(D3D11ContextState& state, D3D11Buffer* countBuffer, u64 countOffset, u32 maxDraw);
 
     /// 全零顶点缓冲（步长 0）：着色器声明了、引擎顶点布局未提供的属性从这里读 0
     ID3D11Buffer* GetZeroVertexBuffer();
@@ -289,13 +308,9 @@ private:
     ComPtr<ID3D11Device5>        m_Device;
     ComPtr<ID3D11DeviceContext4> m_Context;
     ComPtr<ID3D11InfoQueue>      m_InfoQueue;     // 调试层启用时才有
-    ComPtr<ID3DUserDefinedAnnotation> m_Annotation;
     ComPtr<ID3D11Buffer>         m_ZeroVertexBuffer;      // 懒创建
     ComPtr<ID3D11Buffer>         m_InstanceIndexBuffer;   // 懒创建
-    class D3D11CommandList*      m_ContextOwner = nullptr;
-    // 各阶段 SRV 槽位当前指向的资源（只作比较，不持有引用）与可能非空的槽位上界
-    ID3D11Resource*              m_SrvResources[kSrvStageCount][kSrvSlotCount] = {};
-    u32                          m_SrvHigh[kSrvStageCount] = {};
+    D3D11ContextState            m_Immediate;   // immediate context 的状态（所有者、SRV 冲突跟踪、常量环）
     // PSO 预编译队列（描述里的着色器字节码已深拷贝，调用方的临时对象失效后仍可用）
     struct PrecompileItem {
         PipelineStateDesc                            desc;
@@ -355,9 +370,6 @@ private:
     ComPtr<ID3D11Fence>              m_IdleFence;   // WaitIdle 专用
     u64                              m_IdleValue = 0;
 
-    ComPtr<ID3D11Buffer> m_PushRing;
-    u32                  m_PushCursor = 0;          // 下一个可用槽
-    u64                  m_PushRingGeneration = 1;  // 每次 DISCARD 换内存加一
 };
 
 } // namespace he::rhi::d3d11

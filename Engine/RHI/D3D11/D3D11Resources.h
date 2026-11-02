@@ -78,7 +78,8 @@ public:
     /// 作间接参数用的原生缓冲（规划 3.3）。用途不含 Storage 时就是主缓冲（创建时带 DRAWINDIRECT_ARGS）；
     /// 含 Storage 时主缓冲可能是结构化缓冲、不能作参数缓冲：先把 [offset, offset + size) 拷进
     /// 「影子参数缓冲」（DRAWINDIRECT_ARGS | 原始视图，与主缓冲同样大小、同样偏移）再返回它
-    ID3D11Buffer* PrepareIndirectArgs(u64 offset, u64 size);
+    /// 拷贝录在 ctx 上（调用者的上下文：immediate 或二级列表的 deferred context）
+    ID3D11Buffer* PrepareIndirectArgs(ID3D11DeviceContext* ctx, u64 offset, u64 size);
     /// 影子参数缓冲的原始 UAV（参数整形 CS 改写它）；须先调用 PrepareIndirectArgs
     ID3D11UnorderedAccessView* GetIndirectArgsUav();
 
@@ -301,13 +302,13 @@ public:
 
     /// 所有查询标为未发出
     void Reset();
-    /// 时间戳：在当前命令位置写入
-    void WriteTimestamp(u32 index);
+    /// 时间戳：在 ctx 的当前命令位置写入
+    void WriteTimestamp(ID3D11DeviceContext* ctx, u32 index);
     /// 管线统计：开始 / 结束统计
-    void Begin(u32 index);
-    void End(u32 index);
+    void Begin(ID3D11DeviceContext* ctx, u32 index);
+    void End(ID3D11DeviceContext* ctx, u32 index);
     /// 读回 [first, first + count)：时间戳每个 1 个 u64，管线统计每个 6 个 u64（顺序见 CommandList.h）。
-    /// wait = true 时等到结果就绪（限时 5 秒，超时填 0）；wait = false 时任一结果未就绪就返回 false。
+    /// 结果在 immediate context 上取。wait = true 时等到结果就绪（限时 5 秒，超时填 0）；wait = false 时任一结果未就绪就返回 false。
     /// 本轮没有发出的查询读作 0（wait = false 时视为未就绪）
     bool Read(u32 first, u32 count, u64* data, bool wait);
 

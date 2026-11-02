@@ -133,7 +133,7 @@ ID3D11Buffer* D3D11Buffer::GetConstantBuffer() {
     return m_ConstantMirror.Get();
 }
 
-ID3D11Buffer* D3D11Buffer::PrepareIndirectArgs(u64 offset, u64 size) {
+ID3D11Buffer* D3D11Buffer::PrepareIndirectArgs(ID3D11DeviceContext* ctx, u64 offset, u64 size) {
     if (!HasAny(m_Usage, BufferUsage::Storage)) return m_Buffer.Get();   // 创建时已带 DRAWINDIRECT_ARGS
     if (!m_ArgsShadow) {
         D3D11_BUFFER_DESC bd{};
@@ -151,7 +151,7 @@ ID3D11Buffer* D3D11Buffer::PrepareIndirectArgs(u64 offset, u64 size) {
     const u64 end   = std::min<u64>(((offset + size + align - 1) / align) * align, m_AllocSize);
     if (end <= begin) return m_ArgsShadow.Get();
     const D3D11_BOX box{ static_cast<UINT>(begin), 0, 0, static_cast<UINT>(end), 1, 1 };
-    m_Device->GetContext()->CopySubresourceRegion(m_ArgsShadow.Get(), 0, static_cast<UINT>(begin), 0, 0,
+    ctx->CopySubresourceRegion(m_ArgsShadow.Get(), 0, static_cast<UINT>(begin), 0, 0,
                                                   m_Buffer.Get(), 0, &box);
     return m_ArgsShadow.Get();
 }
@@ -701,23 +701,23 @@ void D3D11QueryPool::Reset() {
     std::fill(m_Issued.begin(), m_Issued.end(), u8(0));
 }
 
-void D3D11QueryPool::WriteTimestamp(u32 index) {
+void D3D11QueryPool::WriteTimestamp(ID3D11DeviceContext* ctx, u32 index) {
     if (m_Type != QueryType::Timestamp) return;
     if (ID3D11Query* q = QueryAt(index)) {
-        m_Device->GetContext()->End(q);
+        ctx->End(q);
         m_Issued[index] = 1;
     }
 }
 
-void D3D11QueryPool::Begin(u32 index) {
+void D3D11QueryPool::Begin(ID3D11DeviceContext* ctx, u32 index) {
     if (m_Type != QueryType::PipelineStatistics) return;
-    if (ID3D11Query* q = QueryAt(index)) m_Device->GetContext()->Begin(q);
+    if (ID3D11Query* q = QueryAt(index)) ctx->Begin(q);
 }
 
-void D3D11QueryPool::End(u32 index) {
+void D3D11QueryPool::End(ID3D11DeviceContext* ctx, u32 index) {
     if (m_Type != QueryType::PipelineStatistics) return;
     if (ID3D11Query* q = QueryAt(index)) {
-        m_Device->GetContext()->End(q);
+        ctx->End(q);
         m_Issued[index] = 1;
     }
 }
