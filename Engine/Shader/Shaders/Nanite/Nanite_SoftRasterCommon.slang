@@ -80,8 +80,12 @@ struct InstanceObject {
 [[vk::binding(6, 0)]] RWStructuredBuffer<uint>               u_DepthKey;
 [[vk::binding(7, 0)]] RWStructuredBuffer<uint>               u_Stats;
 [[vk::binding(12, 0)]] StructuredBuffer<NaniteMaterialRecord> u_Materials;
+#if !defined(HE_SHADER_D3D11)
 [[vk::binding(13, 0)]] Texture2D<float4>                     u_MaterialTextures[];
 [[vk::binding(14, 0)]] SamplerState                          u_MaterialSamplers[];
+#endif
+// D3D11（SM 5.0）没有无界资源数组：材质只用常量（baseColorFactor / metallic / roughness），
+// 不采样材质纹理（D3D11 后端实现规划 5.3；纹理数组桶方案见 M6）
 
 // ── 【任务 24】LOD 流式的五 + 一个视图（bindings 15..20）──
 // 【口径：0/1/2 号槽一槽两用】流式开启时，binding 0/1/2 绑的是**页池**的簇段/顶点段/三角形段，
@@ -231,6 +235,7 @@ bool softRasterEvaluateMaterial(uint materialIndex, float2 uv,
     outAlbedo = material.baseColorFactor.rgb;
     float mrG = 1.0;   // 无 MetallicRough 纹理：g（粗糙度）不调制
     float mrB = 0.0;   // 无 MetallicRough 纹理：b（金属度）为 0（与 GBuffer 路径的中性值一致）
+#if !defined(HE_SHADER_D3D11)
     if ((material.textureMask & NANITE_TEXMASK_BASECOLOR) != 0u) {
         uint slot = material.bindlessTextureBase + NANITE_TEXSLOT_BASECOLOR;
         // 【为什么是 `SampleLevel(..., 0)` 而不是 `Sample`】compute 入口没有导数（quad）语义：
@@ -247,6 +252,7 @@ bool softRasterEvaluateMaterial(uint materialIndex, float2 uv,
         mrG = mr.g;
         mrB = mr.b;
     }
+#endif
     metallic  = material.metallicFactor * mrB;
     roughness = clamp(material.roughnessFactor * mrG, 0.04, 1.0);
     return true;
