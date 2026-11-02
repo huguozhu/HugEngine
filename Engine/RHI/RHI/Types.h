@@ -42,6 +42,12 @@ constexpr u32 kBindingNBMaterialSamplers = 104; // 材质 4 个采样器（与�
 constexpr u32 kBindingNBMaterialSlots    = 4;   // 每个材质的纹理槽数
 /// SetNonBindlessHandle 的「不绑定任何资源」：bindless 句柄 0 是合法句柄，不能拿 0 表示「没有」
 constexpr u32 kNonBindlessNone           = ~0u;
+// 纹理数组桶（与 ShaderTypes: kGPUBinding_NB_TexBucket* 一致）：由后端按 bindless 堆内容自行提供，不经 SetNonBindlessHandle
+constexpr u32 kBindingNBTexBuckets       = 114; // 纹理数组桶 t114..t121
+constexpr u32 kBindingNBTexBucketCount   = 8;
+constexpr u32 kBindingNBTexBucketMap     = 122; // 句柄 → (桶号 << 24 | 层号)
+constexpr u32 kBindingNBTexBucketSampler = 123; // 桶路径的采样器
+constexpr u32 kTexBucketNone             = ~0u; // 映射表里「未分桶」
 constexpr u32 kBindingLightGrid        = 7;   // 光源网格（Clustered Shading SSBO）
 constexpr u32 kBindingLightIndexList   = 8;   // 光源索引列表（Clustered Shading SSBO）
 
@@ -330,6 +336,9 @@ struct DeviceCaps {
     bool    supportsCooperativeVectors = false;
     bool    supportsLinearAlgebra  = false;
     bool    supportsSamplerFeedback = false;
+    // 没有 bindless 的后端（D3D11）提供「纹理数组桶」：一次绘制覆盖多个材质的 GPU 驱动路径
+    // （GBuffer GPU 路径、Forward ExecuteIndirect、Nanite 材质纹理）在此为真时可用
+    bool    supportsTextureArrayMaterials = false;
     // 异步计算支持
     bool    supportsAsyncCompute   = false;  // GPU 是否有独立 Compute 队列族
     bool    supportsTransferQueue  = false;  // GPU 是否有独立 Copy 队列 (DMA)

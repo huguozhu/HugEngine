@@ -76,6 +76,12 @@ GPU_CONST(GPU_UINT kGPUBinding_NB_InstanceTransforms = 110); // 实例世界矩�
 GPU_CONST(GPU_UINT kGPUBinding_NB_VisibleInstances  = 111); // 剔除后可见实例下标 StructuredBuffer<uint>
 GPU_CONST(GPU_UINT kGPUBinding_NB_BoneMatrices      = 112); // 骨骼矩阵 StructuredBuffer<float4x4>
 GPU_CONST(GPU_UINT kGPUBinding_NB_Materials         = 113); // 材质参数 StructuredBuffer<GPUMaterialData>
+// 纹理数组桶（M6）：后端把静态纹理按（宽, 高, mip 数, 格式）拷进 ≤ 8 个 Texture2DArray，
+// 并维护「bindless 纹理句柄 → (桶号, 层号)」映射表；着色器先查表，未分桶时退回逐绘制绑定
+GPU_CONST(GPU_UINT kGPUBinding_NB_TexBuckets        = 114); // 纹理数组桶 t114..t121
+GPU_CONST(GPU_UINT kGPUTexBucketCount               = 8);   // 桶数（着色器按字面量下标 switch）
+GPU_CONST(GPU_UINT kGPUBinding_NB_TexBucketMap      = 122); // 句柄 → (桶号 << 24 | 层号)，未分桶为 0xFFFFFFFF
+GPU_CONST(GPU_UINT kGPUBinding_NB_TexBucketSampler  = 123); // 桶路径的采样器（线性、重复寻址）
 GPU_CONST(GPU_UINT kGPUBinding_NB_CullVisibleOut    = 60);  // 实例剔除：可见下标（RWStructuredBuffer<uint>）
 GPU_CONST(GPU_UINT kGPUBinding_NB_CullCommandOut    = 61);  // 实例剔除：间接命令（RWStructuredBuffer<IndirectCmd>）
 GPU_CONST(GPU_UINT kGPUBinding_LightGrid        = 7);   // 光源网格 SSBO
