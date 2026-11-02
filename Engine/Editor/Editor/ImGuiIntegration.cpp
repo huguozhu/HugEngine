@@ -210,8 +210,12 @@ void ImGuiIntegration::EndFrame(rhi::IRHICommandList* cmd) {
 #endif
 #if defined(HE_RHI_D3D11)
     if (m_IsD3D11) {
-        // 先让上下文装上该命令列表的渲染目标与视口，ImGui 画在当前绑定的目标上（结束后它会恢复上下文状态）
-        if (m_Device->GetImGuiCommandBuffer(cmd)) ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+        // 先让上下文装上该命令列表的渲染目标与视口，ImGui 画在当前绑定的目标上（结束后它会恢复上下文状态）。
+        // 返回的是命令列表录制所用的上下文：模式 2 下是 deferred context，ImGui 要画进同一个上下文
+        if (auto* ctx = static_cast<ID3D11DeviceContext*>(m_Device->GetImGuiCommandBuffer(cmd))) {
+            ImGui_ImplDX11_SetDeviceContext(ctx);
+            ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+        }
         return;
     }
 #endif
