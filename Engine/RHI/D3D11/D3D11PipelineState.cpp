@@ -89,12 +89,18 @@ bool D3D11PipelineState::Initialize(D3D11Device* device, const PipelineStateDesc
 void D3D11PipelineState::ReportUnusableOnce() {
     if (m_Reported) return;
     m_Reported = true;
-    HE_CORE_WARN("[D3D11] PSO {} 在 D3D11 下不可用（着色器 DXBC 编译失败，见 generated_dxbc/dxbc_report.md），"
-                 "使用它的绘制 / 派发被跳过", m_Name);
+    if (m_NoBytecode) {
+        // 运行时生成的着色器（如 AI 模块的计算核）只带 SPIR-V，D3D12 后端同样不可用
+        HE_CORE_WARN("[D3D11] PSO {} 在 D3D11 下不可用（调用方没有提供 DXBC），使用它的绘制 / 派发被跳过", m_Name);
+    } else {
+        HE_CORE_WARN("[D3D11] PSO {} 在 D3D11 下不可用（着色器 DXBC 编译失败，见 generated_dxbc/dxbc_report.md），"
+                     "使用它的绘制 / 派发被跳过", m_Name);
+    }
 }
 
 bool D3D11PipelineState::LoadStage(D3D11Device* device, const ShaderBytecode* bc, Stage stage) {
     if (!bc) return false;
+    if (bc->dxbc.empty()) { m_NoBytecode = true; return false; }   // 调用方没给 DXBC（与编译失败的占位区分）
     const u32 size = dxbc::GetDxbcContainerSize(bc->dxbc.data(), bc->dxbc.size());
     if (size == 0) return false;   // 编译失败的占位（不是 DXBC）
 

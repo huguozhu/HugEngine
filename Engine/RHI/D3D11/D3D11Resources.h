@@ -266,6 +266,7 @@ private:
     bool                         m_IsCompute = false;
     bool                         m_Reported = false;
     bool                         m_UsesPushConstants = false;
+    bool                         m_NoBytecode = false;   // 某阶段完全没有 DXBC（不是编译失败的占位）
     std::vector<u8>              m_VsBytecode;    // DXBC 容器（CreateInputLayout 要用）
     ComPtr<ID3D11VertexShader>   m_VS;
     ComPtr<ID3D11PixelShader>    m_PS;
