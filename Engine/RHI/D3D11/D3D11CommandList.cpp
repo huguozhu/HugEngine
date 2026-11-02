@@ -301,6 +301,22 @@ bool D3D11CommandList::ResolveNonBindless(u32 binding, u32 element, ID3D11Shader
         return false;
     };
     auto* heap = static_cast<D3D11BindlessHeap*>(m_Device->GetBindlessHeap());
+    // 纹理数组桶（M6）：与本次绘制无关，由堆直接提供；先把新登记的纹理拷进桶
+    if (binding >= kBindingNBTexBuckets && binding < kBindingNBTexBuckets + kBindingNBTexBucketCount) {
+        heap->EnsureBuckets();
+        srv = heap->GetBucketSrv(binding - kBindingNBTexBuckets);
+        return true;
+    }
+    if (binding == kBindingNBTexBucketMap) {
+        heap->EnsureBuckets();
+        srv = heap->GetBucketMapSrv();
+        return true;
+    }
+    if (binding == kBindingNBTexBucketSampler) {
+        heap->EnsureBuckets();
+        smp = heap->GetBucketSampler();
+        return true;
+    }
     u32 handle = 0;
     // 材质纹理 / 采样器：都以「材质纹理基址」为准，第 k 个取 基址 + k
     if (binding >= kBindingNBMaterialTextures && binding < kBindingNBMaterialTextures + kBindingNBMaterialSlots) {
