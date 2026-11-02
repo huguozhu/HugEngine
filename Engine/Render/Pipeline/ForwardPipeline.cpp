@@ -1314,6 +1314,9 @@ void ForwardPipeline::RenderScene(rhi::IRHICommandList* cmd, const CameraData& c
             cmd->SetVertexBuffer(m_MeshBatcher.GetVertexBuffer(), 0);
             cmd->SetIndexBuffer(m_MeshBatcher.GetIndexBuffer(), 0);
             framePC.useInstanceID = 1;  // SV_InstanceID 模式
+            // 非 bindless 后端：材质纹理按物体从纹理数组桶取；逐绘制的回退槽位与实例 / 骨骼 / 可见列表
+            // 都标为不用（与 GBuffer GPU 路径一致），回退槽位绑占位纹理而不是留空
+            SetDrawNonBindlessHandles(cmd, 0);
             cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSets[RenderFrameSlot()]);
             cmd->SetPushConstants(0, sizeof(PushConstantData), &framePC);
             // DrawCall 调试 marker（RenderDoc 定位用）
