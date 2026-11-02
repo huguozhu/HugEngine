@@ -151,7 +151,8 @@ bool D3D11Device::CreateDeviceAndContext() {
 
 void D3D11Device::QueryCaps() {
     m_Caps = DeviceCaps{};
-    m_Caps.maxBindlessResources = 0;      // 没有 bindless：渲染层据此走逐 draw 绑定（规划 3.2）
+    m_Caps.maxBindlessResources = 0;
+    m_Caps.supportsTextureArrayMaterials = true;   // bindless 堆的纹理数组桶（M6）      // 没有 bindless：渲染层据此走逐 draw 绑定（规划 3.2）
     m_Caps.maxPushConstantsSize = 256;    // 推送常量由常量环提供，每槽 256 字节（规划 3.5）
     m_Caps.maxSamplerAnisotropy = D3D11_REQ_MAXANISOTROPY;
     // 以下能力 D3D11 / SM 5.0 都不具备，保持默认的 false：

@@ -4,6 +4,7 @@
 #include "Pipeline/GBufferRenderer_GPU.h"
 #include "Pipeline/MeshBatcher.h"
 #include "Pipeline/InstanceCuller.h"   // 任务 25：逐实例剔除（状态表也在它这里）
+#include "Pipeline/NonBindless.h"      // 非 bindless 后端（D3D11）的逐绘制句柄交接
 #include "Threading/MeshRegistry.h"    // 阶段 1 第①段：按 meshIndex 取顶点/索引缓冲
 #include "Scene/MeshComponent.h"
 #include "Scene/World.h"
@@ -42,6 +43,8 @@ void GBufferRenderer_GPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
                                              ctx.frameSlot, camera.GetViewProjMatrix());
     cmd->SetPipeline(ctx.pso);
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, ctx.descSet);
+    // 非 bindless 后端：GPU 驱动路径按物体从纹理数组桶取材质纹理，逐绘制的实例 / 骨骼 / 可见列表都不用
+    SetDrawNonBindlessHandles(cmd, 0);
 
     // 清除 + 开始 MRT（8 颜色 + 深度）
     rhi::ClearValue clears[9]{};

@@ -576,9 +576,10 @@ void DeferredPipeline::Shutdown() {
 // CreateTextureDescriptorSet 已移除 — 使用全局 bindless 纹理数组替代
 
 void DeferredPipeline::SetGBufferMode(GBufferRenderer::Mode mode) {
-    // GPU 驱动路径一次间接绘制覆盖多个材质，材质纹理只能经 bindless 按物体取：
-    // 没有 bindless 的后端（D3D11）强制走 CPU 路径（D3D11 后端实现规划 3.2 的 C 类）
-    if (mode == GBufferRenderer::Mode::GPU && m_Device && m_Device->GetCaps().maxBindlessResources == 0) {
+    // GPU 驱动路径一次间接绘制覆盖多个材质，材质纹理只能按物体取（bindless 或 D3D11 的纹理数组桶）：
+    // 两者都没有的后端强制走 CPU 路径（D3D11 后端实现规划 3.2 的 C 类、M6）
+    if (mode == GBufferRenderer::Mode::GPU && m_Device && m_Device->GetCaps().maxBindlessResources == 0 &&
+        !m_Device->GetCaps().supportsTextureArrayMaterials) {
         HE_CORE_WARN("DeferredPipeline: 当前后端没有 bindless，GBuffer 的 GPU 驱动路径不可用，改用 CPU 路径");
         mode = GBufferRenderer::Mode::CPU;
     }
