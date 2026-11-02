@@ -506,6 +506,15 @@ std::unique_ptr<IRHISwapChain> D3D11Device::CreateSwapChain(const SwapChainDesc&
     return sc;
 }
 
+std::unique_ptr<IRHICommandList> D3D11Device::CreateSecondaryCommandList() {
+    // 每条二级列表一个 deferred context：工作线程各自录制，互不干扰（M7.3）
+    ComPtr<ID3D11DeviceContext3> ctx3;
+    if (!HE_D3D11_CHECK(m_Device->CreateDeferredContext3(0, &ctx3), "CreateDeferredContext3")) return nullptr;
+    ComPtr<ID3D11DeviceContext4> ctx4;
+    if (FAILED(ctx3.As(&ctx4))) return nullptr;
+    return std::make_unique<D3D11CommandList>(this, ctx4);
+}
+
 std::unique_ptr<IRHICommandList> D3D11Device::CreateCommandList(QueueType) {
     // 只有一个 immediate context：计算 / 拷贝队列的列表也录到同一个上下文里顺序执行
     return std::make_unique<D3D11CommandList>(this);

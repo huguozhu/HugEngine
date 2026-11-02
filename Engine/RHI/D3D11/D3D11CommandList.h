@@ -17,6 +17,7 @@
 #if defined(_WIN32)
 
 #include "D3D11Common.h"
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -32,15 +33,20 @@ class D3D11CommandList final : public IRHICommandList {
 public:
     /// 主命令列表：录在设备的 immediate context 上
     explicit D3D11CommandList(D3D11Device* device);
+    /// 二级列表（M7.3）：录在自己的 deferred context 上，由工作线程录制、主列表 ExecuteSecondary 执行
+    D3D11CommandList(D3D11Device* device, ComPtr<ID3D11DeviceContext4> deferred);
     ~D3D11CommandList() override;
 
     // ---- 生命周期 ----
     void Begin() override;
     void End()   override;
-    /// 二级列表（deferred context）放到 M7，当前设备不创建二级列表
-    void BeginSecondary(IRHIPipelineState*) override {}
-    void ExecuteSecondary(IRHICommandList*) override {}
-    bool IsSecondary() const override { return false; }
+    /// 二级列表开始录制：清空 deferred context 上的跟踪状态，继承主列表当前通道的渲染目标 / 视口 / 裁剪，
+    /// 并设置 PSO（与 Vulkan 的继承信息对应）
+    void BeginSecondary(IRHIPipelineState* pso) override;
+    /// 主列表执行一条已录好的二级列表（ExecuteCommandList）；之后 immediate context 回到默认状态，
+    /// 本列表下次使用时重新应用自己的状态
+    void ExecuteSecondary(IRHICommandList* secondary) override;
+    bool IsSecondary() const override { return m_Deferred != nullptr; }
 
     // ---- Render pass：设置渲染目标并按加载操作清除；D3D11 没有 render pass 对象 ----
     void BeginRenderPass(u32 colorCount, Format colorFormat, Format depthFormat = Format::Unknown,
@@ -173,6 +179,10 @@ private:
 
     D3D11Device*        m_Device    = nullptr;
     D3D11ContextState*  m_State     = nullptr;   // 本列表录制所用上下文的状态（immediate 或自己的 deferred context）
+    // 二级列表专用（M7.3）
+    ComPtr<ID3D11DeviceContext4>       m_Deferred;    // 自己的 deferred context
+    std::unique_ptr<D3D11ContextState> m_OwnState;    // deferred context 的状态
+    ComPtr<ID3D11CommandList>          m_Recorded;    // End 时 FinishCommandList 得到的命令列表
     IRHISwapChain*      m_SwapChain = nullptr;
 
     // ---- 本列表的完整绑定状态（EnsureOwner 据此重新应用）----

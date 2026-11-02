@@ -19,6 +19,12 @@ using dxbc::DxbcBindType;
 D3D11CommandList::D3D11CommandList(D3D11Device* device)
     : m_Device(device), m_State(&device->GetImmediateState()) {}
 
+D3D11CommandList::D3D11CommandList(D3D11Device* device, ComPtr<ID3D11DeviceContext4> deferred)
+    : m_Device(device), m_Deferred(std::move(deferred)), m_OwnState(std::make_unique<D3D11ContextState>()) {
+    device->InitContextState(*m_OwnState, m_Deferred.Get());
+    m_State = m_OwnState.get();
+}
+
 D3D11CommandList::~D3D11CommandList() {
     // 上下文所有者只做指针比较：本列表销毁后若有新列表恰好分配到同一地址，会误以为状态仍在上下文里
     if (m_State && m_State->owner == this) m_State->owner = nullptr;
@@ -53,6 +59,44 @@ void D3D11CommandList::Begin() {
 void D3D11CommandList::End() {
     // 未配对的调试分组补齐（与 D3D12 一致）
     while (m_LabelDepth > 0) EndDebugLabel();
+    // 二级列表：把 deferred context 里录下的命令封成命令列表，等主列表 ExecuteSecondary。
+    // FALSE：不保存 deferred context 的状态，下一轮录制从默认状态开始（BeginSecondary 会重新应用）
+    if (m_Deferred) {
+        m_Recorded.Reset();
+        HE_D3D11_CHECK(m_Deferred->FinishCommandList(FALSE, &m_Recorded), "FinishCommandList");
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  二级列表（M7.3）
+// ---------------------------------------------------------------------------
+void D3D11CommandList::BeginSecondary(IRHIPipelineState* pso) {
+    Begin();                       // 本列表记下的绑定全部清空（与 Vulkan 新开次级命令缓冲一致）
+    m_Recorded.Reset();
+    m_State->ResetBindings();      // deferred context 在上一轮 FinishCommandList 后已回到默认状态
+    m_State->pushNeedsDiscard = true;   // deferred context 每一轮录制的第一次 Map 必须是 DISCARD
+    // 继承主列表当前通道的渲染目标与视口（Vulkan 由继承信息里的 render pass 决定，D3D11 要显式设）
+    if (const D3D11CommandList* primary = m_Device->GetActivePassList()) {
+        m_RtvCount = primary->m_RtvCount;
+        for (u32 i = 0; i < kMaxColorAttachments; ++i) m_Rtvs[i] = primary->m_Rtvs[i];
+        m_DepthTexture = primary->m_DepthTexture;
+        m_DepthMip     = primary->m_DepthMip;
+        m_DepthLayer   = primary->m_DepthLayer;
+        m_Viewport     = primary->m_Viewport;
+        m_Scissor      = primary->m_Scissor;
+    }
+    SetPipeline(pso);              // 第一次改动上下文时把上面的状态整体应用进 deferred context
+}
+
+void D3D11CommandList::ExecuteSecondary(IRHICommandList* secondary) {
+    auto* sec = static_cast<D3D11CommandList*>(secondary);
+    if (!sec || !sec->m_Recorded) return;
+    m_Device->FlushOpenMaps();   // 二级列表录制期间没有上传持久映射缓冲的改动（见 PrepareDrawOrDispatch）
+    // FALSE：执行后上下文回到默认状态（不恢复执行前的状态，省一次保存 / 恢复）
+    m_State->context->ExecuteCommandList(sec->m_Recorded.Get(), FALSE);
+    sec->m_Recorded.Reset();
+    // 上下文已被清空：跟踪表与所有者作废，本列表下次使用时重新应用渲染目标等全部状态
+    m_State->ResetBindings();
 }
 
 // ---------------------------------------------------------------------------
@@ -172,6 +216,7 @@ void D3D11CommandList::BeginPassTargets(ID3D11RenderTargetView* const* rtvs, u32
         }
     }
     ApplyRenderTargets();
+    if (!m_Deferred) m_Device->SetActivePassList(this);   // 二级列表从它继承渲染目标（M7.3）
 
     if (clearColor) {
         static const float kZero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
@@ -238,6 +283,7 @@ void D3D11CommandList::EndOffscreenPass() {
     m_RtvCount = 0;
     m_DepthTexture = nullptr;
     m_State->context->OMSetRenderTargets(0, nullptr, nullptr);
+    if (m_Device->GetActivePassList() == this) m_Device->SetActivePassList(nullptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -607,8 +653,10 @@ bool D3D11CommandList::PrepareDrawOrDispatch(bool compute) {
         if (m_DepthTexture && wantReadOnly != m_DepthReadOnly) ApplyRenderTargets();
         ApplyInputAssembler();
     }
-    // 持久映射缓冲里 CPU 改过的内容先上传，再执行读它的命令（规划 3.10）
-    m_Device->FlushOpenMaps();
+    // 持久映射缓冲里 CPU 改过的内容先上传，再执行读它的命令（规划 3.10）。
+    // 二级列表不在这里做：工作线程并发录制时它会让所有线程在同一把锁上逐条比较映射内容，
+    // 改由主列表在 ExecuteSecondary 执行前做一次（上传立即生效，早于二级列表的命令执行）
+    if (!m_Deferred) m_Device->FlushOpenMaps();
     FlushBindings();
     BindPushConstants();
     return true;

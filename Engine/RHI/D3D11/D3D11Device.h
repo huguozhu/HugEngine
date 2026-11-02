@@ -87,7 +87,11 @@ public:
     std::unique_ptr<IRHISwapChain>     CreateSwapChain(const SwapChainDesc& desc) override;
     std::unique_ptr<IRHICommandList>   CreateCommandList(QueueType queue = QueueType::Graphics) override;
     /// 二级列表（deferred context）放到 M7：返回空 ⇒ 引擎回退单线程录制
-    std::unique_ptr<IRHICommandList>   CreateSecondaryCommandList() override { return nullptr; }
+    /// 二级列表（M7.3）：每条有自己的 deferred context，供 ParallelRecordHelper 在工作线程上录制
+    std::unique_ptr<IRHICommandList>   CreateSecondaryCommandList() override;
+    /// 当前处于渲染通道中的主列表（二级列表的 BeginSecondary 从它继承渲染目标）；不在通道内时为空
+    D3D11CommandList* GetActivePassList() const { return m_ActivePassList; }
+    void              SetActivePassList(D3D11CommandList* cl) { m_ActivePassList = cl; }
     std::unique_ptr<IRHIBuffer>        CreateBuffer(const BufferDesc& desc) override;
     std::unique_ptr<IRHITexture>       CreateTexture(const TextureDesc& desc) override;
     std::unique_ptr<IRHISampler>       CreateSampler(const SamplerDesc& desc) override;
@@ -320,6 +324,7 @@ private:
     ComPtr<ID3D11Buffer>         m_ZeroVertexBuffer;      // 懒创建
     ComPtr<ID3D11Buffer>         m_InstanceIndexBuffer;   // 懒创建
     D3D11ContextState            m_Immediate;   // immediate context 的状态（所有者、SRV 冲突跟踪、常量环）
+    D3D11CommandList*            m_ActivePassList = nullptr;   // 见 GetActivePassList
     // PSO 预编译队列（描述里的着色器字节码已深拷贝，调用方的临时对象失效后仍可用）
     struct PrecompileItem {
         PipelineStateDesc                            desc;
