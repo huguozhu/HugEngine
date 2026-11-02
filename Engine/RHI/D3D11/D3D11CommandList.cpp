@@ -416,6 +416,9 @@ void D3D11CommandList::FlushBindings() {
     // 图形管线里所有阶段的 UAV 要和渲染目标一起设置（OMSetRenderTargetsAndUnorderedAccessViews）
     ID3D11UnorderedAccessView* graphicsUavs[dxbc::kDxbcMaxUAVSlots] = {};
     u32 graphicsUavMin = dxbc::kDxbcMaxUAVSlots, graphicsUavMax = 0;
+    // 本次已绑为 UAV 的资源：D3D11 不允许同一资源同时占两个 UAV 槽（运行时会把先绑的那个置空），
+    // 而 Vulkan 允许别名（如 Nanite 不开流式时，反馈缓冲槽位借用读数缓冲占位）。保留先出现的槽，后面的置空
+    std::vector<ID3D11Resource*> uavResources;
 
     const D3D11PipelineState::Stage graphicsStages[] = { D3D11PipelineState::VS, D3D11PipelineState::PS };
     const u32 stageCount = compute ? 1u : 2u;
@@ -485,6 +488,22 @@ void D3D11CommandList::FlushBindings() {
                                                    : buf->GetUav(D3D11Buffer::ViewKind::Structured, b.stride);
                             // GPU 可能写它：CPU 下次读取前要回读（规划 3.10）
                             if (views[i]) buf->MarkGpuWritten();
+                        }
+                    }
+                    for (u32 i = 0; i < b.count; ++i) {
+                        if (!views[i]) continue;
+                        ID3D11Resource* r = nullptr;
+                        views[i]->GetResource(&r);
+                        if (r) r->Release();   // 只取指针作比较
+                        if (std::find(uavResources.begin(), uavResources.end(), r) != uavResources.end()) {
+                            if (!m_WarnedUavAlias) {
+                                m_WarnedUavAlias = true;
+                                HE_CORE_WARN("[D3D11] PSO {} 的 (set {}, binding {}) 与前面的 UAV 是同一资源，D3D11 不允许别名，该槽绑空",
+                                             m_Pipeline->GetName(), b.set, b.binding);
+                            }
+                            views[i] = nullptr;
+                        } else {
+                            uavResources.push_back(r);
                         }
                     }
                     if (!views[0] && !byHandle) ReportMissing(b.set, b.binding, "可写资源");
@@ -615,7 +634,7 @@ void D3D11CommandList::DrawIndexedIndirectCount(IRHIBuffer* buffer, u64 offset, 
     if (!args || !count || maxDrawCount == 0) return;
     const u32 step = stride ? stride : static_cast<u32>(sizeof(IndirectDrawIndexedCommand));
     // 参数整形（规划 3.3）：拷进影子参数缓冲，再由内置 CS 把序号 ≥ GPU 计数的命令 instanceCount 置 0，
-    // 然后逐条画满 maxDrawCount 条（多出来的是空绘制）。整形 CS 会改动 CS 阶段状态，
+    // 然后逐条绘制（条数见 EstimateIndirectCount，多出来的是空绘制）。整形 CS 会改动 CS 阶段状态，
     // 所以放在 PrepareDrawOrDispatch 之前，后者会重新应用本列表的状态
     ID3D11Buffer* argBuf = args->PrepareIndirectArgs(offset, u64(maxDrawCount - 1) * step + sizeof(IndirectDrawIndexedCommand));
     if (!argBuf) return;
@@ -629,7 +648,9 @@ void D3D11CommandList::DrawIndexedIndirectCount(IRHIBuffer* buffer, u64 offset, 
     if (!PrepareDrawOrDispatch(false)) return;
     m_Device->NoteExecuted(m_Pipeline->GetName());   // 诊断：GPU 等待超时时打印最近的 PSO
     ID3D11DeviceContext4* ctx = m_Device->GetContext();
-    for (u32 i = 0; i < maxDrawCount; ++i) {
+    // 逐条调用的次数按前几帧回读的计数估计（maxDrawCount 常是容量，如 Nanite 的 1M 条）
+    const u32 loops = m_Device->EstimateIndirectCount(count, countOffset, maxDrawCount);
+    for (u32 i = 0; i < loops; ++i) {
         ctx->DrawIndexedInstancedIndirect(argBuf, static_cast<UINT>(offset + u64(i) * step));
     }
 }
@@ -638,6 +659,17 @@ void D3D11CommandList::Dispatch(u32 x, u32 y, u32 z) {
     if (!PrepareDrawOrDispatch(true)) return;
     m_Device->NoteExecuted(m_Pipeline->GetName());   // 诊断：GPU 等待超时时打印最近的 PSO
     ID3D11DeviceContext4* ctx = m_Device->GetContext();
+    // D3D11 每一维最多 65535 个工作组。引擎有「按容量派发、着色器按实际计数早退」的写法
+    // （如 Nanite 软光栅按可见簇容量 1M 派发），超出部分截断：只有实际数量也超过上限时才会漏算
+    constexpr u32 kMaxGroups = D3D11_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION;
+    if (x > kMaxGroups || y > kMaxGroups || z > kMaxGroups) {
+        if (!m_WarnedDispatchClamp) {
+            m_WarnedDispatchClamp = true;
+            HE_CORE_WARN("[D3D11] PSO {} 的派发 ({}, {}, {}) 超过每维 {} 个工作组的上限，截断到上限",
+                         m_Pipeline->GetName(), x, y, z, kMaxGroups);
+        }
+        x = std::min(x, kMaxGroups); y = std::min(y, kMaxGroups); z = std::min(z, kMaxGroups);
+    }
     ctx->Dispatch(x, y, z);
     // 派发后解绑 CS 的 UAV：同一资源下一步常被当 SRV 读，留着 UAV 绑定会被运行时强制解绑并告警
     ID3D11UnorderedAccessView* nullUavs[dxbc::kDxbcMaxUAVSlots] = {};

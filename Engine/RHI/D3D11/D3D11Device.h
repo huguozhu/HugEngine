@@ -232,6 +232,11 @@ public:
     /// 会改动 CS 阶段的着色器与绑定：调用后清空上下文所有者，命令列表下次使用时重新应用自己的状态
     bool ClampIndirectCount(D3D11Buffer* countBuffer, u64 countOffset, ID3D11UnorderedAccessView* argsUav,
                             u64 argsOffset, u32 stride, u32 maxDraw);
+    /// DrawIndexedIndirectCount 在 CPU 上要逐条调用 maxDrawCount 次，而引擎常把 maxDrawCount 设为
+    /// 容量（如 Nanite 的 1M 条）。这里异步回读计数（不等待 GPU，用前几帧已完成的值），返回本次
+    /// 需要循环的条数：min(maxDraw, 2 × 最近计数 + 64)；还没有回读结果时为 min(maxDraw, 65536)。
+    /// 多画的命令已被 ClampIndirectCount 置为 0 实例，只影响 CPU 开销
+    u32  EstimateIndirectCount(D3D11Buffer* countBuffer, u64 countOffset, u32 maxDraw);
 
     /// 全零顶点缓冲（步长 0）：着色器声明了、引擎顶点布局未提供的属性从这里读 0
     ID3D11Buffer* GetZeroVertexBuffer();
@@ -311,6 +316,18 @@ private:
     float                             m_TimestampPeriodNs = 1.0f;
     /// 开始环里的下一个 disjoint 查询
     void BeginDisjoint();
+    // 间接计数的异步回读（按计数缓冲 + 偏移区分）：暂存缓冲环，结果晚几帧可用
+    struct CountReadback {
+        static constexpr u32 kRing = 4;
+        ComPtr<ID3D11Buffer> staging[kRing];
+        bool                 pending[kRing] = {};
+        u32                  cursor = 0;
+        u32                  size   = 0;        // 暂存缓冲大小（≥ 计数所在元素）
+        u32                  offset = 0;        // 计数在暂存缓冲里的偏移
+        bool                 known  = false;    // 是否已有回读结果
+        u32                  lastCount = 0;
+    };
+    std::unordered_map<u64, CountReadback> m_CountReadbacks;
     // 参数整形 CS 及其资源（第一次用到时创建）
     ComPtr<ID3D11ComputeShader>       m_ClampCS;
     bool                              m_ClampCSFailed = false;    // 编译失败过就不再重试

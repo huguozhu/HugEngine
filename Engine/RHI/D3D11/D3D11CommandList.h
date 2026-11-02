@@ -74,7 +74,7 @@ public:
                      i32 vertexOffset = 0, u32 firstInstance = 0) override;
     /// D3D11 一次只能画一条间接命令：按条数逐条调用 DrawIndexedInstancedIndirect（规划 3.3）
     void DrawIndexedIndirect(IRHIBuffer* buffer, u64 offset, u32 drawCount, u32 stride) override;
-    /// 内置 CS 把序号 ≥ GPU 计数的命令 instanceCount 置 0，再逐条画满 maxDrawCount 条（规划 3.3）
+    /// 内置 CS 把序号 ≥ GPU 计数的命令 instanceCount 置 0，再逐条绘制（条数按异步回读的计数估计，规划 3.3）
     void DrawIndexedIndirectCount(IRHIBuffer* buffer, u64 offset, IRHIBuffer* countBuffer, u64 countOffset,
                                   u32 maxDrawCount, u32 stride) override;
     // D3D11 没有 mesh shader（supportsMeshShaders=false，引擎不会走这条路径）
@@ -200,6 +200,8 @@ private:
     u32                 m_LabelDepth = 0;           // 未配对的 BeginDebugLabel 层数（End 时补齐）
     std::string         m_LastMissing;              // 上一次报告缺资源的键（同一键不重复打印）
     bool                m_WarnedIndirectCount = false;
+    bool                m_WarnedDispatchClamp = false;   // 派发工作组数超上限的提示只打一次
+    bool                m_WarnedUavAlias = false;        // 同一资源绑到多个 UAV 槽的提示只打一次
 };
 
 } // namespace he::rhi::d3d11

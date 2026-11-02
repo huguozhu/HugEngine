@@ -367,6 +367,56 @@ bool D3D11Device::ClampIndirectCount(D3D11Buffer* countBuffer, u64 countOffset, 
     return true;
 }
 
+u32 D3D11Device::EstimateIndirectCount(D3D11Buffer* countBuffer, u64 countOffset, u32 maxDraw) {
+    if (!countBuffer || maxDraw == 0) return maxDraw;
+    // 同一计数缓冲 + 偏移共用一组回读（键里放缓冲地址与偏移）
+    const u64 key = (reinterpret_cast<u64>(countBuffer) << 8) ^ countOffset;
+    CountReadback& rb = m_CountReadbacks[key];
+
+    // 1) 收取已完成的回读（不刷新、不等待；没好就下次再看）
+    for (u32 i = 0; i < CountReadback::kRing; ++i) {
+        if (!rb.pending[i]) continue;
+        D3D11_MAPPED_SUBRESOURCE ms{};
+        if (m_Context->Map(rb.staging[i].Get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &ms) != S_OK) continue;
+        std::memcpy(&rb.lastCount, static_cast<const u8*>(ms.pData) + rb.offset, sizeof(u32));
+        m_Context->Unmap(rb.staging[i].Get(), 0);
+        rb.pending[i] = false;
+        rb.known = true;
+    }
+
+    // 2) 发起本次的回读：把计数所在的元素拷进环里的下一块暂存缓冲（结构化缓冲要按步长整元素拷）
+    const u32 align = countBuffer->GetStructStride() ? countBuffer->GetStructStride() : 4u;
+    const u64 begin = (countOffset / align) * align;
+    const u32 need  = (align + 15u) & ~15u;
+    if (rb.size < need) {
+        for (auto& s : rb.staging) s.Reset();
+        for (bool& p : rb.pending) p = false;
+        rb.size = need;
+    }
+    const u32 slot = rb.cursor;
+    if (!rb.pending[slot]) {   // 该块的上一次回读还没取走就跳过本次（不覆盖未读结果）
+        if (!rb.staging[slot]) {
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth      = rb.size;
+            bd.Usage          = D3D11_USAGE_STAGING;
+            bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            HE_D3D11_CHECK(m_Device->CreateBuffer(&bd, nullptr, &rb.staging[slot]), "CreateBuffer(计数回读)");
+        }
+        if (rb.staging[slot]) {
+            const D3D11_BOX box{ static_cast<UINT>(begin), 0, 0, static_cast<UINT>(begin + align), 1, 1 };
+            m_Context->CopySubresourceRegion(rb.staging[slot].Get(), 0, 0, 0, 0, countBuffer->GetBuffer(), 0, &box);
+            rb.offset = static_cast<u32>(countOffset - begin);
+            rb.pending[slot] = true;
+            rb.cursor = (slot + 1) % CountReadback::kRing;
+        }
+    }
+
+    // 3) 循环条数：留出增长余量；还没有结果时先用一个保守的上限
+    if (!rb.known) return std::min<u32>(maxDraw, 65536u);
+    const u64 bound = u64(rb.lastCount) * 2u + 64u;
+    return static_cast<u32>(std::min<u64>(maxDraw, bound));
+}
+
 void D3D11Device::TrackSrvs(u32 stage, u32 slot, u32 count, ID3D11ShaderResourceView* const* views) {
     if (stage >= kSrvStageCount) return;
     for (u32 i = 0; i < count && slot + i < kSrvSlotCount; ++i) {
