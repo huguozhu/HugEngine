@@ -59,8 +59,6 @@ const char* GetBackendName(Backend backend) {
         case Backend::Vulkan: return "Vulkan";
         case Backend::D3D12:  return "D3D12";
         case Backend::D3D11:  return "D3D11";
-        case Backend::Metal:  return "Metal";
-        case Backend::WebGPU: return "WebGPU";
         default:              return "Unknown";
     }
 }
