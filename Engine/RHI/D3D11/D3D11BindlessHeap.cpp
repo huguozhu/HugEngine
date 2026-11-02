@@ -11,6 +11,7 @@
 namespace he::rhi::d3d11 {
 
 BindlessHandle D3D11BindlessHeap::RegisterTexture(IRHITexture* texture, IRHISampler* sampler) {
+    std::lock_guard<std::mutex> lock(m_Mutex);
     TextureEntry e;
     e.srv     = SrvOf(texture);
     e.sampler = StateOf(sampler);
@@ -30,6 +31,7 @@ BindlessHandle D3D11BindlessHeap::RegisterTexture(IRHITexture* texture, IRHISamp
 }
 
 ID3D11ShaderResourceView* D3D11BindlessHeap::GetBucketSrv(u32 k) const {
+    std::lock_guard<std::mutex> lock(m_Mutex);
     return k < m_Buckets.size() ? m_Buckets[k].srv.Get() : nullptr;
 }
 
@@ -94,6 +96,7 @@ bool D3D11BindlessHeap::GrowBucket(Bucket& b, u32 layers) {
 }
 
 void D3D11BindlessHeap::EnsureBuckets() {
+    std::lock_guard<std::mutex> lock(m_Mutex);
     if (!m_Device) return;
     if (m_PendingBucket.empty() && !m_MapDirty) return;
     if (!m_BucketSampler) {

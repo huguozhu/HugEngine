@@ -119,6 +119,7 @@ bool D3D11Buffer::CreateGpuBuffer(u32 structStride, const void* initial) {
 }
 
 ID3D11Buffer* D3D11Buffer::GetConstantBuffer() {
+    std::lock_guard<std::recursive_mutex> lock(m_ViewMutex);   // 二级列表在工作线程上并发取视图（M7.2）
     if (m_ConstantOnly) return m_Buffer.Get();
     if (!m_ConstantMirror) {
         if (m_AllocSize > D3D11_REQ_CONSTANT_BUFFER_ELEMENT_COUNT * 16u) return nullptr;
@@ -280,6 +281,7 @@ void D3D11Buffer::RefreshPersistentReads() {
 }
 
 ID3D11ShaderResourceView* D3D11Buffer::GetSrv(ViewKind kind, u32 v) {
+    std::lock_guard<std::recursive_mutex> lock(m_ViewMutex);   // 二级列表在工作线程上并发取视图（M7.2）
     if (!HasAny(m_Usage, BufferUsage::Storage)) {
         if (!m_ReportedConflict) {
             HE_CORE_ERROR("[D3D11] 缓冲（usage=0x{:x}）没有 Storage 用途，不能作着色器资源", static_cast<u32>(m_Usage));
@@ -344,6 +346,7 @@ ID3D11ShaderResourceView* D3D11Buffer::GetSrv(ViewKind kind, u32 v) {
 }
 
 ID3D11UnorderedAccessView* D3D11Buffer::GetUav(ViewKind kind, u32 v) {
+    std::lock_guard<std::recursive_mutex> lock(m_ViewMutex);   // 二级列表在工作线程上并发取视图（M7.2）
     // 先走 SRV 路径完成用途检查与结构化重建（两者的约束相同）
     if (!GetSrv(kind, v)) return nullptr;
     const u64 key = ViewKey(kind, v);
@@ -542,6 +545,7 @@ void D3D11Texture::UploadInitialData(const TextureDesc& desc) {
 }
 
 ID3D11ShaderResourceView* D3D11Texture::GetSrv(u32 mip, u32 layer, bool single) {
+    std::lock_guard<std::recursive_mutex> lock(m_ViewMutex);   // 二级列表在工作线程上并发取视图（M7.2）
     const u64 key = ViewKey(mip, layer, single);
     if (auto it = m_Srvs.find(key); it != m_Srvs.end()) return it->second.Get();
 
@@ -581,6 +585,7 @@ ID3D11ShaderResourceView* D3D11Texture::GetSrv(u32 mip, u32 layer, bool single) 
 }
 
 ID3D11UnorderedAccessView* D3D11Texture::GetUav(u32 mip, u32 layer, bool single) {
+    std::lock_guard<std::recursive_mutex> lock(m_ViewMutex);   // 二级列表在工作线程上并发取视图（M7.2）
     const u64 key = ViewKey(mip, layer, single);
     if (auto it = m_Uavs.find(key); it != m_Uavs.end()) return it->second.Get();
 
@@ -604,6 +609,7 @@ ID3D11UnorderedAccessView* D3D11Texture::GetUav(u32 mip, u32 layer, bool single)
 }
 
 ID3D11RenderTargetView* D3D11Texture::GetRtv(u32 mip, u32 layer) {
+    std::lock_guard<std::recursive_mutex> lock(m_ViewMutex);   // 二级列表在工作线程上并发取视图（M7.2）
     const u64 key = ViewKey(mip, layer, true);
     if (auto it = m_Rtvs.find(key); it != m_Rtvs.end()) return it->second.Get();
 
@@ -634,6 +640,7 @@ ID3D11RenderTargetView* D3D11Texture::GetRtv(u32 mip, u32 layer) {
 }
 
 ID3D11DepthStencilView* D3D11Texture::GetDsv(u32 mip, u32 layer, bool readOnly) {
+    std::lock_guard<std::recursive_mutex> lock(m_ViewMutex);   // 二级列表在工作线程上并发取视图（M7.2）
     const u64 key = ViewKey(mip, layer, true, readOnly);
     if (auto it = m_Dsvs.find(key); it != m_Dsvs.end()) return it->second.Get();
 

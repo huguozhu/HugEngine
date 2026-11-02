@@ -24,6 +24,7 @@
 
 #include "RHI/Bindless.h"
 #include "D3D11Resources.h"
+#include <mutex>
 #include <vector>
 
 namespace he::rhi::d3d11 {
@@ -77,9 +78,9 @@ public:
     /// 第 k 个桶的 SRV（Texture2DArray，全部 mip / 层）；还没建的桶返回空（映射表不会指向它）
     ID3D11ShaderResourceView* GetBucketSrv(u32 k) const;
     /// 句柄 → (1 << 31 | 桶号 << 24 | 层号) 的映射表（StructuredBuffer<uint>，未分桶为 0）
-    ID3D11ShaderResourceView* GetBucketMapSrv() const { return m_MapSrv.Get(); }
+    ID3D11ShaderResourceView* GetBucketMapSrv() const { std::lock_guard<std::mutex> lock(m_Mutex); return m_MapSrv.Get(); }
     /// 桶路径的采样器（线性、重复寻址）
-    ID3D11SamplerState*       GetBucketSampler() const { return m_BucketSampler.Get(); }
+    ID3D11SamplerState*       GetBucketSampler() const { std::lock_guard<std::mutex> lock(m_Mutex); return m_BucketSampler.Get(); }
 
 private:
     static ComPtr<ID3D11ShaderResourceView> SrvOf(IRHITexture* t) {
@@ -127,6 +128,7 @@ private:
     ComPtr<ID3D11ShaderResourceView>        m_MapSrv;
     ComPtr<ID3D11SamplerState>              m_BucketSampler;
     bool                                    m_WarnedFull = false;
+    mutable std::mutex                      m_Mutex;   // 二级列表在工作线程上录制时会并发建桶 / 取桶（M7.2）
 };
 
 } // namespace he::rhi::d3d11

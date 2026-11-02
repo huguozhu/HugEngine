@@ -10,6 +10,8 @@
 #include "D3D11Common.h"
 #include "RHI/Shader.h"
 #include "RHI/QueryPool.h"
+#include <atomic>
+#include <mutex>
 #include <unordered_map>
 #include <vector>
 
@@ -111,7 +113,8 @@ private:
     u32                  m_Stride = 0;
     u32                  m_StructStride = 0; // 当前 GPU 缓冲的结构化步长（0 = 非结构化）
     u32                  m_MapCount = 0;
-    bool                 m_GpuWritten = false;
+    std::atomic<bool>    m_GpuWritten{ false };   // 二级列表录制时可能在工作线程上置位
+    std::recursive_mutex m_ViewMutex;             // 视图缓存与结构化重建（取视图时可能重建缓冲）
     bool                 m_ConstantOnly = false;   // 用途只有 Uniform：主缓冲就是常量缓冲
     bool                 m_ReportedConflict = false;
 };
@@ -174,6 +177,7 @@ private:
     std::unordered_map<u64, ComPtr<ID3D11UnorderedAccessView>> m_Uavs;
     std::unordered_map<u64, ComPtr<ID3D11RenderTargetView>>    m_Rtvs;
     std::unordered_map<u64, ComPtr<ID3D11DepthStencilView>>    m_Dsvs;
+    std::recursive_mutex   m_ViewMutex;       // 视图缓存（二级列表在工作线程上并发取视图，M7.2）
     std::vector<void*> m_FaceViews;   // GetNativeHandle(index) 返回的逐层视图
     void*  m_DefaultView = nullptr;   // GetNativeHandle() 返回的视图
     u32    m_Width = 1, m_Height = 1, m_Depth = 1;

@@ -121,6 +121,12 @@ bool D3D11Device::CreateDeviceAndContext() {
         HE_CORE_ERROR("[D3D11] 运行时缺少 D3D11.4 接口（ID3D11Device5 / ID3D11DeviceContext4），需要 Windows 10 1703 或更新版本");
         return false;
     }
+    // 【多线程保护（M7.2）】immediate context 本身不是线程安全的：二级列表在工作线程上录制时，
+    // 资源的上传 / 回读、纹理桶拷贝等仍要用它。打开运行时的多线程保护，对它的调用逐个串行化
+    {
+        ComPtr<ID3D11Multithread> mt;
+        if (SUCCEEDED(m_Context.As(&mt))) mt->SetMultithreadProtected(TRUE);
+    }
 
     // 最低运行环境（规划 1.3 节）：缺任何一项都不启动，并列出全部缺项
     D3D11_FEATURE_DATA_D3D11_OPTIONS  opt{};
@@ -292,6 +298,7 @@ bool D3D11Device::ClampIndirectCount(D3D11ContextState& state, D3D11Buffer* coun
                                      ID3D11UnorderedAccessView* argsUav,
                                      u64 argsOffset, u32 stride, u32 maxDraw) {
     if (!countBuffer || !argsUav || maxDraw == 0) return false;
+    std::lock_guard<std::mutex> lock(m_IndirectMutex);   // 着色器 / 常量缓冲 / 计数暂存是各上下文共用的
     // 第一次用到时编译着色器、建常量缓冲
     if (!m_ClampCS) {
         if (m_ClampCSFailed) return false;
@@ -373,6 +380,7 @@ bool D3D11Device::ClampIndirectCount(D3D11ContextState& state, D3D11Buffer* coun
 
 u32 D3D11Device::EstimateIndirectCount(D3D11ContextState& state, D3D11Buffer* countBuffer, u64 countOffset, u32 maxDraw) {
     if (!countBuffer || maxDraw == 0) return maxDraw;
+    std::lock_guard<std::mutex> lock(m_IndirectMutex);
     // 同一计数缓冲 + 偏移共用一组回读（键里放缓冲地址与偏移）
     const u64 key = (reinterpret_cast<u64>(countBuffer) << 8) ^ countOffset;
     CountReadback& rb = m_CountReadbacks[key];
@@ -525,6 +533,7 @@ std::unique_ptr<IRHISampler> D3D11Device::CreateSampler(const SamplerDesc& desc)
 //  视图登记表与逐 mip 视图
 // ---------------------------------------------------------------------------
 void D3D11Device::UnregisterTextureViews(D3D11Texture* texture) {
+    std::lock_guard<std::mutex> lock(m_ViewMutex);
     for (auto it = m_Views.begin(); it != m_Views.end();) {
         it = (it->second.texture == texture) ? m_Views.erase(it) : std::next(it);
     }
@@ -547,6 +556,7 @@ void* D3D11Device::CreateTextureMipSampledView(IRHITexture* texture, u32 mipLeve
 //  零缓冲与实例序号缓冲
 // ---------------------------------------------------------------------------
 ID3D11Buffer* D3D11Device::GetZeroVertexBuffer() {
+    std::lock_guard<std::mutex> lock(m_LazyMutex);
     if (!m_ZeroVertexBuffer) {
         const u8 zeros[64] = {};   // 最大的顶点属性是 16 字节，64 字节足够
         D3D11_BUFFER_DESC bd{ sizeof(zeros), D3D11_USAGE_IMMUTABLE, D3D11_BIND_VERTEX_BUFFER, 0, 0, 0 };
@@ -557,6 +567,7 @@ ID3D11Buffer* D3D11Device::GetZeroVertexBuffer() {
 }
 
 ID3D11Buffer* D3D11Device::GetInstanceIndexBuffer() {
+    std::lock_guard<std::mutex> lock(m_LazyMutex);
     if (!m_InstanceIndexBuffer) {
         std::vector<u32> indices(kInstanceIndexCount);
         for (u32 i = 0; i < kInstanceIndexCount; ++i) indices[i] = i;
@@ -571,10 +582,12 @@ ID3D11Buffer* D3D11Device::GetInstanceIndexBuffer() {
 //  持久映射缓冲
 // ---------------------------------------------------------------------------
 void D3D11Device::FlushOpenMaps() {
+    std::lock_guard<std::mutex> lock(m_OpenMapsMutex);
     for (D3D11Buffer* b : m_OpenMaps) b->FlushPersistentWrites();
 }
 
 void D3D11Device::RefreshOpenMaps() {
+    std::lock_guard<std::mutex> lock(m_OpenMapsMutex);
     for (D3D11Buffer* b : m_OpenMaps) b->RefreshPersistentReads();
 }
 

@@ -172,17 +172,24 @@ public:
     void  DestroyTextureMipView(void*) override {}
 
     // ---- 视图登记表（纹理创建视图时登记，析构时注销）----
-    void RegisterView(void* view, const D3D11ViewInfo& info) { if (view) m_Views[view] = info; }
+    //  二级列表在工作线程上录制时会并发登记 / 查询，加锁（M7.2）。unordered_map 的元素地址在其它
+    //  元素插入时不变，返回的指针在该纹理销毁前一直有效
+    void RegisterView(void* view, const D3D11ViewInfo& info) {
+        if (!view) return;
+        std::lock_guard<std::mutex> lock(m_ViewMutex);
+        m_Views[view] = info;
+    }
     void UnregisterTextureViews(D3D11Texture* texture);
     /// 查视图句柄；未登记返回空
     const D3D11ViewInfo* FindView(void* view) const {
+        std::lock_guard<std::mutex> lock(m_ViewMutex);
         auto it = m_Views.find(view);
         return it != m_Views.end() ? &it->second : nullptr;
     }
 
     // ---- 持久映射缓冲（Map 之后未 Unmap，见 D3D11Buffer 的说明）----
-    void OnBufferMapped(D3D11Buffer* buffer)   { m_OpenMaps.insert(buffer); }
-    void OnBufferUnmapped(D3D11Buffer* buffer) { m_OpenMaps.erase(buffer); }
+    void OnBufferMapped(D3D11Buffer* buffer)   { std::lock_guard<std::mutex> lock(m_OpenMapsMutex); m_OpenMaps.insert(buffer); }
+    void OnBufferUnmapped(D3D11Buffer* buffer) { std::lock_guard<std::mutex> lock(m_OpenMapsMutex); m_OpenMaps.erase(buffer); }
     /// 绘制 / 派发前调用：把持久映射缓冲里 CPU 改过的内容上传
     void FlushOpenMaps();
     /// 提交时调用：把持久映射缓冲里 GPU 写过的内容回读
@@ -265,7 +272,9 @@ public:
     static constexpr u32 kInstanceIndexCount = 1u << 20;
 
     /// 诊断：记下最近执行的绘制 / 派发所用的 PSO 名（环形 32 条，只存指针，开销可忽略）
-    void NoteExecuted(const char* psoName) { m_RecentPsos[m_RecentCursor++ % kRecentPsoCount] = psoName; }
+    void NoteExecuted(const char* psoName) {
+        m_RecentPsos[m_RecentCursor.fetch_add(1, std::memory_order_relaxed) % kRecentPsoCount] = psoName;
+    }
     /// GPU 等待超时时调用：打印一次最近执行过的 PSO，便于定位是哪个 pass 让 GPU 停住
     void OnGpuTimeout();
 
@@ -352,7 +361,11 @@ private:
     u32                               m_CountScratchSize = 0;
     static constexpr u32         kRecentPsoCount = 32;
     const char*                  m_RecentPsos[kRecentPsoCount] = {};
-    u32                          m_RecentCursor = 0;
+    std::atomic<u32>             m_RecentCursor{ 0 };   // 二级列表并发录制时也会累加（M7.2）
+    mutable std::mutex           m_ViewMutex;           // 视图登记表
+    std::mutex                   m_OpenMapsMutex;       // 持久映射缓冲集合
+    std::mutex                   m_LazyMutex;           // 零缓冲 / 实例序号缓冲的懒创建
+    std::mutex                   m_IndirectMutex;       // 参数整形 CS 的共享资源与计数回读表
     bool                         m_TimeoutReported = false;
     D3D11BindlessHeap            m_BindlessHeap;  // 引擎会无条件解引用它
     DeviceCaps                   m_Caps{};
