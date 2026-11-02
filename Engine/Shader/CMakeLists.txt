@@ -324,6 +324,11 @@ if(SLANGC)
             COMMAND ${CMAKE_COMMAND} -E make_directory ${SPV_OUT_DIR}
             COMMAND ${SLANGC} ${SRC} -target spirv -entry vertexMain -stage vertex
                     -I "${SHADER_DIR}" -o ${SPV} -Wno-39001
+            # 【为什么生成后还要 touch】`slangc` 在输出内容与磁盘上已有文件**逐字节相同**时**不重写**
+            # 该文件（mtime 保持旧值）⇒ CMake / MSBuild 每次都会把这里的 OUTPUT 判为"比输入旧"，
+            # 于是无条件重跑整条链；D3D12 那条链还有第二段（HLSL→DXIL），会一路连带下游 C++ 全量重编。
+            # 生成后显式 touch 一次，让 OUTPUT 的时间戳晚于输入，构建才真正增量。
+            COMMAND ${CMAKE_COMMAND} -E touch ${SPV}
             DEPENDS ${SRC} ${SLANG_INCLUDES}
             COMMENT "Slang -> SPIR-V: ${NAME}"
         )
@@ -340,6 +345,7 @@ if(SLANGC)
             COMMAND ${CMAKE_COMMAND} -E make_directory ${SPV_OUT_DIR}
             COMMAND ${SLANGC} ${SRC} -target spirv -entry fragmentMain -stage fragment
                     -I "${SHADER_DIR}" -o ${SPV} -Wno-39001
+            COMMAND ${CMAKE_COMMAND} -E touch ${SPV}   # slangc 内容未变时不写文件，见上面顶点循环的说明
             DEPENDS ${SRC} ${SLANG_INCLUDES}
             COMMENT "Slang -> SPIR-V: ${NAME}"
         )
@@ -356,6 +362,7 @@ if(SLANGC)
             COMMAND ${CMAKE_COMMAND} -E make_directory ${SPV_OUT_DIR}
             COMMAND ${SLANGC} ${SRC} -target spirv -entry main -stage compute
                     -I "${SHADER_DIR}" -o ${SPV} -Wno-39001
+            COMMAND ${CMAKE_COMMAND} -E touch ${SPV}   # slangc 内容未变时不写文件，见顶点循环的说明
             DEPENDS ${SRC} ${SLANG_INCLUDES}
             COMMENT "Slang -> SPIR-V: ${NAME}"
         )
@@ -385,6 +392,7 @@ if(SLANGC)
             COMMAND ${CMAKE_COMMAND} -E make_directory ${SPV_OUT_DIR}
             COMMAND ${SLANGC} ${SRC} -target spirv -entry main -stage ${SLANGC_STAGE}
                     -I "${SHADER_DIR}" -o ${SPV} -Wno-39001
+            COMMAND ${CMAKE_COMMAND} -E touch ${SPV}   # slangc 内容未变时不写文件，见顶点循环的说明
             DEPENDS ${SRC} ${SLANG_INCLUDES}
             COMMENT "Slang -> SPIR-V (RT): ${NAME} [${SLANGC_STAGE}]"
         )
@@ -408,6 +416,7 @@ if(SLANGC)
             COMMAND ${CMAKE_COMMAND} -E make_directory ${SPV_OUT_DIR}
             COMMAND ${SLANGC} ${SRC} -target spirv -entry main -stage ${SLANGC_STAGE}
                     -I "${SHADER_DIR}" -o ${SPV} -Wno-39001
+            COMMAND ${CMAKE_COMMAND} -E touch ${SPV}   # slangc 内容未变时不写文件，见顶点循环的说明
             DEPENDS ${SRC} ${SLANG_INCLUDES}
             COMMENT "Slang -> SPIR-V (Mesh): ${NAME} [${SLANGC_STAGE}]"
         )
@@ -541,6 +550,9 @@ if(SLANGC)
                 COMMAND ${CMAKE_COMMAND} -E make_directory ${DXIL_OUT_DIR}
                 COMMAND ${SLANGC} ${SRC} -target hlsl -entry ${ENTRY} -stage ${SLANG_STAGE} -DHE_SHADER_HLSL -DHE_SHADER_D3D12 -DHE_NO_TEX -DHE_BYPASS_MATRIX
                         -I "${SHADER_DIR}" -o ${HLSL} -Wno-39001
+                # 【必须 touch】slangc 在输出内容未变时不重写文件（mtime 不变）⇒ 这里的 OUTPUT 会被
+                # 永远判为过期，每次构建都重跑本段，并让第二段（HLSL→DXIL）跟着重跑、下游 C++ 全量重编。
+                COMMAND ${CMAKE_COMMAND} -E touch ${HLSL}
                 DEPENDS ${SRC} ${SLANG_INCLUDES}
                 COMMENT "Slang -> HLSL (D3D12): ${NAME}"
             )
