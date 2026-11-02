@@ -513,6 +513,9 @@ void D3D11Device::ExecutePresent(IRHISwapChain* swapChain, u32, void*, bool vsyn
 }
 
 std::unique_ptr<IRHICommandList> D3D11Device::CreateSecondaryCommandList() {
+    // 调试开关 HE_D3D11_NO_DEFERRED=1：不建二级列表，引擎回退单线程录制（对比并行录制的效果 / 排查问题）
+    static const bool s_NoDeferred = (std::getenv("HE_D3D11_NO_DEFERRED") != nullptr);
+    if (s_NoDeferred) return nullptr;
     // 每条二级列表一个 deferred context：工作线程各自录制，互不干扰（M7.3）
     ComPtr<ID3D11DeviceContext3> ctx3;
     if (!HE_D3D11_CHECK(m_Device->CreateDeferredContext3(0, &ctx3), "CreateDeferredContext3")) return nullptr;

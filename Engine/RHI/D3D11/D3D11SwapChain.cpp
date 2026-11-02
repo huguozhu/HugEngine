@@ -116,6 +116,9 @@ void D3D11SwapChain::PresentNow(bool vsync) {
     if (!m_SwapChain) return;
     ++m_FrameCount;
     CaptureIfRequested();
+    // 调试开关 HE_D3D11_NO_VSYNC=1：强制关闭垂直同步（测 CPU / GPU 吞吐时不受刷新率限制）
+    static const bool s_NoVsync = (std::getenv("HE_D3D11_NO_VSYNC") != nullptr);
+    if (s_NoVsync) vsync = false;
     // 关闭垂直同步时允许撕裂（窗口模式下不等刷新）
     const UINT flags = (!vsync && m_Tearing) ? DXGI_PRESENT_ALLOW_TEARING : 0u;
     const HRESULT hr = m_SwapChain->Present(vsync ? 1u : 0u, flags);
