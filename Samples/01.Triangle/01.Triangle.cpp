@@ -32,6 +32,14 @@
 #include "TriangleMesh.frag.spv.h"
 #include "TriangleMesh.frag.dxil.h"
 #include "TriangleMesh.frag.dxbc.h"
+// RT 输出到离屏纹理后，用这张全屏拷贝着色器贴回后缓冲（D3D12 的后缓冲不能当 UAV，
+// 所以 RT 必须走「离屏 Storage 纹理 → 采样 → 全屏拷贝」这条路，而不是直接写后缓冲）
+#include "Fullscreen.vert.spv.h"
+#include "Fullscreen.vert.dxil.h"
+#include "Fullscreen.vert.dxbc.h"
+#include "FullscreenCopy.frag.spv.h"
+#include "FullscreenCopy.frag.dxil.h"
+#include "FullscreenCopy.frag.dxbc.h"
 #include "imgui.h"
 
 #include <cstdlib>
@@ -40,9 +48,17 @@
 #include <memory>
 #include <vector>
 
+#include <GLFW/glfw3.h>   // glfwGetTime()：旋转动画的帧时间
+
 using namespace he;
 
 namespace {
+
+/// 推送常量：三条渲染路径（光栅 / RT / Mesh）共用的旋转角。
+/// 与着色器里的 `TrianglePushConstant` **逐字段一致**（当前只有 1 个 float）。
+struct RotationPushConstant {
+    f32 angle = 0.0f;   // 弧度：绕屏幕中心旋转
+};
 
 // ============================================================
 // 后端列表与名字
@@ -92,12 +108,19 @@ struct Gfx {
     bool rtRenderable  = false;   // 且后缓冲能当存储图像（D3D12 的 FLIP 后缓冲不行）
     bool meshSupported = false;   // 硬件有网格着色器
 
-    // ---- RT 路径（直接写后缓冲，无中间纹理）----
+    // ---- RT 路径（先写离屏 Storage 纹理，再全屏拷贝到后缓冲）----
     std::unique_ptr<rhi::IRHIRayTracingPipelineState> rtPSO;
     std::unique_ptr<rhi::IRHIBuffer>                  rtSBTBuf;
     rhi::SBTDesc                    sbt{};
-    rhi::DescriptorSetLayoutHandle  rtLayout = rhi::kInvalidLayout;
+    rhi::DescriptorSetLayoutHandle  rtLayout = rhi::kInvalidLayout;    // RT 输出（StorageImage）
     rhi::DescriptorSetHandle        rtSet    = rhi::kInvalidSet;
+    // 离屏目标 + 全屏拷贝（blit）：RT 写 rtTarget，再把它采样贴回后缓冲
+    std::unique_ptr<rhi::IRHITexture>          rtTarget;
+    u32                                        rtTargetW = 0, rtTargetH = 0;
+    std::unique_ptr<rhi::IRHISampler>          blitSampler;
+    rhi::DescriptorSetLayoutHandle             blitLayout = rhi::kInvalidLayout;  // 采样输出（CombinedImageSampler）
+    rhi::DescriptorSetHandle                   blitSet    = rhi::kInvalidSet;
+    std::unique_ptr<rhi::IRHIPipelineState>    blitPSO;
 
     // ---- Mesh Shader 路径 ----
     std::unique_ptr<rhi::IRHIPipelineState> meshPSO;
@@ -114,13 +137,22 @@ struct Gfx {
 // 注意：`rhi::CreateDevice` 在设备创建失败时会直接退出进程（见 RHI.h 的说明），
 //       所以这里只兜「设备创建成功之后」的失败（交换链 / PSO 等）。
 // ============================================================
+/// 前向声明：InitGfx 里要用它建离屏 RT 目标（定义在 ShutdownGfx 之后）
+bool EnsureRtTarget(Gfx& g, u32 w, u32 h);
+
 bool InitGfx(Gfx& g, Engine& engine, rhi::Backend backend) {
     g.backend = backend;
     HE_CORE_INFO("=== 初始化渲染后端：{} ===", BackendName(backend));
 
     rhi::DeviceInitDesc desc;
     desc.backend          = backend;
-    desc.enableValidation = true;
+    // 【切换后端时不重建验证层】首次创建设备才开 Vulkan 验证层：每切一次后端就重建一遍
+    // instance + 验证层 + 调试回调，在部分机器上会明显拖慢甚至看起来像卡住。
+    // 需要强制打开：HE_TRIANGLE_VALIDATION=1（强制关闭：=0）。
+    static bool s_ValidationConsumed = false;
+    desc.enableValidation = !s_ValidationConsumed;
+    s_ValidationConsumed = true;
+    if (const char* v = std::getenv("HE_TRIANGLE_VALIDATION")) desc.enableValidation = (std::atoi(v) != 0);
     desc.windowHandle     = engine.GetWindow()->GetNativeHandleRaw();
 
     g.device = rhi::CreateDevice(desc.backend);
@@ -129,15 +161,12 @@ bool InitGfx(Gfx& g, Engine& engine, rhi::Backend backend) {
 
     g.rtSupported   = g.device->GetCaps().supportsRayTracing;
     g.meshSupported = g.device->GetCaps().supportsMeshShaders;
-    // 【P2】本样例的 RT 模式是**直接把后缓冲当存储图像（UAV）写**：
-    //   · Vulkan 交换链图像带 VK_IMAGE_USAGE_STORAGE_BIT ⇒ 可以；
-    //   · D3D12 的 FLIP 后缓冲由 DXGI 创建，资源标志只有 ALLOW_RENDER_TARGET，转 UNORDERED_ACCESS
-    //     会被调试层判为 id=524（缺 D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS，且该标志无法补）。
-    // 故"能进 RT 模式"要同时满足硬件支持光追 ∧ 后缓冲可作存储图像。
-    g.rtRenderable = g.rtSupported && g.device->GetCaps().supportsBackBufferStorageImage;
-    HE_CORE_INFO("RT 支持: {}, Mesh Shader 支持: {}（RT 写后缓冲={}）",
-                 g.rtSupported ? "是" : "否", g.meshSupported ? "是" : "否",
-                 g.rtRenderable ? "可" : "不可");
+    // 【为什么不再要求"后缓冲可写 UAV"】RT 现在写**离屏 Storage 纹理**、再全屏拷贝回后缓冲，
+    // 所以只要有硬件光追就能进 RT 模式（D3D12 的 FLIP 后缓冲不能当 UAV，之前正是因此被排除）。
+    // 离屏目标建不出来时 EnsureRtTarget 会返回 false，那时仍会回落到光栅化。
+    g.rtRenderable = g.rtSupported;
+    HE_CORE_INFO("RT 支持: {}, Mesh Shader 支持: {}（RT 走离屏纹理 + 全屏拷贝）",
+                 g.rtSupported ? "是" : "否", g.meshSupported ? "是" : "否");
 
     // ---- 交换链 ----
     const u32 swW = engine.GetWindow()->GetWidth();
@@ -175,6 +204,8 @@ bool InitGfx(Gfx& g, Engine& engine, rhi::Backend backend) {
         .depthTest = false, .depthWrite = false,
         // 颜色附件必须是后缓冲的真实格式（D3D12 交换链为 BGRA8，默认值 RGBA8 会让绘制被丢弃）
         .colorFormats = { g.swapchain->GetColorFormat() },
+        // 旋转角走推送常量（顶点阶段可见）
+        .pushConstantRanges = {{rhi::kStageMaskVertex, 0u, sizeof(RotationPushConstant)}},
         .debugName = "Triangle",
     });
     if (!g.pipeline) {
@@ -203,6 +234,8 @@ bool InitGfx(Gfx& g, Engine& engine, rhi::Backend backend) {
         rtpDesc.shaderGroups = groups;
         rtpDesc.maxRecursionDepth = 1;
         rtpDesc.descriptorSetLayouts = { g.rtLayout };
+        // RT 管线也要同样的推送常量（RayGen 在 UV 空间里旋转采样坐标）
+        rtpDesc.pushConstantRanges = {{rhi::kStageMaskRayGen, 0u, sizeof(RotationPushConstant)}};
         rtpDesc.debugName = "RT_Triangle";
 
         g.rtPSO = g.device->CreateRTPipelineState(rtpDesc);
@@ -240,7 +273,44 @@ bool InitGfx(Gfx& g, Engine& engine, rhi::Backend backend) {
         g.sbt.miss.handleOffset = stride;
         g.sbt.miss.stride = stride;
 
-        HE_CORE_INFO("RT 管线就绪: {} groups, {}B SBT (直接渲染到 BackBuffer)", groupCount, sbtSize);
+        // ---- 离屏目标 + 全屏拷贝 ----
+        // 【为什么不再直接写后缓冲】D3D12 的 FLIP 后缓冲只有 RENDER_TARGET 标志，转
+        // UNORDERED_ACCESS 会被调试层判 id=524（缺 ALLOW_UNORDERED_ACCESS，且该标志无法补），
+        // 所以"RT 直接写后缓冲"这条路在 D3D12 上根本不可用。改成 RT → 离屏 Storage 纹理 →
+        // 采样 → 全屏拷贝到后缓冲：三个后端走同一条路，行为一致。
+        rhi::DescriptorSetLayoutDesc blitDesc;
+        blitDesc.bindings = {{ 0, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment }};
+        g.blitLayout = g.device->CreateDescriptorSetLayout(blitDesc);
+        g.blitSet    = g.device->AllocateDescriptorSet(g.blitLayout);
+
+        rhi::SamplerDesc sd;
+        sd.minFilter = rhi::FilterMode::Linear;
+        sd.magFilter = rhi::FilterMode::Linear;
+        sd.mipFilter = rhi::FilterMode::Linear;
+        sd.addressU = sd.addressV = sd.addressW = rhi::AddressMode::ClampToEdge;
+        g.blitSampler = g.device->CreateSampler(sd);
+
+        rhi::ShaderBytecode blitVS = rhi::MakeShaderBytecode(
+            rhi::ShaderStage::Vertex, k_Fullscreen_vert_spv, k_Fullscreen_vert_dxil, k_Fullscreen_vert_dxbc, "main");
+        rhi::ShaderBytecode blitFS = rhi::MakeShaderBytecode(
+            rhi::ShaderStage::Pixel, k_FullscreenCopy_frag_spv, k_FullscreenCopy_frag_dxil, k_FullscreenCopy_frag_dxbc, "main");
+        g.blitPSO = g.device->CreatePipelineState({
+            .vertexShader = &blitVS, .pixelShader = &blitFS,
+            .depthTest = false, .depthWrite = false,
+            .colorFormats = { g.swapchain->GetColorFormat() },
+            .descriptorSetLayouts = { g.blitLayout },
+            .debugName = "TriangleBlit",
+        });
+        if (!g.blitPSO) {
+            HE_CORE_ERROR("01.Triangle: 全屏拷贝 PSO 创建失败（后端 {}）", BackendName(backend));
+            return false;
+        }
+        // 立即按当前后缓冲尺寸建一次离屏目标（失败则由调用方回落到光栅化）
+        if (!EnsureRtTarget(g, g.swapchain->GetWidth(), g.swapchain->GetHeight())) {
+            HE_CORE_WARN("01.Triangle: 离屏 RT 目标不可用，本次只提供光栅化 / Mesh 路径");
+        }
+
+        HE_CORE_INFO("RT 管线就绪: {} groups, {}B SBT (离屏纹理 + 全屏拷贝)", groupCount, sbtSize);
     }
 
     // ---- Mesh Shader 路径（无 VB/IB，硬编码三色三角形）----
@@ -258,6 +328,8 @@ bool InitGfx(Gfx& g, Engine& engine, rhi::Backend backend) {
             .depthTest   = false,
             .depthWrite  = false,
             .colorFormats = { g.swapchain->GetColorFormat() },
+            // 网格着色器阶段同样需要旋转角
+            .pushConstantRanges = {{rhi::kStageMaskMesh, 0u, sizeof(RotationPushConstant)}},
             .debugName   = "TriangleMesh",
         });
         HE_CORE_INFO("Mesh Shader 管线就绪: DrawMeshTasks(1,1,1)");
@@ -280,6 +352,10 @@ bool InitGfx(Gfx& g, Engine& engine, rhi::Backend backend) {
 void ShutdownGfx(Gfx& g) {
     if (!g.device) return;
     HE_CORE_INFO("=== 关闭渲染后端：{} ===", BackendName(g.backend));
+    // 【日志分段】切换后端如果出现"卡住"，日志停在哪一行就说明卡在那一阶段：
+    //   WaitIdle 之后仍在 → 资源释放/设备销毁；ImGui 之后仍在 → ImGui 后端切换；
+    //   一路打完但没出现"初始化渲染后端" → CreateDevice 卡住。
+    HE_CORE_INFO("[关闭] 等待 GPU 空闲（WaitIdle）");
     g.device->WaitIdle();
 
     // 帧外壳持有交换链指针；ImGui 持有 device / swapchain 指针 ⇒ 都必须先于它们释放
@@ -292,12 +368,21 @@ void ShutdownGfx(Gfx& g) {
         g.device->DestroyDescriptorSetLayout(g.rtLayout);
         g.rtLayout = rhi::kInvalidLayout;
     }
-    g.rtSet = rhi::kInvalidSet;
+    if (g.blitLayout != rhi::kInvalidLayout) {
+        g.device->DestroyDescriptorSetLayout(g.blitLayout);
+        g.blitLayout = rhi::kInvalidLayout;
+    }
+    g.rtSet   = rhi::kInvalidSet;
+    g.blitSet = rhi::kInvalidSet;
 
-    HE_CORE_INFO("[关闭] 释放 meshPSO");
+    HE_CORE_INFO("[关闭] 释放 meshPSO / RT / blit 资源");
     g.meshPSO.reset();
+    g.blitPSO.reset();
     g.rtPSO.reset();
     g.rtSBTBuf.reset();
+    g.blitSampler.reset();
+    g.rtTarget.reset();
+    g.rtTargetW = g.rtTargetH = 0;
     HE_CORE_INFO("[关闭] 释放顶点缓冲 / 光栅化 PSO");
     g.vertexBuffer.reset();
     g.pipeline.reset();
@@ -305,10 +390,42 @@ void ShutdownGfx(Gfx& g) {
     g.cmdList.reset();
     g.swapchain.reset();
     g.device.reset();
+    HE_CORE_INFO("[关闭] 设备已释放");
     rhi::SetDevice(nullptr);   // 全局设备指针指向已销毁对象会变成悬垂指针
 
     g.rtSupported = g.rtRenderable = g.meshSupported = false;
     g.sbt = {};
+}
+
+/// 确保离屏 RT 目标与当前后缓冲同尺寸；尺寸变化时重建纹理并刷新两个描述符集。
+/// 返回 false 表示纹理创建失败（调用方回落到光栅化路径）。
+bool EnsureRtTarget(Gfx& g, u32 w, u32 h) {
+    if (w == 0 || h == 0) return false;
+    if (g.rtTarget && g.rtTargetW == w && g.rtTargetH == h) return true;
+
+    g.rtTarget.reset();
+    rhi::TextureDesc td;
+    td.width      = w;
+    td.height     = h;
+    td.mipLevels  = 1;
+    td.arrayLayers = 1;
+    td.sampleCount = 1;
+    // 用 RGBA8_UNORM 而不是后缓冲格式：离屏纹理要能当 UAV（sRGB / BGRA 存储格式在部分后端不可写）
+    td.format     = rhi::Format::RGBA8_UNORM;
+    td.usage      = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource;
+    g.rtTarget    = g.device->CreateTexture(td);
+    if (!g.rtTarget) {
+        HE_CORE_ERROR("01.Triangle: 离屏 RT 目标创建失败（{}x{}）", w, h);
+        return false;
+    }
+    g.rtTargetW = w;
+    g.rtTargetH = h;
+
+    void* view = g.rtTarget->GetNativeHandle();
+    // RT 管线按 StorageImage 写它；blit 管线按采样纹理读它
+    g.device->UpdateDescriptorSetWithImageView(g.rtSet, 0, rhi::DescriptorType::StorageImage, view);
+    g.device->UpdateDescriptorSet(g.blitSet, 0, rhi::DescriptorType::CombinedImageSampler, g.rtTarget.get(), g.blitSampler.get());
+    return true;
 }
 
 /// 切换后端后，把用户选的渲染模式夹到新后端真正可用的档位：
@@ -340,11 +457,12 @@ int main() {
         return 1;
     }
 
-    // 窗口缩放：交换链与命令列表都要跟着换（回调里引用的是 gfx，切换后端后依然有效）
+    // 窗口缩放：交换链、命令列表与离屏 RT 目标都要跟着换（回调引用 gfx，切换后端后依然有效）
     engine.GetWindow()->SetResizeCallback([&](u32 w, u32 h) {
         if (!gfx.swapchain || !gfx.cmdList) return;
         gfx.swapchain->Resize(w, h);
         gfx.cmdList->SetSwapChain(gfx.swapchain.get());
+        gfx.rtTargetW = gfx.rtTargetH = 0;   // 尺寸变了：下一帧 EnsureRtTarget 会重建离屏目标
     });
 
     // ============================================================
@@ -359,6 +477,11 @@ int main() {
     const std::vector<rhi::Backend> backends = AvailableBackends();
     rhi::Backend pendingBackend = gfx.backend;   // 下拉里选中的后端（帧末真正切换）
 
+    // ---- 旋转动画状态：角度按帧时间累加，三条路径共用同一个角度 ----
+    f32  rotationAngle = 0.0f;                       // 弧度
+    f32  rotationSpeed = 1.0f;                       // 弧度/秒（面板可调，0 = 停）
+    f64  lastFrameTime = glfwGetTime();
+
     HE_CORE_INFO("01.Triangle started — ImGui 切换渲染模式 / 渲染后端（当前 {}）", BackendName(gfx.backend));
     u64 frameIndex = 0;
 
@@ -366,19 +489,22 @@ int main() {
         engine.GetWindow()->PollEvents();
         if (!gfx.framePresenter->BeginFrame()) continue;
 
+        // 帧时间 → 旋转角：2π 取模，长时间运行也不会丢精度
+        const f64 nowTime = glfwGetTime();
+        const f32 deltaTime = static_cast<f32>(nowTime - lastFrameTime);
+        lastFrameTime = nowTime;
+        rotationAngle += rotationSpeed * deltaTime;
+        if (rotationAngle > 6.28318530718f) rotationAngle -= 6.28318530718f;
+        const RotationPushConstant rotationPC{ rotationAngle };
+
         const u32 w = gfx.swapchain->GetWidth();
         const u32 h = gfx.swapchain->GetHeight();
 
         gfx.framePresenter->BeginRecording(gfx.device.get(), gfx.cmdList.get());   // L4-2
 
-        // ── RT 调度 + 直接渲染到 BackBuffer ──
-        if (renderMode == 1 && gfx.rtRenderable && gfx.rtPSO) {
-            // 将 BackBuffer ImageView 绑定为 RT 输出（StorageImage）
-            void* backBufferView = gfx.swapchain->GetCurrentBackBufferView();
-            gfx.device->UpdateDescriptorSetWithImageView(gfx.rtSet, 0,
-                rhi::DescriptorType::StorageImage, backBufferView);
-
-            // 全局屏障：确保 BackBuffer 可被 RT 写入
+        // ── RT：写离屏纹理 → 全屏拷贝到后缓冲（三个后端同一条路，D3D12 也因此可用）──
+        if (renderMode == 1 && gfx.rtRenderable && gfx.rtPSO && gfx.blitPSO && EnsureRtTarget(gfx, w, h)) {
+            // 离屏目标进入 UAV 状态，供 RayGen 写
             gfx.cmdList->PipelineBarrier(rhi::PipelineStage::BottomOfPipe,
                                          rhi::PipelineStage::RayTracingShader,
                                          rhi::ResourceState::Undefined,
@@ -386,26 +512,29 @@ int main() {
 
             gfx.cmdList->BindRTPipeline(gfx.rtPSO.get());
             gfx.cmdList->BindDescriptorSet(0, gfx.rtSet);
+            // 旋转角：必须在 BindRTPipeline 之后（推送常量属于当前管线布局）
+            gfx.cmdList->SetPushConstants(0, sizeof(rotationPC), &rotationPC);
             gfx.cmdList->TraceRays(gfx.sbt, w, h, 1);
 
-            // 全局屏障：等待 RT 写入完成
+            // 离屏目标 UAV → 采样（片元着色器要读它）
             gfx.cmdList->PipelineBarrier(rhi::PipelineStage::RayTracingShader,
-                                         rhi::PipelineStage::ColorAttachmentOutput,
+                                         rhi::PipelineStage::FragmentShader,
                                          rhi::ResourceState::UnorderedAccess,
-                                         rhi::ResourceState::RenderTarget);
+                                         rhi::ResourceState::ShaderResource);
 
-            // SetPipeline 设置 m_CurrentRenderPass（BeginRenderPass 必需）
-            gfx.cmdList->SetPipeline(gfx.pipeline.get());
-
-            // RenderPass (LoadOp::Load 保留 BackBuffer 上的 RT 输出)
-            gfx.cmdList->BeginRenderPass(1, gfx.swapchain->GetColorFormat(), rhi::Format::Unknown,
-                                         nullptr, rhi::LoadOp::Load);
+            // 全屏拷贝进后缓冲（BeginRenderPass 之前先 SetPipeline，它负责 m_CurrentRenderPass）
+            gfx.cmdList->SetPipeline(gfx.blitPSO.get());
+            gfx.cmdList->BeginRenderPass(1, gfx.swapchain->GetColorFormat());
+            gfx.cmdList->SetFullscreenViewport(w, h);
+            gfx.cmdList->BindDescriptorSet(0, gfx.blitSet);
+            gfx.cmdList->Draw(3);
         } else if (renderMode == 2 && gfx.meshSupported && gfx.meshPSO) {
             // ── Mesh Shader 模式：三色渐变三角形，无 VB/IB ──
             gfx.cmdList->SetPipeline(gfx.meshPSO.get());
             gfx.cmdList->BeginRenderPass(1, gfx.swapchain->GetColorFormat());
             // 全屏视口：走引擎统一入口（Vulkan 会设负高度翻转 Y，与 D3D 的 Y 向上约定对齐）
             gfx.cmdList->SetFullscreenViewport(w, h);
+            gfx.cmdList->SetPushConstants(0, sizeof(rotationPC), &rotationPC);   // 旋转角
             gfx.cmdList->DrawMeshTasks(1, 1, 1);  // 1 个工作组，3 个线程输出 1 个三角形
         } else {
             // 光栅化模式：红色三角形
@@ -413,6 +542,7 @@ int main() {
             gfx.cmdList->BeginRenderPass(1, gfx.swapchain->GetColorFormat());
             // 同上：用 SetFullscreenViewport 而不是裸 SetViewport（裸调用会绕过后端的 Y 约定）
             gfx.cmdList->SetFullscreenViewport(w, h);
+            gfx.cmdList->SetPushConstants(0, sizeof(rotationPC), &rotationPC);   // 旋转角
             gfx.cmdList->SetVertexBuffer(gfx.vertexBuffer.get(), 0);
             gfx.cmdList->Draw(3);
         }
@@ -421,7 +551,7 @@ int main() {
         if (gfx.imgui && gfx.imgui->IsInitialized()) {
             gfx.imgui->BeginFrame();
             ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_FirstUseEver);
-            ImGui::SetNextWindowSize(ImVec2(300, 240), ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowSize(ImVec2(330, 330), ImGuiCond_FirstUseEver);
             ImGui::Begin("01.Triangle");
 
             // ---- 渲染后端下拉（选中后在本帧末重建后端）----
@@ -444,7 +574,7 @@ int main() {
 
             // ---- 渲染模式 ----
             ImGui::Separator();
-            ImGui::RadioButton("光栅化 (VS→PS)", &renderMode, 0);
+            ImGui::RadioButton("光栅化 (VS/PS)", &renderMode, 0);
             if (gfx.rtRenderable) {
                 ImGui::RadioButton("Ray Tracing (RayGen)", &renderMode, 1);
             } else {
@@ -455,7 +585,7 @@ int main() {
                 ImGui::EndDisabled();
             }
             if (gfx.meshSupported) {
-                ImGui::RadioButton("Mesh Shader (MS→PS)", &renderMode, 2);
+                ImGui::RadioButton("Mesh Shader (MS/PS)", &renderMode, 2);
             } else {
                 ImGui::BeginDisabled();
                 ImGui::RadioButton("Mesh Shader (不支持)", &renderMode, 2);
@@ -466,6 +596,11 @@ int main() {
             const char* modeNames[] = {"光栅化", "Ray Tracing", "Mesh Shader"};
             ImGui::Text("当前模式: %s", modeNames[renderMode]);
             ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
+            // 旋转动画：速度可调，0 = 停（三条路径共用一个角度）
+            ImGui::SetNextItemWidth(120.0f);
+            ImGui::SliderFloat("转速", &rotationSpeed, 0.0f, 5.0f, "%.2f rad/s");
+            ImGui::SameLine();
+            if (ImGui::SmallButton("停/转")) rotationSpeed = (rotationSpeed > 0.0f) ? 0.0f : 1.0f;
             ImGui::End();
             gfx.imgui->EndFrame(gfx.cmdList.get());
         }
@@ -478,14 +613,37 @@ int main() {
         // ============================================================
         // 帧末：如果下拉选了别的后端，就在这里整体重建
         // ============================================================
+        // 【自动化自测用】HE_TRIANGLE_SWITCH_TO=d3d11|d3d12|vulkan：第 60 帧自动切到该后端；
+        // HE_TRIANGLE_SWITCH_BACK=<backend>：第 90 帧再切一次（用于无人值守验证往返切换）
+        if (const char* sw = std::getenv("HE_TRIANGLE_SWITCH_TO")) {
+            if (frameIndex == 60) {
+                if (std::strcmp(sw, "vulkan") == 0) pendingBackend = rhi::Backend::Vulkan;
+                else if (std::strcmp(sw, "d3d12") == 0) pendingBackend = rhi::Backend::D3D12;
+                else if (std::strcmp(sw, "d3d11") == 0) pendingBackend = rhi::Backend::D3D11;
+            }
+        }
+        if (const char* swb = std::getenv("HE_TRIANGLE_SWITCH_BACK")) {
+            if (frameIndex == 90) {
+                if (std::strcmp(swb, "vulkan") == 0) pendingBackend = rhi::Backend::Vulkan;
+                else if (std::strcmp(swb, "d3d12") == 0) pendingBackend = rhi::Backend::D3D12;
+                else if (std::strcmp(swb, "d3d11") == 0) pendingBackend = rhi::Backend::D3D11;
+            }
+        }
         if (pendingBackend != gfx.backend) {
             const rhi::Backend want = pendingBackend;
             ShutdownGfx(gfx);
+            // 【Windows 上的一个坑】窗口上先创建过 DXGI 翻转交换链（D3D11/D3D12）之后，再让
+            // Vulkan 往同一个 HWND 呈现时，窗口会停在 D3D 的最后一帧：Present 返回成功、渲染
+            // 循环照常跑（截图能看到三角形在转），但桌面画面不更新；隐藏/显示、缩放、DWM cloak
+            // 都无效。切到 Vulkan 前重建一次窗口拿到干净 HWND 即可（同尺寸同位置，只是闪一下）。
+            if (want == rhi::Backend::Vulkan) {
+                engine.GetWindow()->Recreate();
+            }
             if (!InitGfx(gfx, engine, want)) {
                 HE_CORE_ERROR("01.Triangle: 切换到 {} 失败，退出", BackendName(want));
                 break;
             }
-            // 新后端未必支持原来的渲染模式（D3D 没有可写后缓冲的 RT、D3D11 没有 mesh shader）
+            // 新后端未必支持原来的渲染模式（D3D11 没有 mesh shader 等）
             renderMode = ClampRenderMode(renderMode, gfx);
             HE_CORE_INFO("01.Triangle: 已切换到 {}（渲染模式 {}）", BackendName(gfx.backend), renderMode);
         }
