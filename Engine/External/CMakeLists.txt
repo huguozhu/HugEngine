@@ -58,6 +58,10 @@ if(WIN32)
     # D3D11 后端的 ImGui 渲染（同为 v1.91.0 的官方 backends/imgui_impl_dx11）
     target_sources(imgui PRIVATE ${IMGUI_DIR}/backends/imgui_impl_dx11.cpp)
     target_link_libraries(imgui PUBLIC d3d12 d3d11 dxgi d3dcompiler)
+    # imgui_impl_dx11.cpp 里有中文注释的本地补丁：按 UTF-8 编译（外部库在全局 /utf-8 之前加入）
+    if(MSVC)
+        target_compile_options(imgui PRIVATE /utf-8)
+    endif()
 endif()
 
 # --- meshoptimizer v0.22 ---

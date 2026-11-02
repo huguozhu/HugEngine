@@ -25,6 +25,9 @@ IMGUI_IMPL_API bool     ImGui_ImplDX11_Init(ID3D11Device* device, ID3D11DeviceCo
 IMGUI_IMPL_API void     ImGui_ImplDX11_Shutdown();
 IMGUI_IMPL_API void     ImGui_ImplDX11_NewFrame();
 IMGUI_IMPL_API void     ImGui_ImplDX11_RenderDrawData(ImDrawData* draw_data);
+// 【HugEngine 本地补丁】切换渲染所用的设备上下文：D3D11 后端在模式 2（RHI 线程提交）下主命令列表
+// 录在 deferred context 上，ImGui 必须画进同一个上下文才能与场景命令保持先后顺序
+IMGUI_IMPL_API void     ImGui_ImplDX11_SetDeviceContext(ID3D11DeviceContext* device_context);
 
 // Use if you want to reset your rendering device without losing Dear ImGui state.
 IMGUI_IMPL_API void     ImGui_ImplDX11_InvalidateDeviceObjects();

@@ -592,6 +592,18 @@ void ImGui_ImplDX11_Shutdown()
     IM_DELETE(bd);
 }
 
+// 【HugEngine 本地补丁】切换渲染所用的设备上下文（说明见头文件）；引用计数与 Init / Shutdown 的约定一致
+void ImGui_ImplDX11_SetDeviceContext(ID3D11DeviceContext* device_context)
+{
+    ImGui_ImplDX11_Data* bd = ImGui_ImplDX11_GetBackendData();
+    if (bd == nullptr || device_context == nullptr || bd->pd3dDeviceContext == device_context)
+        return;
+    device_context->AddRef();
+    if (bd->pd3dDeviceContext)
+        bd->pd3dDeviceContext->Release();
+    bd->pd3dDeviceContext = device_context;
+}
+
 void ImGui_ImplDX11_NewFrame()
 {
     ImGui_ImplDX11_Data* bd = ImGui_ImplDX11_GetBackendData();
