@@ -17,6 +17,7 @@
 #if defined(_WIN32)
 
 #include "D3D11Common.h"
+#include "D3D11Resources.h"   // D3D11PipelineState::Binding
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -156,6 +157,10 @@ private:
     void FlushBindings();
     /// 冲突解绑（规划 3.7）：这些 UAV 的资源若仍以 SRV 绑着，先清掉那些 SRV 槽
     void UnbindSrvsOfUavs(ID3D11UnorderedAccessView* const* uavs, u32 count);
+    /// 描述符集 / bindless 句柄里记录的缓冲若已销毁（悬空指针）返回空，并报告一次来源
+    class D3D11Buffer* LiveBuffer(IRHIBuffer* buffer, u32 set, u32 binding);
+    /// 结构化视图建不出来是因为缓冲已按另一个步长建成时，报告一次是哪个 PSO / binding
+    void ReportStrideConflict(class D3D11Buffer* buffer, const D3D11PipelineState::Binding& b);
     /// 一次绑定缺资源时打印（同一 PSO + binding 只打一次，避免每帧刷屏）
     void ReportMissing(u32 set, u32 binding, const char* what);
     /// bindless 替代绑定（kBindingNB*）：按 SetNonBindlessHandle 记下的句柄从 bindless 堆取资源。
@@ -226,6 +231,7 @@ private:
 
     u32                 m_LabelDepth = 0;           // 未配对的 BeginDebugLabel 层数（End 时补齐）
     std::string         m_LastMissing;              // 上一次报告缺资源的键（同一键不重复打印）
+    std::vector<std::string> m_ReportedDangling;    // 已报告过悬空缓冲的「PSO + binding」
     bool                m_WarnedIndirectCount = false;
     bool                m_WarnedDispatchClamp = false;   // 派发工作组数超上限的提示只打一次
     bool                m_WarnedUavAlias = false;        // 同一资源绑到多个 UAV 槽的提示只打一次

@@ -32,10 +32,12 @@ static u32 DxgiElementSize(DXGI_FORMAT f) {
 // ===========================================================================
 D3D11Buffer::~D3D11Buffer() {
     if (m_Device && m_MapCount > 0) m_Device->OnBufferUnmapped(this);
+    if (m_Device) m_Device->UnregisterLiveBuffer(this);
 }
 
 bool D3D11Buffer::Initialize(D3D11Device* device, const BufferDesc& desc) {
     m_Device = device;
+    m_Device->RegisterLiveBuffer(this);   // 绑定前的悬空指针检查用
     m_Usage  = desc.usage;
     m_Size   = desc.size;
     m_Stride = static_cast<u32>(desc.stride);

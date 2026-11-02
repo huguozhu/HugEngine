@@ -413,7 +413,9 @@ bool D3D11CommandList::ResolveNonBindless(u32 binding, u32 element, ID3D11Shader
     // 其余替代绑定是缓冲：句柄即 bindless 堆里的缓冲句柄（数组元素按句柄依次往后取）；
     // kNonBindlessNone 表示本次不用，绑空
     if (find(binding, handle)) {
-        if (handle != kNonBindlessNone) buf = static_cast<D3D11Buffer*>(heap->GetBuffer(handle + element));
+        if (handle != kNonBindlessNone) {
+            buf = const_cast<D3D11CommandList*>(this)->LiveBuffer(heap->GetBuffer(handle + element), 0, binding);
+        }
         return true;
     }
     return false;
@@ -515,6 +517,30 @@ ID3D11DeviceContext4* D3D11CommandList::PrepareExternalRendering() {
     return m_State->context;
 }
 
+void D3D11CommandList::ReportStrideConflict(D3D11Buffer* buffer, const D3D11PipelineState::Binding& b) {
+    if (b.rawBuffer || buffer->GetStructStride() == 0 || buffer->GetStructStride() == b.stride) return;
+    const std::string key = std::string("stride:") + m_Pipeline->GetName() + "#" + std::to_string(b.set) + "/" +
+                            std::to_string(b.binding);
+    if (std::find(m_ReportedDangling.begin(), m_ReportedDangling.end(), key) != m_ReportedDangling.end()) return;
+    m_ReportedDangling.push_back(key);
+    HE_CORE_ERROR("[D3D11] PSO {} 的 (set {}, binding {}) 要以步长 {} 读缓冲 {}，而它已按步长 {} 建成结构化缓冲"
+                  "（同一缓冲被不同元素类型的绑定共用），该槽绑空",
+                  m_Pipeline->GetName(), b.set, b.binding, b.stride, static_cast<const void*>(buffer), buffer->GetStructStride());
+}
+
+D3D11Buffer* D3D11CommandList::LiveBuffer(IRHIBuffer* buffer, u32 set, u32 binding) {
+    if (!buffer) return nullptr;
+    if (m_Device->IsLiveBuffer(buffer)) return static_cast<D3D11Buffer*>(buffer);
+    const std::string key = std::string(m_Pipeline ? m_Pipeline->GetName() : "?") + "#" + std::to_string(set) +
+                            "/" + std::to_string(binding);
+    if (std::find(m_ReportedDangling.begin(), m_ReportedDangling.end(), key) == m_ReportedDangling.end()) {
+        m_ReportedDangling.push_back(key);
+        HE_CORE_ERROR("[D3D11] PSO {} 的 (set {}, binding {}) 指向已销毁的缓冲 {}（描述符集 / bindless 句柄没有随缓冲重建更新），按空资源绑定",
+                      m_Pipeline ? m_Pipeline->GetName() : "?", set, binding, static_cast<const void*>(buffer));
+    }
+    return nullptr;
+}
+
 void D3D11CommandList::ReportMissing(u32 set, u32 binding, const char* what) {
     std::string key = std::string(m_Pipeline->GetName()) + "#" + std::to_string(set) + "." + std::to_string(binding);
     if (key == m_LastMissing) return;
@@ -568,9 +594,11 @@ void D3D11CommandList::FlushBindings() {
                         if (b.texture) {
                             if (i < e->srvs.size()) views[i] = e->srvs[i].Get();   // 写入描述符集时已建好并持有
                         } else if (i < e->buffers.size() && e->buffers[i]) {
-                            auto* buf = static_cast<D3D11Buffer*>(e->buffers[i]);
+                            auto* buf = LiveBuffer(e->buffers[i], b.set, b.binding);
+                            if (!buf) continue;
                             views[i] = b.rawBuffer ? buf->GetSrv(D3D11Buffer::ViewKind::Raw, 0)
                                                    : buf->GetSrv(D3D11Buffer::ViewKind::Structured, b.stride);
+                            if (!views[i]) ReportStrideConflict(buf, b);
                         }
                     }
                     // 句柄决定的绑定为空是调用方的意图（如非实例化绘制不用实例变换），不报告
@@ -599,9 +627,11 @@ void D3D11CommandList::FlushBindings() {
                         if (b.texture) {
                             if (i < e->uavs.size()) views[i] = e->uavs[i].Get();   // 写入描述符集时已建好并持有
                         } else if (i < e->buffers.size() && e->buffers[i]) {
-                            auto* buf = static_cast<D3D11Buffer*>(e->buffers[i]);
+                            auto* buf = LiveBuffer(e->buffers[i], b.set, b.binding);
+                            if (!buf) continue;
                             views[i] = b.rawBuffer ? buf->GetUav(D3D11Buffer::ViewKind::Raw, 0)
                                                    : buf->GetUav(D3D11Buffer::ViewKind::Structured, b.stride);
+                            if (!views[i]) ReportStrideConflict(buf, b);
                             // GPU 可能写它：CPU 下次读取前要回读（规划 3.10）
                             if (views[i]) buf->MarkGpuWritten();
                         }
@@ -657,7 +687,7 @@ void D3D11CommandList::FlushBindings() {
                 case DxbcBindType::CBuffer: {
                     ID3D11Buffer* cb = nullptr;
                     if (e && !e->buffers.empty() && e->buffers[0]) {
-                        cb = static_cast<D3D11Buffer*>(e->buffers[0])->GetConstantBuffer();
+                        if (D3D11Buffer* live = LiveBuffer(e->buffers[0], b.set, b.binding)) cb = live->GetConstantBuffer();
                     }
                     if (!cb) ReportMissing(b.set, b.binding, "常量缓冲");
                     if (stage == D3D11PipelineState::VS)      ctx->VSSetConstantBuffers(b.slot, 1, &cb);

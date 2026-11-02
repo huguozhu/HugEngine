@@ -192,6 +192,13 @@ public:
         return it != m_Views.end() ? &it->second : nullptr;
     }
 
+    // ---- 存活缓冲登记（悬空指针检查）----
+    //  描述符集与 bindless 堆按裸指针记录缓冲：引擎重建 / 销毁缓冲后若没有更新它们，绑定时拿到的就是
+    //  悬空指针。缓冲创建时登记、析构时注销，绑定前查一次，悬空的按空资源绑定并报告来源
+    void RegisterLiveBuffer(const IRHIBuffer* buffer)   { std::lock_guard<std::mutex> lock(m_LiveMutex); m_LiveBuffers.insert(buffer); }
+    void UnregisterLiveBuffer(const IRHIBuffer* buffer) { std::lock_guard<std::mutex> lock(m_LiveMutex); m_LiveBuffers.erase(buffer); }
+    bool IsLiveBuffer(const IRHIBuffer* buffer) const   { std::lock_guard<std::mutex> lock(m_LiveMutex); return m_LiveBuffers.count(buffer) != 0; }
+
     // ---- 持久映射缓冲（Map 之后未 Unmap，见 D3D11Buffer 的说明）----
     void OnBufferMapped(D3D11Buffer* buffer)   { std::lock_guard<std::mutex> lock(m_OpenMapsMutex); m_OpenMaps.insert(buffer); }
     void OnBufferUnmapped(D3D11Buffer* buffer) { std::lock_guard<std::mutex> lock(m_OpenMapsMutex); m_OpenMaps.erase(buffer); }
@@ -382,6 +389,8 @@ private:
     std::atomic<u32>             m_RecentCursor{ 0 };   // 二级列表并发录制时也会累加（M7.2）
     mutable std::mutex           m_ViewMutex;           // 视图登记表
     std::mutex                   m_OpenMapsMutex;       // 持久映射缓冲集合
+    std::unordered_set<const IRHIBuffer*> m_LiveBuffers;   // 当前存活的缓冲（见 IsLiveBuffer）
+    mutable std::mutex           m_LiveMutex;
     std::mutex                   m_LazyMutex;           // 零缓冲 / 实例序号缓冲的懒创建
     std::mutex                   m_IndirectMutex;       // 参数整形 CS 的共享资源与计数回读表
     bool                         m_TimeoutReported = false;
