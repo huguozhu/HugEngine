@@ -230,8 +230,10 @@ D3D12Device::~D3D12Device() {
     m_PrecompileStop.store(true, std::memory_order_release);
     m_PrecompileCv.notify_all();   // 批处理没关闭时线程正在条件变量上等：必须唤醒才能退出
     if (m_PrecompileThread.joinable()) m_PrecompileThread.join();
-    // 退出前确保 GPU 空闲，否则销毁资源时驱动会报 use-after-free
-    if (m_Queue) { m_Queue->Signal(nullptr, 0); }
+    // 退出前确保 GPU 空闲，否则销毁资源时驱动会报 use-after-free。
+    // 【这里曾经有一句 `m_Queue->Signal(nullptr, 0)`，已删除】给它传**空围栏**是非法参数：带调试层时
+    // 报错，不带调试层时驱动内部直接访问违例——表现为"关闭 D3D12 设备时进程消失"（热切换后端必踩）。
+    // 它本来也没有作用：下面的 WaitIdle 会自己建围栏并等待队列清空。
     WaitIdle();
     m_DeferredReleases.clear();   // GPU 已空闲：延迟释放的对象可以全部释放
     // 调试层报告（退出时统一输出一次，避免刷屏）
