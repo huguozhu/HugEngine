@@ -3,12 +3,26 @@
 
 [[vk::binding(0, 0)]] RWTexture2D<float4> g_Output;
 
+// 推送常量：与 Triangle.vert.slang / 01.Triangle.cpp 的 RotationPushConstant 逐字段一致
+struct TrianglePushConstant {
+    float angle;   // 绕画面中心的旋转角（弧度）
+};
+
+[[vk::push_constant]] TrianglePushConstant g_PC;
+
 [shader("raygeneration")]
 void main()
 {
     uint2 idx = DispatchRaysIndex().xy;
     uint2 dim = DispatchRaysDimensions().xy;
     float2 uv = (float2(idx) + 0.5) / float2(dim);
+
+    // 【旋转】RT 路径的三角形是在**UV 空间**里定义的（p0/p1/p2 是归一化坐标），
+    // 所以绕画面中心 (0.5,0.5) 旋转采样坐标即可，效果与光栅化/Mesh 路径一致。
+    const float c = cos(g_PC.angle);
+    const float s = sin(g_PC.angle);
+    const float2 d = uv - float2(0.5, 0.5);
+    uv = float2(0.5, 0.5) + float2(d.x * c - d.y * s, d.x * s + d.y * c);
 
     // 过程化三角形：用重心坐标判断像素是否在三角形内
     float2 p0 = float2(0.5, 0.2);

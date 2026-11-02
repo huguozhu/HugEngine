@@ -18,6 +18,13 @@ struct VertexOut
     float3 color    : COLOR0;
 };
 
+// 推送常量：与 Triangle.vert.slang / 01.Triangle.cpp 的 RotationPushConstant 逐字段一致
+struct TrianglePushConstant {
+    float angle;   // 绕 NDC 原点的旋转角（弧度）
+};
+
+[[vk::push_constant]] TrianglePushConstant g_PC;
+
 // 工作组：3 个线程（每个顶点一个），输出最多 3 个顶点和 1 个三角形
 [numthreads(3, 1, 1)]
 [outputtopology("triangle")]
@@ -50,8 +57,12 @@ void main(
     // Vulkan 要求所有线程调用且参数一致）
     SetMeshOutputCounts(3, 1);  // 3 个顶点，1 个三角形
 
-    // 每个线程输出其对应的顶点
-    verts[tid].position = float4(positions[tid], 0.0, 1.0);
+    // 每个线程输出其对应的顶点（在裁剪空间里绕原点旋转，与光栅化路径同一套角度）
+    const float c = cos(g_PC.angle);
+    const float s = sin(g_PC.angle);
+    const float2 p = float2(positions[tid].x * c - positions[tid].y * s,
+                            positions[tid].x * s + positions[tid].y * c);
+    verts[tid].position = float4(p, 0.0, 1.0);
     verts[tid].color    = colors[tid];
 
     // 仅线程 0 输出图元索引（只需输出一次）
