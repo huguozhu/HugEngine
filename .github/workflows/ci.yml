@@ -1,0 +1,63 @@
+# ============================================================
+# HugEngine CI — Windows 构建 + shader 绑定契约对账 + 单元测试
+#
+# 与本地门禁脚本 Tools/ci/ci.ps1 走同一条命令链，避免"本地绿、CI 红"。
+# 依赖：
+#   · Vulkan SDK（提供 slangc / spirv-dis）—— 用 install-vulkan-sdk action
+#   · Visual Studio（Windows runner 自带，含 fxc / dxc 运行库）
+#   · Python 3（Tools/shader/binding_audit.py 用）
+#   · D3D12 Agility SDK —— configure 阶段自动从 nuget.org 下载（cmake/AgilitySDK.cmake）
+# ============================================================
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: Windows / ${{ matrix.config }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Debug 跳过被 HE_ASSERT 中止的用例，Release 才覆盖它们（见 Tests/TestSurfaceCache.cpp）
+        config: [Debug, Release]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Install Vulkan SDK
+        uses: jurplel/install-vulkan-sdk@v1
+        with:
+          version: "1.4.341.1"
+          cache: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Configure
+        run: >
+          cmake -S . -B Build
+          -DHUGENGINE_BUILD_TESTS=ON
+          -DHUGENGINE_BUILD_SAMPLES=OFF
+          -DHUGENGINE_BUILD_EDITOR=OFF
+          -DCMAKE_BUILD_TYPE=${{ matrix.config }}
+
+      - name: Build
+        run: cmake --build Build --config ${{ matrix.config }} -- /m
+
+      # 契约对账：146 个入口 × 3 后端（Vulkan / DX12 / DX11）各跑一次 slangc 反射，
+      # 与 ShaderTypes/GPUBindings.slang 的 kGPUBinding_* 以及 RHI/Types.h 的镜像比对。
+      # 只在 Debug 下跑一次（与配置无关，省一半时间）。
+      - name: Shader binding audit
+        if: matrix.config == 'Debug'
+        run: cmake --build Build --config Debug --target AuditShaderBindings
+
+      - name: Unit tests
+        run: .\Build\bin\${{ matrix.config }}\HugEngineTests.exe
