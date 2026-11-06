@@ -195,11 +195,48 @@ static void PatchMeshSignature(std::string& s, const std::string& entry) {
     ReplaceAll(params, "out vertices inout ",   "out vertices ");
     ReplaceAll(params, "out indices inout ",    "out indices ");
     ReplaceAll(params, "out primitives inout ", "out primitives ");
+    // 新版 Slang（2026.1）把输出数组参数导成 `out vertices out T verts[N]`——
+    // 多出来的 `out` 会被 dxc 判成重复用法（GFA3B113F: duplicate HLSL parameter usages 'out'）。
+    // 与上面的 inout 是同一类问题，只是多余的修饰词从 inout 变成了 out。
+    ReplaceAll(params, "out vertices out ",     "out vertices ");
+    ReplaceAll(params, "out indices out ",      "out indices ");
+    ReplaceAll(params, "out primitives out ",   "out primitives ");
     // 剩下的 inout 数组参数只可能是顶点输出（图元索引 / 逐图元属性都带了修饰）
     size_t p = 0;
     while ((p = params.find("inout ", p)) != std::string::npos) {
         params.replace(p, 6, "out vertices ");
         p += 13;
+    }
+
+    // 图元索引在 HLSL 里是 `out indices uint3 prims[N]`；Slang 2026.1 有时只写 `out uint3 prims[N]`
+    ReplaceAll(params, "out uint3 ", "out indices uint3 ");
+
+    // Slang 2026.1 的另一种形态：顶点输出只写 `out <Struct> verts[N]`（缺 vertices 修饰）。
+    // dxc 会把它当普通 out 参数，报的却是 "Semantic SV_POSITION is invalid for shader model: ms"
+    //（症状与病因无关，实测 dxc 1.10）。这里按"数组参数且不带 vertices/indices/primitives 修饰"
+    // 统一补 vertices —— 补完后再交给 dxc。
+    {
+        size_t pos = 0;
+        while ((pos = params.find("out ", pos)) != std::string::npos) {
+            size_t e = pos;
+            int depth = 0;
+            for (; e < params.size(); ++e) {
+                const char c = params[e];
+                if (c == '(' || c == '[') ++depth;
+                else if (c == ')' || c == ']') --depth;
+                else if (c == ',' && depth == 0) break;
+            }
+            const std::string item = params.substr(pos, e - pos);
+            if (item.find('[') != std::string::npos &&
+                item.find("vertices") == std::string::npos &&
+                item.find("indices") == std::string::npos &&
+                item.find("primitives") == std::string::npos) {
+                params.insert(pos + 4, "vertices ");
+                pos += 13;
+                continue;
+            }
+            pos = e;
+        }
     }
     s.replace(open, close - open, params);
 }
