@@ -52,7 +52,9 @@ shader 里 `u_Textures[idx]` / `u_SSBO[idx]` 任意非均匀索引，draw 只带
 - `Engine/RHI/Vulkan/VulkanDevice.cpp` — descriptor indexing 已启用
   （`shaderSampledImageArrayNonUniformIndexing` / `runtimeDescriptorArray`）。
 - `Engine/Shader/Shaders/common.slang` — `u_Textures[]`（binding 5）、`u_Samplers[]`（binding 6），set=0。
-- `Engine/Shader/Shaders/ShaderTypes.slang` — `kGPUDescSet_Bindless = 2` 已定义（现用于 TLAS 等），但纹理 bindless 仍在 set=0。
+- `Engine/Shader/Shaders/ShaderTypes/GPUBindings.slang` — `kGPUDescSet_Bindless = 2` 已定义：
+  光栅路径的纹理 bindless 仍在 set=0（binding 5/6），set=2 目前只被 **RT 命中着色器**的
+  `Texture2D u_Textures[]` 使用；**TLAS 不在 set=2**，它在 set=0 的 binding 0。
 
 ---
 

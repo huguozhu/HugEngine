@@ -20,10 +20,21 @@ constexpr u32 kMaxFramesInFlight = 3;
 constexpr u32 kDefaultBackBufferWidth  = kDefaultWindowWidth;
 constexpr u32 kDefaultBackBufferHeight = kDefaultWindowHeight;
 
-// 描述符集索引常量（与 ShaderTypes: kGPUDescSet_* 一致）
-constexpr u32 kDescSetPerFrame = 0;  // set=0: 逐帧数据（Camera、Lights、Shadows 等）
-constexpr u32 kDescSetMaterial = 1;  // set=1: 逐材质数据（Bindless Textures 等）
-constexpr u32 kDescSetBindless = 2;  // set=2: 无绑定资源（TLAS 等）
+// 描述符集索引常量（与 ShaderTypes/GPUBindings.slang 的 kGPUDescSet_* 一致）
+//
+// 【set 编号的物理含义】Vulkan 把一组绑定当作整体切换的单位：shader 侧写
+// `[[vk::binding(binding, set)]]` 的第二个参数，C++ 侧是 `BindDescriptorSet(set, 集)`
+// 的第一个参数 —— 两边必须逐位一致，否则描述符集布局与 shader 的声明对不上。
+//
+// 【名字沿用早期设计，与现在的用途不完全对应，以行尾注释为准】
+constexpr u32 kDescSetPerFrame = 0;  // set=0: 逐帧 + 每个 pass 自己的输入；每飞行帧一份。
+                                     //   光栅路径的 bindless 三件套（5 纹理 / 6 采样器 / 30 SSBO）
+                                     //   与 TLAS（binding 0）都在这个 set 里
+constexpr u32 kDescSetMaterial = 1;  // set=1: RT 命中着色器的**场景级**数据（不是逐材质切换）：
+                                     //   材质图集(b0) + 命中点光源 LightUB(b1)，目前只有 3 个 rchit 使用
+                                     //   （`RT_PBR.rchit` 还声明了 b2/b3 的顶点/索引缓冲，属已删除的顶点拉取路径）
+constexpr u32 kDescSetBindless = 2;  // set=2: RT 命中着色器的 bindless 纹理数组(b0)，建立一次、
+                                     //   内容不再重写；光栅路径不使用这个 set
 
 // 共享 Descriptor Binding 常量（与 ShaderTypes: kGPUBinding_* 一致）
 constexpr u32 kBindingObjectData       = 2;   // Object SSBO（GBuffer / Shadow Pass 共用）

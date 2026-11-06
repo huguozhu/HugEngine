@@ -15,9 +15,14 @@
 GPU_CONST_BEGIN
 
 // --- Descriptor Set 索引 ---
-GPU_CONST(GPU_UINT kGPUDescSet_PerFrame = 0);   // set=0: 逐帧数据
-GPU_CONST(GPU_UINT kGPUDescSet_Material = 1);   // set=1: 逐材质数据
-GPU_CONST(GPU_UINT kGPUDescSet_Bindless = 2);   // set=2: 无绑定资源（TLAS 等）
+// 【编号是两端的契约】shader 侧 `[[vk::binding(binding, set)]]` 的第二个参数、C++ 侧
+// `BindDescriptorSet(set, 集)` 的第一个参数，必须逐位一致，否则布局与声明对不上。
+// 【名字与用途有偏差，以行尾注释为准】set=0 是"逐帧 + 各 pass 输入"，
+// 光栅路径的 bindless 三件套（5/6/30）与 TLAS（binding 0）都在这里；
+// set=1 / set=2 目前**只有 RT 命中着色器**使用（3 个 rchit / 2 个 rchit）。
+GPU_CONST(GPU_UINT kGPUDescSet_PerFrame = 0);   // set=0: 逐帧 + 每 pass 输入（bindless 数组 / TLAS 也在此）
+GPU_CONST(GPU_UINT kGPUDescSet_Material = 1);   // set=1: RT 命中着色器的场景级数据（材质图集 / 命中点光源），非逐材质切换
+GPU_CONST(GPU_UINT kGPUDescSet_Bindless = 2);   // set=2: RT 命中着色器的 bindless 纹理数组（光栅路径不用此 set）
 
 // --- 共享 Binding 索引（set=0，Forward / Deferred / GBuffer 共用）---
 GPU_CONST(GPU_UINT kGPUBinding_ObjectData       = 2);   // Object SSBO
