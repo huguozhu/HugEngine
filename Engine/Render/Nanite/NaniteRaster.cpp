@@ -1,4 +1,4 @@
-// ============================================================
+﻿// ============================================================
 // Nanite/NaniteRaster.cpp — 绘制端：消费「计数 → 间接绘制」链（§14.8 任务 3）
 //   + 任务 16：默认消费**可见簇列表**写出的间接命令（假簇链保留为自证/退化路径）
 //
@@ -24,27 +24,54 @@
 // ============================================================
 
 #include "Nanite/NaniteRaster.h"
+#include <iterator>
 
 #include "Nanite/NaniteTypes.h"     // kNaniteRasterTargetSize / kNaniteFakeClusterIndexCount
 #include "Core/Log.h"
 
-#include "Nanite_Raster.vert.spv.h"   // k_Nanite_Raster_vert_spv
-#include "Nanite_Raster.frag.spv.h"   // k_Nanite_Raster_frag_spv
-#include "Nanite_TestWrite.comp.spv.h"   // k_Nanite_TestWrite_comp_spv（§14.8 任务 4 的 UAV 自证通道）
-#include "Nanite_MeshTest.mesh.spv.h"    // k_Nanite_MeshTest_mesh_spv（§14.8 任务 6 的 mesh 通道）
-#include "Nanite_MeshTest.frag.spv.h"    // k_Nanite_MeshTest_frag_spv
+#include "Nanite_Raster.vert.spv.h"
+#include "Nanite_Raster.vert.dxil.h"   // k_Nanite_Raster_vert_spv
+#include "Nanite_Raster.vert.dxbc.h"
+#include "Nanite_Raster.frag.spv.h"
+#include "Nanite_Raster.frag.dxil.h"   // k_Nanite_Raster_frag_spv
+#include "Nanite_Raster.frag.dxbc.h"
+#include "Nanite_TestWrite.comp.spv.h"
+#include "Nanite_TestWrite.comp.dxil.h"   // k_Nanite_TestWrite_comp_spv（§14.8 任务 4 的 UAV 自证通道）
+#include "Nanite_TestWrite.comp.dxbc.h"
+#include "Nanite_MeshTest.mesh.spv.h"
+#include "Nanite_MeshTest.mesh.dxil.h"    // k_Nanite_MeshTest_mesh_dxil（§14.8 任务 6 的 mesh 通道）
+#include "Nanite_MeshTest.frag.spv.h"
+#include "Nanite_MeshTest.frag.dxil.h"    // k_Nanite_MeshTest_frag_spv
+#include "Nanite_MeshTest.frag.dxbc.h"
 // 【§14.8 任务 18】软光栅三趟：深度键 / 写 GBuffer / 深度解析
-#include "Nanite_SoftRasterDepth.comp.spv.h"   // k_Nanite_SoftRasterDepth_comp_spv
-#include "Nanite_SoftRaster.comp.spv.h"        // k_Nanite_SoftRaster_comp_spv
+#include "Nanite_SoftRasterDepth.comp.spv.h"
+#include "Nanite_SoftRasterDepth.comp.dxil.h"   // k_Nanite_SoftRasterDepth_comp_spv
+#include "Nanite_SoftRasterDepth.comp.dxbc.h"
+#include "Nanite_SoftRaster.comp.spv.h"
+#include "Nanite_SoftRaster.comp.dxil.h"        // k_Nanite_SoftRaster_comp_spv
+#include "Nanite_SoftRaster.comp.dxbc.h"
 // 【确定性赢家选择】第 2.5 趟：赢家候选号仲裁（夹在第 1 趟与第 3 趟之间）
-#include "Nanite_SoftRasterWinner.comp.spv.h"  // k_Nanite_SoftRasterWinner_comp_spv
-#include "Nanite_DepthResolve.vert.spv.h"      // k_Nanite_DepthResolve_vert_spv
-#include "Nanite_DepthResolve.frag.spv.h"      // k_Nanite_DepthResolve_frag_spv
-#include "Nanite_GBufferClear.comp.spv.h"     // k_Nanite_GBufferClear_comp_spv（compute 清屏 8 张颜色目标）
+#include "Nanite_SoftRasterWinner.comp.spv.h"
+#include "Nanite_SoftRasterWinner.comp.dxil.h"  // k_Nanite_SoftRasterWinner_comp_spv
+#include "Nanite_SoftRasterWinner.comp.dxbc.h"
+#include "Nanite_DepthResolve.vert.spv.h"
+#include "Nanite_DepthResolve.vert.dxil.h"      // k_Nanite_DepthResolve_vert_spv
+#include "Nanite_DepthResolve.vert.dxbc.h"
+#include "Nanite_DepthResolve.frag.spv.h"
+#include "Nanite_DepthResolve.frag.dxil.h"      // k_Nanite_DepthResolve_frag_spv
+#include "Nanite_DepthResolve.frag.dxbc.h"
+#include "Nanite_GBufferClear.comp.spv.h"
+#include "Nanite_GBufferClear.comp.dxil.h"     // k_Nanite_GBufferClear_comp_spv（compute 清屏 8 张颜色目标）
+#include "Nanite_GBufferClear.comp.dxbc.h"
 // 【§14.8 任务 22】硬光栅（mesh shader 分流）
-#include "Nanite_HardRaster.mesh.spv.h"       // k_Nanite_HardRaster_mesh_spv
-#include "Nanite_HardRaster.frag.spv.h"       // k_Nanite_HardRaster_frag_spv
-#include "Nanite_DebugView.comp.spv.h"        // k_Nanite_DebugView_comp_spv（§14.8 任务 26 的可视化）
+#include "Nanite_HardRaster.mesh.spv.h"
+#include "Nanite_HardRaster.mesh.dxil.h"       // k_Nanite_HardRaster_mesh_dxil
+#include "Nanite_HardRaster.frag.spv.h"
+#include "Nanite_HardRaster.frag.dxil.h"       // k_Nanite_HardRaster_frag_spv
+#include "Nanite_HardRaster.frag.dxbc.h"
+#include "Nanite_DebugView.comp.spv.h"
+#include "Nanite_DebugView.comp.dxil.h"        // k_Nanite_DebugView_comp_spv（§14.8 任务 26 的可视化）
+#include "Nanite_DebugView.comp.dxbc.h"
 
 #include <cstring>   // std::memcpy（占位顶点/索引缓冲的初值）
 
@@ -164,9 +191,17 @@ bool NaniteRaster::Initialize(rhi::IRHIDevice* device, u32 width, u32 height,
     // ── 4. 图形 PSO（单颜色附件 R8，无深度）──
     m_VS.stage      = rhi::ShaderStage::Vertex;
     m_VS.spirv      = k_Nanite_Raster_vert_spv;
+    m_VS.dxil.assign(std::begin(k_Nanite_Raster_vert_dxil), std::end(k_Nanite_Raster_vert_dxil));
+    m_VS.dxil.assign(std::begin(k_Nanite_Raster_vert_dxil), std::end(k_Nanite_Raster_vert_dxil));
+    m_VS.dxil.assign(std::begin(k_Nanite_Raster_vert_dxil), std::end(k_Nanite_Raster_vert_dxil));
+    m_VS.dxbc.assign(std::begin(k_Nanite_Raster_vert_dxbc), std::end(k_Nanite_Raster_vert_dxbc));
     m_VS.entryPoint = "main";
     m_FS.stage      = rhi::ShaderStage::Pixel;
     m_FS.spirv      = k_Nanite_Raster_frag_spv;
+    m_FS.dxil.assign(std::begin(k_Nanite_Raster_frag_dxil), std::end(k_Nanite_Raster_frag_dxil));
+    m_FS.dxil.assign(std::begin(k_Nanite_Raster_frag_dxil), std::end(k_Nanite_Raster_frag_dxil));
+    m_FS.dxil.assign(std::begin(k_Nanite_Raster_frag_dxil), std::end(k_Nanite_Raster_frag_dxil));
+    m_FS.dxbc.assign(std::begin(k_Nanite_Raster_frag_dxbc), std::end(k_Nanite_Raster_frag_dxbc));
     m_FS.entryPoint = "main";
 
     rhi::PipelineStateDesc desc;
@@ -422,6 +457,10 @@ bool NaniteRaster::EnsureTestWriteResources() {
     // ── compute PSO（无 push constant：分辨率由着色器 GetDimensions 从纹理自身取）──
     m_TestWriteCS.stage      = rhi::ShaderStage::Compute;
     m_TestWriteCS.spirv      = k_Nanite_TestWrite_comp_spv;
+    m_TestWriteCS.dxil.assign(std::begin(k_Nanite_TestWrite_comp_dxil), std::end(k_Nanite_TestWrite_comp_dxil));
+    m_TestWriteCS.dxil.assign(std::begin(k_Nanite_TestWrite_comp_dxil), std::end(k_Nanite_TestWrite_comp_dxil));
+    m_TestWriteCS.dxil.assign(std::begin(k_Nanite_TestWrite_comp_dxil), std::end(k_Nanite_TestWrite_comp_dxil));
+    m_TestWriteCS.dxbc.assign(std::begin(k_Nanite_TestWrite_comp_dxbc), std::end(k_Nanite_TestWrite_comp_dxbc));
     m_TestWriteCS.entryPoint = "main";
 
     rhi::PipelineStateDesc desc;
@@ -554,9 +593,14 @@ bool NaniteRaster::EnsureMeshTestResources() {
     //   push constant 留空：mesh 分支会自动补一条 128B 的 Mesh|Task|Fragment 范围（既有行为）。
     m_MeshTestMS.stage      = rhi::ShaderStage::Mesh;
     m_MeshTestMS.spirv      = k_Nanite_MeshTest_mesh_spv;
+    m_MeshTestMS.dxil.assign(std::begin(k_Nanite_MeshTest_mesh_dxil), std::end(k_Nanite_MeshTest_mesh_dxil));   // D3D12 网格着色器
     m_MeshTestMS.entryPoint = "main";
     m_MeshTestFS.stage      = rhi::ShaderStage::Pixel;
     m_MeshTestFS.spirv      = k_Nanite_MeshTest_frag_spv;
+    m_MeshTestFS.dxil.assign(std::begin(k_Nanite_MeshTest_frag_dxil), std::end(k_Nanite_MeshTest_frag_dxil));
+    m_MeshTestFS.dxil.assign(std::begin(k_Nanite_MeshTest_frag_dxil), std::end(k_Nanite_MeshTest_frag_dxil));
+    m_MeshTestFS.dxil.assign(std::begin(k_Nanite_MeshTest_frag_dxil), std::end(k_Nanite_MeshTest_frag_dxil));
+    m_MeshTestFS.dxbc.assign(std::begin(k_Nanite_MeshTest_frag_dxbc), std::end(k_Nanite_MeshTest_frag_dxbc));
     m_MeshTestFS.entryPoint = "main";
 
     rhi::PipelineStateDesc desc;
@@ -697,6 +741,10 @@ bool NaniteRaster::EnsureSoftRasterResources(const GBufferTargets& targets) {
 
         m_SoftDepthCS.stage      = rhi::ShaderStage::Compute;
         m_SoftDepthCS.spirv      = k_Nanite_SoftRasterDepth_comp_spv;
+        m_SoftDepthCS.dxil.assign(std::begin(k_Nanite_SoftRasterDepth_comp_dxil), std::end(k_Nanite_SoftRasterDepth_comp_dxil));
+        m_SoftDepthCS.dxil.assign(std::begin(k_Nanite_SoftRasterDepth_comp_dxil), std::end(k_Nanite_SoftRasterDepth_comp_dxil));
+        m_SoftDepthCS.dxil.assign(std::begin(k_Nanite_SoftRasterDepth_comp_dxil), std::end(k_Nanite_SoftRasterDepth_comp_dxil));
+        m_SoftDepthCS.dxbc.assign(std::begin(k_Nanite_SoftRasterDepth_comp_dxbc), std::end(k_Nanite_SoftRasterDepth_comp_dxbc));
         m_SoftDepthCS.entryPoint = "main";
 
         rhi::PushConstantRange pc;
@@ -781,6 +829,10 @@ bool NaniteRaster::EnsureSoftRasterResources(const GBufferTargets& targets) {
 
         m_SoftColorCS.stage      = rhi::ShaderStage::Compute;
         m_SoftColorCS.spirv      = k_Nanite_SoftRaster_comp_spv;
+        m_SoftColorCS.dxil.assign(std::begin(k_Nanite_SoftRaster_comp_dxil), std::end(k_Nanite_SoftRaster_comp_dxil));
+        m_SoftColorCS.dxil.assign(std::begin(k_Nanite_SoftRaster_comp_dxil), std::end(k_Nanite_SoftRaster_comp_dxil));
+        m_SoftColorCS.dxil.assign(std::begin(k_Nanite_SoftRaster_comp_dxil), std::end(k_Nanite_SoftRaster_comp_dxil));
+        m_SoftColorCS.dxbc.assign(std::begin(k_Nanite_SoftRaster_comp_dxbc), std::end(k_Nanite_SoftRaster_comp_dxbc));
         m_SoftColorCS.entryPoint = "main";
 
         rhi::PushConstantRange pc;
@@ -805,6 +857,10 @@ bool NaniteRaster::EnsureSoftRasterResources(const GBufferTargets& targets) {
         //   布局里有它们是合法的（超集），且不构成任何副作用。
         m_SoftWinnerCS.stage      = rhi::ShaderStage::Compute;
         m_SoftWinnerCS.spirv      = k_Nanite_SoftRasterWinner_comp_spv;
+        m_SoftWinnerCS.dxil.assign(std::begin(k_Nanite_SoftRasterWinner_comp_dxil), std::end(k_Nanite_SoftRasterWinner_comp_dxil));
+        m_SoftWinnerCS.dxil.assign(std::begin(k_Nanite_SoftRasterWinner_comp_dxil), std::end(k_Nanite_SoftRasterWinner_comp_dxil));
+        m_SoftWinnerCS.dxil.assign(std::begin(k_Nanite_SoftRasterWinner_comp_dxil), std::end(k_Nanite_SoftRasterWinner_comp_dxil));
+        m_SoftWinnerCS.dxbc.assign(std::begin(k_Nanite_SoftRasterWinner_comp_dxbc), std::end(k_Nanite_SoftRasterWinner_comp_dxbc));
         m_SoftWinnerCS.entryPoint = "main";
 
         rhi::PushConstantRange winnerPc;
@@ -839,9 +895,17 @@ bool NaniteRaster::EnsureSoftRasterResources(const GBufferTargets& targets) {
 
         m_DepthResolveVS.stage      = rhi::ShaderStage::Vertex;
         m_DepthResolveVS.spirv      = k_Nanite_DepthResolve_vert_spv;
+        m_DepthResolveVS.dxil.assign(std::begin(k_Nanite_DepthResolve_vert_dxil), std::end(k_Nanite_DepthResolve_vert_dxil));
+        m_DepthResolveVS.dxil.assign(std::begin(k_Nanite_DepthResolve_vert_dxil), std::end(k_Nanite_DepthResolve_vert_dxil));
+        m_DepthResolveVS.dxil.assign(std::begin(k_Nanite_DepthResolve_vert_dxil), std::end(k_Nanite_DepthResolve_vert_dxil));
+        m_DepthResolveVS.dxbc.assign(std::begin(k_Nanite_DepthResolve_vert_dxbc), std::end(k_Nanite_DepthResolve_vert_dxbc));
         m_DepthResolveVS.entryPoint = "main";
         m_DepthResolveFS.stage      = rhi::ShaderStage::Pixel;
         m_DepthResolveFS.spirv      = k_Nanite_DepthResolve_frag_spv;
+        m_DepthResolveFS.dxil.assign(std::begin(k_Nanite_DepthResolve_frag_dxil), std::end(k_Nanite_DepthResolve_frag_dxil));
+        m_DepthResolveFS.dxil.assign(std::begin(k_Nanite_DepthResolve_frag_dxil), std::end(k_Nanite_DepthResolve_frag_dxil));
+        m_DepthResolveFS.dxil.assign(std::begin(k_Nanite_DepthResolve_frag_dxil), std::end(k_Nanite_DepthResolve_frag_dxil));
+        m_DepthResolveFS.dxbc.assign(std::begin(k_Nanite_DepthResolve_frag_dxbc), std::end(k_Nanite_DepthResolve_frag_dxbc));
         m_DepthResolveFS.entryPoint = "main";
 
         rhi::PushConstantRange resolvePc;
@@ -1013,6 +1077,10 @@ bool NaniteRaster::EnsureGBufferClearResources() {
 
     m_ClearCS.stage      = rhi::ShaderStage::Compute;
     m_ClearCS.spirv      = k_Nanite_GBufferClear_comp_spv;
+    m_ClearCS.dxil.assign(std::begin(k_Nanite_GBufferClear_comp_dxil), std::end(k_Nanite_GBufferClear_comp_dxil));
+    m_ClearCS.dxil.assign(std::begin(k_Nanite_GBufferClear_comp_dxil), std::end(k_Nanite_GBufferClear_comp_dxil));
+    m_ClearCS.dxil.assign(std::begin(k_Nanite_GBufferClear_comp_dxil), std::end(k_Nanite_GBufferClear_comp_dxil));
+    m_ClearCS.dxbc.assign(std::begin(k_Nanite_GBufferClear_comp_dxbc), std::end(k_Nanite_GBufferClear_comp_dxbc));
     m_ClearCS.entryPoint = "main";
 
     rhi::PushConstantRange pc;
@@ -1217,15 +1285,22 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
                              tex);
     }
 
-    // ── ③ A 趟：逐簇一个工作组，dispatch 条数 = 可见簇容量（着色器按可见计数提前返回）──
+    // ── ③ A 趟：逐簇一个工作组，dispatch 条数 = 可见簇引用的**CPU 可算上界**（着色器按可见计数提前返回）──
     // 【为什么要按容量而不是按可见数派发】可见计数是**同一帧 GPU 刚写出的**值，CPU 读不到（读回
-    //   要等 GPU ⇒ 破坏无停顿）；按容量派发、由 shader 按 `slot >= visibleCount` 早退，是本引擎
-    //   既有的"GPU 驱动"写法。容量 = 可见引用表容量（`NaniteCull::GetBVHVisibleCapacity`）。
+    //   要等 GPU ⇒ 破坏无停顿）；按上界派发、由 shader 按 `slot >= visibleCount` 早退，是本引擎
+    //   既有的"GPU 驱动"写法。
+    // 【A5】上界由调用方给（`NaniteCull::GetVisibleRefBound` = 簇数 × 实例数 ≤ 容量）：此前这里
+    //   传的是**表容量** `GetBVHVisibleCapacity()`（64 × 16384 = 1,048,576），于是本函数的 3 趟
+    //   每帧各派发 1024×1024 个工作组 —— 实际引用只有 384 条。实测 07.Nanite 因此每帧 2.07 s
+    //   （关掉 Nanite 立刻 129 fps）。上界不改变正确性：引用表是紧凑的，槽位 ≥ 上界 的条目不存在。
     cmd->SetPipeline(ResP(m_SoftRasterPSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_SoftDepthSet);
     cmd->SetPushConstants(0, (u32)sizeof(NaniteSoftRasterParams), &paramsEff);
     cmd->SetDrawDebugLabel("Nanite_SoftRasterDepth (atomic depth key)");
-    cmd->Dispatch(visibleCapacity, 1, 1);
+    // 二维派发（宽 kNaniteRasterDispatchWidth）：单维不能超过 65535，着色器按 gid.x + gid.y × 宽 换算槽位
+    const u32 rasterGroupsX = std::min(visibleCapacity, kNaniteRasterDispatchWidth);
+    const u32 rasterGroupsY = (visibleCapacity + kNaniteRasterDispatchWidth - 1u) / kNaniteRasterDispatchWidth;
+    cmd->Dispatch(rasterGroupsX, rasterGroupsY, 1);
 
     // ── ④ A → B：深度键的 RAW（全局内存屏障）──
     cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
@@ -1239,7 +1314,7 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_SoftColorSet);
     cmd->SetPushConstants(0, (u32)sizeof(NaniteSoftRasterParams), &paramsEff);
     cmd->SetDrawDebugLabel("Nanite_SoftRasterWinner (deterministic winner id)");
-    cmd->Dispatch(visibleCapacity, 1, 1);
+    cmd->Dispatch(rasterGroupsX, rasterGroupsY, 1);   // 同 A 趟的二维派发
 
     // ── ⑥ B → C：赢家候选号的 RAW（全局内存屏障）──
     cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
@@ -1250,7 +1325,7 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_SoftColorSet);
     cmd->SetPushConstants(0, (u32)sizeof(NaniteSoftRasterParams), &paramsEff);
     cmd->SetDrawDebugLabel("Nanite_SoftRaster (equality test -> GBuffer)");
-    cmd->Dispatch(visibleCapacity, 1, 1);
+    cmd->Dispatch(rasterGroupsX, rasterGroupsY, 1);   // 同 A 趟的二维派发
 
     // ── ⑧ C 趟 → 深度解析：深度键 UAV → 只读；4 张颜色 UAV → 可采样（Lighting 要读）──
     cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::FragmentShader,
@@ -1385,9 +1460,14 @@ bool NaniteRaster::EnsureHardRasterResources(const GBufferTargets& targets) {
     // ── 3. mesh PSO：8 个 GBuffer 颜色附件（Load + 只写 MRT0/1/4/7）+ D32 深度附件（Load + 测试 + 写）──
     m_HardRasterMS.stage      = rhi::ShaderStage::Mesh;
     m_HardRasterMS.spirv      = k_Nanite_HardRaster_mesh_spv;
+    m_HardRasterMS.dxil.assign(std::begin(k_Nanite_HardRaster_mesh_dxil), std::end(k_Nanite_HardRaster_mesh_dxil));   // D3D12 网格着色器
     m_HardRasterMS.entryPoint = "main";
     m_HardRasterFS.stage      = rhi::ShaderStage::Pixel;
     m_HardRasterFS.spirv      = k_Nanite_HardRaster_frag_spv;
+    m_HardRasterFS.dxil.assign(std::begin(k_Nanite_HardRaster_frag_dxil), std::end(k_Nanite_HardRaster_frag_dxil));
+    m_HardRasterFS.dxil.assign(std::begin(k_Nanite_HardRaster_frag_dxil), std::end(k_Nanite_HardRaster_frag_dxil));
+    m_HardRasterFS.dxil.assign(std::begin(k_Nanite_HardRaster_frag_dxil), std::end(k_Nanite_HardRaster_frag_dxil));
+    m_HardRasterFS.dxbc.assign(std::begin(k_Nanite_HardRaster_frag_dxbc), std::end(k_Nanite_HardRaster_frag_dxbc));
     m_HardRasterFS.entryPoint = "main";
 
     rhi::PushConstantRange pc;
@@ -1589,10 +1669,15 @@ void NaniteRaster::RecordHardRasterPass(rhi::IRHICommandList* cmd,
     //   帧缓冲 y 向下"的差异；软光栅的 `softRasterNdcToPixel` 也是按这条约定把 NDC 映射到行列的
     //   ⇒ 只有用同一个负高度视口，两条光栅路径才会落在**同一批像素**上。
     cmd->SetFullscreenViewport(static_cast<u32>(w), static_cast<u32>(h));
-    // 任务数 = 可见簇容量（与软光栅同一条既有口径：可见计数是**同一帧 GPU 刚写出**的、CPU 读不到，
-    // 读回会破坏无停顿）⇒ 由 shader 按 `slot >= visibleCount` 与分流判据早退收口。
+    // 任务数 = 可见簇引用的**CPU 可算上界**（与软光栅同一条既有口径：可见计数是**同一帧 GPU
+    // 刚写出**的、CPU 读不到，读回会破坏无停顿）⇒ 由 shader 按 `slot >= visibleCount` 与分流
+    // 判据早退收口。
+    // 【A5】上界由调用方给（`NaniteCull::GetVisibleRefBound`）：此前用的是表容量 1,048,576 ⇒
+    //   每帧 1024×1024 = 1,048,576 个网格着色器组（每个 128 个顶点调用）恒被发射，实测 2.07 s/帧。
     cmd->SetDrawDebugLabel("Nanite_HardRaster (mesh, triangleCount > maxTriangles)");
-    cmd->DrawMeshTasks(visibleCapacity, 1u, 1u);
+    // 二维派发（同软光栅）：网格着色器组数单维同样不能超过 65535
+    cmd->DrawMeshTasks(std::min(visibleCapacity, kNaniteRasterDispatchWidth),
+                       (visibleCapacity + kNaniteRasterDispatchWidth - 1u) / kNaniteRasterDispatchWidth, 1u);
     cmd->EndOffscreenPass();
 
     // ── ④ 画完转回可采样（Lighting / Decal 等下游按帧图模型把它们当 ShaderResource）──
@@ -1715,6 +1800,10 @@ bool NaniteRaster::EnsureDebugViewResources(u32 mode,
 
     m_DebugCS.stage      = rhi::ShaderStage::Compute;
     m_DebugCS.spirv      = k_Nanite_DebugView_comp_spv;
+    m_DebugCS.dxil.assign(std::begin(k_Nanite_DebugView_comp_dxil), std::end(k_Nanite_DebugView_comp_dxil));
+    m_DebugCS.dxil.assign(std::begin(k_Nanite_DebugView_comp_dxil), std::end(k_Nanite_DebugView_comp_dxil));
+    m_DebugCS.dxil.assign(std::begin(k_Nanite_DebugView_comp_dxil), std::end(k_Nanite_DebugView_comp_dxil));
+    m_DebugCS.dxbc.assign(std::begin(k_Nanite_DebugView_comp_dxbc), std::end(k_Nanite_DebugView_comp_dxbc));
     m_DebugCS.entryPoint = "main";
 
     rhi::PushConstantRange pc;

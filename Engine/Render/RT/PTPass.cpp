@@ -10,9 +10,13 @@
 
 // RT 着色器 SPIR-V
 #include "PT_Full.rgen.spv.h"
+#include "PT_Full.rgen.dxil.h"
 #include "PT_Full.rchit.spv.h"
+#include "PT_Full.rchit.dxil.h"
 #include "PT_Full.rmiss.spv.h"
+#include "PT_Full.rmiss.dxil.h"
 
+#include <iterator>   // std::begin / std::end（填 dxil 字节码用）
 #include <glm/gtc/type_ptr.hpp>
 #include <cstring>
 #include <algorithm>
@@ -105,6 +109,7 @@ bool PTPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         rhi::ShaderBytecode bc;
         bc.stage = rhi::ShaderStage::RayGen;
         bc.spirv = k_PT_Full_rgen_spv;
+        bc.dxil.assign(std::begin(k_PT_Full_rgen_dxil), std::end(k_PT_Full_rgen_dxil));
         bc.entryPoint = "main";
         shaders.push_back(bc);
     }
@@ -112,6 +117,7 @@ bool PTPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         rhi::ShaderBytecode bc;
         bc.stage = rhi::ShaderStage::ClosestHit;
         bc.spirv = k_PT_Full_rchit_spv;
+        bc.dxil.assign(std::begin(k_PT_Full_rchit_dxil), std::end(k_PT_Full_rchit_dxil));
         bc.entryPoint = "main";
         shaders.push_back(bc);
     }
@@ -119,6 +125,7 @@ bool PTPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         rhi::ShaderBytecode bc;
         bc.stage = rhi::ShaderStage::Miss;
         bc.spirv = k_PT_Full_rmiss_spv;
+        bc.dxil.assign(std::begin(k_PT_Full_rmiss_dxil), std::end(k_PT_Full_rmiss_dxil));
         bc.entryPoint = "main";
         shaders.push_back(bc);
     }
@@ -168,8 +175,17 @@ bool PTPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     d.mipLevels = 1;
     d.usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource
             | rhi::TextureUsage::TransferSrc;
+    // HDR 比其余四张多一个 **RenderTarget**：粒子 Billboard 是把它当**颜色附件**
+    // （LoadOp::Load）写进去的（见 PathTracingPipeline 的 ParticleRender pass）。
+    // 缺这个用途时 D3D12 侧看不出问题，但 Vulkan 会报
+    //   VUID-VkFramebufferCreateInfo-pAttachments-00877（附件视图缺 COLOR_ATTACHMENT 用途）
+    //   VUID-VkImageMemoryBarrier-oldLayout-01208（转换到 COLOR_ATTACHMENT_OPTIMAL 非法）
+    // 实测（B1）：05 一开粒子每帧 2 条。
     d.format = rhi::Format::RGBA16_FLOAT;
+    d.usage = d.usage | rhi::TextureUsage::RenderTarget;
     m_HDR = device->CreateTextureHandle(d);   // A-3
+    d.usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource
+            | rhi::TextureUsage::TransferSrc;
     d.format = rhi::Format::R32_FLOAT;
     m_Depth = device->CreateTextureHandle(d);
     d.format = rhi::Format::RGBA16_FLOAT;

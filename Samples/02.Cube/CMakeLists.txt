@@ -1,5 +1,8 @@
 # 02.Cube — PBR 前向渲染管线演示（立方体+球体）
-add_executable(02.Cube 02.Cube.cpp)
+add_executable(02.Cube 02.Cube.cpp
+    # P6：瞬态纹理 / 内存别名自检（HE_TRANSIENT_ALIAS_TEST=1 时运行，D3D12 与 Vulkan 共用）
+    ${CMAKE_SOURCE_DIR}/Samples/Common/TransientAliasTest.cpp
+)
 
 target_link_libraries(02.Cube PRIVATE
     HugEngineCore

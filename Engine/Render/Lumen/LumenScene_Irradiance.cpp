@@ -14,14 +14,27 @@
 // ============================================================
 
 #include "Lumen/LumenScene.h"
+#include <iterator>
 
 #include "Core/Log.h"
 #include "Lumen_ScreenProbe_SHProject.comp.spv.h"
+#include "Lumen_ScreenProbe_SHProject.comp.dxil.h"
+#include "Lumen_ScreenProbe_SHProject.comp.dxbc.h"
 #include "Lumen_ProbeIrradiance.comp.spv.h"
+#include "Lumen_ProbeIrradiance.comp.dxil.h"
+#include "Lumen_ProbeIrradiance.comp.dxbc.h"
 #include "Lumen_FarFieldCompare.comp.spv.h"
+#include "Lumen_FarFieldCompare.comp.dxil.h"
+#include "Lumen_FarFieldCompare.comp.dxbc.h"
 #include "Lumen_FarFieldMerge.comp.spv.h"
+#include "Lumen_FarFieldMerge.comp.dxil.h"
+#include "Lumen_FarFieldMerge.comp.dxbc.h"
 #include "Lumen_Irradiance.frag.spv.h"
+#include "Lumen_Irradiance.frag.dxil.h"
+#include "Lumen_Irradiance.frag.dxbc.h"
 #include "SSAO.vert.spv.h"
+#include "SSAO.vert.dxil.h"
+#include "SSAO.vert.dxbc.h"
 
 #include <cstring>
 
@@ -46,12 +59,7 @@ void LumenScene::CreateIrradianceTexture() {
     m_IrradianceTex = m_Device->CreateTextureHandle(td);   // A-3
     m_IrrBound = false;   // 纹理换了 ⇒ 描述符要重绑
 
-    if (!m_IrradianceStatsBuf.IsValid()) {
-        rhi::BufferDesc sb;
-        sb.size = sizeof(u32) * 4u; sb.usage = rhi::BufferUsage::Storage; sb.cpuAccess = true;
-        m_IrradianceStatsBuf = m_Device->CreateBufferHandle(sb);
-        m_IrrStatsMapped = ResB(m_IrradianceStatsBuf)->Map();
-    }
+    if (!m_IrrStats.IsValid()) m_IrrStats.Create(m_Device, sizeof(u32) * 4u);
 }
 
 void LumenScene::CreateIrradianceGPUObjects() {
@@ -78,6 +86,10 @@ void LumenScene::CreateIrradianceGPUObjects() {
     rhi::ShaderBytecode cs;
     cs.stage      = rhi::ShaderStage::Compute;
     cs.spirv      = k_Lumen_ProbeIrradiance_comp_spv;
+    cs.dxil.assign(std::begin(k_Lumen_ProbeIrradiance_comp_dxil), std::end(k_Lumen_ProbeIrradiance_comp_dxil));
+    cs.dxil.assign(std::begin(k_Lumen_ProbeIrradiance_comp_dxil), std::end(k_Lumen_ProbeIrradiance_comp_dxil));
+    cs.dxil.assign(std::begin(k_Lumen_ProbeIrradiance_comp_dxil), std::end(k_Lumen_ProbeIrradiance_comp_dxil));
+    cs.dxbc.assign(std::begin(k_Lumen_ProbeIrradiance_comp_dxbc), std::end(k_Lumen_ProbeIrradiance_comp_dxbc));
     cs.entryPoint = "main";
 
     rhi::PipelineStateDesc pso;
@@ -105,7 +117,7 @@ void LumenScene::RunProbeIrradiance(rhi::IRHICommandList* cmd, rhi::IRHITexture*
         m_Device->UpdateDescriptorSet(m_IrrSet, 1, rhi::DescriptorType::StorageBuffer, ResB(m_CellProbeBuf));
         m_Device->UpdateDescriptorSetWithImageView(m_IrrSet, 5,
             rhi::DescriptorType::StorageImage, ResT(m_IrradianceTex)->GetNativeHandle());
-        m_Device->UpdateDescriptorSet(m_IrrSet, 6, rhi::DescriptorType::StorageBuffer, ResB(m_IrradianceStatsBuf));
+        m_Device->UpdateDescriptorSet(m_IrrSet, 6, rhi::DescriptorType::StorageBuffer, m_IrrStats.Live());
         m_IrrBound = true;
         return;   // 本帧只建资源；下一帧开始派发（"新建资源当帧使用"的教训见 §附二十）
     }
@@ -126,10 +138,9 @@ void LumenScene::RunProbeIrradiance(rhi::IRHICommandList* cmd, rhi::IRHITexture*
                              ResT(m_IrradianceTex));
     }
 
-    // ① 先读上一帧的统计（同"先读后清"）
-    if (m_IrrFrame >= 1 && m_IrrStatsMapped) {
-        u32 st[4] = {0, 0, 0, 0};
-        std::memcpy(st, m_IrrStatsMapped, sizeof(st));
+    // ① 先读已执行完的那一帧的统计（确定性回读，见 LumenStatsReadback）
+    u32 st[4] = {0, 0, 0, 0};
+    if (m_IrrFrame >= 1 && m_IrrStats.Read(st)) {
         m_IrradianceCovered = st[0];
         m_IrradianceMean = st[0] ? (float)((double)st[1] / 1024.0 / (double)st[0]) : 0.0f;
         m_IrradianceMax  = (float)((double)st[2] / 65536.0);
@@ -143,8 +154,8 @@ void LumenScene::RunProbeIrradiance(rhi::IRHICommandList* cmd, rhi::IRHITexture*
         }
     }
 
-    // ② 清零统计并派发
-    if (m_IrrStatsMapped) { u32 zero[4] = {0, 0, 0, 0}; std::memcpy(m_IrrStatsMapped, zero, sizeof(zero)); }
+    // ② 快照并在 GPU 时间线上清零统计，再派发
+    m_IrrStats.RecordSnapshotAndClear(cmd);
     struct { u32 x, y, z, w; float4 params; } pc{};
     const u32 cellsX = (m_Width + 15u) / 16u;
     pc.x = m_Width; pc.y = m_Height; pc.z = cellsX; pc.w = 0u;
@@ -184,9 +195,17 @@ void LumenScene::CreateIrradianceCopyPipeline() {
     rhi::ShaderBytecode vs, fs;
     vs.stage      = rhi::ShaderStage::Vertex;
     vs.spirv      = k_SSAO_vert_spv;
+    vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+    vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+    vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+    vs.dxbc.assign(std::begin(k_SSAO_vert_dxbc), std::end(k_SSAO_vert_dxbc));
     vs.entryPoint = "vertexMain";
     fs.stage      = rhi::ShaderStage::Pixel;
     fs.spirv      = k_Lumen_Irradiance_frag_spv;
+    fs.dxil.assign(std::begin(k_Lumen_Irradiance_frag_dxil), std::end(k_Lumen_Irradiance_frag_dxil));
+    fs.dxil.assign(std::begin(k_Lumen_Irradiance_frag_dxil), std::end(k_Lumen_Irradiance_frag_dxil));
+    fs.dxil.assign(std::begin(k_Lumen_Irradiance_frag_dxil), std::end(k_Lumen_Irradiance_frag_dxil));
+    fs.dxbc.assign(std::begin(k_Lumen_Irradiance_frag_dxbc), std::end(k_Lumen_Irradiance_frag_dxbc));
     fs.entryPoint = "fragmentMain";
 
     rhi::PipelineStateDesc d;
@@ -294,6 +313,10 @@ void LumenScene::CreateFarFieldCompareGPUObjects() {
     rhi::ShaderBytecode cs;
     cs.stage      = rhi::ShaderStage::Compute;
     cs.spirv      = k_Lumen_FarFieldCompare_comp_spv;
+    cs.dxil.assign(std::begin(k_Lumen_FarFieldCompare_comp_dxil), std::end(k_Lumen_FarFieldCompare_comp_dxil));
+    cs.dxil.assign(std::begin(k_Lumen_FarFieldCompare_comp_dxil), std::end(k_Lumen_FarFieldCompare_comp_dxil));
+    cs.dxil.assign(std::begin(k_Lumen_FarFieldCompare_comp_dxil), std::end(k_Lumen_FarFieldCompare_comp_dxil));
+    cs.dxbc.assign(std::begin(k_Lumen_FarFieldCompare_comp_dxbc), std::end(k_Lumen_FarFieldCompare_comp_dxbc));
     cs.entryPoint = "main";
 
     rhi::PipelineStateDesc pso;
@@ -304,24 +327,15 @@ void LumenScene::CreateFarFieldCompareGPUObjects() {
     pso.debugName            = "Lumen_FarFieldCompare";
     m_FarCmpPSO = m_Device->CreatePipelineStateHandle(pso);   // A-3
 
-    rhi::BufferDesc sb;
-    sb.size = sizeof(u32) * 24u; sb.usage = rhi::BufferUsage::Storage; sb.cpuAccess = true;
-    m_FarCmpStatsBuf = m_Device->CreateBufferHandle(sb);
-    rhi::BufferDesc msb;
-    msb.size = sizeof(u32) * 8u; msb.usage = rhi::BufferUsage::Storage; msb.cpuAccess = true;
-    m_FarMergeStatsBuf = m_Device->CreateBufferHandle(msb);
-    m_FarMergeStatsMapped = ResB(m_FarMergeStatsBuf)->Map();
-    // 距离分桶缓冲在 CreateShadeGPUObjects 里已建（着色 pass 的绑定 11）
-    m_FarCmpStatsMapped = ResB(m_FarCmpStatsBuf)->Map();
-    rhi::BufferDesc hb;
-    hb.size = sizeof(u32) * 16u; hb.usage = rhi::BufferUsage::Storage; hb.cpuAccess = true;
-    m_FarCmpHistBuf = m_Device->CreateBufferHandle(hb);
-    m_FarCmpHistMapped = ResB(m_FarCmpHistBuf)->Map();
+    m_FarCmpStats.Create(m_Device, sizeof(u32) * 24u);
+    m_FarMergeStats.Create(m_Device, sizeof(u32) * 8u);
+    // 距离分桶在 CreateShadeGPUObjects 里已建（着色 pass 的绑定 11）
+    m_FarCmpHist.Create(m_Device, sizeof(u32) * 16u);
     m_FarFieldHist.assign(16u, 0u);
 
     m_Device->UpdateDescriptorSet(m_FarCmpSet, 0, rhi::DescriptorType::StorageBuffer, ResB(m_RayResultBuf));
-    m_Device->UpdateDescriptorSet(m_FarCmpSet, 2, rhi::DescriptorType::StorageBuffer, ResB(m_FarCmpStatsBuf));
-    m_Device->UpdateDescriptorSet(m_FarCmpSet, 3, rhi::DescriptorType::StorageBuffer, ResB(m_FarCmpHistBuf));
+    m_Device->UpdateDescriptorSet(m_FarCmpSet, 2, rhi::DescriptorType::StorageBuffer, m_FarCmpStats.Live());
+    m_Device->UpdateDescriptorSet(m_FarCmpSet, 3, rhi::DescriptorType::StorageBuffer, m_FarCmpHist.Live());
     if (!m_FarCmpPSO.IsValid()) HE_CORE_ERROR("LumenScene: 远场对照 PSO 创建失败");
 
     // ── 合并 pass：把远场光追的命中并进探针光线结果（见 shader 头的理由）──
@@ -340,6 +354,10 @@ void LumenScene::CreateFarFieldCompareGPUObjects() {
     rhi::ShaderBytecode mcs;
     mcs.stage = rhi::ShaderStage::Compute;
     mcs.spirv = k_Lumen_FarFieldMerge_comp_spv;
+    mcs.dxil.assign(std::begin(k_Lumen_FarFieldMerge_comp_dxil), std::end(k_Lumen_FarFieldMerge_comp_dxil));
+    mcs.dxil.assign(std::begin(k_Lumen_FarFieldMerge_comp_dxil), std::end(k_Lumen_FarFieldMerge_comp_dxil));
+    mcs.dxil.assign(std::begin(k_Lumen_FarFieldMerge_comp_dxil), std::end(k_Lumen_FarFieldMerge_comp_dxil));
+    mcs.dxbc.assign(std::begin(k_Lumen_FarFieldMerge_comp_dxbc), std::end(k_Lumen_FarFieldMerge_comp_dxbc));
     mcs.entryPoint = "main";
     rhi::PipelineStateDesc mpso;
     mpso.bindPoint            = rhi::PipelineBindPoint::Compute;
@@ -350,7 +368,7 @@ void LumenScene::CreateFarFieldCompareGPUObjects() {
     m_FarMergePSO = m_Device->CreatePipelineStateHandle(mpso);   // A-3
     m_Device->UpdateDescriptorSet(m_FarMergeSet, 0, rhi::DescriptorType::StorageBuffer, ResB(m_RayResultBuf));
     m_Device->UpdateDescriptorSet(m_FarMergeSet, 2, rhi::DescriptorType::StorageBuffer, ResB(m_RayHitPosBuf));
-    m_Device->UpdateDescriptorSet(m_FarMergeSet, 4, rhi::DescriptorType::StorageBuffer, ResB(m_FarMergeStatsBuf));
+    m_Device->UpdateDescriptorSet(m_FarMergeSet, 4, rhi::DescriptorType::StorageBuffer, m_FarMergeStats.Live());
     if (m_RayFadeBuf.IsValid())   // 在着色 pass 的资源创建里已经建好（见 CreateShadeGPUObjects）
         m_Device->UpdateDescriptorSet(m_FarMergeSet, 3, rhi::DescriptorType::StorageBuffer, ResB(m_RayFadeBuf));
     // 绑定 1（光追结果）此时还不存在（它由第一次 Trace 创建）⇒ 在派发合并之前才绑。
@@ -375,6 +393,20 @@ void LumenScene::RunFarFieldRT(rhi::IRHICommandList* cmd) {
     if (!m_Device || !cmd || !m_ProbeBuf.IsValid() || !m_TLAS || !m_RayResultBuf.IsValid()) return;
     if (m_TraceFrame == 0u) return;   // 还没追踪过 ⇒ 没有可比的光线
 
+    // 【B2 诊断开关】`HE_LUMEN_NO_FARFIELD=1`：整段跳过远场硬件光追（派发 + 对照统计 + 合并），
+    // 得到"远场开启 vs 关闭"的画面 A/B。跳过后"SDF 未命中"的光线保持未命中 —— 那些光线本来正是
+    // 由远场光追的三角形命中兜底的，所以这个开关量化的就是远场对最终画面的总贡献。
+    // 默认关闭（不设环境变量时行为完全不变）。
+    static const bool s_NoFarField = (std::getenv("HE_LUMEN_NO_FARFIELD") != nullptr);
+    if (s_NoFarField) {
+        static bool s_noFarLogged = false;
+        if (!s_noFarLogged) {
+            s_noFarLogged = true;
+            HE_CORE_INFO("LumenScene: HE_LUMEN_NO_FARFIELD=1 —— 已关闭远场硬件光追（B2 对照）");
+        }
+        return;
+    }
+
     if (!m_FarField) {
         m_FarField = std::make_unique<LumenFarFieldPass>();
         if (!m_FarField->Initialize(m_Device)) { m_FarField.reset(); return; }
@@ -392,9 +424,21 @@ void LumenScene::RunFarFieldRT(rhi::IRHICommandList* cmd) {
     if (m_FarFieldFrame == 60u) LogMemoryUsage();   // 等卡片/mesh 场都建齐再报
 
     // ── ① 先读**上一帧**的对照统计（同"先读后清"；本帧紧接着会把统计清零再派发）──
-    if (m_FarFieldFrame >= 1u && m_FarCmpStatsMapped) {
-        u32 st[24] = {0};
-        std::memcpy(st, m_FarCmpStatsMapped, sizeof(st));
+    //
+    // 【C2 指标定义（两端口径逐字相同：同一份 `Lumen_FarFieldCompare.comp` 着色器 + 同一段宿主回读）】
+    //   · 分母 = `st[0]` = **两侧都命中**的光线数（SDF 命中 ∧ RT 命中）。只有三角形命中 / 只有 SDF 命中
+    //     的光线不进分母（前者是 SDF 漏掉的几何、后者是 SDF 假命中或超出光追范围，都不是"一致性"样本）。
+    //   · 相对差 = |t_sdf − t_rt| / max(t_sdf, t_rt)（逐光线；t 是命中距离）。
+    //   · 一致率 ≤5% / ≤20% = `st[6]/denom` 与 `st[7]/denom`；均值 = `st[4]/1024/denom`（定点 ×1024）。
+    //   · 另有按 `min(t_sdf,t_rt)` 切的近带/远带（分界 `m_FarFieldNearBand`）与 0..1 的 16 桶直方图。
+    // 【为什么 D3D12 曾经读到 2.2% / 9.2%（C2 的结论：**统计窗口**问题，不是数值/口径公式不同）】
+    //   跑一次 D3D12 的 06 就能复现：**第一批**统计（第 40 帧左右，`m_FarFieldFrame % 40 == 0` 首次打印）
+    //   读到 `只有 SDF 命中 239` 条、均值 0.72、≤5% 占 2.3%；**下一批**就回到 `只有 SDF 命中 39` 条、
+    //   均值 0.55、≤5% 占 13.6%。也就是：统计批次里混进了一批"RT 还没命中、SDF 已命中"的光线，
+    //   分母被换成了一个分布不同的子集 ⇒ 一致率被压低。Vulkan 的第一批就已经是稳态值，所以两边
+    //   看起来差一个量级。稳态两端口径/数值一致（13.6%/27.2% vs 13.8%/27.0%，差异 < 3%）。
+    u32 st[24] = {0};
+    if (m_FarFieldFrame >= 1u && m_FarCmpStats.Read(st)) {   // 确定性回读（见 LumenStatsReadback）
         const u32 rays = m_FarFieldRays;   // 上一次派发的光线数（与本批统计同批）
         m_FarFieldBothHit = st[0];
         m_FarFieldSdfOnly = st[1];
@@ -413,7 +457,7 @@ void LumenScene::RunFarFieldRT(rhi::IRHICommandList* cmd) {
         m_FarFieldNearMeanRel = nearHit ? (float)((double)st[20] / 1024.0 / (double)nearHit) : 0.0f;
         m_FarFieldFar20 = farHit ? (float)((double)st[18] / (double)farHit) : 0.0f;
         m_FarFieldFarMeanRel = farHit ? (float)((double)st[21] / 1024.0 / (double)farHit) : 0.0f;
-        if (m_FarCmpHistMapped) std::memcpy(m_FarFieldHist.data(), m_FarCmpHistMapped, 16u * sizeof(u32));
+        if (m_FarFieldHist.size() >= 16u) m_FarCmpHist.Read(m_FarFieldHist.data());
         if ((m_FarFieldFrame % 40u) == 0u) {
             HE_CORE_INFO("LumenScene 远场光追（步骤 26）: 光线 {}；两侧都命中 {}（SDF 命中率 {:.1f}%、RT 命中率 {:.1f}%）；"
                          "只有 SDF 命中 {} / 只有三角形命中 {}；两者都未命中 {}；全部命中光线 相对差 均值 {:.4f} 最大 {:.4f}，"
@@ -459,16 +503,14 @@ void LumenScene::RunFarFieldRT(rhi::IRHICommandList* cmd) {
     }
 
     // ── ② 步骤 27 的读数：合并分类 + "按距离分桶的最终材质亮度"曲线 ──
-    if (m_FarMergeStatsMapped) {
-        u32 ms[8] = {0};
-        std::memcpy(ms, m_FarMergeStatsMapped, sizeof(ms));
+    u32 ms[8] = {0};
+    if (m_FarMergeStats.Read(ms)) {
         m_FadeSdfOnly = ms[0]; m_FadeRtOnly = ms[1]; m_FadeBlend = ms[2];
         m_FadeInvNearViol = ms[3]; m_FadeInvFarViol = ms[4]; m_FadeInvBranchViol = ms[5];
         m_FadeInvariantViolations = ms[3] + ms[4] + ms[5];
     }
-    if (m_DistBinMapped) {
-        u32 bins[32] = {0};
-        std::memcpy(bins, m_DistBinMapped, sizeof(bins));
+    u32 bins[32] = {0};
+    if (m_DistBin.Read(bins)) {
         for (u32 i = 0; i < 16u; ++i) {
             m_DistBinCount[i] = bins[i * 2u];
             m_DistBinLum[i]   = bins[i * 2u + 1u];
@@ -507,8 +549,9 @@ void LumenScene::RunFarFieldRT(rhi::IRHICommandList* cmd) {
     pc.rays     = rays;
     pc.thr      = (u32)m_FarFieldThreshold;
     pc.nearBand = (u32)m_FarFieldNearBand;   // 近带/远带的分界（近带里 SDF 是准的，可作对照）
-    if (m_FarCmpStatsMapped) { u32 zero[24] = {0}; std::memcpy(m_FarCmpStatsMapped, zero, sizeof(zero)); }
-    if (m_FarCmpHistMapped)  { u32 zero[16] = {0}; std::memcpy(m_FarCmpHistMapped, zero, sizeof(zero)); }
+    // 快照并在 GPU 时间线上清零（确定性回读，见 LumenStatsReadback）
+    m_FarCmpStats.RecordSnapshotAndClear(cmd);
+    m_FarCmpHist.RecordSnapshotAndClear(cmd);
     cmd->SetPipeline(ResP(m_FarCmpPSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_FarCmpSet);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
@@ -529,8 +572,8 @@ void LumenScene::RunFarFieldRT(rhi::IRHICommandList* cmd) {
         const float halfBand = m_FarFieldThreshold * std::max(0.0f, m_FarFieldOverlap);
         const u32 t0 = (u32)std::max(0.0f, m_FarFieldThreshold - halfBand);
         const u32 t1 = (u32)(m_FarFieldThreshold + halfBand);
-        if (m_FarMergeStatsMapped) { u32 zero[8] = {0}; std::memcpy(m_FarMergeStatsMapped, zero, sizeof(zero)); }
-        if (m_DistBinMapped)       { u32 zero[32] = {0}; std::memcpy(m_DistBinMapped, zero, sizeof(zero)); }
+        m_FarMergeStats.RecordSnapshotAndClear(cmd);
+        m_DistBin.RecordSnapshotAndClear(cmd);
         struct { u32 rays, t0, t1, pad0; } mpc2{};
         mpc2.rays = rays;
         mpc2.t0   = t0;

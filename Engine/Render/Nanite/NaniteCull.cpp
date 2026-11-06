@@ -1,4 +1,4 @@
-// ============================================================
+﻿// ============================================================
 // Nanite/NaniteCull.cpp — 「计数 → 间接绘制」链的计数端（§14.8 任务 3）
 //   + 实例剔除（任务 13）+ per-instance cluster BVH（任务 14）
 //   + 三阶段簇剔除（任务 15：Phase 1 掩码 → Phase 2 Hi-Z → Phase 3 LOD 选择）
@@ -22,13 +22,22 @@
 // ============================================================
 
 #include "Nanite/NaniteCull.h"
+#include <iterator>
 
 #include "Core/Log.h"
 
-#include "Nanite_Cull.comp.spv.h"             // 由 Shader 编译管线生成（slangc → SPIR-V → spv_to_header.py）
-#include "Nanite_InstanceCull.comp.spv.h"     // 【任务 13】同上
-#include "Nanite_ClusterBVH.comp.spv.h"       // 【任务 14】per-instance cluster BVH 的 DFS 遍历
-#include "Nanite_HiZDownsample.comp.spv.h"    // 【任务 15】模块自持的 Hi-Z 下采样（与既有 HiZDownsample 同口径）
+#include "Nanite_Cull.comp.spv.h"
+#include "Nanite_Cull.comp.dxil.h"             // 由 Shader 编译管线生成（slangc → SPIR-V → spv_to_header.py）
+#include "Nanite_Cull.comp.dxbc.h"
+#include "Nanite_InstanceCull.comp.spv.h"
+#include "Nanite_InstanceCull.comp.dxil.h"     // 【任务 13】同上
+#include "Nanite_InstanceCull.comp.dxbc.h"
+#include "Nanite_ClusterBVH.comp.spv.h"
+#include "Nanite_ClusterBVH.comp.dxil.h"       // 【任务 14】per-instance cluster BVH 的 DFS 遍历
+#include "Nanite_ClusterBVH.comp.dxbc.h"
+#include "Nanite_HiZDownsample.comp.spv.h"
+#include "Nanite_HiZDownsample.comp.dxil.h"    // 【任务 15】模块自持的 Hi-Z 下采样（与既有 HiZDownsample 同口径）
+#include "Nanite_HiZDownsample.comp.dxbc.h"
 
 // 【任务 13 的契约交叉验证】`NaniteInstanceGpuObject` 是 `GPUSceneObject` 的 RHI-free 镜像。
 // 只有本 .cpp（Render 目标）能 include 真身，因此把"逐字段同布局"这条硬契约钉在这里：
@@ -99,6 +108,7 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     {
         rhi::BufferDesc d;
         d.size      = sizeof(NaniteFakeCluster) * kNaniteMaxFakeClusters;
+        d.debugName = "Nanite.FakeClusters";
         d.usage     = rhi::BufferUsage::Storage;
         d.cpuAccess = true;   // CPU 每帧上传假簇
         m_FakeClusterBuf = m_Device->CreateBufferHandle(d);   // A-3
@@ -107,6 +117,7 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     {
         rhi::BufferDesc d;
         d.size      = sizeof(NaniteIndirectCommand) * kNaniteMaxFakeClusters;
+        d.debugName = "Nanite.FakeClusterDraws";
         // Indirect：vkCmdDrawIndexedIndirectCount 要求命令缓冲带 INDIRECT_BUFFER usage
         d.usage     = rhi::BufferUsage::Storage | rhi::BufferUsage::Indirect;
         d.cpuAccess = true;   // 每帧填哨兵 + dump 帧读回
@@ -135,6 +146,7 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     {
         rhi::BufferDesc d;
         d.size      = sizeof(NaniteInstanceGpuObject) * kNaniteMaxTestInstances;
+        d.debugName = "Nanite.TestInstances";
         d.usage     = rhi::BufferUsage::Storage;
         d.cpuAccess = true;   // CPU 每帧上传合成实例表
         m_InstanceBuf = m_Device->CreateBufferHandle(d);   // A-3
@@ -143,6 +155,7 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     {
         rhi::BufferDesc d;
         d.size      = sizeof(NaniteInstanceSphere) * kNaniteMaxTestInstances;
+        d.debugName = "Nanite.TestInstanceSpheres";
         d.usage     = rhi::BufferUsage::Storage;
         d.cpuAccess = true;   // CPU 每帧上传包围球
         m_InstanceSphereBuf = m_Device->CreateBufferHandle(d);   // A-3
@@ -202,6 +215,10 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     // ── 3. compute PSO ──
     m_CS.stage      = rhi::ShaderStage::Compute;
     m_CS.spirv      = k_Nanite_Cull_comp_spv;
+    m_CS.dxil.assign(std::begin(k_Nanite_Cull_comp_dxil), std::end(k_Nanite_Cull_comp_dxil));
+    m_CS.dxil.assign(std::begin(k_Nanite_Cull_comp_dxil), std::end(k_Nanite_Cull_comp_dxil));
+    m_CS.dxil.assign(std::begin(k_Nanite_Cull_comp_dxil), std::end(k_Nanite_Cull_comp_dxil));
+    m_CS.dxbc.assign(std::begin(k_Nanite_Cull_comp_dxbc), std::end(k_Nanite_Cull_comp_dxbc));
     m_CS.entryPoint = "main";
 
     rhi::PushConstantRange pc;
@@ -238,6 +255,10 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
 
         m_InstanceCullCS.stage      = rhi::ShaderStage::Compute;
         m_InstanceCullCS.spirv      = k_Nanite_InstanceCull_comp_spv;
+        m_InstanceCullCS.dxil.assign(std::begin(k_Nanite_InstanceCull_comp_dxil), std::end(k_Nanite_InstanceCull_comp_dxil));
+        m_InstanceCullCS.dxil.assign(std::begin(k_Nanite_InstanceCull_comp_dxil), std::end(k_Nanite_InstanceCull_comp_dxil));
+        m_InstanceCullCS.dxil.assign(std::begin(k_Nanite_InstanceCull_comp_dxil), std::end(k_Nanite_InstanceCull_comp_dxil));
+        m_InstanceCullCS.dxbc.assign(std::begin(k_Nanite_InstanceCull_comp_dxbc), std::end(k_Nanite_InstanceCull_comp_dxbc));
         m_InstanceCullCS.entryPoint = "main";
 
         rhi::PushConstantRange cullPc;
@@ -260,6 +281,7 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     {
         rhi::BufferDesc d;
         d.size      = sizeof(NaniteBVHNode) * kNaniteMaxBVHNodes;
+        d.debugName = "Nanite.BVHNodes";
         d.usage     = rhi::BufferUsage::Storage;
         d.cpuAccess = true;   // 只在 SetClusterBVH 写一次
         m_BVHNodeBuf = m_Device->CreateBufferHandle(d);   // A-3
@@ -268,6 +290,7 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     {
         rhi::BufferDesc d;
         d.size      = sizeof(u32) * kNaniteMaxBVHClusters;
+        d.debugName = "Nanite.BVHLeafClusters";
         d.usage     = rhi::BufferUsage::Storage;
         d.cpuAccess = true;
         m_BVHLeafBuf = m_Device->CreateBufferHandle(d);   // A-3
@@ -276,6 +299,7 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     {
         rhi::BufferDesc d;
         d.size      = sizeof(NaniteClusterSphere) * kNaniteMaxBVHClusters;
+        d.debugName = "Nanite.ClusterSpheres";
         d.usage     = rhi::BufferUsage::Storage;
         d.cpuAccess = true;
         m_BVHSphereBuf = m_Device->CreateBufferHandle(d);   // A-3
@@ -285,6 +309,7 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         // 【任务 15】每簇 LOD 元数据（16B/条；`SetClusterBVH` 一次性上传）
         rhi::BufferDesc d;
         d.size      = sizeof(NaniteClusterLODInfo) * kNaniteMaxBVHClusters;
+        d.debugName = "Nanite.LODInfo";
         d.usage     = rhi::BufferUsage::Storage;
         d.cpuAccess = true;
         m_LODInfoBuf = m_Device->CreateBufferHandle(d);   // A-3
@@ -294,6 +319,7 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         // 【任务 16】每簇绘制参数（16B/条；`SetClusterBVH` 一次性上传）
         rhi::BufferDesc d;
         d.size      = sizeof(NaniteClusterDrawRange) * kNaniteMaxBVHClusters;
+        d.debugName = "Nanite.DrawRanges";
         d.usage     = rhi::BufferUsage::Storage;
         d.cpuAccess = true;
         m_ClusterDrawRangeBuf = m_Device->CreateBufferHandle(d);   // A-3
@@ -306,6 +332,7 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         //   buffer-00547）。cpuAccess 仅供 dump 帧逐条读回比对。
         rhi::BufferDesc d;
         d.size      = sizeof(NaniteIndirectCommand) * kNaniteMaxIndirectDraws;
+        d.debugName = "Nanite.IndirectDraws";
         d.usage     = rhi::BufferUsage::Storage | rhi::BufferUsage::Indirect;
         d.cpuAccess = true;
         m_IndirectDrawBuf = m_Device->CreateBufferHandle(d);   // A-3
@@ -326,6 +353,7 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     {
         rhi::BufferDesc d;
         d.size      = sizeof(NaniteVisibleClusterRef) * kNaniteMaxVisibleClusterRefs;
+        d.debugName = "Nanite.VisibleClusterRefs";
         d.usage     = rhi::BufferUsage::Storage;
         d.cpuAccess = true;   // dump 帧读回可见簇列表（每帧不重置，理由同任务 13）
         m_VisibleClusterBuf = m_Device->CreateBufferHandle(d);   // A-3
@@ -344,6 +372,7 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         // 【任务 15】三阶段读数（扁平 u32；整块 64B ⇒ 一次 64B 拷贝清零）
         rhi::BufferDesc d;
         d.size      = kNaniteCullStatsBytes;
+        d.debugName = "Nanite.CullStats";
         d.usage     = rhi::BufferUsage::Storage | rhi::BufferUsage::TransferDst;
         d.cpuAccess = true;   // dump 帧读回（通过视锥/遮挡/级直方图/访问节点数）
         m_CullStatsBuf = m_Device->CreateBufferHandle(d);   // A-3
@@ -353,6 +382,7 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         // 【任务 15】三阶段参数（112B；CPU 每帧上传，与实例表同款的主机可见缓冲）
         rhi::BufferDesc d;
         d.size      = sizeof(NaniteCullChainParams);
+        d.debugName = "Nanite.ChainParams";
         d.usage     = rhi::BufferUsage::Storage;
         d.cpuAccess = true;
         m_ChainParamBuf = m_Device->CreateBufferHandle(d);   // A-3
@@ -431,6 +461,10 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
 
         m_BVHCS.stage      = rhi::ShaderStage::Compute;
         m_BVHCS.spirv      = k_Nanite_ClusterBVH_comp_spv;
+        m_BVHCS.dxil.assign(std::begin(k_Nanite_ClusterBVH_comp_dxil), std::end(k_Nanite_ClusterBVH_comp_dxil));
+        m_BVHCS.dxil.assign(std::begin(k_Nanite_ClusterBVH_comp_dxil), std::end(k_Nanite_ClusterBVH_comp_dxil));
+        m_BVHCS.dxil.assign(std::begin(k_Nanite_ClusterBVH_comp_dxil), std::end(k_Nanite_ClusterBVH_comp_dxil));
+        m_BVHCS.dxbc.assign(std::begin(k_Nanite_ClusterBVH_comp_dxbc), std::end(k_Nanite_ClusterBVH_comp_dxbc));
         m_BVHCS.entryPoint = "main";
 
         rhi::PushConstantRange bvhPc;
@@ -472,6 +506,10 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
 
         m_HiZBuildCS.stage      = rhi::ShaderStage::Compute;
         m_HiZBuildCS.spirv      = k_Nanite_HiZDownsample_comp_spv;
+        m_HiZBuildCS.dxil.assign(std::begin(k_Nanite_HiZDownsample_comp_dxil), std::end(k_Nanite_HiZDownsample_comp_dxil));
+        m_HiZBuildCS.dxil.assign(std::begin(k_Nanite_HiZDownsample_comp_dxil), std::end(k_Nanite_HiZDownsample_comp_dxil));
+        m_HiZBuildCS.dxil.assign(std::begin(k_Nanite_HiZDownsample_comp_dxil), std::end(k_Nanite_HiZDownsample_comp_dxil));
+        m_HiZBuildCS.dxbc.assign(std::begin(k_Nanite_HiZDownsample_comp_dxbc), std::end(k_Nanite_HiZDownsample_comp_dxbc));
         m_HiZBuildCS.entryPoint = "main";
 
         rhi::PushConstantRange hizPc;
@@ -1278,10 +1316,24 @@ void NaniteCull::EnsureHiZBuildViews(rhi::IRHITexture* pyramid) {
     }
 }
 
+// ============================================================
+// 【A5】上一帧可见簇数（主机侧直接 Map 读：滞后一帧、无同步、不停顿）
+// ============================================================
+u32 NaniteCull::ReadLastVisibleClusterCount() const {
+    if (!m_VisibleClusterCountBuf.IsValid()) return 0u;
+    auto* buf = ResB(m_VisibleClusterCountBuf);
+    if (!buf) return 0u;
+    u32 count = 0u;
+    if (void* p = buf->Map()) {
+        count = *static_cast<const u32*>(p);
+        buf->Unmap();
+    }
+    return count;
+}
+
 void NaniteCull::RecordCullChainPass(rhi::IRHICommandList* cmd,
                                      rhi::IRHITexture* hizTexture, rhi::IRHITexture* depthTexture,
-                                     bool enableOcclusion, bool hizFlipY) {
-    if (!cmd) return;
+                                     bool enableOcclusion, bool hizFlipY) {    if (!cmd) return;
 
     // ── Phase 1：实例剔除（写可见列表 + 可见性掩码）──
     // 【为什么和 Phase 2/3 挤在同一个 pass 里】帧图对"两个零资源 pass"的顺序**无法表达**
@@ -1386,7 +1438,6 @@ void NaniteCull::RecordCullChainPass(rhi::IRHICommandList* cmd,
     }
 
     if (m_BVHInstanceDomain == 0u) return;   // 0 实例 ⇒ 不派发；上面已把计数与读数清 0
-
     // push constant：6 个平面（本帧 viewProj 提取，与实例剔除**同一份**）+ 三个计数 + 容量
     NaniteClusterBVHParams pc{};
     std::memcpy(pc.planes, m_FrameFrustum.planes, sizeof(m_FrameFrustum.planes));

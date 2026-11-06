@@ -61,6 +61,10 @@ static VkPipelineStageFlags ToVkPipelineStageFlags(PipelineStage stage) {
     VkPipelineStageFlags flags = 0;
     u32 s = u32(stage);
     if (s & u32(PipelineStage::ColorAttachmentOutput))   flags |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    // 间接参数读取 / 顶点输入阶段：此前缺这两项，「计算写间接命令 → 间接绘制」的屏障在 Vulkan 下
+    // 不等间接参数读取（逐实例剔除的实例数被读成清零后的 0，实例化网格时有时无）
+    if (s & u32(PipelineStage::DrawIndirect))            flags |= VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT;
+    if (s & u32(PipelineStage::VertexInput))             flags |= VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
     if (s & u32(PipelineStage::FragmentShader))          flags |= VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
     if (s & u32(PipelineStage::ComputeShader))           flags |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
     if (s & u32(PipelineStage::Transfer))                flags |= VK_PIPELINE_STAGE_TRANSFER_BIT;
@@ -87,6 +91,7 @@ static VkAccessFlags ToVkAccessFlags(ResourceState state) {
     if (s & u32(ResourceState::UnorderedAccess))    flags |= VK_ACCESS_SHADER_WRITE_BIT;
     if (s & u32(ResourceState::CopySrc))            flags |= VK_ACCESS_TRANSFER_READ_BIT;
     if (s & u32(ResourceState::CopyDst))            flags |= VK_ACCESS_TRANSFER_WRITE_BIT;
+    if (s & u32(ResourceState::IndirectArgument))   flags |= VK_ACCESS_INDIRECT_COMMAND_READ_BIT;   // 间接参数读取
     return flags ? flags : VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
 }
 
@@ -240,6 +245,32 @@ void VulkanCommandList::ExecuteSecondary(IRHICommandList* secondary) {
     auto* vkSec = static_cast<VulkanCommandList*>(secondary);
     vkCmdExecuteCommands(m_CmdBuffers[m_FrameIndex], 1,
                          &vkSec->m_SecCmdBuffers[vkSec->m_SecActive]);
+}
+
+// ============================================================
+// UI 叠加（ImGui）
+// ============================================================
+void VulkanCommandList::DrawOverlay() {
+    if (!m_VulkanDevice) return;
+    if (m_StreamMode) {
+        // 【A2】流模式：源列表此刻没有任何已开始录制的 VkCommandBuffer（render pass 也还在
+        // 流里），唯一能画 UI 的时机是影子列表回放、且回放正处在同一个 render pass 内部。
+        // 于是只记录一条无载荷命令，由回放侧调用上层的叠加记录器。
+        // 模式 2（RHI 线程提交）下回放可能晚于上层下一帧的 ImGui::NewFrame，draw data 已失效，
+        // 因此显式拒绝并给出一次明确日志，绝不静默画错或画到错误位置。
+        if (m_VulkanDevice->HasSubmitRouter()) {
+            static bool s_warnedOverlayThread = false;
+            if (!s_warnedOverlayThread) {
+                s_warnedOverlayThread = true;
+                HE_CORE_WARN("Vulkan 命令流模式 + 多线程提交：UI 叠加需要回放时的 draw data，"
+                             "而回放可能晚于下一帧的 ImGui::NewFrame ⇒ 本帧跳过 UI（其余画面正常）");
+            }
+            return;
+        }
+        m_Stream.Enqueue(RHICommandType::CmdDrawOverlay, u32{0});
+        return;
+    }
+    m_VulkanDevice->InvokeOverlayRecorder(m_CmdBuffers[m_FrameIndex]);
 }
 
 // ============================================================
@@ -398,8 +429,12 @@ void VulkanCommandList::SetPipeline(IRHIPipelineState* pso) {
     auto* vkPso = static_cast<VulkanPipelineState*>(pso);
     m_CurrentPipeline   = vkPso->GetPipeline();
     if (m_IsReplayList) {
-        HE_CORE_INFO("[L4-3] SetPipeline replay pso={} vkPipeline={} rp={}",
-                     (void*)pso, (void*)m_CurrentPipeline, (void*)m_CurrentRenderPass);
+        // 回放侧逐条打印会淹没日志（每帧上千行）；只在需要追查回放顺序时才打开
+        static const bool s_logReplay = (std::getenv("HE_L43_VERBOSE") != nullptr);
+        if (s_logReplay) {
+            HE_CORE_INFO("[L4-3] SetPipeline replay pso={} vkPipeline={} rp={}",
+                         (void*)pso, (void*)m_CurrentPipeline, (void*)m_CurrentRenderPass);
+        }
     }
     m_CurrentLayout     = vkPso->GetPipelineLayout();
     m_CurrentBindPoint  = vkPso->GetBindPoint();
@@ -412,6 +447,7 @@ void VulkanCommandList::SetPipeline(IRHIPipelineState* pso) {
         m_CurrentRenderPass = rp;
         m_FramebuffersNeedRebuild = true;  // 仅图形管线切换时需要重建 Framebuffer
     }
+
 
     if (m_IsRecording) {
         vkCmdBindPipeline(m_CmdBuffers[m_FrameIndex], m_CurrentBindPoint,
@@ -466,9 +502,9 @@ void VulkanCommandList::DrawIndexed(u32 indexCount, u32 instanceCount,
                                      u32 firstIndex, i32 vertexOffset, u32 firstInstance) {
     if (m_StreamMode) {
         // L4-3: in stream mode record the draw only; bindings are replayed by the submit thread.
-        HE_ASSERT(firstInstance == 0u && "L4-3 stream mode does not support firstInstance != 0");
+        // 载荷已带起始实例，回放时原样传入
         m_Stream.Enqueue(RHICommandType::DrawIndexed,
-                         RHICommandDrawIndexed{ indexCount, firstIndex, vertexOffset, instanceCount });
+                         RHICommandDrawIndexed{ indexCount, firstIndex, vertexOffset, instanceCount, firstInstance });
         return;
     }
     EmitDrawLabel();  // 自动插入 DrawCall 级调试 marker（若已设置）
@@ -492,6 +528,14 @@ void VulkanCommandList::DrawIndexedIndirect(rhi::IRHIBuffer* buffer, u64 offset,
     }
     EmitDrawLabel();  // 自动插入 DrawCall 级调试 marker（若已设置）
     auto* vkBuf = static_cast<VulkanBuffer*>(buffer);
+    // 索引/顶点缓冲绑定：SetVertexBuffer / SetIndexBuffer 只记录，绑定在绘制时下发（与 DrawIndexed 一致）。
+    // 此前这里漏了，间接绘制用的是上一次绘制留下的缓冲（实测逐实例剔除后的实例化网格画成别的网格的尖刺）
+    if (m_CurrentIB)
+        vkCmdBindIndexBuffer(m_CmdBuffers[m_FrameIndex], m_CurrentIB, m_IBOffset, m_CurrentIndexType);
+    if (m_CurrentVB) {
+        VkDeviceSize vbOffset = 0;
+        vkCmdBindVertexBuffers(m_CmdBuffers[m_FrameIndex], m_VBBinding, 1, &m_CurrentVB, &vbOffset);
+    }
     vkCmdDrawIndexedIndirect(m_CmdBuffers[m_FrameIndex], vkBuf->GetHandle(),
                               (VkDeviceSize)offset, drawCount, stride);
 }
@@ -582,7 +626,8 @@ void VulkanCommandList::SetPushConstants(u32 offset, u32 size, const void* data)
     if (m_StreamMode) {
         // L4-3: the caller's data may live on the render thread's stack, so copy it into the stream arena.
         RHICommandSetPushConstants pc{};
-        pc.size = size;
+        pc.size   = size;
+        pc.offset = offset;   // 回放时按原偏移写入
         if (size != 0u && data) {
             void* dst = m_Stream.AllocArena(size, 16);
             std::memcpy(dst, data, size);
@@ -671,15 +716,21 @@ void VulkanCommandList::ResetQueryPool(IRHIQueryPool* pool) {
     vkCmdResetQueryPool(m_CmdBuffers[m_FrameIndex], vkPool->GetHandle(), 0, vkPool->GetQueryCount());
 }
 
+// 每个查询的结果个数：管线统计池选了 6 个计数器（见 VulkanQueryPool），时间戳为 1 个
+static u32 QueryValueCount(const IRHIQueryPool* pool) {
+    return (pool && pool->GetQueryType() == QueryType::PipelineStatistics) ? 6u : 1u;
+}
+
 void VulkanCommandList::GetQueryResults(IRHIQueryPool* pool, u32 first, u32 count, u64* data) {
+    const u32 per = QueryValueCount(pool);   // count 是查询个数，每个查询写 per 个 u64
     if (m_StreamMode) {
         // L4-3: queries are never recorded in stream mode; VK_QUERY_RESULT_WAIT_BIT would block forever.
-        if (data) std::memset(data, 0, sizeof(u64) * count);
+        if (data) std::memset(data, 0, sizeof(u64) * per * count);
         return;
     }
     auto* vkPool = static_cast<VulkanQueryPool*>(pool);
     vkGetQueryPoolResults(m_Device, vkPool->GetHandle(), first, count,
-        sizeof(u64) * count, data, sizeof(u64),
+        sizeof(u64) * per * count, data, sizeof(u64) * per,
         VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
 }
 
@@ -687,15 +738,17 @@ bool VulkanCommandList::TryGetQueryResults(IRHIQueryPool* pool, u32 first, u32 c
     if (m_StreamMode) { return false; }   // L4-3: same as GetQueryResults
     auto* vkPool = static_cast<VulkanQueryPool*>(pool);
     if (!data || count == 0) return false;
-    // WITH_AVAILABILITY：每个查询返回 (结果, 是否可用) 两个 u64；**不等待**
-    std::vector<u64> raw(size_t(count) * 2, 0);
+    // WITH_AVAILABILITY：每个查询返回 (per 个结果, 是否可用)；**不等待**
+    const u32 per    = QueryValueCount(pool);
+    const u32 stride = per + 1;
+    std::vector<u64> raw(size_t(count) * stride, 0);
     vkGetQueryPoolResults(m_Device, vkPool->GetHandle(), first, count,
-        sizeof(u64) * 2 * count, raw.data(), sizeof(u64) * 2,
+        sizeof(u64) * stride * count, raw.data(), sizeof(u64) * stride,
         VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
     bool allAvailable = true;
     for (u32 i = 0; i < count; ++i) {
-        data[i] = raw[size_t(i) * 2 + 0];
-        if (raw[size_t(i) * 2 + 1] == 0) allAvailable = false;
+        for (u32 j = 0; j < per; ++j) data[size_t(i) * per + j] = raw[size_t(i) * stride + j];
+        if (raw[size_t(i) * stride + per] == 0) allAvailable = false;
     }
     return allAvailable;
 }
@@ -722,6 +775,14 @@ void VulkanCommandList::EndQuery(IRHIQueryPool* pool, u32 queryIndex) {
 
 // ── Debug Label（VK_EXT_debug_utils 调试标签）──
 void VulkanCommandList::BeginDebugLabel(const char* name, const float color[4]) {
+    // 【L4-3】流模式：标签也进流，由影子列表在回放时下发。此前直接对未开始录制的
+    // 命令缓冲调用 vkCmdBeginDebugUtilsLabelEXT（每个 pass 一次，校验层会持续报错）。
+    if (m_StreamMode) {
+        RHICommandSetDebugLabel l{};
+        if (name) std::strncpy(l.text, name, sizeof(l.text) - 1);
+        m_Stream.Enqueue(RHICommandType::CmdBeginDebugLabel, l);
+        return;
+    }
     // 记录当前 Pass 标签（即使设备没有 debug-utils 扩展也记录，供 HE_TRACE_BARRIERS 用）
     if (name) {
         std::snprintf(m_CurrentPassLabel, kPassLabelMaxLen, "%s", name);
@@ -751,12 +812,24 @@ void VulkanCommandList::BeginDebugLabel(const char* name, const float color[4]) 
 }
 
 void VulkanCommandList::EndDebugLabel() {
+    // 【L4-3】流模式：与 BeginDebugLabel 成对进流，回放侧配对下发
+    if (m_StreamMode) {
+        m_Stream.Enqueue(RHICommandType::CmdEndDebugLabel, u32{0});
+        return;
+    }
     if (!m_VulkanDevice) return;
     auto fn = m_VulkanDevice->GetCmdEndDebugLabelFn();
     if (fn) fn(m_CmdBuffers[m_FrameIndex]);
 }
 
 void VulkanCommandList::InsertDebugLabel(const char* name, const float color[4]) {
+    // 【L4-3】流模式：逐绘制标记进流（回放时插入到影子列表）
+    if (m_StreamMode) {
+        RHICommandSetDebugLabel l{};
+        if (name) std::strncpy(l.text, name, sizeof(l.text) - 1);
+        m_Stream.Enqueue(RHICommandType::CmdInsertDebugLabel, l);
+        return;
+    }
     if (!m_VulkanDevice) return;
     auto fn = m_VulkanDevice->GetCmdInsertDebugLabelFn();
     if (!fn) return;
@@ -1014,6 +1087,15 @@ void VulkanCommandList::ClearDepthStencil(IRHITexture* texture, float depth) {
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
                          VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
                          0, 0, nullptr, 0, nullptr, 1, &postBarrier);
+
+    // ── 4. 同步布局追踪器 ──
+    // 上面两步转换不经过 PipelineBarrier，追踪器不知道这张图已经停在 DEPTH_STENCIL_ATTACHMENT。
+    // 不同步的后果（B1 实测，05 开粒子）：紧随其后的 BeginOffscreenPass 会调
+    // EnsureDepthAttachmentLayout，它按"追踪器记的上帧状态 = DepthStencilRead"发一条
+    // oldLayout=DEPTH_STENCIL_READ_ONLY 的屏障，而图的**真实**布局是 ATTACHMENT ⇒
+    // VUID-VkImageMemoryBarrier-oldLayout-01197 + VUID-vkCmdBeginRenderPass-initialLayout-00895。
+    TrackTextureLayout(reinterpret_cast<void*>(vkTex->GetImageView()),
+                       rhi::ResourceState::DepthStencilWrite);
 }
 
 // ============================================================
@@ -1035,6 +1117,13 @@ void VulkanCommandList::PipelineBarrier(
     memoryBarrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
     memoryBarrier.srcAccessMask = ToVkAccessFlags(srcState);
     memoryBarrier.dstAccessMask = ToVkAccessFlags(dstState);
+    // 目标阶段含间接参数读取时补全访问位：调用方常写「→ DrawIndirect | VertexShader，状态 ShaderResource」，
+    // 只有 SHADER_READ 时间接命令的读取不在内存依赖内。实测（Intel Arc，参数缓冲在主机可见内存、由计算
+    // 着色器原子累加）只补 INDIRECT_COMMAND_READ 仍会读到清零后的实例数，补上 MEMORY_WRITE / MEMORY_READ 才稳定
+    if (u32(dstStage) & u32(PipelineStage::DrawIndirect)) {
+        memoryBarrier.srcAccessMask |= VK_ACCESS_MEMORY_WRITE_BIT;
+        memoryBarrier.dstAccessMask |= VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_MEMORY_READ_BIT;
+    }
 
     vkCmdPipelineBarrier(m_CmdBuffers[m_FrameIndex],
         ToVkPipelineStageFlags(srcStage), ToVkPipelineStageFlags(dstStage),
@@ -1046,6 +1135,18 @@ void VulkanCommandList::PipelineBarrier(
     ResourceState srcState, ResourceState dstState,
     IRHITexture* texture)
 {
+    // 【L4-3】流模式：带纹理的屏障此前**没有**进流分支 —— 录制期直接对一条尚未
+    // vkBeginCommandBuffer 的命令缓冲下发 vkCmdPipelineBarrier，既触发校验错误，
+    // 又让回放侧完全收不到布局转换（图像停留在旧布局，绘制/呈现读到未定义内容，
+    // 表现为抓帧全黑）。现在把「纹理 + 四个状态字段」编码进流，由影子列表回放时
+    // 走下面同一段逻辑（含布局追踪器纠偏），语义与直接录制完全一致。
+    if (m_StreamMode) {
+        m_Stream.Enqueue(RHICommandType::CmdPipelineBarrierTexture,
+                         RHICommandPipelineBarrierTexture{
+                             texture, static_cast<u32>(srcStage), static_cast<u32>(dstStage),
+                             static_cast<u32>(srcState), static_cast<u32>(dstState) });
+        return;
+    }
     if (!texture) return;
     auto* vkTex = static_cast<VulkanTexture*>(texture);
 
@@ -1134,6 +1235,13 @@ void VulkanCommandList::PipelineBarrier(
 
 void VulkanCommandList::DrawMeshTasks(u32 groupCountX, u32 groupCountY, u32 groupCountZ) {
     EmitDrawLabel();  // 自动插入 DrawCall 级调试 marker（若已设置）
+    // 【L4-3】流模式：网格着色器绘制此前没有进流分支，07.Nanite 在流模式下会整帧
+    // 对未开始录制的命令缓冲下发 vkCmdDrawMeshTasksEXT（校验错误 + 回放侧丢命令）。
+    if (m_StreamMode) {
+        m_Stream.Enqueue(RHICommandType::CmdDrawMeshTasks,
+                         RHICommandDrawMeshTasks{ groupCountX, groupCountY, groupCountZ, 0u });
+        return;
+    }
     if (!m_VulkanDevice->m_CmdDrawMeshTasks) {
         HE_CORE_WARN("DrawMeshTasks: 设备不支持 Mesh Shader");
         return;
@@ -1145,6 +1253,12 @@ void VulkanCommandList::DrawMeshTasks(u32 groupCountX, u32 groupCountY, u32 grou
 void VulkanCommandList::DrawMeshTasksIndirect(IRHIBuffer* buffer, u64 offset,
                                                u32 drawCount, u32 stride) {
     EmitDrawLabel();  // 自动插入 DrawCall 级调试 marker（若已设置）
+    // 【L4-3】流模式：同 DrawMeshTasks，进流后由影子列表回放（载荷复用 DrawIndexedIndirect）
+    if (m_StreamMode) {
+        m_Stream.Enqueue(RHICommandType::CmdDrawMeshTasksIndirect,
+                         RHICommandDrawIndexedIndirect{ buffer, offset, drawCount, stride });
+        return;
+    }
     if (!m_VulkanDevice->m_CmdDrawMeshTasksIndirect) {
         HE_CORE_WARN("DrawMeshTasksIndirect: 设备不支持 Mesh Shader");
         return;
@@ -1162,6 +1276,13 @@ void VulkanCommandList::DrawMeshTasksIndirectCount(IRHIBuffer* buffer, u64 offse
                                                    IRHIBuffer* countBuffer, u64 countOffset,
                                                    u32 maxDrawCount, u32 stride) {
     EmitDrawLabel();
+    // 【L4-3】流模式：进流后由影子列表回放（载荷复用 DrawIndexedIndirectCount）
+    if (m_StreamMode) {
+        m_Stream.Enqueue(RHICommandType::CmdDrawMeshTasksIndirectCount,
+                         RHICommandDrawIndexedIndirectCount{ buffer, countBuffer, offset, countOffset,
+                                                             maxDrawCount, stride });
+        return;
+    }
     if (!m_VulkanDevice->m_CmdDrawMeshTasksIndirectCount) {
         HE_CORE_WARN("DrawMeshTasksIndirectCount: 设备未提供 vkCmdDrawMeshTasksIndirectCountEXT，"
                      "本次绘制已跳过");
@@ -1185,6 +1306,38 @@ void VulkanCommandList::DrawMeshTasksIndirectCount(IRHIBuffer* buffer, u64 offse
 
 void VulkanCommandList::BuildBLAS(IRHIAccelerationStructure* blas, IRHIBuffer* scratchBuffer,
                                    const BLASBuildDesc& desc, bool update) {
+    // 【L4-3】流模式：BLAS 构建此前没有进流分支，光追场景（05 / 任何 RT pass）在流模式下
+    // 的加速结构因此从未被构建（回放侧收不到构建命令），光线全部未命中。这里把几何描述
+    // 按 D3D12 侧同一套编码写进流（几何数组超过 64B 内联上限，走 arena）。
+    if (m_StreamMode) {
+        if (!blas) return;
+        const u32 geoCount = static_cast<u32>(desc.geometries.size());
+        if (geoCount == 0u) return;
+        void* dst = m_Stream.AllocArena(sizeof(RHIBLASGeometry) * geoCount, 8);
+        auto* geos = static_cast<RHIBLASGeometry*>(dst);
+        for (u32 i = 0; i < geoCount; ++i) {
+            const RTGeometryDesc& s = desc.geometries[i];
+            RHIBLASGeometry& d = geos[i];
+            d.vertexBuffer      = s.vertexBuffer;
+            d.indexBuffer       = s.indexBuffer;
+            d.transformBuffer   = s.transformBuffer;
+            d.vertexStride      = s.vertexStride;
+            d.vertexFormat      = static_cast<u32>(s.vertexFormat);
+            d.indexFormat       = static_cast<u32>(s.indexFormat);
+            d.maxVertex         = s.maxVertex;
+            d.maxPrimitiveCount = s.maxPrimitiveCount;
+            d.type              = static_cast<u32>(s.type);
+        }
+        RHICommandBuildBLAS p{};
+        p.blas           = blas;
+        p.scratch        = scratchBuffer;
+        p.geometryOffset = m_Stream.ArenaOffsetOf(geos);
+        p.geometryCount  = geoCount;
+        p.flags          = static_cast<u32>(static_cast<u8>(desc.flags));
+        p.update         = update ? 1u : 0u;
+        m_Stream.EnqueueArena(RHICommandType::CmdBuildBLAS, p);
+        return;
+    }
     auto* vkBLAS  = static_cast<VulkanAccelerationStructure*>(blas);
     auto* vkScratch = static_cast<VulkanBuffer*>(scratchBuffer);
     auto& rt = m_VulkanDevice->GetRTDispatch();
@@ -1309,6 +1462,24 @@ void VulkanCommandList::BindRTPipeline(IRHIRayTracingPipelineState* rtPSO) {
 
 void VulkanCommandList::TraceRays(const SBTDesc& sbt, u32 width, u32 height, u32 depth) {
     EmitDrawLabel();  // 自动插入 DrawCall 级调试 marker（若已设置）
+    // 【A2】流模式：光线派发此前没有进流分支 —— 录制期直接对一条尚未 vkBeginCommandBuffer
+    // 的命令缓冲调用 vkCmdTraceRaysKHR（校验层原文："was called before vkBeginCommandBuffer()"），
+    // 回放侧又收不到这条命令，光追输出恒为空。与 D3D12 侧同一套语义：SBT 四槽位与派发尺寸
+    // 写进流 arena，影子列表回放时再下发。
+    if (m_StreamMode) {
+        if (!sbt.buffer) return;
+        RHICommandTraceRays p{};
+        p.buffer         = sbt.buffer;
+        p.rayGenOffset   = sbt.rayGen.handleOffset;   p.rayGenStride   = sbt.rayGen.stride;
+        p.missOffset     = sbt.miss.handleOffset;     p.missStride     = sbt.miss.stride;
+        p.hitOffset      = sbt.hit.handleOffset;      p.hitStride      = sbt.hit.stride;
+        p.callableOffset = sbt.callable.handleOffset; p.callableStride = sbt.callable.stride;
+        p.width  = width;
+        p.height = height;
+        p.depth  = depth;
+        m_Stream.EnqueueArena(RHICommandType::CmdTraceRays, p);
+        return;
+    }
     auto& rt = m_VulkanDevice->GetRTDispatch();
     VkCommandBuffer cb = m_CmdBuffers[m_FrameIndex];
 

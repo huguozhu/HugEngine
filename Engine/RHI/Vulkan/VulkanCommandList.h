@@ -36,6 +36,9 @@ public:
     void End()   override;
     void BeginSecondary(IRHIPipelineState* pso) override;
     void ExecuteSecondary(IRHICommandList* secondary) override;
+    // 【A2】UI 叠加：直接录制时当场画进本列表的命令缓冲；流模式下编码成流命令，
+    // 由影子列表回放时（render pass 内部）再调用上层的叠加记录器。
+    void DrawOverlay() override;
     bool IsSecondary() const override { return m_SecondaryPool != VK_NULL_HANDLE; }
     void BeginRenderPass(u32 colorCount, Format colorFmt, Format depthFmt,
                          const ClearValue* clear, LoadOp loadOp) override;

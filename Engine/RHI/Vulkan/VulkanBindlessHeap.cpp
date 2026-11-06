@@ -47,6 +47,19 @@ BindlessHandle VulkanBindlessHeap::RegisterSampler(IRHISampler* sampler) {
 }
 
 BindlessHandle VulkanBindlessHeap::RegisterBuffer(IRHIBuffer* ssbo) {
+    // 【槽位 0 保留为无效哨兵】引擎约定缓冲句柄 0 = 无效（如逐实例剔除的可见列表句柄为 0 即跳过派发，
+    // 推送常量里的句柄 0 表示「未使用」），D3D12 后端也保留了 0。此前 Vulkan 从 0 起分配，
+    // 第一个注册的缓冲（剔除器的可见列表）拿到句柄 0 ⇒ 被当作无效，剔除从不派发、实例全不绘制。
+    // 槽位 0 固定指向一个占位缓冲（描述符数组整体写入时每个元素都必须是有效缓冲）
+    if (m_Buffers.empty()) {
+        BufferDesc nd{};
+        nd.size  = 256;
+        nd.usage = BufferUsage::Storage;
+        m_NullBuffer = m_Device->CreateBufferHandle(nd);   // 设备持有，随设备在 VMA 销毁前释放
+        IRHIBuffer* nb = m_Device->ResolveBuffer(m_NullBuffer);
+        m_Buffers.push_back(nb ? nb : ssbo);   // 占位缓冲创建失败时退而用本缓冲填位（仍不分配出去）
+        m_BufRing.Acquire();                   // 首次分配必为槽位 0：占住、永不释放
+    }
     const u32 slot = m_BufRing.Acquire();
     if (slot < (u32)m_Buffers.size()) m_Buffers[slot] = ssbo;   // 复用槽位
     else                              m_Buffers.push_back(ssbo);

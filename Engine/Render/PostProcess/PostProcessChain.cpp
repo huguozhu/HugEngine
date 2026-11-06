@@ -93,7 +93,9 @@ void PostProcessChain::OnResize(rhi::IRHIDevice* device, u32 width, u32 height) 
     m_Height = height;
 
     if (m_ToneMap) m_ToneMap->OnResize(width, height);
-    if (m_Skybox)  { m_Skybox->Shutdown(); m_Skybox->Initialize(device, width, height); }
+    // 天空盒的着色器、描述符集与 PSO 都与尺寸无关（Initialize 不使用宽高），缩放时不重建。
+    // 此前这里 Shutdown + Initialize：每次缩放重新分配一个描述符集，而描述符集没有释放接口 ⇒
+    // 每次缩放泄漏一个集（D3D12 下 11 个槽位，Vulkan 同样增长）
     if (m_TAA)     m_TAA->OnResize(width, height);
     if (m_FXAA)    m_FXAA->OnResize(width, height);
     if (m_SMAA)    m_SMAA->OnResize(width, height);

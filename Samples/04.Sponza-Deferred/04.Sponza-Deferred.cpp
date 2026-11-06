@@ -29,6 +29,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>   // 【P5】HE_NO_PARTICLES 读取（std::getenv）
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -98,7 +99,10 @@ int main() {
     config.appName      = "HugEngine — 04.Sponza-Deferred";
     config.windowWidth  = 960;
     config.windowHeight = 540;
-    config.enableVSync  = true;
+    // 【P10 测量钩子】HE_NO_VSYNC=1 关闭垂直同步（与 06/07 样例的同名开关一致）
+    // 【为什么需要】垂直同步会把帧率锁在刷新率上，测不出 Storage 缓冲换堆的 GPU 侧收益。
+    const bool useVsync = std::getenv("HE_NO_VSYNC") == nullptr;
+    config.enableVSync  = useVsync;
     config.logLevel     = LogLevel::Info;
 
     Engine engine(config);
@@ -108,7 +112,7 @@ int main() {
     // 2. 创建 Vulkan RHI 设备
     // ============================================================
     rhi::DeviceInitDesc rhiDesc;
-    rhiDesc.backend          = rhi::Backend::Vulkan;
+    rhiDesc.backend          = rhi::ResolveBackendFromEnv();
     rhiDesc.enableValidation = true;
     rhiDesc.windowHandle     = engine.GetWindow()->GetNativeHandleRaw();
 
@@ -123,7 +127,7 @@ int main() {
         .windowHandle = engine.GetWindow()->GetNativeHandleRaw(),
         .width  = engine.GetWindow()->GetWidth(),
         .height = engine.GetWindow()->GetHeight(),
-        .vsync  = true,
+        .vsync  = useVsync,
     });
 
     // ============================================================
@@ -450,7 +454,11 @@ int main() {
     pipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
 
     // ── 测试粒子效果 ──
-    {
+    // 【P5】`HE_NO_PARTICLES=1` 关闭本样例的粒子系统：粒子模拟是按帧 dt 推进的，
+    // 帧率不同（异步计算 / 全同步两条路径的帧时间不同）⇒ 同一帧号上粒子的位置/颜色不同
+    // ⇒ 截图无法逐像素对比。做「异步 vs 全同步」的画面判据时用这个开关把时域相关的
+    // 唯一来源去掉；默认（不开）行为与之前完全一致。
+    if (!std::getenv("HE_NO_PARTICLES")) {
         Entity particleEntity = world.CreateEntity("TestParticle");
         world.AddComponent<TransformComponent>(particleEntity);
         auto* pc = world.AddComponent<ParticleComponent>(particleEntity);
@@ -473,6 +481,8 @@ int main() {
         pipeline.AddParticleComponent(pid);
 
         HE_CORE_INFO("粒子系统已注册: id={} maxParticles={}", pid, pc->GetMaxParticles());
+    } else {
+        HE_CORE_INFO("粒子系统已关闭（HE_NO_PARTICLES=1）：用于逐像素画面对照");
     }
 
     // ── 从配置文件恢复管线 / GI / 后处理设置 ──
@@ -721,7 +731,8 @@ int main() {
         submitRender(recordScene);
         if (frameAborted) continue;   // Acquire 失败：跳过本帧剩余部分
 
-        imgui.BeginFrame();
+        if (imgui.IsInitialized()) imgui.BeginFrame();   // 非 Vulkan 后端没有 UI
+        if (imgui.IsInitialized()) {   // 非 Vulkan 后端没有 UI，整块跳过
         ImGui::SetNextWindowPos({10, 10}, ImGuiCond_Once);
         ImGui::SetNextWindowBgAlpha(0.55f);
         ImGui::Begin("04.Sponza-Deferred");
@@ -1157,19 +1168,22 @@ int main() {
             ImGui::Text("%u 网格  |  %u 方向光  |  %u 点光  |  %u 聚光", meshCount, dirLightCount, 1, spotCount);
         }
         ImGui::End();
+        }   // end if (imgui.IsInitialized())
 
         // GPU Profiler 面板（按 F1 切换）
-        if (ImGui::IsKeyPressed(ImGuiKey_F1))
+        // 只在 ImGui 已初始化时查按键：没有 UI 后端时（如 D3D11 尚未接入 ImGui）没有 ImGui 上下文，
+        // 直接调用 ImGui::IsKeyPressed 会访问空上下文而崩溃
+        if (imgui.IsInitialized() && ImGui::IsKeyPressed(ImGuiKey_F1))
             pipeline.GetProfilerPanel().Toggle();
         pipeline.GetProfilerPanel().Draw();
 
         // ---- 命令 2：ImGui 录制 + End + Submit + AsyncCompute + Present ----
         auto recordUiAndPresent = [&]() {
-            imgui.EndFrame(cmdList.get());
+            if (imgui.IsInitialized()) imgui.EndFrame(cmdList.get());
             cmdList->EndRenderPass();
             framePresenter.EndRecording();   // L4-2：End + Submit 收口
             pipeline.FlushComputeWork();  // AsyncCompute: Graphics Submit 之后提交 Compute 工作
-            framePresenter.EndFrame(true);
+            framePresenter.EndFrame(useVsync);
             frameIndex++;        };
         submitRender(recordUiAndPresent);
 

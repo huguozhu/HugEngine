@@ -41,5 +41,24 @@
     #define GPU_CONST_BEGIN
     #define GPU_CONST_END
     #define GPU_CONST(decl) static const decl
+
+    // ── 后端差异宏（只在 Slang 侧定义；C++ 侧不走这些路径）──
+    // bindless 缓冲数组的访问：Vulkan / D3D12 按句柄取数组元素；D3D11（SM 5.0 不能动态索引
+    // 资源数组）下同名资源是单个缓冲，句柄由渲染层经 SetNonBindlessHandle 交给后端
+    // （见 GPUBindings.slang 的 kGPUBinding_NB_*）。
+    #if defined(HE_SHADER_D3D11)
+        #define HE_BINDLESS_BUF(name, handle) name
+    #else
+        #define HE_BINDLESS_BUF(name, handle) name[handle]
+    #endif
+
+    // 单 mip 纹理（阴影贴图、RSM 等渲染目标）的采样：D3D11（fxc / SM 5.0）不允许隐式导数采样
+    // 出现在动态次数的循环里（光源循环里的 PCF 等，报 X3511 / X3531），对只有 1 级 mip 的
+    // 纹理改用 SampleLevel(…, 0) 结果完全相同；其它后端展开后与原写法逐字相同。
+    #if defined(HE_SHADER_D3D11)
+        #define HE_SAMPLE_L0(tex, smp, uv) tex.SampleLevel(smp, uv, 0)
+    #else
+        #define HE_SAMPLE_L0(tex, smp, uv) tex.Sample(smp, uv)
+    #endif
 #endif
 #endif // GPU_UINT

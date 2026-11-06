@@ -28,7 +28,7 @@
 void main(uint3 tid : SV_GroupThreadID, uint3 gid : SV_GroupID) {
     // 【诊断】在任何提前返回**之前**，由工作组 0 的 0 号线程把 shader 实际收到的 push constant
     //   回读进读数缓冲 —— 布局错位（例如 screenWidth 读到 0）在这里一眼可见，不必靠猜。
-    if (gid.x == 0u && tid.x == 0u) {
+    if (naniteRasterSlot(gid) == 0u && tid.x == 0u) {   // 只由第 0 个工作组的 0 号线程写
         u_Stats[kSoftStatDiagScreenW] = screenWidth;
         u_Stats[kSoftStatDiagScreenH] = screenHeight;
         u_Stats[kSoftStatDiagMaxTri]  = maxTriangles;
@@ -38,7 +38,7 @@ void main(uint3 tid : SV_GroupThreadID, uint3 gid : SV_GroupID) {
     // 【为什么按可见簇列表而不是"全部簇"】剔除链（任务 15/16）已经把"本帧可见"的簇压缩成
     //   一张列表 + 一个计数；软光栅只消费它 ⇒ "软光栅画了什么"与"剔除说可见什么"同源。
     uint visibleCount = u_VisibleClusterCount[0];
-    uint slot = gid.x;
+    uint slot = naniteRasterSlot(gid);   // 二维派发展开成可见簇槽位
     if (slot >= visibleCount) return;               // 多派发的组：直接返回（dispatch 按容量取整）
 
     ClusterRef ref = u_VisibleClusters[slot];

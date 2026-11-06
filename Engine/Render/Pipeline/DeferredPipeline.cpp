@@ -27,7 +27,11 @@
 #include <cmath>
 #include <unordered_set>
 #include "Fullscreen.vert.spv.h"
+#include "Fullscreen.vert.dxil.h"
+#include "Fullscreen.vert.dxbc.h"
 #include "FullscreenCopy.frag.spv.h"
+#include "FullscreenCopy.frag.dxil.h"
+#include "FullscreenCopy.frag.dxbc.h"
 
 // ── DGC 开关（Device Generated Commands，VK_EXT_device_generated_commands）──
 // 语义：`true` = 让 **GPU 自己生成绘制命令**（GPU-driven 绘制）——GPU 侧的实例剔除与
@@ -37,9 +41,12 @@
 //
 // 注意：这是 `constexpr` **编译期常量**，未注册 CVar，控制台/配置文件都改不了；
 // 要切换请改这里的初值并重新编译。
+// 【P1】默认改为 true（T7 完成后依赖已解除）；**生效的闸门在
+// `DeferredPipeline_FrameGraph.cpp` 的同名常量**（本文件的常量只作语义说明，未参与判断），
+// 运行时对照实验用环境变量 `HE_DISABLE_DGC=1` 强制关闭。
 // 设备能力不满足时（`VulkanDGC::IsSupported()` 为假）`InitializeDGC()` 返回 false，
 // 整条 DGC 路径自动跳过（`IsDGCReady()` 为 false），不会出错。
-constexpr bool kDGCEnable = false;
+constexpr bool kDGCEnable = true;
 
 
 
@@ -65,6 +72,12 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
     m_GBuffer = std::make_unique<GBufferRenderer>();
     m_GBuffer->Initialize(device, m_Width, m_Height);
 
+    // 【T8】从这里开始进入"启动阶段批量预编译"窗口：窗口内创建 PSO 的 pass 只登记占位句柄，
+    // 编译由后台预编译线程与下面的初始化工作并行完成，窗口结束时（Initialize 末尾）统一落地。
+    // 位置必须在 GBuffer 之后：下面的 InitializeDGC 要用 GBuffer 的 PSO 对象（DGC 执行集）。
+    // 不支持该能力的后端（默认实现为空操作）保持原来的同步创建行为。
+    device->BeginPSOPrecompileBatch();
+
     // 硬件 MSAA：覆盖纹理和 PSO 的 sampleCount（委托给 PostProcessChain）
     if (m_PostProcess.IsMSAAEnabled()) {
         HE_CORE_INFO("DeferredPipeline: MSAA enabled (HDR 目标多采样，GBuffer 保持 1x)");
@@ -76,14 +89,39 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
     // LDR 中间纹理已在 PostProcessChain::Initialize() 中创建
 
     // 三缓冲
+    // 【P10】这些缓冲每帧由 CPU Map 写入（对象/光源/阴影数据）⇒ 必须显式置 cpuAccess=true，
+    //   让它们留在 CPU 可见堆（只补调试名便于统计清单辨认）。
+    //   【为什么必须显式置】迁移规则是「Storage && !cpuAccess ⇒ DEFAULT 堆」，这四类缓冲
+    //   原先没置 cpuAccess 却被 Map（实测迁移后 D3D12 报"DEFAULT 堆 Storage 缓冲被 CPU Map"），
+    //   属于 §P10 安全提醒里的"引擎某处偷偷 Map"。
     for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-        m_LightBuffers[i]      = device->CreateBufferHandle({sizeof(GPULight) * MAX_LIGHTS, rhi::BufferUsage::Storage});   // A-3
+        rhi::BufferDesc lightDesc;
+        lightDesc.size = sizeof(GPULight) * MAX_LIGHTS;
+        lightDesc.usage = rhi::BufferUsage::Storage;
+        lightDesc.cpuAccess = true;
+        lightDesc.debugName = "Deferred.Lights";
+        m_LightBuffers[i]      = device->CreateBufferHandle(lightDesc);   // A-3
         HE_ASSERT(m_LightBuffers[i].IsValid(), "DeferredPipeline: 光源缓冲句柄创建失败");
-        m_ObjectBuffers[i]     = device->CreateBufferHandle({sizeof(GPUObjectData) * MAX_OBJECTS, rhi::BufferUsage::Storage});   // A-3
+        rhi::BufferDesc objDesc;
+        objDesc.size = sizeof(GPUObjectData) * MAX_OBJECTS;
+        objDesc.usage = rhi::BufferUsage::Storage;
+        objDesc.cpuAccess = true;
+        objDesc.debugName = "Deferred.Objects";
+        m_ObjectBuffers[i]     = device->CreateBufferHandle(objDesc);   // A-3
         HE_ASSERT(m_ObjectBuffers[i].IsValid(), "DeferredPipeline: 对象缓冲句柄创建失败");
-        m_ShadowBuffers[i]     = device->CreateBufferHandle({sizeof(GPUShadowData) * MAX_SHADOWS, rhi::BufferUsage::Storage});   // A-3
+        rhi::BufferDesc shadowDesc;
+        shadowDesc.size = sizeof(GPUShadowData) * MAX_SHADOWS;
+        shadowDesc.usage = rhi::BufferUsage::Storage;
+        shadowDesc.cpuAccess = true;
+        shadowDesc.debugName = "Deferred.Shadows";
+        m_ShadowBuffers[i]     = device->CreateBufferHandle(shadowDesc);   // A-3
         HE_ASSERT(m_ShadowBuffers[i].IsValid(), "DeferredPipeline: 阴影缓冲句柄创建失败");
-        m_ShadowObjBuffers[i]  = device->CreateBufferHandle({sizeof(GPUObjectData) * MAX_OBJECTS, rhi::BufferUsage::Storage});   // A-3
+        rhi::BufferDesc shadowObjDesc;
+        shadowObjDesc.size = sizeof(GPUObjectData) * MAX_OBJECTS;
+        shadowObjDesc.usage = rhi::BufferUsage::Storage;
+        shadowObjDesc.cpuAccess = true;
+        shadowObjDesc.debugName = "Deferred.ShadowObjects";
+        m_ShadowObjBuffers[i]  = device->CreateBufferHandle(shadowObjDesc);   // A-3
         HE_ASSERT(m_ShadowObjBuffers[i].IsValid(), "DeferredPipeline: 阴影对象缓冲句柄创建失败");
     }
 
@@ -462,16 +500,29 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
     m_ParticleRenderer.Initialize(device);
     m_ParticleRenderer.SetSceneDepth(m_Lighting.GetHDRDepth(), m_Lighting.GetPointSampler());  // 软粒子深度纹理
 
-    // 启动 PSO 后台预热（目前**只有 SSAO** 调用了 PrecompileQueuePSO 注册变体：
-    // SSAO.cpp:144/167/196 的三个变体；原文写"所有子系统已调用"与事实不符，故改准）
-    // 另注：worker 用 setLayoutCount = 0 建简化管线，与真实（带描述符布局的）PSO 不会命中同一
-    // 缓存条目 ⇒ 即便恢复本调用，对真实管线的预热收益也有限（详见
-    // docs/HugEngine引擎介绍/15.多线程架构与渲染实现分析.md 的 §7.1）
-    // 注意：本机（Intel Arc B370 + 该版驱动）预编译 worker 线程会在
+    // 启动 PSO 后台预热。**D3D12 下真正的覆盖面来自上面的 BeginPSOPrecompileBatch**：
+    // 初始化窗口内创建的 PSO 全部登记进预编译队列（代码见 D3D12Device::CreatePipelineStateHandle），
+    // 日志里的「PSO 预编译完成 N / N」就是这些 PSO 的数量；SSAO 仍显式注册它的三个惰性变体。
+    // 这行 StartPSOPrecompile 是给"没有批处理窗口"的后端/路径兜底的（已在跑时是空操作）。
+    // 注意：本机（Intel Arc B370 + 该版驱动）Vulkan 预编译 worker 线程会在
     // igc-default64.dll 内随机 SIGSEGV（约 50% 概率，见 gdb 栈：线程 27 编译器崩溃），
     // 导致 02.Cube 启动随机崩溃。预编译是纯优化（PSO 缓存已按 hash 去重，
-    // 禁用后 PSO 仅在首次使用时惰性编译），故本机禁用。稳定驱动上可恢复。
-    // device->StartPSOPrecompile();
+    // 禁用后 PSO 仅在首次使用时惰性编译），故那台机器上禁用。
+    // 【C1】改按**厂商**判断而不是按后端一刀切：崩溃只发生在 Intel 驱动的 Vulkan 编译器线程里，
+    // NVIDIA/AMD 的 Vulkan 预编译是正常可用的（4060 上实测预编译计数 3、0 VUID、长跑稳定），
+    // 一刀切会让 NVIDIA 白白丢掉预编译收益。D3D12 侧不受此问题影响（它只是在后台线程用同一
+    // 设备建 PSO 并保存驱动缓存块，不经 Vulkan 驱动的编译线程），故 D3D12 一律启用。
+    {
+        const bool isVulkan = (device->GetBackend() == rhi::Backend::Vulkan);
+        const u32  vendor   = device->GetDeviceVendorId();
+        // 0x8086 = Intel 的 PCI vendor id
+        const bool intelOnVulkan = isVulkan && (vendor == 0x8086u);
+        if (!intelOnVulkan) device->StartPSOPrecompile();
+        HE_CORE_INFO("PSO 后台预编译：{}（后端={}，vendorId=0x{:04X}{}）",
+                     intelOnVulkan ? "关闭" : "启用",
+                     isVulkan ? "Vulkan" : "D3D12", vendor,
+                     intelOnVulkan ? "，Intel 驱动的 Vulkan 编译线程会崩，按厂商安全关闭" : "");
+    }
 
     // ── Nanite 模块（§14.8 任务 1 / N0）──
     // 放在 m_Ready 之前：模块不依赖任何 GI/Lumen/GBuffer 的运行时状态（§14.3 依赖禁令），
@@ -480,6 +531,10 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
     if (!m_Nanite.Initialize(device, m_Width, m_Height)) {
         HE_CORE_WARN("DeferredPipeline: NaniteRenderer 骨架初始化失败，Nanite 不可用");
     }
+
+    // 【T8】关闭批量预编译窗口：等后台线程把这些 PSO 编译完，再把占位句柄统一落地。
+    // 必须在 m_Ready = true 之前：首帧开始渲染时所有 PSO 必须已经可用（不改变画面）。
+    device->EndPSOPrecompileBatch();
 
     m_Ready = true;
     HE_CORE_INFO("DeferredPipeline initialized");
@@ -490,6 +545,10 @@ void DeferredPipeline::Shutdown() {
     // 【空保护】m_Device 可能为空（Shutdown 被调用两次，或 Initialize 失败后进入清理路径），
     // 直接解引用会崩溃（实测：02.Cube 退出时连续崩在多个 Shutdown 里）。
     if (!m_Device) return;
+
+    // 【T8】初始化中途失败时批量预编译窗口可能还开着：先正常收尾（等后台线程、落地占位句柄），
+    // 否则后台线程会一直等新登记，设备析构时才被唤醒
+    m_Device->EndPSOPrecompileBatch();
 
     // GI Provider 生命周期遍历（§12 架构前置）：Provider 自持的资源（如 Lumen 的
     // Surface Cache atlas / SDF clipmap）必须在这里释放。**必须早于底层 pass 的 Shutdown**
@@ -570,6 +629,13 @@ void DeferredPipeline::Shutdown() {
 // CreateTextureDescriptorSet 已移除 — 使用全局 bindless 纹理数组替代
 
 void DeferredPipeline::SetGBufferMode(GBufferRenderer::Mode mode) {
+    // GPU 驱动路径一次间接绘制覆盖多个材质，材质纹理只能按物体取（bindless 或 D3D11 的纹理数组桶）：
+    // 两者都没有的后端强制走 CPU 路径（D3D11 后端实现规划 3.2 的 C 类、M6）
+    if (mode == GBufferRenderer::Mode::GPU && m_Device && m_Device->GetCaps().maxBindlessResources == 0 &&
+        !m_Device->GetCaps().supportsTextureArrayMaterials) {
+        HE_CORE_WARN("DeferredPipeline: 当前后端没有 bindless，GBuffer 的 GPU 驱动路径不可用，改用 CPU 路径");
+        mode = GBufferRenderer::Mode::CPU;
+    }
     if (m_GBuffer) m_GBuffer->SetMode(mode);
 }
 
@@ -596,12 +662,15 @@ void DeferredPipeline::NextFrame() {
     // 【T2.4 步骤 (b)】推进快照槽位：命令载荷指向的快照在其被消费完之前不会被复用
     m_SnapshotSlot = (m_SnapshotSlot + 1u) % MAX_FRAMES_IN_FLIGHT;
     m_Assembler.Bind(&SnapBuf(), &m_MeshRegistry);
-    m_Assembler.SetFrameSlot(RenderFrameSlot());   // 随快照冻结给渲染命令
+    // 【先推进再冻结】此前用 RenderFrameSlot() 取槽位：有快照时它返回的是**上一帧快照**的槽位，
+    // 自己喂自己，槽位永远停在 0 ⇒ 按飞行帧多份的资源（剔除命令、描述符集、HDR 目标等）实际只用第 0 份，
+    // CPU 录制下一帧时改写 GPU 仍在使用的那份（Vulkan 下逐实例剔除的实例数被提前清零，实例化网格消失）
+    m_CurrentFrameSlot = (m_CurrentFrameSlot + 1) % MAX_FRAMES_IN_FLIGHT;
+    m_Assembler.SetFrameSlot(m_CurrentFrameSlot);   // 随快照冻结给渲染命令
     // 【必须每帧复位】`AssembleScene` 靠 `m_Assembled` 做"每帧只装配一次"的幂等；不复位就会
     // **只在第一帧装配**（静态场景看不出来，但动态场景会冻结，且多槽快照下其它槽永远为空）。
     m_Assembler.BeginFrame();
     m_Assembler.Settings().physicalUnitsEnabled = cvLightPhysicalUnits.Get();
-    m_CurrentFrameSlot = (m_CurrentFrameSlot + 1) % MAX_FRAMES_IN_FLIGHT;
 
     // PSO 预热：主线程检查后台编译进度，完成后合并缓存
     static bool precompileMerged = false;
@@ -701,15 +770,20 @@ void DeferredPipeline::Render(rhi::IRHICommandList* cmd, const FrameSceneSnapsho
     // ============================================================
     // AsyncCompute: RenderGraph 多阶段提交
     //
-    // 当设备支持专用 Compute 队列时，RenderGraph 内部自动将 Pass
-    // 拆分为三段提交：
-    //   Phase 1: Graphics CmdList #1（Shadow + 前期 Pass）
-    //   Phase 2: Compute CmdList（GPUCull, SSAO, DDGI, AutoExposure）
-    //   Phase 3: Graphics CmdList #2（GBuffer, Lighting, PostProcess）
+    // 设备支持专用 Compute 队列时，RenderGraph 内部把「依赖闭包全在计算组内、且只碰持久
+    // 资源」的 Compute hint pass（本管线里是 GPU_Cull —— 纯 compute dispatch，只读上一帧的
+    // GBuffer 深度）录到一条**独立计算列表**上：计算列表先提交，图形列表经时间线围栏等它
+    // 完成。切分逻辑见 RenderGraph::MarkAsyncQueueGroups / ExecuteWithAsyncCompute。
     //
-    // 传统单队列回退：设备不支持 AsyncCompute 时自动降级。
+    // `HE_ASYNC_COMPUTE=0` 强制走单队列（全同步）路径 —— 用来做"异步 vs 全同步"的
+    // 逐像素对照，不用改设备能力或重编译。
     // ============================================================
     bool useAsyncCompute = m_Device->HasAsyncComputeQueue();
+    {
+        static const char* s_env = std::getenv("HE_ASYNC_COMPUTE");
+        static const bool  s_envOff = (s_env && s_env[0] == '0');
+        if (s_envOff) useAsyncCompute = false;
+    }
 
     if (useAsyncCompute && m_CrossQueueFence == rhi::kInvalidFence) {
         // 首次使用 AsyncCompute 时，创建跨队列时间线信号量

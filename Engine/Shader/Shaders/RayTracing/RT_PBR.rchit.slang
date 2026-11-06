@@ -68,7 +68,7 @@ float3 ComputeBarycentrics(float3 P, float3 v0, float3 v1, float3 v2) {
 // 主入口：ClosestHit 着色器
 // ============================================================
 [shader("closesthit")]
-void main(inout RayPayload payload) {
+void main(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr) {   // 命中属性：DXR 的 closesthit 入口签名要求带它（SPIR-V 下等价）
     // ── 步骤 1: 获取命中信息 ──
     uint instanceID = NonUniformResourceIndex(InstanceID());
     uint primId     = NonUniformResourceIndex(PrimitiveIndex());

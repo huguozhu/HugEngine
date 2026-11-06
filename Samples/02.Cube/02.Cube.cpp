@@ -8,6 +8,7 @@
 // 自由相机：WASD + 鼠标右键旋转
 // ============================================================
 
+#include <cstdio>
 #include "Core/Core.h"
 #include "Core/CVar.h"
 #include "Core/Engine.h"
@@ -55,6 +56,7 @@
 #include "Asset/glTFLoader.h"
 #include "Editor/ImGuiIntegration.h"
 #include "imgui.h"
+#include "TransientAliasTest.h"   // P6：瞬态纹理 / 内存别名自检（HE_TRANSIENT_ALIAS_TEST=1）
 
 #include <cmath>
 #include <cstring>
@@ -157,12 +159,51 @@ Entity CreateShapeEntity(World& world, SceneGraph& sg,
 // ============================================================
 // 主函数
 // ============================================================
+// ============================================================================
+// RenderDoc 抓帧支持：运行时若被 renderdoccmd 启动并设置了 HE_RD_CAPTURE=<帧号>，
+// 就在指定帧自动开始/结束一次抓帧，无需人工按 F12。
+// ============================================================================
+#include <cstdlib>
+#include <windows.h>
+#include "renderdoc_app.h"
+
+namespace {
+RENDERDOC_API_1_6_0* g_RdApi = nullptr;
+
+void RenderDocInit() {
+    if (HMODULE mod = GetModuleHandleA("renderdoc.dll")) {
+        auto getApi = reinterpret_cast<pRENDERDOC_GetAPI>(GetProcAddress(mod, "RENDERDOC_GetAPI"));
+        if (getApi) {
+            void* api = nullptr;
+            if (getApi(eRENDERDOC_API_Version_1_6_0, &api) == 1 && api) {
+                g_RdApi = static_cast<RENDERDOC_API_1_6_0*>(api);
+                g_RdApi->SetCaptureFilePathTemplate("rdoc/cube");
+                std::printf("[RD] RenderDoc 已就绪\n");
+                std::fflush(stdout);
+            }
+        }
+    }
+}
+
+void RenderDocFrameBegin(int frame) {
+    const char* env = std::getenv("HE_RD_CAPTURE");
+    if (!g_RdApi || !env) return;
+    if (frame == std::atoi(env)) { g_RdApi->TriggerCapture(); std::printf("[RD] 触发抓帧 frame=%d\n", frame); std::fflush(stdout); }
+}
+
+void RenderDocFrameEnd(int frame) {
+    const char* env = std::getenv("HE_RD_CAPTURE");
+    if (!g_RdApi || !env) return;
+    // TriggerCapture 模式无需手动结束
+}
+}
+
 int main() {
     // --- 1. 引擎启动 ---
     EngineConfig config;
     config.appName      = "HugEngine — PBR Forward Pipeline";
-    config.windowWidth  = 1920;
-    config.windowHeight = 1080;
+    config.windowWidth  = 960;
+    config.windowHeight = 540;
     config.enableVSync  = true;
 
     Engine engine(config);
@@ -170,12 +211,15 @@ int main() {
 
     // --- 2. 创建 RHI 设备 ---
     rhi::DeviceInitDesc rhiDesc;
-    rhiDesc.backend          = rhi::Backend::Vulkan;
+    rhiDesc.backend          = rhi::ResolveBackendFromEnv();
+    // 【P6】瞬态别名自检需要后端校验来判定别名屏障 / 布局转换是否合法，故自检模式下打开
+    //（D3D12 还会额外看 HE_D3D12_DEBUG_LAYER / HE_D3D12_GPU_VALIDATION；Vulkan 看验证层）。
+    const bool transientSelfTest = (std::getenv("HE_TRANSIENT_ALIAS_TEST") != nullptr);
     // 注意：本机（Intel Arc B370 + 该版驱动 + Vulkan SDK 1.4.341 验证层）存在
     // 预先存在的驱动编译器崩溃（HEAD 同样复现）：开启验证层时 igc-default64.dll
     // 在 shader 编译线程随机 SIGSEGV。关闭验证层后稳定（RT 管线编译约 20s/个）。
     // 在 NVIDIA/其他稳定驱动上可恢复为 true 以获得验证信息。
-    rhiDesc.enableValidation = false;
+    rhiDesc.enableValidation = transientSelfTest;
     rhiDesc.windowHandle     = engine.GetWindow()->GetNativeHandleRaw();
 
     auto device = rhi::CreateDevice(rhiDesc.backend);
@@ -194,6 +238,22 @@ int main() {
     // 一次性验证日志：打印交换链实际协商到的颜色格式
     HE_CORE_INFO("[SwapChain] 颜色格式: {}", swapchain->GetColorFormat() == rhi::Format::A2B10G10R10_UNORM_PACK32
         ? "A2B10G10R10 (HDR10)" : "BGRA8 (SDR)");
+
+    // --- 3.5 【P6】瞬态纹理 / 内存别名自检（可独立运行）---
+    // 判据与打印内容见 Samples/Common/TransientAliasTest.h。跑完即退出，便于自动化：
+    //   HE_TRANSIENT_ALIAS_TEST=1 02.Cube.exe
+    // 同时建议开 HE_D3D12_DEBUG_LAYER=1 / HE_D3D12_GPU_VALIDATION=1（D3D12）与
+    // HE_TRACE_BARRIERS=1（看每次别名激活的日志）。
+    if (std::getenv("HE_TRANSIENT_ALIAS_TEST")) {
+        const bool ok = he::samples::RunTransientAliasTest(device.get());
+        device->WaitIdle();
+        HE_CORE_INFO("[P6] 自检结束：{}（退出码 {}）", ok ? "通过" : "失败", ok ? 0 : 1);
+        // 【为什么用 _Exit】自检是自动化入口：判据与数据已经在上面打印完、GPU 也已 WaitIdle。
+        // 样例的交互式关闭流程（窗口/设备销毁）在本机环境会挂住（与自检无关的既有问题），
+        // 这里直接以确定的退出码结束进程，避免自动化脚本超时。
+        std::fflush(nullptr);
+        std::_Exit(ok ? 0 : 1);
+    }
 
     // --- 4. 初始化场景 ---
     World world;
@@ -702,12 +762,14 @@ int main() {
     render::DeferredPipeline deferredPipeline;
         render::PathTracingPipeline pathTracingPipeline;
     forwardPipeline.Initialize(device.get());
+    if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] ...\n"); std::fflush(stdout); }
     forwardPipeline.SetUseRenderGraph(false);
     forwardPipeline.SetMultiThreadedRecording(false);
     forwardPipeline.SetSwapChain(swapchain.get());
     forwardPipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
 
     deferredPipeline.Initialize(device.get());
+    if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] ...\n"); std::fflush(stdout); }
     deferredPipeline.SetSwapChain(swapchain.get());
     deferredPipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
 
@@ -715,6 +777,7 @@ int main() {
     // 全路径追踪管线（r.Pipeline.Mode=3，设备支持 RT 时才可用）
     // 定位：参考渲染器（ground truth），用于校验实时 GI 近似的正确性
     pathTracingPipeline.Initialize(device.get());
+    if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] ...\n"); std::fflush(stdout); }
     pathTracingPipeline.SetSwapChain(swapchain.get());
     pathTracingPipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
     // PT 复用 Deferred 的加速结构（同一份 BLAS/TLAS，避免重复内存）
@@ -814,16 +877,22 @@ int main() {
     }
 
     // --- 6. 创建命令列表 ---
+    HE_CORE_INFO("[Cube 进度] 6. 创建命令列表");
     auto cmdList = device->CreateCommandList();
+    HE_CORE_INFO("[Cube 进度] 6.1 cmdList={}", static_cast<const void*>(cmdList.get()));
     cmdList->SetSwapChain(swapchain.get());
+    HE_CORE_INFO("[Cube 进度] 6.2 SetSwapChain 完成");
     cmdList->SetPipeline(forwardPipeline.GetPipelineState());
+    HE_CORE_INFO("[Cube 进度] 6.3 SetPipeline 完成");
 
     // --- 6.5. 获取 GLFW 窗口句柄 ---
     GLFWwindow* glfwWin = engine.GetWindow()->GetNativeHandle();
 
     // --- 6.6. ImGui ---
+    HE_CORE_INFO("[Cube 进度] 6.6 开始 ImGui 初始化");
     editor::ImGuiIntegration imgui;
     imgui.Initialize(glfwWin, device.get(), swapchain.get());
+    HE_CORE_INFO("[Cube 进度] 6.7 ImGui 完成 initialized={}", imgui.IsInitialized());
 
     // --- 7. 相机 ---
     render::CameraController camCtrl;
@@ -980,6 +1049,11 @@ int main() {
         HE_CORE_INFO("02.Cube：已起真渲染线程（整帧 RHI 归它；游戏线程按帧严格握手等待）");
         renderThread.Start();
     }
+    // 【帧上下文的设备指针】即使没起真渲染线程，`SubmitAndWait` / `SubmitAndPump` 也会在调用线程上
+    // 就地泵帧（壳模式），泵帧时把 RenderThreadContext 发布到线程局部。若这里不登记设备，上下文里的
+    // device 为空 ⇒ 各 pass 的 ResB/ResT 解析恒为 nullptr，随后解引用空指针（02.Cube 在模式 1/2 下
+    // 第一帧的 CSM 阴影就崩在这里；06.GILab 早已登记，故只有本样例受影响）。
+    renderThread.SetDevice(device.get());
     auto submitRender = [&](auto&& fn) {
         if (useRenderThread) {
             renderQueue.BeginFrame();
@@ -995,7 +1069,12 @@ int main() {
     // L4-1：帧外壳的 acquire/present 收口（L4-3 把整帧变成命令流时只改这里）
     rhi::FramePresenter framePresenter(swapchain.get());
 
+    RenderDocInit();
+    int rdFrame = 0;
+
     while (!engine.GetWindow()->ShouldClose()) {
+        ++rdFrame;
+        RenderDocFrameBegin(rdFrame);
         // 计算帧时间
         f64 now       = glfwGetTime();
         f32 deltaTime = static_cast<f32>(now - lastTime);
@@ -1335,7 +1414,8 @@ int main() {
         submitRender(recordScene);
         if (frameAborted) continue;
 
-        imgui.BeginFrame();
+        if (imgui.IsInitialized()) imgui.BeginFrame();   // 非 Vulkan 后端没有 UI
+        if (imgui.IsInitialized()) {   // 非 Vulkan 后端没有 UI，整块跳过
         ImGui::SetNextWindowPos({10, 10}, ImGuiCond_Once);
         ImGui::SetNextWindowBgAlpha(0.5f);
         ImGui::Begin("HugEngine");
@@ -1726,9 +1806,10 @@ int main() {
         }
 
         ImGui::End();
+        }   // end if (imgui.IsInitialized())
         // ---- 命令 2：ImGui 录制 + End + Submit + Present ----
         auto recordUiAndPresent = [&]() {
-            imgui.EndFrame(cmdList.get());
+            if (imgui.IsInitialized()) imgui.EndFrame(cmdList.get());
             cmdList->EndDebugLabel();  // 闭合 BackBuffer pass 级标记
             cmdList->EndRenderPass();  // 关闭 ImGui RP（RG 和 non-RG 都需要）
             framePresenter.EndRecording();   // L4-2：End + Submit 收口

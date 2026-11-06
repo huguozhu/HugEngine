@@ -373,55 +373,8 @@ VulkanTexture::VulkanTexture(VmaAllocator allocator, VkCommandPool cmdPool, VkQu
     if (desc.initialData)
         UploadInitialData(cmdPool, queue, desc);
 
-    // 4. 创建 ImageView
-    VkImageViewCreateInfo viewInfo{};
-    viewInfo.sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    viewInfo.image            = m_Image;
-    viewInfo.viewType         = ToVkImageViewType(desc);
-    viewInfo.format           = m_VkFormat;
-    viewInfo.subresourceRange.aspectMask     = ToVkAspectMask(desc.format);
-    viewInfo.subresourceRange.baseMipLevel   = 0;
-    viewInfo.subresourceRange.levelCount     = m_MipLevels;
-    viewInfo.subresourceRange.baseArrayLayer = 0;
-    viewInfo.subresourceRange.layerCount     = m_ArrayLayers;
-
-    result = vkCreateImageView(m_Device, &viewInfo, nullptr, &m_ImageView);
-    HE_ASSERT(result == VK_SUCCESS, "Failed to create Vulkan image view");
-
-    // 5. 为 Cubemap 创建 6 个逐面 2D ImageView（用于离屏渲染到每个面）
-    if (isCubemap) {
-        m_FaceViews.resize(kCubemapFaceCount);
-        VkImageViewCreateInfo faceViewInfo{};
-        faceViewInfo.sType      = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        faceViewInfo.image      = m_Image;
-        faceViewInfo.viewType   = VK_IMAGE_VIEW_TYPE_2D;
-        faceViewInfo.format     = m_VkFormat;
-        faceViewInfo.subresourceRange.aspectMask     = ToVkAspectMask(desc.format);
-        faceViewInfo.subresourceRange.baseMipLevel   = 0;
-        faceViewInfo.subresourceRange.levelCount     = m_MipLevels;
-        faceViewInfo.subresourceRange.baseArrayLayer = 0;
-        faceViewInfo.subresourceRange.layerCount     = 1;
-
-        for (u32 face = 0; face < kCubemapFaceCount; ++face) {
-            faceViewInfo.subresourceRange.baseArrayLayer = face;
-            result = vkCreateImageView(m_Device, &faceViewInfo, nullptr, &m_FaceViews[face]);
-            HE_ASSERT(result == VK_SUCCESS, "Failed to create cubemap face image view");
-        }
-    }
-
-    // 日志里带上 VkImage 句柄：便于与校验层报错（如 "VkImage 0x…" 布局不符）对账定位
-    // 同时登记「视图 → 底层图像」：render pass 附件以视图形式传入，而 image barrier 只能
-    // 作用于 VkImage，需要靠这份登记在开始 render pass 前补布局转换（见 TextureLayoutTracker.h）
-    TrackViewImage(reinterpret_cast<void*>(m_ImageView), reinterpret_cast<void*>(m_Image),
-                   m_MipLevels, m_ArrayLayers, u32(m_Format));
-    // 逐面视图也必须登记：立方体贴图是**逐面**渲染的（BeginOffscreenPass 传的是面视图），
-    // 而按面视图反查底层图像此前会失败——布局修正与纹理级判定都需要这份登记。
-    // 注意：非 cubemap 时 m_FaceViews 是空容器，故按 size() 遍历而不是按 kCubemapFaceCount 下标。
-    for (usize i = 0; i < m_FaceViews.size(); ++i) {
-        if (m_FaceViews[i] == VK_NULL_HANDLE) continue;
-        TrackViewImage(reinterpret_cast<void*>(m_FaceViews[i]), reinterpret_cast<void*>(m_Image),
-                       m_MipLevels, 1, u32(m_Format));
-    }
+    // 4. 创建 ImageView / 逐面视图，并登记「视图 -> 底层图像」（与瞬态纹理共用同一段代码）
+    CreateImageViews(desc);
 
     // 「已写入」登记（供「采样了从未被写入的纹理」检测使用，见 TextureLayoutTracker.h）：
     //  1) 带初始数据的纹理已由 UploadInitialData 写入确定内容；
@@ -463,8 +416,91 @@ VulkanTexture::~VulkanTexture() {
     m_FaceViews.clear();
     if (m_ImageView) vkDestroyImageView(m_Device, m_ImageView, nullptr);
     if (m_Image) {
-        // vmaDestroyImage 自动处理 vkDestroyImage + vkFreeMemory
-        vmaDestroyImage(m_Allocator, m_Image, m_Allocation);
+        if (m_AdoptedImage) {
+            // 【P6】瞬态纹理：VkImage 由本对象接管，但内存属于瞬态堆（不由我们释放）
+            // ⇒ 只销毁图像对象，绝不能 vmaDestroyImage（它会把整段堆内存一起释放）
+            vkDestroyImage(m_Device, m_Image, nullptr);
+        } else {
+            // vmaDestroyImage 自动处理 vkDestroyImage + vkFreeMemory
+            vmaDestroyImage(m_Allocator, m_Image, m_Allocation);
+        }
+    }
+}
+
+// ============================================================
+// 【P6】接管外部 VkImage（瞬态纹理）：不建 VMA 分配，视图与登记与普通纹理一致
+// ============================================================
+VulkanTexture::VulkanTexture(AdoptExternal, VkDevice device, VkImage image, VkFormat vkFormat,
+                             const TextureDesc& desc)
+    : m_Device(device)
+    , m_Image(image)
+    , m_AdoptedImage(true)
+    , m_Width(desc.width), m_Height(desc.height), m_Depth(desc.depth)
+    , m_MipLevels(desc.mipLevels)
+    , m_ArrayLayers(u32(desc.usage) & u32(TextureUsage::Cubemap) ? kCubemapFaceCount : desc.arrayLayers)
+    , m_SampleCount(desc.sampleCount)
+    , m_Format(desc.format)
+    , m_VkFormat(vkFormat)
+    , m_Usage(desc.usage)
+{
+    MarkTextureAlive(this);
+    CreateImageViews(desc);
+}
+
+// ============================================================
+// CreateImageViews — ImageView / 逐面视图 / 「视图 → 图像」登记（两个构造函数共用）
+// ============================================================
+void VulkanTexture::CreateImageViews(const TextureDesc& desc) {
+    const bool isCubemap = (u32(desc.usage) & u32(TextureUsage::Cubemap)) != 0;
+
+    // 创建 ImageView
+    VkImageViewCreateInfo viewInfo{};
+    viewInfo.sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewInfo.image            = m_Image;
+    viewInfo.viewType         = ToVkImageViewType(desc);
+    viewInfo.format           = m_VkFormat;
+    viewInfo.subresourceRange.aspectMask     = ToVkAspectMask(desc.format);
+    viewInfo.subresourceRange.baseMipLevel   = 0;
+    viewInfo.subresourceRange.levelCount     = m_MipLevels;
+    viewInfo.subresourceRange.baseArrayLayer = 0;
+    viewInfo.subresourceRange.layerCount     = m_ArrayLayers;
+
+    VkResult result = vkCreateImageView(m_Device, &viewInfo, nullptr, &m_ImageView);
+    HE_ASSERT(result == VK_SUCCESS, "Failed to create Vulkan image view");
+
+    // 为 Cubemap 创建 6 个逐面 2D ImageView（用于离屏渲染到每个面）
+    if (isCubemap) {
+        m_FaceViews.resize(kCubemapFaceCount);
+        VkImageViewCreateInfo faceViewInfo{};
+        faceViewInfo.sType      = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        faceViewInfo.image      = m_Image;
+        faceViewInfo.viewType   = VK_IMAGE_VIEW_TYPE_2D;
+        faceViewInfo.format     = m_VkFormat;
+        faceViewInfo.subresourceRange.aspectMask     = ToVkAspectMask(desc.format);
+        faceViewInfo.subresourceRange.baseMipLevel   = 0;
+        faceViewInfo.subresourceRange.levelCount     = m_MipLevels;
+        faceViewInfo.subresourceRange.baseArrayLayer = 0;
+        faceViewInfo.subresourceRange.layerCount     = 1;
+
+        for (u32 face = 0; face < kCubemapFaceCount; ++face) {
+            faceViewInfo.subresourceRange.baseArrayLayer = face;
+            result = vkCreateImageView(m_Device, &faceViewInfo, nullptr, &m_FaceViews[face]);
+            HE_ASSERT(result == VK_SUCCESS, "Failed to create cubemap face image view");
+        }
+    }
+
+    // 日志里带上 VkImage 句柄：便于与校验层报错（如 "VkImage 0x…" 布局不符）对账定位
+    // 同时登记「视图 → 底层图像」：render pass 附件以视图形式传入，而 image barrier 只能
+    // 作用于 VkImage，需要靠这份登记在开始 render pass 前补布局转换（见 TextureLayoutTracker.h）
+    TrackViewImage(reinterpret_cast<void*>(m_ImageView), reinterpret_cast<void*>(m_Image),
+                   m_MipLevels, m_ArrayLayers, u32(m_Format));
+    // 逐面视图也必须登记：立方体贴图是**逐面**渲染的（BeginOffscreenPass 传的是面视图），
+    // 而按面视图反查底层图像此前会失败——布局修正与纹理级判定都需要这份登记。
+    // 注意：非 cubemap 时 m_FaceViews 是空容器，故按 size() 遍历而不是按 kCubemapFaceCount 下标。
+    for (usize i = 0; i < m_FaceViews.size(); ++i) {
+        if (m_FaceViews[i] == VK_NULL_HANDLE) continue;
+        TrackViewImage(reinterpret_cast<void*>(m_FaceViews[i]), reinterpret_cast<void*>(m_Image),
+                       m_MipLevels, 1, u32(m_Format));
     }
 }
 
@@ -727,63 +763,18 @@ std::unique_ptr<IRHISampler> CreateVulkanSampler(
 // ============================================================
 
 VulkanPlacedTexture::VulkanPlacedTexture(VkDevice device, VkImage image, VkFormat vkFormat,
-                                         const TextureDesc& desc)
-    : m_Device(device), m_Image(image)
-    , m_Width(desc.width), m_Height(desc.height), m_Depth(desc.depth)
-    , m_MipLevels(desc.mipLevels)
-    , m_ArrayLayers(u32(desc.usage) & u32(TextureUsage::Cubemap) ? kCubemapFaceCount : desc.arrayLayers)
-    , m_Format(desc.format)
+                                         const TextureDesc& desc, u64 offset, u64 size)
+    // 交给基类的“接管”构造函数：创建 ImageView / 逐面视图 / 布局追踪登记，
+    // 并在析构时销毁这些视图与 VkImage 对象（不释放堆内存）。
+    : VulkanTexture(AdoptExternal{}, device, image, vkFormat, desc)
+    , m_TransientOffset(offset)
+    , m_TransientSize(size)
 {
-    // 创建 ImageView（与 VulkanTexture 构造函数相同逻辑）
-    bool isCubemap = u32(desc.usage) & u32(TextureUsage::Cubemap);
-
-    VkImageViewCreateInfo viewInfo{};
-    viewInfo.sType      = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    viewInfo.image      = m_Image;
-    viewInfo.viewType   = ToVkImageViewType(desc);
-    viewInfo.format     = vkFormat;
-    viewInfo.subresourceRange.aspectMask     = ToVkAspectMask(desc.format);
-    viewInfo.subresourceRange.baseMipLevel   = 0;
-    viewInfo.subresourceRange.levelCount     = m_MipLevels;
-    viewInfo.subresourceRange.baseArrayLayer = 0;
-    viewInfo.subresourceRange.layerCount     = m_ArrayLayers;
-
-    VkResult result = vkCreateImageView(m_Device, &viewInfo, nullptr, &m_ImageView);
-    HE_ASSERT(result == VK_SUCCESS, "VulkanPlacedTexture: 创建 ImageView 失败");
-
-    // Cubemap 逐面视图
-    if (isCubemap) {
-        m_FaceViews.resize(kCubemapFaceCount);
-        VkImageViewCreateInfo faceViewInfo{};
-        faceViewInfo.sType      = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        faceViewInfo.image      = m_Image;
-        faceViewInfo.viewType   = VK_IMAGE_VIEW_TYPE_2D;
-        faceViewInfo.format     = vkFormat;
-        faceViewInfo.subresourceRange.aspectMask = ToVkAspectMask(desc.format);
-        faceViewInfo.subresourceRange.baseMipLevel = 0;
-        faceViewInfo.subresourceRange.levelCount   = m_MipLevels;
-        faceViewInfo.subresourceRange.baseArrayLayer = 0;
-        faceViewInfo.subresourceRange.layerCount     = 1;
-
-        for (u32 face = 0; face < kCubemapFaceCount; ++face) {
-            faceViewInfo.subresourceRange.baseArrayLayer = face;
-            result = vkCreateImageView(m_Device, &faceViewInfo, nullptr, &m_FaceViews[face]);
-            HE_ASSERT(result == VK_SUCCESS, "VulkanPlacedTexture: 创建 Cubemap face view 失败");
-        }
-    }
-
-    HE_CORE_INFO("VulkanPlacedTexture: {}x{} [{}]{}", m_Width, m_Height,
-        m_Format == Format::RGBA8_UNORM ? "RGBA8" : "other",
-        isCubemap ? " cubemap" : "");
-}
-
-VulkanPlacedTexture::~VulkanPlacedTexture() {
-    // 只销毁 ImageView 和 VkImage，不销毁 VkDeviceMemory（由 TransientResourceAllocator 管理）
-    for (auto& fv : m_FaceViews)
-        if (fv) vkDestroyImageView(m_Device, fv, nullptr);
-    m_FaceViews.clear();
-    if (m_ImageView) vkDestroyImageView(m_Device, m_ImageView, nullptr);
-    if (m_Image)     vkDestroyImage(m_Device, m_Image, nullptr);
+    HE_CORE_INFO("VulkanPlacedTexture: {}x{} [{}]{} 堆内偏移={} 大小={}", GetWidth(), GetHeight(),
+        GetFormat() == Format::RGBA8_UNORM ? "RGBA8" : "other",
+        (u32(desc.usage) & u32(TextureUsage::Cubemap)) ? " cubemap" : "",
+        static_cast<unsigned long long>(m_TransientOffset),
+        static_cast<unsigned long long>(m_TransientSize));
 }
 
 } // namespace he::rhi

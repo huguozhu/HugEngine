@@ -273,10 +273,11 @@ void VulkanCommandList::BeginRenderPass(u32 colorCount, Format, Format depthForm
         vkClearValues[0].color.float32[2] = clear[0].color[2];
         vkClearValues[0].color.float32[3] = clear[0].color[3];
     } else {
-        vkClearValues[0].color.float32[0] = 0.1f;
-        vkClearValues[0].color.float32[1] = 0.1f;
-        vkClearValues[0].color.float32[2] = 0.15f;
-        vkClearValues[0].color.float32[3] = 1.0f;
+        // 不传 clear：用三后端统一的默认清除色（见 RHI/CommandList.h 的 kDefaultClearValue）
+        vkClearValues[0].color.float32[0] = kDefaultClearValue.color[0];
+        vkClearValues[0].color.float32[1] = kDefaultClearValue.color[1];
+        vkClearValues[0].color.float32[2] = kDefaultClearValue.color[2];
+        vkClearValues[0].color.float32[3] = kDefaultClearValue.color[3];
     }
     vkClearValues[1].depthStencil.depth   = 1.0f;
     vkClearValues[1].depthStencil.stencil = 0;

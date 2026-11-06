@@ -11,7 +11,7 @@
 #include "RTPayloads.slang"   // ShadowPayload / RayPayload / GIPayload / ReflectionPayload（唯一出处）
 
 [shader("closesthit")]
-void main(inout ShadowPayload payload) {
+void main(inout ShadowPayload payload, in BuiltInTriangleIntersectionAttributes attr) {   // 命中属性：DXR 的 closesthit 入口签名要求带它（SPIR-V 下等价）
     // 命中几何体 → 光线被遮挡 / AO 被遮蔽
     payload.blocked = true;
 }

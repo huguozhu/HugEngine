@@ -88,6 +88,10 @@ struct PassNode {
     RGPassQueue                 queueHint     = RGPassQueue::Default;  // 队列类型提示
     bool                        asyncSchedule = false;  // 编译后: 是否可并行执行
     bool                        requiresSync  = false;  // 编译后: 是否需要跨队列同步点
+    // 【P5】编译后: 该 pass 是否被提到**计算列表**上执行（见 RenderGraph::MarkAsyncQueueGroups）。
+    // 与 asyncSchedule 的区别：那个是"语义上能不能并行"的分析结果，这个是"本帧真的放到计算
+    // 队列上录制"的最终决定（还要满足依赖闭包 / 只用持久资源这两条硬条件）。
+    bool                        hoistedAsync = false;
     // 跨队列 Barrier（AsyncCompute 专用）
     std::vector<BarrierRecord>  crossQueueAcquire;  // Pass 执行前: Graphics→Compute
     std::vector<BarrierRecord>  crossQueueRelease;  // Pass 执行后: Compute→Graphics
@@ -97,6 +101,8 @@ struct PassNode {
 struct AliasInfo {
     u64  offset = 0;   // 池内偏移
     u32  poolId = 0;   // 所属池（0=未分配）
+    u32  firstPass = ~0u;   // 生命周期：首次使用的 pass 序号（~0u = 未使用）
+    u32  lastPass  = 0;     // 生命周期：末次使用的 pass 序号（传给后端做真正的内存别名）
 };
 
 // --- Render Graph ---
@@ -152,6 +158,12 @@ private:
     void InsertCrossQueueBarrier(PassNode* pass,
                                   rhi::QueueType srcQueue,
                                   rhi::QueueType dstQueue);
+    // 【P5】按队列归属把编译后的执行序列分组：决定哪些 Compute hint 的 pass 提到计算列表。
+    // 在 DeriveBarriers 之前调用（屏障要按分组后的真实执行顺序推导）。
+    void MarkAsyncQueueGroups();
+    // 【P5】该资源是否是跨帧持久（导入）资源 —— 异步 pass 只允许碰这类资源，
+    // 才能保证"它读的上一帧内容在本帧图形 pass 之前就已存在"。
+    bool IsPersistentResource(ResourceHandle handle) const;
     // 获取 Pass 之后（拓扑序）的所有 Pass
     std::vector<PassNode*> GetSubsequentPasses(PassNode* pass);
 

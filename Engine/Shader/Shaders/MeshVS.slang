@@ -11,13 +11,17 @@
 #ifndef HUGENGINE_MESH_VS_SLANG
 #define HUGENGINE_MESH_VS_SLANG
 
-// GBuffer pass：worldPos@0 + worldNormal@1 + uv@2 + prevClipPos@3
+// GBuffer pass：worldPos@0 + worldNormal@1 + uv@2 + prevClipPos@3 + objectIndex@4
 struct GBufferVSOutput {
     float4 position : SV_Position;
     [[vk::location(0)]] float3 worldPos;
     [[vk::location(1)]] float3 worldNormal;
     [[vk::location(2)]] float2 uv;
     [[vk::location(3)]] float4 prevClipPos;   // 上一帧裁剪空间位置（含上帧抖动）→ velocity 计算
+    // 【T7】逐实例物体下标：GPU 驱动路径的物体下标来自 SV_InstanceID（= 间接命令 firstInstance），
+    // 与 push constant 里的 objectIndex 可能不同（后者在 GPU 模式下恒 0）。片元着色器必须用
+    // **这一个** 去查材质/包围盒，否则所有像素都会读成物体 0 的材质（实测：Sponza 全被 alpha 裁剪掉）。
+    [[vk::location(4)]] nointerpolation uint objectIndex;
 };
 
 // PBR（前向与延迟共用）：worldPos@0 + worldNormal@1 + uv@2 + objectIndex@3

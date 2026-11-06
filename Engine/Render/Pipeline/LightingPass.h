@@ -211,6 +211,10 @@ private:
     rhi::RHITextureHandle m_PlaceholderWhite{};   // A-3：句柄持有
     rhi::RHITextureHandle m_PlaceholderBlack{};   // A-3：句柄持有
     rhi::RHITextureHandle m_PlaceholderCube{};   // A-3：黑色 Cubemap（IBL 无贡献）
+    // 描述符集的缓冲占位（必须由本对象持有，且每种元素类型一个，见 LightingPass.cpp 的说明）
+    rhi::RHIBufferHandle  m_PlaceholderLightGrid{};        // binding 7：LightGridCell
+    rhi::RHIBufferHandle  m_PlaceholderLightIndexList{};   // binding 8：uint
+    rhi::RHIBufferHandle  m_PlaceholderDDGIProbes{};       // binding 22：float4
     rhi::RHISamplerHandle m_PlaceholderSampler{};   // A-3：句柄持有
 
     u32 m_Width = 0, m_Height = 0;

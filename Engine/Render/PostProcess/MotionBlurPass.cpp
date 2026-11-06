@@ -1,11 +1,16 @@
-// PostProcess/MotionBlurPass.cpp — 运动模糊（velocity-based 方向采样）
+﻿// PostProcess/MotionBlurPass.cpp — 运动模糊（velocity-based 方向采样）
 #include "MotionBlurPass.h"
+#include <iterator>
 #include "Core/Log.h"
 #include "Core/Assert.h"
 #include "Math/Math.h"
 
 #include "SSAO.vert.spv.h"
+#include "SSAO.vert.dxil.h"
+#include "SSAO.vert.dxbc.h"
 #include "MotionBlur.frag.spv.h"
+#include "MotionBlur.frag.dxil.h"
+#include "MotionBlur.frag.dxbc.h"
 
 namespace he::render {
 
@@ -29,9 +34,17 @@ bool MotionBlurPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) 
     rhi::ShaderBytecode vs, fs;
     vs.stage = rhi::ShaderStage::Vertex;
     vs.spirv = k_SSAO_vert_spv;
+    vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+    vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+    vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+    vs.dxbc.assign(std::begin(k_SSAO_vert_dxbc), std::end(k_SSAO_vert_dxbc));
     vs.entryPoint = "vertexMain";
     fs.stage = rhi::ShaderStage::Pixel;
     fs.spirv = k_MotionBlur_frag_spv;
+    fs.dxil.assign(std::begin(k_MotionBlur_frag_dxil), std::end(k_MotionBlur_frag_dxil));
+    fs.dxil.assign(std::begin(k_MotionBlur_frag_dxil), std::end(k_MotionBlur_frag_dxil));
+    fs.dxil.assign(std::begin(k_MotionBlur_frag_dxil), std::end(k_MotionBlur_frag_dxil));
+    fs.dxbc.assign(std::begin(k_MotionBlur_frag_dxbc), std::end(k_MotionBlur_frag_dxbc));
     fs.entryPoint = "fragmentMain";
 
     rhi::PushConstantRange pc;

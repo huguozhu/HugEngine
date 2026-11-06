@@ -115,6 +115,11 @@ enum class NaniteRasterMode : u32 {
 //     把 Nanite 段挡在外面；Nanite 段只能经 `NaniteLocalIndex()` 索引模块自持缓冲。
 // ============================================================
 
+// 软 / 硬光栅「每个可见簇一个工作组」的二维派发宽度：D3D12 单维线程组数上限 65535（网格着色器组数在
+// D3D12 / Vulkan 下同样受限），可见簇容量 2^20 必须拆成 宽 × 高。着色器按 gid.x + gid.y × 宽 换算槽位，
+// 该值必须与 Nanite_SoftRasterCommon.slang 的同名常量一致
+inline constexpr u32 kNaniteRasterDispatchWidth = 1024u;
+
 inline constexpr u32 kNormalObjectIndexBegin    = 0u;
 inline constexpr u32 kNormalObjectIndexCapacity = 1024u;   // = kGPUMaxObjects = MAX_OBJECTS
 inline constexpr u32 kNaniteObjectIndexBegin    = kNormalObjectIndexBegin + kNormalObjectIndexCapacity;

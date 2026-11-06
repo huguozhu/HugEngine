@@ -16,6 +16,11 @@ struct ClearValue {
     u8    stencil  = 0;
 };
 
+/// 【三后端统一的默认清除色】`BeginRenderPass` 不传 clear 指针时用它。
+/// 此前三个后端各用各的默认（Vulkan 深蓝 0.1/0.1/0.15、D3D11 / D3D12 纯黑），
+/// 表现为"同一个样例换后端后背景色变了"。这里取 Vulkan 侧原有的取值作为唯一口径。
+constexpr ClearValue kDefaultClearValue = { {0.1f, 0.1f, 0.15f, 1.0f}, 1.0f, 0 };
+
 struct Viewport {
     float x = 0, y = 0;
     float width  = kDefaultBackBufferWidth;
@@ -45,6 +50,12 @@ public:
     virtual void ExecuteSecondary(IRHICommandList* secondary) = 0;
     virtual bool IsSecondary() const = 0;
 
+    // 【A2】UI 叠加（ImGui）绘制入口。
+    // 直接录制时它当场把 UI 画进命令缓冲；Vulkan 的命令流模式下，UI 必须在**回放**时
+    // 画进影子列表（那时才真正处于 render pass 内部），因此这里编码成一条流命令。
+    // 默认空实现：D3D12 走自己的 ImGui 专用列表，不经过这条路径。
+    virtual void DrawOverlay() {}
+
     // Render pass: binds framebuffer and clears
     virtual void BeginRenderPass(
         u32 colorCount,
@@ -63,6 +74,31 @@ public:
     /// 【L4-3】回放侧提示：命令流自带 render pass 句柄时，先把它交给目标列表。
     /// 默认空实现（后端无关层不需要知道具体类型；Vulkan 后端会真正的把它记下来）。
     virtual void SetRenderPassHint(void* /*renderPass*/) {}
+
+    // ============================================================
+    // 【T10】命令流回放：录制期已解析好的后端细节
+    //
+    // 【为什么需要这三个入口】模式 2 下命令流在 RHI 线程上回放，落后录制线程一到两帧。
+    // 若回放时再去查描述符集内容 / 设备资源状态表，拿到的是**后面帧**的数据（T10 挂起根因）。
+    // 所以录制线程在录制时就完成这些解析，把结果编码进命令流；回放只按数据下指令：
+    //   · ApplyResolvedBarrier            —— 一条已解析的原生资源屏障（转换 / UAV / 别名 / 丢弃）；
+    //   · ApplyResolvedDescriptorTable    —— 已拍下的描述符表快照 GPU 句柄（按帧分版本）；
+    //   · ApplyResolvedRenderTargets      —— 已解析的 RTV/DSV 绑定（如只读深度 DSV 切换）。
+    // 默认空实现：其它后端不产生这些命令（命令流里的对应类型只由 D3D12 录制）。
+    // ============================================================
+    /// 屏障类型（与 RHICommandResolvedBarrier::type 使用同一组数值）
+    enum class ResolvedBarrierType : u32 {
+        Transition = 1,   ///< before → after 的状态转换
+        Uav        = 2,   ///< UAV 屏障（resource 为空表示全局）
+        Aliasing   = 3,   ///< 别名屏障（resourceAfter = resource，before 为空）
+        Discard    = 4,   ///< DiscardResource（配合别名激活清空未知内容）
+    };
+    virtual void ApplyResolvedBarrier(void* /*resource*/, ResolvedBarrierType /*type*/,
+                                      u32 /*subresource*/, u32 /*before*/, u32 /*after*/) {}
+    /// set / srv / uav / sampler 都是录制时取出的 GPU 句柄（后端自行解释）
+    virtual void ApplyResolvedDescriptorTable(u32 /*setIndex*/, u64 /*set*/, u64 /*srv*/,
+                                              u64 /*uav*/, u64 /*sampler*/) {}
+    virtual void ApplyResolvedRenderTargets(void* const* /*rtvs*/, u32 /*count*/, void* /*dsv*/) {}
 
     // 离屏渲染通道：渲染到自定义纹理附件（非 SwapChain）
     // colorImageView/depthImageView 为后端特定句柄（VkImageView），可空。
@@ -173,6 +209,13 @@ public:
                                             IRHIBuffer* countBuffer, u64 countOffset,
                                             u32 maxDrawCount, u32 stride) = 0;
 
+    /// 【非 bindless 后端（D3D11）专用，其它后端为空操作】着色器在没有 bindless 的后端上用单个资源
+    /// 替代 bindless 数组（见 ShaderTypes.slang 的 kGPUBinding_NB_* 与 D3D11 后端实现规划 3.2）：
+    /// 声明在 set 0 的 `binding` 上的替代资源，本次及之后的绘制 / 派发取 bindless 堆里句柄 `handle`
+    /// 对应的资源（材质纹理按 kBindingNBMaterialTextures 给基址，4 张纹理 / 采样器依次取 handle..handle+3）。
+    /// 调用方在把句柄写进推送常量的同一处调用它即可，值一直有效直到被覆盖或下次 Begin。
+    virtual void SetNonBindlessHandle(u32 binding, u32 handle) { (void)binding; (void)handle; }
+
     // Push constants（小型常量数据，直接推送到 GPU 寄存器）
     virtual void BindDescriptorSet(u32 setIndex, DescriptorSetHandle set) = 0;
 
@@ -188,6 +231,13 @@ public:
         PipelineStage srcStage, PipelineStage dstStage,
         ResourceState srcState, ResourceState dstState,
         IRHITexture* texture) = 0;
+
+    /// 单个缓冲的状态转换（声明该缓冲接下来的用途）。
+    /// 经 bindless 句柄读写的缓冲后端无从得知是哪一个（句柄在推送常量里）：D3D12 的缓冲状态必须
+    /// 按资源转换，全局屏障不够，调用方据此显式声明。Vulkan 下全局内存屏障已足够，默认空实现
+    virtual void BufferBarrier(IRHIBuffer* buffer, ResourceState srcState, ResourceState dstState) {
+        (void)buffer; (void)srcState; (void)dstState;
+    }
 
     // 计算着色器调度
     virtual void Dispatch(u32 groupCountX, u32 groupCountY, u32 groupCountZ) = 0;
@@ -259,6 +309,9 @@ public:
     // GPU 时间戳查询
     virtual void WriteTimestamp(IRHIQueryPool* pool, u32 queryIndex) = 0;
     virtual void ResetQueryPool(IRHIQueryPool* pool) = 0;
+    /// 读回 [first, first + count) 这 count 个**查询**的结果。时间戳每个查询写 1 个 u64；
+    /// 管线统计每个查询写 6 个 u64（IA 顶点、IA 图元、VS 调用、裁剪调用、裁剪图元、PS 调用，
+    /// 即 PipelineStatistics::kNumCounters），data 需容纳 count × 6 个 u64
     virtual void GetQueryResults(IRHIQueryPool* pool, u32 first, u32 count, u64* data) = 0;
 
     /// **不阻塞**地读回查询结果：结果尚未就绪时返回 false（`data` 内容未定义）。

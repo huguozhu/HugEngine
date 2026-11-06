@@ -92,6 +92,11 @@ public:
     const std::vector<IndirectDrawCommand>& GetDrawCommands() const { return m_Commands; }
     u32 GetCommandCount() const { return (u32)m_Commands.size(); }
 
+    /// 【T7】每条合批命令对应的**快照条目下标**（与 `GetDrawCommands()` 同序、同长）。
+    /// GPU 驱动的 GBuffer 路径要求「物体缓冲下标 = 间接命令的 firstInstance = 合批序号」，
+    /// 因此需要按合批顺序回查快照条目（世界矩阵 / 世界 AABB / 材质），见 `GBufferRenderer_GPU.cpp`。
+    const std::vector<u32>& GetBatchSnapshotIndices() const { return m_BatchSnapshotIndices; }
+
     /// 【§14.8 任务 19】逐合并网格的材质快照（与 `GetDrawCommands()` **同序、同长**）
     const std::vector<MergedMeshMaterial>& GetMeshMaterials() const { return m_MeshMaterials; }
 
@@ -119,6 +124,8 @@ private:
     std::vector<StaticVertex> m_MergedVertices;
     std::vector<u32>          m_MergedIndices;
     std::vector<IndirectDrawCommand> m_Commands;
+    /// 【T7】与 `m_Commands` 同序的快照条目下标（GPU 驱动路径按它回查物体数据）
+    std::vector<u32>          m_BatchSnapshotIndices;
     /// 【§14.8 任务 19】与 `m_Commands` 同序的材质快照（见 `MergedMeshMaterial`）
     std::vector<MergedMeshMaterial>  m_MeshMaterials;
 

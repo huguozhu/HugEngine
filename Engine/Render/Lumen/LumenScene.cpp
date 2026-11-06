@@ -1,12 +1,17 @@
-#include "Lumen/LumenScene.h"
+﻿#include "Lumen/LumenScene.h"
+#include <iterator>
 
 #include "Core/Log.h"
 #include "Core/Assert.h"              // HE_ASSERT（PSO 创建失败要立刻可见）
 #include <cstdlib>
 #include <string>                    // std::getenv（确定性验收模式的开关）
 
-#include "SSAO.vert.spv.h"            // 全屏三角顶点着色（与 SSGI/AO 等 pass 共用）
-#include "Lumen_Skeleton.frag.spv.h"  // 骨架阶段的常量输出
+#include "SSAO.vert.spv.h"
+#include "SSAO.vert.dxil.h"            // 全屏三角顶点着色（与 SSGI/AO 等 pass 共用）
+#include "SSAO.vert.dxbc.h"
+#include "Lumen_Skeleton.frag.spv.h"
+#include "Lumen_Skeleton.frag.dxil.h"  // 骨架阶段的常量输出
+#include "Lumen_Skeleton.frag.dxbc.h"
 
 namespace he::render {
 
@@ -107,8 +112,7 @@ void LumenScene::OnResize(u32 width, u32 height) {
         m_Device->DestroyBufferHandle(m_CellProbeHistBuf[k]);   m_CellProbeHistBuf[k]   = {};
     }
     m_Device->DestroyBufferHandle(m_ProbeFilteredBuf); m_ProbeFilteredBuf = {};
-    m_Device->DestroyBufferHandle(m_ProbeFilterStatsBuf); m_ProbeFilterStatsBuf = {};
-    m_ProbeFilterStatsMapped = nullptr;
+    m_ProbeFilterStats.Destroy();
     m_ProbeFilterBound = false;
     m_ProbeFilterHistoryReady = false;
     m_ProbeFilterHistIdx = 0;
@@ -122,9 +126,17 @@ void LumenScene::CreateSkeletonPipeline() {
     rhi::ShaderBytecode vs, fs;
     vs.stage      = rhi::ShaderStage::Vertex;
     vs.spirv      = k_SSAO_vert_spv;
+    vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+    vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+    vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+    vs.dxbc.assign(std::begin(k_SSAO_vert_dxbc), std::end(k_SSAO_vert_dxbc));
     vs.entryPoint = "vertexMain";
     fs.stage      = rhi::ShaderStage::Pixel;
     fs.spirv      = k_Lumen_Skeleton_frag_spv;
+    fs.dxil.assign(std::begin(k_Lumen_Skeleton_frag_dxil), std::end(k_Lumen_Skeleton_frag_dxil));
+    fs.dxil.assign(std::begin(k_Lumen_Skeleton_frag_dxil), std::end(k_Lumen_Skeleton_frag_dxil));
+    fs.dxil.assign(std::begin(k_Lumen_Skeleton_frag_dxil), std::end(k_Lumen_Skeleton_frag_dxil));
+    fs.dxbc.assign(std::begin(k_Lumen_Skeleton_frag_dxbc), std::end(k_Lumen_Skeleton_frag_dxbc));
     fs.entryPoint = "fragmentMain";
 
     rhi::PushConstantRange pcr;

@@ -1,14 +1,20 @@
-// ============================================================
+﻿// ============================================================
 // InstanceCuller.cpp — 逐实例 GPU 视锥剔除（任务 25）
 // 阶段 1 第①段（§15.1）：逐网格实例缓冲的状态与生命周期从组件搬到本类（按 meshIndex 索引），
 // 实例变换数据由 `FrameSceneSnapshot` 按值送达 ⇒ 渲染期不再读 InstancedMeshComponent。
 // ============================================================
 
 #include "Pipeline/InstanceCuller.h"
+#include "Pipeline/NonBindless.h"          // 非 bindless 后端（D3D11）的句柄交接
+#include "Threading/MeshRegistry.h"          // PrepareInstances：按 meshIndex 取索引数
+#include "Threading/FrameSceneSnapshot.h"    // PrepareInstances：快照里的实例条目
+#include <iterator>
 #include "Math/Geometry.h"   // Frustum::FromViewProj（六平面提取）
 #include "Core/Log.h"
 
 #include "InstancedCull.comp.spv.h"
+#include "InstancedCull.comp.dxil.h"
+#include "InstancedCull.comp.dxbc.h"
 
 #include <cstdio>
 #include <cstring>
@@ -53,6 +59,10 @@ bool InstanceCuller::Initialize(rhi::IRHIDevice* device) {
     // 3. Compute PSO
     m_CS.stage = rhi::ShaderStage::Compute;
     m_CS.spirv = k_InstancedCull_comp_spv;
+    m_CS.dxil.assign(std::begin(k_InstancedCull_comp_dxil), std::end(k_InstancedCull_comp_dxil));
+    m_CS.dxil.assign(std::begin(k_InstancedCull_comp_dxil), std::end(k_InstancedCull_comp_dxil));
+    m_CS.dxil.assign(std::begin(k_InstancedCull_comp_dxil), std::end(k_InstancedCull_comp_dxil));
+    m_CS.dxbc.assign(std::begin(k_InstancedCull_comp_dxbc), std::end(k_InstancedCull_comp_dxbc));
     m_CS.entryPoint = "main";
 
     rhi::PushConstantRange pc;
@@ -129,7 +139,9 @@ std::unique_ptr<rhi::IRHIBuffer> InstanceCuller::CreateCommandBuffer(u32 indexCo
     if (!m_Device) return nullptr;
     rhi::BufferDesc desc;
     desc.size      = sizeof(InstanceIndirectCommand);
-    desc.usage     = rhi::BufferUsage::Storage;
+    // Storage：剔除着色器原子累加实例数；Indirect：作为 DrawIndexedIndirect 的参数缓冲。
+    // 此前缺 Indirect，Vulkan 下缓冲没有 INDIRECT_BUFFER 用途却被用作间接参数（未定义行为，实测之后的绘制全部错乱）
+    desc.usage     = rhi::BufferUsage::Storage | rhi::BufferUsage::Indirect;
     desc.cpuAccess = true;               // CPU 填命令头 + 读回可见实例数
     auto buf = m_Device->CreateBuffer(desc);
     if (!buf) return nullptr;
@@ -174,7 +186,45 @@ void InstanceCuller::BeginInstancesFrame(rhi::IRHIDevice* device) {
         st.retired.Advance();
         st.seenLastFrame = st.seenThisFrame;
         st.seenThisFrame = false;
+        st.culledThisFrame = false;   // 本帧的剔除由 PrepareInstances 重新派发
         ++it;
+    }
+}
+
+void InstanceCuller::PrepareInstances(rhi::IRHICommandList* cmd, rhi::IRHIDevice* device,
+                                      const MeshRegistry* meshRegistry, const FrameSceneSnapshot& snapshot,
+                                      u32 frameSlot, const float4x4& viewProj) {
+    BeginInstancesFrame(device);   // 帧边界：推进退役队列 + 回收上帧未见的条目
+    if (!cmd || !device || !meshRegistry) return;
+    const u32 slot = frameSlot % rhi::kMaxFramesInFlight;
+    for (const SnapshotInstance& si : snapshot.instances) {
+        if (si.transformCount == 0u) continue;   // 无实例：跳过
+        // 变换切片越界保护：快照损坏时宁可少画，也不要读越界内存
+        if (static_cast<usize>(si.transformOffset) + si.transformCount >
+            snapshot.instanceTransforms.size()) continue;
+        const MeshRegistryEntry* me = meshRegistry->Find(si.meshIndex);
+        if (!me || !me->vertexBuffer || !me->indexBuffer) continue;
+
+        // 实例变换上传（版本未变则直接复用；通道内的绘制再调用时同样直接返回句柄）
+        const u32 instHandle = UploadInstanceTransforms(
+            device, si.meshIndex, snapshot.instanceTransforms.data() + si.transformOffset,
+            si.transformCount, si.transformVersion, si.sourceEntity);
+        if (instHandle == 0) continue;
+        InstanceState* st = FindInstanceState(si.meshIndex);
+        if (!st || !si.enableFrustumCull || !GetPSO()) continue;
+
+        // 命令缓冲按飞行帧存活（本帧 CPU 清零命令时，上帧的间接绘制可能还在读另一份）
+        if (!st->cullCmd[slot]) {
+            st->cullCmd[slot] = CreateCommandBuffer(me->indexCount, 0, 0);
+            if (st->cullCmd[slot])
+                st->cullCmdHandle[slot] = device->GetBindlessHeap()->RegisterBuffer(st->cullCmd[slot].get());
+        }
+        if (!st->cullCmd[slot] || st->cullCmdHandle[slot] == 0) continue;   // 创建失败：通道内整批绘制
+
+        st->visibleInstanceCount = Cull(cmd, st->buffer.get(), st->ssboHandle,
+                                        st->cullCmd[slot].get(), st->cullCmdHandle[slot],
+                                        si.transformCount, slot, si.localBoundsMin, si.localBoundsMax, viewProj);
+        st->culledThisFrame = true;
     }
 }
 
@@ -303,10 +353,19 @@ u32 InstanceCuller::Cull(rhi::IRHICommandList* cmd,
     cmd->SetPipeline(ResP(m_PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
     cmd->SetPushConstants(0, sizeof(pcs), &pcs);
+    // 非 bindless 后端：三个按句柄访问的缓冲（实例变换、可见下标、间接命令）
+    cmd->SetNonBindlessHandle(kGPUBinding_NB_InstanceTransforms, pcs.instanceBufferHandle);
+    cmd->SetNonBindlessHandle(kGPUBinding_NB_CullVisibleOut, pcs.visibleBufferHandle);
+    cmd->SetNonBindlessHandle(kGPUBinding_NB_CullCommandOut, pcs.commandHandle);
 
     char label[64];
     snprintf(label, sizeof(label), "InstancedCull (%u inst)", instanceCount);
     cmd->SetDrawDebugLabel(label);
+    // 可见列表与间接命令经 bindless 句柄写入：后端不知道是哪两个缓冲，显式声明（D3D12 按资源转换状态；
+    // 可见列表在上一个组件的绘制里还被顶点着色器读着）
+    rhi::IRHIBuffer* visibleBuf = ResB(m_VisibleBuf[frameSlot]);
+    cmd->BufferBarrier(visibleBuf,    rhi::ResourceState::ShaderResource,   rhi::ResourceState::UnorderedAccess);
+    cmd->BufferBarrier(commandBuffer, rhi::ResourceState::IndirectArgument, rhi::ResourceState::UnorderedAccess);
     cmd->Dispatch((instanceCount + 63) / 64, 1, 1);
 
     // 屏障：compute 写的可见列表/命令 → 之后的 DrawIndexedIndirect（读命令）与顶点着色器（读列表）
@@ -314,6 +373,8 @@ u32 InstanceCuller::Cull(rhi::IRHICommandList* cmd,
                          rhi::PipelineStage::DrawIndirect | rhi::PipelineStage::VertexShader,
                          rhi::ResourceState::UnorderedAccess,
                          rhi::ResourceState::ShaderResource);
+    cmd->BufferBarrier(visibleBuf,    rhi::ResourceState::UnorderedAccess, rhi::ResourceState::ShaderResource);
+    cmd->BufferBarrier(commandBuffer, rhi::ResourceState::UnorderedAccess, rhi::ResourceState::IndirectArgument);
     ++m_CullCount;
     return prevVisible;
 }

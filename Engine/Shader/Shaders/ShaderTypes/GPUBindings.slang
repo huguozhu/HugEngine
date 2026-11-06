@@ -29,8 +29,35 @@ GPU_CONST(GPU_UINT kGPUBinding_ObjectData       = 2);   // Object SSBO
 GPU_CONST(GPU_UINT kGPUBinding_BindlessTextures = 5);   // Bindless 纹理数组
 GPU_CONST(GPU_UINT kGPUBinding_BindlessSamplers = 6);   // Bindless 采样器数组
 GPU_CONST(GPU_UINT kGPUBinding_BindlessSSBO     = 30);  // Bindless SSBO 数组（最高 binding，VARIABLE_COUNT）
+
+// --- 非 bindless 后端（D3D11 / SM 5.0）的替代绑定（set=0，只出现在 HE_SHADER_D3D11 的声明里）---
+// SM 5.0 不能用运行时句柄索引资源数组：bindless 数组在 D3D11 下换成下面这些单个资源，
+// 由渲染层调用 IRHICommandList::SetNonBindlessHandle(binding, 句柄) 指定本次绘制用 bindless 堆里的哪个资源。
+// 编号选在 Vulkan 布局用不到的范围；UAV 的槽位上限是 63，所以可写缓冲用 60 / 61。
+GPU_CONST(GPU_UINT kGPUBinding_NB_MaterialTextures = 100);  // 材质 4 张纹理 t100..t103（句柄 = 材质纹理基址）
+GPU_CONST(GPU_UINT kGPUBinding_NB_MaterialSamplers = 104);  // 对应的 4 个采样器（与纹理同一个基址）
+GPU_CONST(GPU_UINT kGPUBinding_NB_InstanceTransforms = 110); // 实例世界矩阵 StructuredBuffer<float4x4>
+GPU_CONST(GPU_UINT kGPUBinding_NB_VisibleInstances  = 111); // 剔除后可见实例下标 StructuredBuffer<uint>
+GPU_CONST(GPU_UINT kGPUBinding_NB_BoneMatrices      = 112); // 骨骼矩阵 StructuredBuffer<float4x4>
+GPU_CONST(GPU_UINT kGPUBinding_NB_Materials         = 113); // 材质参数 StructuredBuffer<GPUMaterialData>
+// 纹理数组桶（M6）：后端把静态纹理按（宽, 高, mip 数, 格式）拷进 ≤ 8 个 Texture2DArray，
+// 并维护「bindless 纹理句柄 → (桶号, 层号)」映射表；着色器先查表，未分桶时退回逐绘制绑定
+GPU_CONST(GPU_UINT kGPUBinding_NB_TexBuckets        = 114); // 纹理数组桶 t114..t121
+GPU_CONST(GPU_UINT kGPUTexBucketCount               = 8);   // 桶数（着色器按字面量下标 switch）
+GPU_CONST(GPU_UINT kGPUBinding_NB_TexBucketMap      = 122); // 句柄 → (1 << 31 | 桶号 << 24 | 层号)，未分桶为 0
+GPU_CONST(GPU_UINT kGPUBinding_NB_TexBucketSampler  = 123); // 桶路径的采样器（线性、重复寻址）
+GPU_CONST(GPU_UINT kGPUBinding_NB_CullVisibleOut    = 60);  // 实例剔除：可见下标（RWStructuredBuffer<uint>）
+GPU_CONST(GPU_UINT kGPUBinding_NB_CullCommandOut    = 61);  // 实例剔除：间接命令（RWStructuredBuffer<IndirectCmd>）
+
 GPU_CONST(GPU_UINT kGPUBinding_LightGrid        = 7);   // 光源网格 SSBO
 GPU_CONST(GPU_UINT kGPUBinding_LightIndexList   = 8);   // 光源索引列表 SSBO
+// --- 网格着色器几何 SSBO（P9；只出现在 GBuffer 的 per-frame set 里）---
+// 【为什么是 21/22】GBuffer 的 set=0 目前只占 2（对象）/5/6（bindless 纹理、采样器）/30
+//  （bindless SSBO 数组，其 4096 个描述符占满 30 之后的号段）⇒ 21/22 在其之前、且与该
+//  管线其它 set 的号（Lighting 的 17..31）互不影响（绑定号只在"同一个集"内有意义）。
+//  内容是 `MeshBatcher` 合批出来的合并顶点/索引缓冲，mesh shader 按索引读取。
+GPU_CONST(GPU_UINT kGPUBinding_MeshVertices     = 21);  // 合并顶点 SSBO（StructuredBuffer<StaticVertex>）
+GPU_CONST(GPU_UINT kGPUBinding_MeshIndices      = 22);  // 合并索引 SSBO（StructuredBuffer<uint>，绝对顶点索引）
 
 // --- Forward 管线 Binding 索引 ---
 GPU_CONST(GPU_UINT kGPUBinding_Lights          = 1);   // GPULight[] SSBO

@@ -201,6 +201,7 @@ set(RENDER_SOURCES
     Lumen/LumenFarFieldPass.cpp
     Lumen/LumenFarFieldPass.h
     Lumen/LumenSH.h
+    Lumen/LumenStatsReadback.h   # GPU 原子累加统计的确定性回读
     GI/LumenProvider.h
     # Nanite（虚拟几何模块；§14.8 任务 1：骨架 + 独立开关 + Nanite_Noop）。
     # 登记风格与上面的 Lumen 一致：显式列表，本仓库不用 glob。

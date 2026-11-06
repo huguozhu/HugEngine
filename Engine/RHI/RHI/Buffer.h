@@ -18,6 +18,15 @@ struct BufferDesc {
     bool        cpuAccess   = false;      // Mappable from CPU
     const void* initialData = nullptr;    // Optional initial upload
     usize       stride      = 0;          // For vertex/index buffers
+    /// 结构化缓冲（StructuredBuffer<T>）的元素字节数 sizeof(T)，0 = 未知。
+    /// D3D11 必须在**创建缓冲时**给出元素大小；不填时 D3D11 后端在该缓冲第一次以结构化视图
+    /// 绑定时按着色器反射出的步长重建缓冲（会多一次拷贝并打印提示）。其它后端忽略此字段。
+    usize       structureStride = 0;
+    // 【P10】调试名（仅用于统计 / 诊断；不改变任何行为）。
+    // Storage 缓冲的堆类型统计（`HE_STORAGE_HEAP_STATS=1`）按它列清单，
+    // 便于把"GPU 频繁读写的大缓冲"和"CPU 每帧 Map 的小缓冲"区分开。
+    // 仍以聚合初始化传参 ⇒ 必须保持在**最后一个**字段之后新增。
+    const char* debugName   = nullptr;
 };
 
 // --- Texture descriptor ---
@@ -59,6 +68,17 @@ public:
     // 原生资源句柄（后端特定：Vulkan=VkImageView, 空=未初始化）
     virtual void*  GetNativeHandle() const = 0;          // ImageView 句柄（默认面/层）
     virtual void*  GetNativeHandle(u32 index) const = 0; // 逐面/逐层句柄（Cubemap 面 0-5）
+
+    // ========================================================
+    // 瞬态纹理的存放位置（P6：内存别名的验收/诊断口）
+    //
+    // 语义：仅当该纹理是**瞬态分配**（CreateTransientTexture 创建，放在后端共享的
+    //       瞬态堆上）时返回 true，并给出它在堆内的字节偏移与分配大小。
+    //       普通纹理、或后端没有瞬态堆时返回 false（默认实现）。
+    // 用途：验证"生命周期不重叠的两张瞬态纹理共用同一段内存"——直接比较偏移即可，
+    //       不需要按后端私有类型做转换（样例/测试保持 RHI 中立）。
+    // ========================================================
+    virtual bool GetTransientPlacement(u64& /*offset*/, u64& /*size*/) const { return false; }
 };
 
 // --- Sampler descriptor ---

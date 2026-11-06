@@ -20,19 +20,35 @@
 #include "Core/Assert.h"
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>   // 【T7 诊断】std::getenv（HE_T7_DEBUG）
 #include <chrono>   // 步骤 37：Lumen 计算 pass 的 CPU 录制分解
 #include <cstring>
 #include <algorithm>
 #include <string>
 #include <unordered_set>
 #include "DeferredLighting.vert.spv.h"
+#include "DeferredLighting.vert.dxil.h"
+#include "DeferredLighting.vert.dxbc.h"
 #include "DeferredLighting.frag.spv.h"
+#include "DeferredLighting.frag.dxil.h"
+#include "DeferredLighting.frag.dxbc.h"
 
-// DGC 开关（编译期常量，默认 false 保留传统 ExecuteIndirect 回退）
+// DGC 开关（编译期常量，默认 true：T7 完成后依赖解除，按文档 2.5 第 1 项做端到端验证）
 // 语义与落点详见 DeferredPipeline.cpp 的同名常量：true = GPU 生成绘制命令
 // （MeshBatcher/GBufferRenderer_GPU 产出命令序列 → ExecuteGeneratedCommands）。
 // 注意：`constexpr` ⇒ 编译期常量，未注册 CVar，控制台改不了；要切换请改初值重编译。
-constexpr bool kDGCEnable = false;
+// 【对照实验开关】DGC 默认打开后，用 `HE_DISABLE_DGC=1` 在运行时强制关闭，
+// 这样开 / 关两组截图只需同一份二进制、不用来回改常量重编译（P1 验证用）。
+constexpr bool kDGCEnable = true;
+
+// 运行时的 DGC 强制关闭开关（仅用于开 / 关对照，默认不影响正常路径）
+static bool IsDGCForceDisabled() {
+    static const bool s_off = [] {
+        const char* v = std::getenv("HE_DISABLE_DGC");
+        return (v != nullptr) && (v[0] != '0');
+    }();
+    return s_off;
+}
 
 // CVar: GBuffer 投影贴花开关（任务 24，默认开启）。
 // 关闭后 Deferred 路径不再绘制贴花（贴花卡片已从 GBuffer 排除，见 DeferredPipeline::Initialize），
@@ -116,24 +132,53 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
     m_PostProcess.GetMotionBlur().SetIntensity(camera.motionBlurIntensity);
     // exposureBias 叠加到 AutoExposure 输出（在 ToneMap Pass 前处理）
 
-    // GPUScene 收集 → [GPU 模式: 填充 IndirectDraw 参数] → 上传
+    // GPUScene 收集 → [GPU 模式: 按合批顺序重建对象表 + 填充 IndirectDraw 参数] → 上传
     // 【第③段】GPUScene 不再自建快照：直接消费管线本帧的快照（口径相同 —— 贴花排除已由
     // `BuildObjects` 的 `excludeDecals` 烘进快照），顺带省掉每帧一次重复的物体收集。
-    m_GPUScene.CollectFromSnapshot(FrameSnap());
+    //
     // MeshBatcher 的构建条件有三条：① GPU 模式要靠它填 IndirectDraw 参数；
     // ② **Lumen 的 Mesh SDF 构建需要这份 CPU 侧几何**（步骤 8）——CPU GBuffer 模式下
     //    绘制不走它，但 SDF 仍然要有几何输入，否则距离场队列为空（实测就是这么发现的）；
     // ③ **Nanite 的资产构建也要这份合并几何**（§14.8 任务 12）：模块只把它当**一次性输入**，
     //    且这条条件带 `enabled`，所以关闭档下这一行与今天逐字等价（§14.2 不变式 1）。
+    //
+    // 【T7 顺序】GPU 模式的合批必须在 GPUScene 收集**之前**建好：对象表要按合批顺序（= 间接命令
+    // `firstInstance` = 物体缓冲下标）重排。故这里把"先 Collect 再 Build"改成"GPU 模式先 Build"。
+    const bool gpuGBufferMode = (m_GBuffer->GetMode() == GBufferRenderer::Mode::GPU);
     const bool lumenNeedsGeometry = m_GIConfig.diffuse.Has(GISourceId::Lumen)
                                  || m_GIConfig.specular.Has(GISourceId::Lumen);
     const bool naniteNeedsGeometry = m_Nanite.GetSettings().enabled && m_Nanite.IsReady();
-    if (m_GBuffer->GetMode() == GBufferRenderer::Mode::GPU) {
-        if (!m_BatchBuilt) { m_MeshBatcher.Build(FrameSnap(), m_MeshRegistry, m_ExcludeDecalCards); m_BatchBuilt = true; }
-        m_MeshBatcher.FillGPUScene(m_GPUScene);  // 在 Upload 前写入 draw 参数
-    } else if ((lumenNeedsGeometry || naniteNeedsGeometry) && !m_BatchBuilt) {
-        m_MeshBatcher.Build(FrameSnap(), m_MeshRegistry, m_ExcludeDecalCards);   // 供 Lumen 的 SDF / Nanite 的资产使用
+    if (gpuGBufferMode && !m_BatchBuilt) {
+        m_MeshBatcher.Build(FrameSnap(), m_MeshRegistry, m_ExcludeDecalCards);
         m_BatchBuilt = true;
+    }
+    if (gpuGBufferMode) {
+        // 【T7】按合批顺序重建对象表：GPUScene 下标 / 间接命令 firstInstance / 物体缓冲下标三者对齐。
+        // 旧实现用 `CollectFromSnapshot`（快照全量顺序）+ CPU 裁剪后的可见子集物体缓冲 ⇒ 错位。
+        m_GPUScene.CollectBatchedFromSnapshot(FrameSnap(), m_MeshBatcher.GetBatchSnapshotIndices());
+        m_MeshBatcher.FillGPUScene(m_GPUScene);  // 在 Upload 前写入 draw 参数（同序）
+        // 【T7 诊断】HE_T7_DEBUG=1：打印对象表前几条（objectID / 绘制参数 / 包围盒），
+        // 用来核对「合批序号 = objectID = 间接命令 firstInstance」这条契约。
+        if (std::getenv("HE_T7_DEBUG")) {
+            static u32 s_DumpTimes = 0;
+            if (++s_DumpTimes <= 3u) {
+                const auto& objs = m_GPUScene.GetObjects();
+                const u32 n = (u32)std::min<size_t>(objs.size(), 8u);
+                for (u32 i = 0; i < n; ++i) {
+                    HE_CORE_INFO("[T7] GPUScene[{}]: objectID={} indexCount={} firstIndex={} "
+                                 "vertexOffset={} meshIndex={} boundsMin=({:.1f},{:.1f},{:.1f})",
+                                 i, objs[i].objectID, objs[i].indexCount, objs[i].firstIndex,
+                                 objs[i].vertexOffset, objs[i].meshIndex,
+                                 objs[i].boundsMin.x, objs[i].boundsMin.y, objs[i].boundsMin.z);
+                }
+            }
+        }
+    } else {
+        m_GPUScene.CollectFromSnapshot(FrameSnap());
+        if ((lumenNeedsGeometry || naniteNeedsGeometry) && !m_BatchBuilt) {
+            m_MeshBatcher.Build(FrameSnap(), m_MeshRegistry, m_ExcludeDecalCards);   // 供 Lumen 的 SDF / Nanite 的资产使用
+            m_BatchBuilt = true;
+        }
     }
     m_GPUScene.Upload(m_Device);
 
@@ -179,7 +224,11 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
                 if (m_GBuffer->GetDepth()) m_GPUCulling.SetDepthTexture(m_Device, m_GBuffer->GetDepth(), w, h);
                 m_GPUCulling.DispatchPhase1(c, camera.GetViewProjMatrix(),
                                             m_GPUScene.GetObjectCount(), w, h);
-                c->SetPipeline(m_GBuffer->GetPSO());
+                // 【A1】这里**不得**再绑定 GBuffer 的图形 PSO：本 pass 的队列提示是 Compute，
+                // 会被 RenderGraph 提升到独立的 Compute 命令列表上录制，而 Vulkan 的 Compute
+                // 命令池不支持图形操作 —— 绑定图形管线是非法用法，提交后直接把 GPU 挂死
+                // （实测 04 / 06 第 1 帧 TDR，vkDeviceWaitIdle 返回 VK_ERROR_DEVICE_LOST）。
+                // 该行是 GBufferRenderer 重构时留下的残留：后面的 GBuffer pass 自己会绑定。
             },
             RGPassQueue::Compute);  // AsyncCompute: Phase 1 在 Compute 队列执行
     } else {
@@ -199,7 +248,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
                     m_GPUCulling.Dispatch(c, camera.GetViewProjMatrix(),
                                           m_GPUScene.GetObjectCount(), w, h);
                 }
-                c->SetPipeline(m_GBuffer->GetPSO());
+                // 【A1】同上：Compute 队列的 pass 内不绑定图形 PSO（见 GPU_Cull_Phase1 分支的说明）。
             },
             RGPassQueue::Compute);
     }
@@ -365,6 +414,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
 
             // ── DGC 模式上下文注入（通过 RHI 统一接口）──
             m_DGCEnabled = kDGCEnable
+                && !IsDGCForceDisabled()      // HE_DISABLE_DGC=1：对照实验时强制走传统间接绘制
                 && m_Device->IsDGCReady()
                 && m_GPUCulling.GetIndirectBuffer()
                 && m_GPUCulling.enabled;
@@ -733,8 +783,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
                         // 网格与采样数在参数 UBO 里，dispatch 的射线数在 EnsureCapacity 里定。
                         m_DDGI_Trace->Execute(c, m_RTPass->GetTLAS(), tctx);
                     },
-                    RGPassQueue::Graphics);   // 与 DDGI 的 compute 同队列 ⇒ 靠注册顺序保证先后
-            } else {
+                    RGPassQueue::Graphics);   // 与 DDGI 的 compute 同队列 ⇒ 靠注册顺序保证先后            } else {
                 // 缓冲建不出来：明确回退，不能让 DDGI 去读一个没绑的缓冲（§9.2-T）
                 m_DDGI.SetTracedRadiance(nullptr, 0);
             }
@@ -795,9 +844,12 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
                 m_GITimer.End(c, giIdx);
                 c->SetPipeline(m_Lighting.GetPSO());
             },
-            RGPassQueue::Graphics);  // 与 RSM 同队列顺序执行：探针采样 RSM 前必须确保 RSM 完成
+            // 【P5】GI Provider 的 pass 都是纯 compute（SSGI / Lumen SDF / DDGI 探针滤波），
+            // 且位于帧首的异步前缀内 ⇒ 计算队列。消费方（Lighting 等图形 pass）经时间线围栏
+            // 排在计算列表之后，交接状态由 D3D12 计算列表的 handoff 负责。
+            (m_Device && m_Device->HasAsyncComputeQueue()) ? RGPassQueue::Compute
+                                                           : RGPassQueue::Default);
     }
-
     // ── AO Pass：遍历已注册的 Provider（P4 / Wave 2）──
     // 替代原先手写的「ShouldRunAO + useGTAO 赋值 + 固定 pass 名」：
     // 只要 Provider 声明处理该通道的源且 NeedsPass 为真，就为它注册 pass。
@@ -1338,7 +1390,14 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
                 m_GITimer.Begin(c, giIdx);
                 p->Render(c, MakeGIContext(&camera, m_GIConfig.furnaceMode));
                 m_GITimer.End(c, giIdx);
-            });
+            },
+            // 【P5 修正】这里此前标成 `RGPassQueue::Compute`，但 `GI_IBL::Render` 是**图形** pass：
+            // 它用 `BeginOffscreenPass + SetViewport + Draw(3)` 依次烘焙辐照度图（6 面）、预滤波图
+            // （5 mip × 6 面）与 BRDF LUT。放到计算队列上实测直接触发
+            // `[D3D12 ERROR] id=932 OMSetRenderTargets/RSSetViewports: invalid for COMMAND_LIST_TYPE_COMPUTE`，
+            // 随后设备被移除（hr=0x887a0005）。因此交回图形队列；本帧真正能上计算队列的是
+            // GPU_Cull（纯 compute dispatch，见上方），切分规则见 RenderGraph::MarkAsyncQueueGroups。
+            RGPassQueue::Default);
     }
 
     // Lighting 读取依赖：仅在对应通道注册了 pass 时才加入（避免无效句柄）

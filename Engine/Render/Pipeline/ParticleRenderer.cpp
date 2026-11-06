@@ -1,20 +1,36 @@
-// ParticleRenderer.cpp — GPU 粒子系统完整实现
+﻿// ParticleRenderer.cpp — GPU 粒子系统完整实现
 
 #include "Pipeline/ParticleRenderer.h"
+#include <iterator>
 #include "Math/Geometry.h"   // 统一视锥提取（he::Frustum::FromViewProj）
 #include "Core/Log.h"
 #include "Core/Assert.h"
 #include <cstring>
+#include <cstddef>
 #include <cstdio>
 
 // Slang → SPIR-V headers
 #include "ParticleInit.comp.spv.h"
+#include "ParticleInit.comp.dxil.h"
+#include "ParticleInit.comp.dxbc.h"
 #include "ParticleEmit.comp.spv.h"
+#include "ParticleEmit.comp.dxil.h"
+#include "ParticleEmit.comp.dxbc.h"
 #include "ParticleSimulate.comp.spv.h"
+#include "ParticleSimulate.comp.dxil.h"
+#include "ParticleSimulate.comp.dxbc.h"
 #include "ParticleCulling.comp.spv.h"
+#include "ParticleCulling.comp.dxil.h"
+#include "ParticleCulling.comp.dxbc.h"
 #include "ParticleSort.comp.spv.h"
+#include "ParticleSort.comp.dxil.h"
+#include "ParticleSort.comp.dxbc.h"
 #include "ParticleRender.vert.spv.h"
+#include "ParticleRender.vert.dxil.h"
+#include "ParticleRender.vert.dxbc.h"
 #include "ParticleRender.frag.spv.h"
+#include "ParticleRender.frag.dxil.h"
+#include "ParticleRender.frag.dxbc.h"
 
 namespace he::render {
 
@@ -112,12 +128,18 @@ void ParticleRenderer::CompState::CreateBuffers(rhi::IRHIDevice* device, u32 sor
     {
         rhi::BufferDesc d;
         d.size = sizeof(ParticleCounters);
-        d.usage = rhi::BufferUsage::Storage;
+        d.usage = rhi::BufferUsage::Storage | rhi::BufferUsage::TransferDst;   // 每帧由 CopyBuffer 重置部分字段
         d.cpuAccess = true;
         counters = device->CreateBuffer(d);
         ParticleCounters zero = {};
         std::memcpy(counters->Map(), &zero, sizeof(ParticleCounters));
         counters->Unmap();
+
+        rhi::BufferDesc rd;
+        rd.size = sizeof(ParticleCounters);
+        rd.usage = rhi::BufferUsage::TransferSrc;
+        rd.cpuAccess = true;
+        for (auto& r : counterReset) r = device->CreateBuffer(rd);
     }
     // Random floats — CPU 写入一次
     {
@@ -219,22 +241,42 @@ bool ParticleRenderer::Initialize(rhi::IRHIDevice* device) {
     // Load shader bytecodes
     m_InitCS.stage      = rhi::ShaderStage::Compute;
     m_InitCS.spirv      = k_ParticleInit_comp_spv;
+    m_InitCS.dxil.assign(std::begin(k_ParticleInit_comp_dxil), std::end(k_ParticleInit_comp_dxil));
+    m_InitCS.dxil.assign(std::begin(k_ParticleInit_comp_dxil), std::end(k_ParticleInit_comp_dxil));
+    m_InitCS.dxil.assign(std::begin(k_ParticleInit_comp_dxil), std::end(k_ParticleInit_comp_dxil));
+    m_InitCS.dxbc.assign(std::begin(k_ParticleInit_comp_dxbc), std::end(k_ParticleInit_comp_dxbc));
     m_InitCS.entryPoint = "main";
 
     m_EmitCS.stage      = rhi::ShaderStage::Compute;
     m_EmitCS.spirv      = k_ParticleEmit_comp_spv;
+    m_EmitCS.dxil.assign(std::begin(k_ParticleEmit_comp_dxil), std::end(k_ParticleEmit_comp_dxil));
+    m_EmitCS.dxil.assign(std::begin(k_ParticleEmit_comp_dxil), std::end(k_ParticleEmit_comp_dxil));
+    m_EmitCS.dxil.assign(std::begin(k_ParticleEmit_comp_dxil), std::end(k_ParticleEmit_comp_dxil));
+    m_EmitCS.dxbc.assign(std::begin(k_ParticleEmit_comp_dxbc), std::end(k_ParticleEmit_comp_dxbc));
     m_EmitCS.entryPoint = "main";
 
     m_SimCS.stage       = rhi::ShaderStage::Compute;
     m_SimCS.spirv       = k_ParticleSimulate_comp_spv;
+    m_SimCS.dxil.assign(std::begin(k_ParticleSimulate_comp_dxil), std::end(k_ParticleSimulate_comp_dxil));
+    m_SimCS.dxil.assign(std::begin(k_ParticleSimulate_comp_dxil), std::end(k_ParticleSimulate_comp_dxil));
+    m_SimCS.dxil.assign(std::begin(k_ParticleSimulate_comp_dxil), std::end(k_ParticleSimulate_comp_dxil));
+    m_SimCS.dxbc.assign(std::begin(k_ParticleSimulate_comp_dxbc), std::end(k_ParticleSimulate_comp_dxbc));
     m_SimCS.entryPoint  = "main";
 
     m_CullingCS.stage      = rhi::ShaderStage::Compute;
     m_CullingCS.spirv      = k_ParticleCulling_comp_spv;
+    m_CullingCS.dxil.assign(std::begin(k_ParticleCulling_comp_dxil), std::end(k_ParticleCulling_comp_dxil));
+    m_CullingCS.dxil.assign(std::begin(k_ParticleCulling_comp_dxil), std::end(k_ParticleCulling_comp_dxil));
+    m_CullingCS.dxil.assign(std::begin(k_ParticleCulling_comp_dxil), std::end(k_ParticleCulling_comp_dxil));
+    m_CullingCS.dxbc.assign(std::begin(k_ParticleCulling_comp_dxbc), std::end(k_ParticleCulling_comp_dxbc));
     m_CullingCS.entryPoint = "main";
 
     m_SortCS.stage      = rhi::ShaderStage::Compute;
     m_SortCS.spirv      = k_ParticleSort_comp_spv;
+    m_SortCS.dxil.assign(std::begin(k_ParticleSort_comp_dxil), std::end(k_ParticleSort_comp_dxil));
+    m_SortCS.dxil.assign(std::begin(k_ParticleSort_comp_dxil), std::end(k_ParticleSort_comp_dxil));
+    m_SortCS.dxil.assign(std::begin(k_ParticleSort_comp_dxil), std::end(k_ParticleSort_comp_dxil));
+    m_SortCS.dxbc.assign(std::begin(k_ParticleSort_comp_dxbc), std::end(k_ParticleSort_comp_dxbc));
     m_SortCS.entryPoint = "main";
 
     // Layouts
@@ -299,10 +341,18 @@ bool ParticleRenderer::Initialize(rhi::IRHIDevice* device) {
     // ── Render PSO (Graphics: Billboard) ──
     m_RenderVS.stage      = rhi::ShaderStage::Vertex;
     m_RenderVS.spirv      = k_ParticleRender_vert_spv;
+    m_RenderVS.dxil.assign(std::begin(k_ParticleRender_vert_dxil), std::end(k_ParticleRender_vert_dxil));
+    m_RenderVS.dxil.assign(std::begin(k_ParticleRender_vert_dxil), std::end(k_ParticleRender_vert_dxil));
+    m_RenderVS.dxil.assign(std::begin(k_ParticleRender_vert_dxil), std::end(k_ParticleRender_vert_dxil));
+    m_RenderVS.dxbc.assign(std::begin(k_ParticleRender_vert_dxbc), std::end(k_ParticleRender_vert_dxbc));
     m_RenderVS.entryPoint = "vertexMain";
 
     m_RenderFS.stage      = rhi::ShaderStage::Pixel;
     m_RenderFS.spirv      = k_ParticleRender_frag_spv;
+    m_RenderFS.dxil.assign(std::begin(k_ParticleRender_frag_dxil), std::end(k_ParticleRender_frag_dxil));
+    m_RenderFS.dxil.assign(std::begin(k_ParticleRender_frag_dxil), std::end(k_ParticleRender_frag_dxil));
+    m_RenderFS.dxil.assign(std::begin(k_ParticleRender_frag_dxil), std::end(k_ParticleRender_frag_dxil));
+    m_RenderFS.dxbc.assign(std::begin(k_ParticleRender_frag_dxbc), std::end(k_ParticleRender_frag_dxbc));
     m_RenderFS.entryPoint = "fragmentMain";
 
     {
@@ -365,6 +415,7 @@ void ParticleRenderer::Shutdown(rhi::IRHIDevice* device) {
 // ============================================================
 
 u32 ParticleRenderer::RegisterComponent(ParticleComponent* comp, rhi::IRHIDevice* device) {
+    if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] ...\n"); std::fflush(stdout); }
     CompState cs;
     cs.comp         = comp;
     cs.maxParticles = comp->GetMaxParticles();
@@ -421,6 +472,7 @@ u32 ParticleRenderer::RegisterComponent(ParticleComponent* comp, rhi::IRHIDevice
     comp->SetGPUReady(true);
 
     HE_CORE_INFO("ParticleRenderer: 注册组件 id={} maxParticles={}", id, cs.maxParticles);
+    if (std::getenv("HE_D3D12_TRACE")) { std::printf("[TRACE] ...\n"); std::fflush(stdout); }
     return id;
 }
 
@@ -530,7 +582,7 @@ void ParticleRenderer::DispatchCompute(rhi::IRHICommandList* cmd, u32 id, float 
     }
 
     // ── Step 0: 读回上帧 GPU 执行结果（在 CPU 清零 counters 之前缓存 renderCount）──
-    DebugDumpState(id, "Dispatch-Start(prev-frame-GPU-result)");
+    if (verbose) DebugDumpState(id, "Dispatch-Start(prev-frame-GPU-result)");   // 只在前几帧打，避免每帧刷日志
     {
         ParticleCounters prevCtrs;
         void* prevMap = cs.counters->Map();
@@ -621,29 +673,30 @@ void ParticleRenderer::DispatchCompute(rhi::IRHICommandList* cmd, u32 id, float 
             emitParam.emitShape, emitParam.emitDirectionType, emitParam.sphereRadius,
             emitParam.minInitSpeed, emitParam.maxInitSpeed);
 
-        // 写 emit_count 到 counters (用于 Emit shader 读取)
-        ParticleCounters ctrs;
-        void* cMapBefore = cs.counters->Map();
-        std::memcpy(&ctrs, cMapBefore, sizeof(ParticleCounters));
-        if (verbose) HE_CORE_INFO("    counters-before: dead={} alivePre={} alivePost={} emit={} render={}",
-            ctrs.deadCount, ctrs.aliveCount[0], ctrs.aliveCount[1],
-            ctrs.emitCount, ctrs.renderCount);
-        ctrs.emitCount = emitCount;
-        ctrs.aliveCount[0] = 0;  // 重置 alive_pre（本帧新发射粒子）
-        ctrs.aliveCount[1] = 0;  // 重置 alive_post（Simulate 每帧重新填充）
-        // 注意: simulateCount 不重置 — 用作全局唯一发射计数器（Emit shader 种子生成）
-        ctrs.renderCount = 0;
-        std::memcpy(cMapBefore, &ctrs, sizeof(ParticleCounters));
-        cs.counters->Unmap();
-
-        // 立即回读验证 CPU 写入是否成功（测试 Map/Unmap 对同一 buffer 的读写一致性）
-        ParticleCounters verify;
-        std::memcpy(&verify, cs.counters->Map(), sizeof(ParticleCounters));
-        cs.counters->Unmap();
-        if (verbose) HE_CORE_INFO("    counters-after-write-verify: dead={} alivePre={} emit={} render={} (size={})",
-            verify.deadCount, verify.aliveCount[0], verify.emitCount, verify.renderCount,
-            (u32)sizeof(ParticleCounters));
-        HE_CORE_INFO("    GpuEmitParam size={} maxPushConst={}", (u32)sizeof(GpuEmitParam), (u32)sizeof(GpuEmitParam) > 128 ? "OVER!" : "OK");
+        // 写 emit_count 并重置本帧计数（用于 Emit shader 读取）
+        // 【在 GPU 时间线上重置】此前 CPU 在录制时读出整个计数器、改几个字段再整体写回：
+        // 计数器只有一份，而前几帧的 GPU 模拟可能尚未执行完，CPU 读到旧值后写回，会覆盖 GPU
+        // 对 dead_count 的修改（实测 D3D12 下 dead_count 下溢、粒子几乎画不出来；GPU 越忙越明显）。
+        // 改为：重置值写进按飞行帧轮换的暂存缓冲，再用 CopyBuffer 只拷需要重置的字段，
+        // dead_count / simulate_count 由 GPU 独占维护（simulate_count 是全局发射计数器，不重置）。
+        if (auto* reset = cs.counterReset[cs.counterResetSlot].get()) {
+            cs.counterResetSlot = (cs.counterResetSlot + 1) % rhi::kMaxFramesInFlight;
+            ParticleCounters r = {};
+            r.emitCount     = emitCount;
+            r.aliveCount[0] = 0;   // alive_pre（本帧新发射粒子）
+            r.aliveCount[1] = 0;   // alive_post（Simulate 每帧重新填充）
+            r.renderCount   = 0;
+            std::memcpy(reset->Map(), &r, sizeof(ParticleCounters));
+            reset->Unmap();
+            constexpr u64 kAliveOff  = offsetof(ParticleCounters, aliveCount);   // alive[0..1] + emit 连续 12 字节
+            constexpr u64 kRenderOff = offsetof(ParticleCounters, renderCount);
+            cmd->CopyBuffer(reset, cs.counters.get(), 3 * sizeof(u32), kAliveOff, kAliveOff);
+            cmd->CopyBuffer(reset, cs.counters.get(), sizeof(u32), kRenderOff, kRenderOff);
+            // 拷贝 → 计算着色器读写
+            cmd->PipelineBarrier(rhi::PipelineStage::Transfer, rhi::PipelineStage::ComputeShader,
+                                 rhi::ResourceState::CopyDst, rhi::ResourceState::UnorderedAccess);
+        }
+        if (verbose) HE_CORE_INFO("    GpuEmitParam size={} maxPushConst={}", (u32)sizeof(GpuEmitParam), (u32)sizeof(GpuEmitParam) > 128 ? "OVER!" : "OK");   // 只在前几帧打
 
         cmd->SetPipeline(m_EmitPSO.get());
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, cs.emitSet);
@@ -799,7 +852,7 @@ void ParticleRenderer::Render(rhi::IRHICommandList* cmd, u32 id,
     }
 
     if (renderCount > 0) {
-        HE_CORE_INFO("  >>> DRAW: 6 vertices x {} instances <<<", renderCount);
+        if (verbose) HE_CORE_INFO("  >>> DRAW: 6 vertices x {} instances <<<", renderCount);   // 只在前几帧打
         // 6 顶点 Billboard × N 实例
         cmd->Draw(6, renderCount, 0, 0);
     } else {

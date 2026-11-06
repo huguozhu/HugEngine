@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.28)
+﻿cmake_minimum_required(VERSION 3.28)
 project(HugEngine
     VERSION 0.1.0
     DESCRIPTION "Modern real-time rendering engine"
@@ -34,6 +34,9 @@ option(HUGENGINE_BUILD_SAMPLES   "Build sample projects" ON)
 option(HUGENGINE_BUILD_EDITOR    "Build editor"          ON)
 option(HUGENGINE_BUILD_TESTS     "Build tests"           OFF)
 option(HUGENGINE_RHI_VULKAN      "Enable Vulkan backend" ON)
+# D3D 后端只在 Windows 上可用；非 Windows 平台即使打开也会被忽略
+option(HUGENGINE_RHI_D3D12       "Enable D3D12 backend (Windows only)" ON)
+option(HUGENGINE_RHI_D3D11       "Enable D3D11 backend (Windows only)" ON)
 
 # Vulkan SDK（ImGui Vulkan 后端 + RHI 均需要）
 if(HUGENGINE_RHI_VULKAN)
@@ -79,6 +82,15 @@ if(MSVC)
     # 链接器必须显式开 /DEBUG，否则不产出可解析的 exe PDB（只剩编译期 PDB 引用）。
     set(CMAKE_EXE_LINKER_FLAGS_RELEASE    "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /DEBUG")
     set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "${CMAKE_SHARED_LINKER_FLAGS_RELEASE} /DEBUG")
+endif()
+
+# 工具链：D3D12 的着色器构建需要 ShaderToDxil（HLSL 补丁 + dxc）。
+# 必须在 add_subdirectory(Engine) 之前定义，否则 Engine/Shader 里的
+# 「if(TARGET ShaderToDxil)」判断为假，DXIL 着色器不会被生成。
+if(WIN32)
+    add_subdirectory(Tools/ShaderToDxil)
+    # D3D12 Agility SDK：下载运行时并提供 huge_enable_d3d12_agility()（样例 exe 调用）
+    include(cmake/AgilitySDK.cmake)
 endif()
 
 add_subdirectory(Engine)

@@ -134,6 +134,28 @@ void VulkanDevice::FindQueueFamilies() {
         m_HasAsyncCompute  = false;
         HE_CORE_INFO("AsyncCompute: Tier 0 — 不支持，Compute 与 Graphics 共享队列");
     }
+
+    // ============================================================
+    // 【A1 回退】Vulkan 后端暂不启用异步计算
+    //
+    // 原因（实测，RTX 4060 Laptop / 干净的 9c0348b5）：一旦有独立的 Compute 队列族，
+    // RenderGraph 就会把 deferred 的 GPU_Cull 提升到 Compute 命令列表上录制。这条路径在
+    // Vulkan 上有两处未实现的规范要求：
+    //   ① 跨队列所有权转移：只下发了 acquire（src=Graphics→dst=Compute），图形队列一侧
+    //      没有对应的 release —— 校验层 VUID-vkQueueSubmit-pSubmits-02207；
+    //   ② GPU_Cull 要读**上一帧**的 GBuffer 深度，而帧图给的起始状态是 UNDEFINED，
+    //      Vulkan 下 oldLayout=UNDEFINED 会丢弃内容（D3D12 的 Undefined 只是 promote）。
+    // 结果是第 1 帧就把 GPU 挂死（nvlddmkm 13/153，vkDeviceWaitIdle 返回 -4），
+    // 后续帧全部空转。在补齐"release+acquire 两段式所有权转移 + 深度布局跨帧跟踪"之前，
+    // 这里显式拒绝异步计算并回退到 Tier 0 单队列路径（该路径已被 01/02/03/05 长期验证），
+    // 同时打一条明确警告，绝不允许静默设备丢失。
+    // ============================================================
+    if (m_HasAsyncCompute) {
+        HE_CORE_WARN("Vulkan 后端暂不支持异步计算（跨队列所有权转移未实现）："
+                     "已回退单队列录制（Tier 0），deferred 的 GPU_Cull 改在图形队列上执行");
+        m_ComputeFamily   = m_GraphicsFamily;
+        m_HasAsyncCompute = false;
+    }
 }
 
 // ============================================================
@@ -170,6 +192,9 @@ DeviceCaps VulkanDevice::QueryCaps() const {
 
     // Ray Tracing
     caps.supportsRayTracing       = m_CapsCache.supportsRayTracing;
+    // Vulkan 交换链图像创建时带 VK_IMAGE_USAGE_STORAGE_BIT ⇒ 后缓冲可直接当存储图像写
+    // （01.Triangle 的 RT 模式依赖它；D3D12 的 DXGI 后缓冲没有这个用途位，见 Types.h 的说明）
+    caps.supportsBackBufferStorageImage = true;
     caps.supportsVRS              = false;
     caps.maxRayRecursionDepth     = m_MaxRayRecursionDepth;
     caps.shaderGroupHandleSize    = m_ShaderGroupHandleSize;
@@ -376,14 +401,22 @@ void VulkanDevice::Shutdown() {
     // 1. 等待 GPU 完成所有工作
     if (m_Device) vkDeviceWaitIdle(m_Device);
 
-    // 1.5. 保存并销毁 VkPipelineCache 持久化缓存
+    // 1.5. 先收掉 PSO 预热管理器（等后台线程完成 + 把 worker 缓存合并进主缓存），
+    //      再保存并销毁 VkPipelineCache 持久化缓存 —— 顺序反过来会让预编译的结果
+    //      在落盘之后才合并，下一次启动就读不到（C1 的顺带修正）。
+    m_PSOPrecompileManager.Shutdown();
+
+    // 1.5b. 【C1】预编译专用的 pipeline layout（worker 只借用，必须等线程结束后再销毁）
+    for (auto l : m_PrecompileLayouts) {
+        if (l != VK_NULL_HANDLE) vkDestroyPipelineLayout(m_Device, l, nullptr);
+    }
+    m_PrecompileLayouts.clear();
+
+    // 1.6. 保存并销毁 VkPipelineCache 持久化缓存
     SavePipelineCache();
 
-    // 1.6. 销毁 TransientResourceAllocator（等待 GPU idle 后安全回收所有 Heap）
+    // 1.7. 销毁 TransientResourceAllocator（等待 GPU idle 后安全回收所有 Heap）
     m_TransientAllocator.Shutdown();
-
-    // 1.7. 销毁 PSO 预热管理器（等待后台线程完成 + 销毁 worker cache）
-    m_PSOPrecompileManager.Shutdown();
 
     // 1.8. 销毁 PipelineLibraryCache（延迟销毁四段库 VkPipeline）
     m_PipelineLibraryCache.Shutdown();
@@ -770,6 +803,14 @@ void VulkanDevice::CreateLogicalDevice() {
         //   **本引擎不建任何几何着色器管线**，开启该特性只为满足这条 SPIR-V 能力要求，
         //   对任何既有渲染结果零影响（特性只在被使用时才改变行为）。
         features.geometryShader = supportedCore.geometryShader;
+
+        // pipelineStatisticsQuery：Profiler 的管线统计查询池（VK_QUERY_TYPE_PIPELINE_STATISTICS）要求启用该特性，
+        // 此前未启用，建池与 vkCmdBeginQuery 均违反规范（VUID-VkQueryPoolCreateInfo-queryType-00791）。
+        // 不支持时 CreateQueryPool 对该类型返回空，调用方按「无统计」处理
+        features.pipelineStatisticsQuery = supportedCore.pipelineStatisticsQuery;
+        m_PipelineStatisticsSupported = supportedCore.pipelineStatisticsQuery == VK_TRUE;
+        if (!supportedCore.pipelineStatisticsQuery)
+            HE_CORE_WARN("设备不支持 pipelineStatisticsQuery —— 管线统计查询不可用");
         if (!supportedCore.geometryShader)
             HE_CORE_WARN("设备不支持 geometryShader —— Nanite 绘制端的 SV_PrimitiveID 计数不可用"
                          "（该特性是 Vulkan 1.0 可选特性，桌面 GPU 均支持）");
@@ -867,7 +908,7 @@ void VulkanDevice::CreateCommandPools() {
 // ============================================================
 std::unique_ptr<IRHISwapChain> VulkanDevice::CreateSwapChain(const SwapChainDesc& desc) {
     return std::make_unique<VulkanSwapChain>(m_Device, m_Physical, m_Surface,
-                                            m_GraphicsQueue, desc);
+                                            m_GraphicsQueue, m_GraphicsFamily, desc);
 }
 
 // L4-3: read the command-stream switch (env var, off by default).
@@ -1052,8 +1093,13 @@ void VulkanDevice::Submit(IRHICommandList* cmdList, RHICommandList* stream) {
     HE_ASSERT_RENDER_THREAD();   // T0.1：提交只允许在拥有线程（渲染线程）发起
     // 模式 2：交给提交路由（RHI 线程稍后执行）；未注入路由时行为与改造前完全一致
     if (m_SubmitRouter && m_SubmitRouter->RouteSubmit(cmdList, stream)) return;
-    auto* vulkanCmd = static_cast<VulkanCommandList*>(cmdList);
-    vulkanCmd->Submit();
+    // 【A2】没有提交路由（模式 0/1，单线程样例都走这里）时，就地执行与 RHI 线程
+    // **同一套**提交逻辑（D3D12 侧一直是这么做的）：
+    //   流模式的源列表里只有纯数据，**没有**可提交的 VkCommandBuffer；此前这里直接调
+    //   `vulkanCmd->Submit()`，于是把一条从未 vkBeginCommandBuffer 的命令缓冲提交上去
+    //   —— 既不报错也不绘制，抓帧全黑 / 不出帧的直接原因。
+    //   ExecuteSubmit 内部会判断流模式并走 SubmitStreamReplay（回放到影子列表再提交）。
+    ExecuteSubmit(cmdList, stream);
 }
 
 void VulkanDevice::SetSubmitRouter(ISubmitRouter* router) {
@@ -1116,7 +1162,13 @@ void VulkanDevice::SubmitStreamReplay(VulkanCommandList* src) {
     const u32 replayed = ReplayCommandStream(*streamData, *replay);
     replay->End();
     replay->Submit();
-    HE_CORE_INFO("[CommandStream] replayed {} commands (slot {})", replayed, slot);
+    // 每帧一条 INFO 会刷屏（几十帧后就不好读日志）；改为按需打开 HE_L43_VERBOSE
+    {
+        static const bool s_logReplay = (std::getenv("HE_L43_VERBOSE") != nullptr);
+        if (s_logReplay) {
+            HE_CORE_INFO("[CommandStream] replayed {} commands (slot {})", replayed, slot);
+        }
+    }
 }
 
 void VulkanDevice::ExecutePresent(IRHISwapChain* swapChain, u32 imageIndex, void* waitSemaphore,
@@ -1271,6 +1323,7 @@ void VulkanDevice::SubmitAll(Span<IRHICommandList*> cmdLists) {
 // GPU Query
 // ============================================================
 std::unique_ptr<IRHIQueryPool> VulkanDevice::CreateQueryPool(u32 queryCount, QueryType type) {
+    if (type == QueryType::PipelineStatistics && !m_PipelineStatisticsSupported) return nullptr;   // 特性未启用
     return std::make_unique<VulkanQueryPool>(m_Device, queryCount, type);
 }
 
@@ -1278,6 +1331,21 @@ float VulkanDevice::GetTimestampPeriod() {
     VkPhysicalDeviceProperties props;
     vkGetPhysicalDeviceProperties(m_Physical, &props);
     return float(props.limits.timestampPeriod);
+}
+
+// ============================================================
+// 设备厂商 ID（C1：按厂商决定是否启动 PSO 后台预编译）
+//
+// 只查一次并缓存：`vkGetPhysicalDeviceProperties` 是驱动查询，而厂商 ID 在设备生命周期内
+// 不变；调用点（渲染管线初始化）也只调一次，缓存的意义是避免以后新增调用点时重复查驱动。
+// ============================================================
+u32 VulkanDevice::GetDeviceVendorId() const {
+    if (m_VendorIdCache == 0u && m_Physical != VK_NULL_HANDLE) {
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(m_Physical, &props);
+        m_VendorIdCache = props.vendorID;
+    }
+    return m_VendorIdCache;
 }
 
 // ============================================================
@@ -1296,7 +1364,20 @@ void VulkanDevice::ShutdownDGC() {
 }
 
 bool VulkanDevice::IsDGCReady() const {
-    return m_DGC.IsInitialized();
+    if (!m_DGC.IsInitialized()) return false;
+    // 【A1 回退】Vulkan 的 DGC（VK_EXT_device_generated_commands）绘制路径当前是坏的：
+    // 04.Sponza-Deferred 走「GBuffer GPU 绘制路径：DGC」时整帧只有天空（几何一个都没画出来），
+    // 而同一个场景把 DGC 关掉（HE_DISABLE_DGC=1）走 DrawIndexedIndirectCount 就完全正常。
+    // 这是与本次 TDR 无关的既有缺陷（DGC 的 sequenceCountAddress / execution set 还没对齐），
+    // 但它会让"修好 TDR 之后"的 deferred 画面看起来仍然不对。在把 DGC 的计数/布局修好之前，
+    // 这里显式报告"未就绪"，让上层退回传统间接绘制，并打一条明确警告 —— 绝不静默画空。
+    static bool s_warnedDGCFallback = false;
+    if (!s_warnedDGCFallback) {
+        s_warnedDGCFallback = true;
+        HE_CORE_WARN("Vulkan 的 DGC 绘制路径当前不可用（GBuffer 走 DGC 时画不出几何）："
+                     "已回退 DrawIndexedIndirectCount；对照实验可设 HE_DISABLE_DGC=1（同一路径）");
+    }
+    return false;
 }
 
 // ============================================================
@@ -1520,7 +1601,50 @@ std::shared_ptr<u32> VulkanDevice::GetCachedPSORef(uint64_t hash,
 // PSO 预热管理器 — 后台编译 PSO 变体到独立 VkPipelineCache
 // ============================================================
 void VulkanDevice::PrecompileQueuePSO(const PipelineStateDesc& desc) {
-    m_PSOPrecompileManager.QueuePSO(desc);
+    // 【C1】为预编译建一个**真实**的 pipeline layout（用 desc 的 descriptorSetLayouts 解析出
+    // VkDescriptorSetLayout）。worker 原先用空布局建图形流水线，着色器声明了 set=0 却给 0 个 set
+    // ⇒ 校验层报 VUID-VkGraphicsPipelineCreateInfo-layout-07988。
+    // 布局由设备持有到 Shutdown（worker 只借用，不能自己销毁），因此和预热管理器同寿命。
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    {
+        std::vector<VkDescriptorSetLayout> sets;
+        sets.reserve(desc.descriptorSetLayouts.size());
+        for (const auto h : desc.descriptorSetLayouts) {
+            VkDescriptorSetLayout l = ResolveDescriptorSetLayout(h);
+            sets.push_back(l != VK_NULL_HANDLE ? l : VK_NULL_HANDLE);
+        }
+        std::vector<VkPushConstantRange> pcr;
+        pcr.reserve(desc.pushConstantRanges.size());
+        for (const auto& r : desc.pushConstantRanges) {
+            VkPushConstantRange range{};
+            range.stageFlags = r.stageMask;
+            range.offset     = r.offset;
+            range.size       = r.size;
+            pcr.push_back(range);
+        }
+        // 【C1】描述里没登记 push constant 范围、但着色器又用到了它时（例如 SSAO 的片段着色器），
+        // 空布局会让校验层报 VUID-VkGraphicsPipelineCreateInfo-layout-07987。这里的布局**只服务编译**、
+        // 不参与任何绘制，故给一条宽松的默认范围把这条噪声消掉（不影响生成到缓存里的流水线兼容性）。
+        if (pcr.empty()) {
+            VkPushConstantRange range{};
+            range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+            range.offset     = 0;
+            range.size       = 128;
+            pcr.push_back(range);
+        }
+        VkPipelineLayoutCreateInfo li{};
+        li.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        li.setLayoutCount         = static_cast<u32>(sets.size());
+        li.pSetLayouts            = sets.empty() ? nullptr : sets.data();
+        li.pushConstantRangeCount = static_cast<u32>(pcr.size());
+        li.pPushConstantRanges    = pcr.empty() ? nullptr : pcr.data();
+        if (vkCreatePipelineLayout(m_Device, &li, nullptr, &layout) != VK_SUCCESS) {
+            HE_CORE_WARN("VulkanDevice: 预编译用 pipeline layout 创建失败（worker 将退回空布局）");
+            layout = VK_NULL_HANDLE;
+        }
+    }
+    if (layout != VK_NULL_HANDLE) m_PrecompileLayouts.push_back(layout);
+    m_PSOPrecompileManager.QueuePSO(desc, layout);
 }
 
 void VulkanDevice::StartPSOPrecompile() {
@@ -1588,6 +1712,16 @@ std::unique_ptr<IRHITexture> VulkanDevice::CreateTexture(const TextureDesc& desc
 // 与 CreateTexture 的关键区别：不通过 VMA 分配独占内存
 // ============================================================
 std::unique_ptr<IRHITexture> VulkanDevice::CreateTransientTexture(const TextureDesc& desc) {
+    // 无生命周期信息 ⇒ 按整帧存活（等价于改造前的线性分配）
+    return CreateTransientTexture(desc, 0, ~0u);
+}
+
+// 【P6】带生命周期的瞬态纹理：firstPass / lastPass 是本次执行里首次 / 末次使用该图
+// 的 pass 序号（闭区间）。分配器按"只有生命周期重叠的区段才占位"做 first-fit，于是
+// 生命周期不重叠的两张图会拿到**相同的堆内偏移**（内存别名）；两张图之间由首次使用时
+// 的布局转换（oldLayout = UNDEFINED）完成别名屏障语义。
+std::unique_ptr<IRHITexture> VulkanDevice::CreateTransientTexture(const TextureDesc& desc,
+                                                                 u32 firstPass, u32 lastPass) {
     if (!m_TransientAllocator.IsInitialized()) return nullptr;
 
     // 构建 VkImageCreateInfo（与 VulkanTexture 的构造逻辑保持一致）
@@ -1623,34 +1757,25 @@ std::unique_ptr<IRHITexture> VulkanDevice::CreateTransientTexture(const TextureD
     imageInfo.usage       = ToVkImageUsage(desc.usage);
     imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     if (isCubemap) imageInfo.flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+    // 【P6】瞬态图可能与其他瞬态图共用同一段堆内存（内存别名）：Vulkan 要求这种图带 ALIAS 位
+    imageInfo.flags |= VK_IMAGE_CREATE_ALIAS_BIT;
 
-    // 通过 TransientResourceAllocator 子分配 VkImage + 绑定到共享 Heap
-    auto placed = m_TransientAllocator.AllocateImage(imageInfo);
+    // 通过 TransientResourceAllocator 子分配 VkImage + 绑定到共享 Heap（按生命周期复用区段）
+    auto placed = m_TransientAllocator.AllocateImage(imageInfo, firstPass, lastPass);
     if (placed.image == VK_NULL_HANDLE) {
         HE_CORE_WARN("CreateTransientTexture: 瞬态分配失败 ({}x{}), 回退到普通纹理", desc.width, desc.height);
         return nullptr;  // 调用方应回退到 CreateTexture
     }
 
-    return std::make_unique<VulkanPlacedTexture>(m_Device, placed.image, vkFormat, desc);
+    return std::make_unique<VulkanPlacedTexture>(m_Device, placed.image, vkFormat, desc,
+                                                 placed.offset, placed.size);
 }
 
 std::unique_ptr<IRHISampler> VulkanDevice::CreateSampler(const SamplerDesc& desc) {
     return CreateVulkanSampler(m_Device, desc);
 }
 
-// ============================================================
-// Factory
-// ============================================================
-std::unique_ptr<IRHIDevice> CreateDevice(Backend backend) {
-    if (backend == Backend::Vulkan) {
-        auto device = std::make_unique<VulkanDevice>();
-        // T0.1：把**创建设备的线程**记为 RHI 拥有线程（阶段 0 即主线程；阶段 2 起是渲染线程）。
-        // 由于认领的是"创建线程"，阶段 2 的 T2.2 必须保证设备在渲染线程上创建与销毁。
-        GetThreadAffinity().Claim();
-        return device;
-    }
-    return nullptr;
-}
+// 工厂函数 CreateDevice 已移到 RHI/RHIBase.cpp（各后端由各自的编译开关决定是否参与）
 
 // --- VulkanDeviceAccess — 内部桥接实现 ---
 VkInstance VulkanDeviceAccess::GetInstance(IRHIDevice* d) {

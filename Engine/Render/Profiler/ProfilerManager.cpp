@@ -87,8 +87,9 @@ void ProfilerManager::BeginFrame(rhi::IRHICommandList* cmd) {
 
         // 读回 Pipeline Statistics
         if (m_UsePipelineStats && rbFrame.statsPool) {
-            u32 statsCount = rbFrame.passCount * PipelineStatistics::kNumCounters;
-            cmd->GetQueryResults(rbFrame.statsPool.get(), 0, statsCount,
+            // count 是查询个数（每 Pass 一个查询，后端按每查询 kNumCounters 个 u64 写出）；
+            // 此前传 passCount × 6，Vulkan 按查询个数解释，越过池容量且步长错误
+            cmd->GetQueryResults(rbFrame.statsPool.get(), 0, rbFrame.passCount,
                                  rbFrame.statsData.data());
         }
 

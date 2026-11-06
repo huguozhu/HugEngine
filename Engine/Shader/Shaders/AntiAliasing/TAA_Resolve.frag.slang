@@ -24,8 +24,11 @@ struct TAAUniforms {
 // bindless 的 u_Textures[] / u_Samplers[] / u_Materials[]。用 5 只是靠「TAA 没用到这些数组、
 // 编 SPIR-V 时被裁掉」才没有真正撞车；一旦哪天这里采样 bindless 纹理，两个变量就会同时落在
 // (set=0, binding=5)，校验层报布局与 shader 不匹配。故 UBO 放在 7（TAA 自身 0..4 是纹理）。
-// 注：原写法还带一个孤立的 `: register(b5)`（全仓库唯一一处），一并去掉，与其余 shader 一致。
-[[vk::binding(7, 0)]] cbuffer u_TAA { TAAUniforms u_TAA; }
+// 不写 register：由 ShaderToDxil 按「描述符集常量缓冲 = b(8 + binding)」分配（binding 7 ⇒ D3D12 下 b15）。
+// 此前手写 register(b5) 被原样保留，落在留给推送常量的根 CBV 区间（b0..b7），而根参数 5 从未设置，
+// TAA 一直读未初始化的根参数（GPU 验证 id=935），窗口缩放后读到垃圾，设备挂起。
+// 块名不能与成员同名：同名时 Slang 把块改名为 u_TAA_1，ShaderToDxil 按名字回查源码时对不上、不做重映射
+[[vk::binding(7, 0)]] cbuffer TAAParams { TAAUniforms u_TAA; }
 
 // ── Push Constants ──
 [[vk::push_constant]] cbuffer TAA_PC {

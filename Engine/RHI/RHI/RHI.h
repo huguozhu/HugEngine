@@ -43,6 +43,12 @@ public:
     /// 每次调用都拷贝整个结构体；Vulkan 实现里还会重复驱动查询）。
     virtual const DeviceCaps& GetCaps() const = 0;
 
+    /// 设备厂商 ID（PCI vendor id：NVIDIA 0x10DE / AMD 0x1002 / Intel 0x8086）。
+    /// 【C1 用途】PSO 后台预编译在"Vulkan + Intel 驱动"上会让 worker 线程崩在编译器 DLL 里，
+    /// 因此是否启用预编译必须按**厂商**判断，而不是按后端一刀切。未知/未实现返回 0
+    /// （调用方按"非 Intel"处理：预编译只是纯优化，最坏情况退回惰性编译）。
+    virtual u32 GetDeviceVendorId() const { return 0; }
+
     // --- 格式能力查询（§14.8 任务 18 新增；最小扩展，性质同任务 3/6/12 的 RHI 补充）---
     // 该格式能否作为**存储图像**（UAV / `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT`）被着色器读写。
     // 【为什么需要】任务 18 的软光栅是 compute（写 GBuffer 颜色 UAV），而"compute 写深度"能否
@@ -100,6 +106,13 @@ public:
     // 创建使用瞬态内存的纹理（GPU 完成前帧后内存被回收）
     // 返回 nullptr 表示后端不支持瞬态资源（回退到普通 CreateTexture）
     virtual std::unique_ptr<IRHITexture>        CreateTransientTexture(const TextureDesc& desc) { return nullptr; }
+    // 带生命周期的瞬态纹理：firstPass / lastPass 是本次 RenderGraph 执行中首次 / 末次使用该纹理的
+    // pass 序号（闭区间）。生命周期不重叠的瞬态纹理可由后端放在同一段内存上（内存别名）。
+    // 默认忽略生命周期、转发到上面的版本（不做别名的后端无需改动）
+    virtual std::unique_ptr<IRHITexture>        CreateTransientTexture(const TextureDesc& desc, u32 firstPass, u32 lastPass) {
+        (void)firstPass; (void)lastPass;
+        return CreateTransientTexture(desc);
+    }
     // 推进瞬态资源帧：回收上一帧内存，切换到下一帧的 Heap
     // 默认空实现：后端不支持瞬态资源时安全跳过
     virtual void AdvanceTransientResources() {}
@@ -122,6 +135,15 @@ public:
     // 【A-5】句柄版异步 PSO 创建：立即返回一个"已登记、尚未就绪"的占位句柄，
     // ProcessPSOCreateQueue 在拥有线程上真正创建后填充它。未实现该能力的后端返回空句柄。
     virtual RHIPipelineStateHandle EnqueuePSOCreateHandle(const PipelineStateDesc& /*desc*/) { return {}; }
+
+    // --- 启动阶段的 PSO 批量预编译（T8）---
+    // 【用途】把"初始化阶段创建的全部 PSO"变成一次批处理：批内的 CreatePipelineStateHandle
+    //  只登记占位句柄，真正的编译交给后台预编译线程与初始化工作并行；End 时等后台完成、
+    //  再把占位句柄统一落地（此时命中驱动缓存块，创建很快）。
+    // 【默认实现】空操作：不支持预编译的后端（Vulkan 在本机驱动上会被引擎禁用）保持原有
+    //  同步创建行为，调用方无需按后端分支。
+    virtual void BeginPSOPrecompileBatch() {}
+    virtual void EndPSOPrecompileBatch() {}
 
     // --- Ray Tracing 资源创建 ---
     virtual std::unique_ptr<IRHIAccelerationStructure>
@@ -206,6 +228,13 @@ public:
     /// 获取命令列表后端原生句柄（VkCommandBuffer / ID3D12CommandList），供 ImGui 渲染使用
     virtual void* GetImGuiCommandBuffer(IRHICommandList* cmd) const { return nullptr; }
 
+    /// 【A2】UI 叠加记录器：命令流模式把 UI 绘制推迟到回放侧（影子列表）才执行，
+    /// 那时只有后端拿得到"正在录制的原生命令缓冲"。由上层（ImGuiIntegration）注册一个
+    /// 把 ImGui draw data 画进给定命令缓冲的函数；Vulkan 后端在回放时调用它。
+    /// 默认空实现：D3D12 直接在自己的 ImGui 专用列表上录制，不经过这里。
+    using OverlayRecorder = void (*)(void* nativeCmdBuffer);
+    virtual void SetOverlayRecorder(OverlayRecorder /*recorder*/) {}
+
     // --- Commands ---
     /// `stream`（A-1，可选）：纯数据命令流，由执行端在提交前翻译进 `cmdList`。
     /// 默认 `nullptr` ⇒ 现有调用点一行不改、行为不变。
@@ -261,6 +290,18 @@ public:
 // --- Global device access ---
 IRHIDevice*                     GetDevice();
 void                            SetDevice(IRHIDevice* device);
+/// 按后端创建设备。所请求的后端未编译进本构建、尚未实现或初始化失败时，
+/// 打印中文原因后**直接退出进程**（返回码 1）—— 调用方（各样例）不检查空指针，
+/// 返回空只会在下一行解引用时崩溃，不如在这里给出明确原因。
 std::unique_ptr<IRHIDevice>     CreateDevice(Backend backend);
+
+/// 后端的可读名称（日志用），如 "Vulkan" / "D3D12" / "D3D11"
+const char*                     GetBackendName(Backend backend);
+
+/// 从环境变量 `HE_RHI_BACKEND` 解析要使用的后端（大小写不敏感）。
+/// 取值：`vulkan`（默认）/ `d3d12`（或 `dx12`）/ `d3d11`（或 `dx11`）。无法识别时回退到 Vulkan 并打印警告。
+/// 用途：让所有样例统一支持 `set HE_RHI_BACKEND=d3d12` 切换后端，
+/// 而不必每个样例各写一份解析逻辑。
+Backend ResolveBackendFromEnv();
 
 } // namespace he::rhi

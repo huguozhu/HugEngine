@@ -8,17 +8,23 @@
 #include "common.slang"
 
 struct VSInput {
-    [[vk::location(0)]] float3 positionOS;
-    [[vk::location(1)]] float3 normalOS;
-    [[vk::location(2)]] float2 uv;
+    [[vk::location(0)]] float3 positionOS : POSITION0;
+    [[vk::location(1)]] float3 normalOS   : NORMAL0;
+    [[vk::location(2)]] float2 uv         : TEXCOORD0;
 };
 
 // GPUObjectData 定义来自 ShaderTypes.slang（C++/Slang 共享）
 
-[[vk::binding(kGPUBinding_ObjectData, kGPUDescSet_PerFrame)]] StructuredBuffer<GPUObjectData> u_Objects;
+[[vk::binding(kGPUBinding_ObjectData, kGPUDescSet_PerFrame)]] StructuredBuffer<GPUObjectData> u_Objects : register(t2, space0);
+#if defined(HE_SHADER_D3D11)
+// D3D11（SM 5.0）不能按句柄索引缓冲数组：换成单个缓冲，句柄由渲染层经 SetNonBindlessHandle 指定
+[[vk::binding(kGPUBinding_NB_InstanceTransforms, kGPUDescSet_PerFrame)]] StructuredBuffer<float4x4> u_InstanceTransforms;
+[[vk::binding(kGPUBinding_NB_VisibleInstances, kGPUDescSet_PerFrame)]] StructuredBuffer<uint>     u_VisibleInstanceIndices;
+#else
 // bindless SSBO 数组：实例化网格的实例变换 + 逐实例剔除的可见索引列表（任务 25）
-[[vk::binding(kGPUBinding_BindlessSSBO, kGPUDescSet_PerFrame)]] StructuredBuffer<float4x4> u_InstanceTransforms[];
-[[vk::binding(kGPUBinding_BindlessSSBO, kGPUDescSet_PerFrame)]] StructuredBuffer<uint>     u_VisibleInstanceIndices[];
+[[vk::binding(kGPUBinding_BindlessSSBO, kGPUDescSet_PerFrame)]] StructuredBuffer<float4x4> u_InstanceTransforms[256] : register(t1024, space2);
+[[vk::binding(kGPUBinding_BindlessSSBO, kGPUDescSet_PerFrame)]] StructuredBuffer<uint>     u_VisibleInstanceIndices[256] : register(t1280, space2);
+#endif
 
 // offset 0:  viewProjMatrix     (64B) — 当前帧 VP（含当前帧抖动）
 // offset 64: prevViewProjMatrix (64B) — 上一帧 VP（含**上帧**抖动，velocity 因此自带抖动差）
@@ -33,7 +39,18 @@ struct VSInput {
     uint     _pad[12];               // 填充到 192B
 };
 
-GBufferVSOutput vertexMain(VSInput input, uint instanceID : SV_InstanceID) {
+// 实例号语义：Vulkan 下 Slang 把 SV_InstanceID 编成 gl_InstanceIndex - gl_BaseInstance（不含 firstInstance），
+// 而本引擎用 firstInstance 传对象号 / 簇号（GPU 剔除、Nanite），需要含 firstInstance 的 gl_InstanceIndex（SV_VulkanInstanceID）。
+// D3D 后端（D3D11 / D3D12，定义了 HE_SHADER_HLSL）仍写 SV_InstanceID，由 ShaderToDxil 改为读逐实例序号缓冲（同样含起始实例）
+#ifndef HE_SV_INSTANCE
+#if defined(HE_SHADER_HLSL)
+#define HE_SV_INSTANCE SV_InstanceID
+#else
+#define HE_SV_INSTANCE SV_VulkanInstanceID
+#endif
+#endif
+
+GBufferVSOutput vertexMain(VSInput input, uint instanceID : HE_SV_INSTANCE) {
     // 对象/材质条目：GPU Driven 模式（1）用 SV_InstanceID 当对象下标；
     // 实例化网格（2）是"一个对象条目 + N 个实例"——对象下标仍取 push constant 的 objectIndex，
     // 只有世界矩阵来自实例 SSBO（这一点与 PBR.vert 的语义必须一致，否则会越界读到别的物体）。
@@ -44,8 +61,8 @@ GBufferVSOutput vertexMain(VSInput input, uint instanceID : SV_InstanceID) {
         // 任务 25：可见列表非空时先查压缩后的实例下标（逐实例剔除的结果）
         uint instIdx = instanceID;
         if (instanceVisibleHandle != 0u)
-            instIdx = u_VisibleInstanceIndices[instanceVisibleHandle][instanceID];
-        worldMatrix = u_InstanceTransforms[instanceSSBOHandle][instIdx];
+            instIdx = HE_BINDLESS_BUF(u_VisibleInstanceIndices, instanceVisibleHandle)[instanceID];
+        worldMatrix = HE_BINDLESS_BUF(u_InstanceTransforms, instanceSSBOHandle)[instIdx];
     }
     float4 worldPos = mul(worldMatrix, float4(input.positionOS, 1.0));
 
@@ -55,5 +72,8 @@ GBufferVSOutput vertexMain(VSInput input, uint instanceID : SV_InstanceID) {
     output.worldPos    = worldPos.xyz;
     output.worldNormal = normalize(mul((float3x3)worldMatrix, input.normalOS));
     output.uv          = input.uv;
+    // 【T7】把**实际使用的物体下标**传给片元：GPU 驱动路径下 objectIndex 取 SV_InstanceID
+    //（= 间接命令 firstInstance = 合批序号），push constant 的 oi 在该模式下恒 0。
+    output.objectIndex = objIdx;
     return output;
 }

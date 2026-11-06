@@ -50,20 +50,27 @@ struct SortInfo {
 
 // ── GPU 参数结构体 ──
 
+// 【显式填充】推送常量在 Vulkan 下按 std430 排布（float3 按 16 字节对齐），D3D12 的 cbuffer 按
+// HLSL 规则排布（float3 只要不跨 16 字节边界就紧跟前一个成员）。不显式补齐时两边偏移不同，
+// 而 C++ 端按 Vulkan 布局填写 ⇒ D3D12 读错字段。一律用标量补齐（标量数组在 HLSL 里按 16 字节对齐，不能用）。
 struct GpuEmitParam {
-    float3  position;
-    uint    max_particles;
-    uint    emit_direction_type;
-    float3  direction;
+    float3  position;           // [0]
+    uint    max_particles;      // [12]
+    uint    emit_direction_type;// [16]
+    uint    _pad0a;             // [20] 显式填充：direction 落在 32
+    uint    _pad0b;             // [24]
+    uint    _pad0c;             // [28]
+    float3  direction;          // [32]
     float   direction_spread_percent;
     float   min_init_speed;
     float   max_init_speed;
     float   min_life_time;
     float   max_life_time;
     float3  box_size;
-    int     emit_shape;
-    float   sphere_radius;
-    uint2   tex_rows_cols;
+    int     emit_shape;         // [76]
+    float   sphere_radius;      // [80]
+    uint    _pad1;              // [84] 显式填充：tex_rows_cols 落在 88
+    uint2   tex_rows_cols;      // [88]
     uint    tex_time_sampling_type;
     float   min_size;          // 初始最小大小
     float   max_size;          // 初始最大大小
@@ -72,8 +79,11 @@ struct GpuEmitParam {
 };
 
 struct GpuSimulateParam {
-    float   delta_time;
-    float3  gravity;
+    float   delta_time;         // [0]
+    float   _pad0a;             // [4] 显式填充：gravity 落在 16（见 GpuEmitParam 上方说明）
+    float   _pad0b;             // [8]
+    float   _pad0c;             // [12]
+    float3  gravity;            // [16]
     uint    tex_time_sampling_type;
     uint2   tex_rows_cols;
     float   tex_frames_per_sec;

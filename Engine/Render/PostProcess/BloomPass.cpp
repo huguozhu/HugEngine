@@ -1,14 +1,21 @@
-// PostProcess/BloomPass.cpp — 完整 Bloom 后处理实现
+﻿// PostProcess/BloomPass.cpp — 完整 Bloom 后处理实现
 // 管线：HDR → BrightPass(阈值+半分辨率) → GaussianBlur → Composite(上采样+叠加)
 #include "BloomPass.h"
+#include <iterator>
 #include "Core/Log.h"
 #include "Core/Assert.h"
 #include "Math/Math.h"
 
 // 着色器字节码
-#include "SSAO.vert.spv.h"          // 复用通用全屏三角形顶点着色器
+#include "SSAO.vert.spv.h"
+#include "SSAO.vert.dxil.h"          // 复用通用全屏三角形顶点着色器
+#include "SSAO.vert.dxbc.h"
 #include "BrightPass.frag.spv.h"
+#include "BrightPass.frag.dxil.h"
+#include "BrightPass.frag.dxbc.h"
 #include "BloomComposite.frag.spv.h"
+#include "BloomComposite.frag.dxil.h"
+#include "BloomComposite.frag.dxbc.h"
 
 namespace he::render {
 
@@ -33,9 +40,17 @@ bool BloomPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         rhi::ShaderBytecode vs, fs;
         vs.stage = rhi::ShaderStage::Vertex;
         vs.spirv = k_SSAO_vert_spv;
+        vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+        vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+        vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+        vs.dxbc.assign(std::begin(k_SSAO_vert_dxbc), std::end(k_SSAO_vert_dxbc));
         vs.entryPoint = "vertexMain";
         fs.stage = rhi::ShaderStage::Pixel;
         fs.spirv = k_BrightPass_frag_spv;
+        fs.dxil.assign(std::begin(k_BrightPass_frag_dxil), std::end(k_BrightPass_frag_dxil));
+        fs.dxil.assign(std::begin(k_BrightPass_frag_dxil), std::end(k_BrightPass_frag_dxil));
+        fs.dxil.assign(std::begin(k_BrightPass_frag_dxil), std::end(k_BrightPass_frag_dxil));
+        fs.dxbc.assign(std::begin(k_BrightPass_frag_dxbc), std::end(k_BrightPass_frag_dxbc));
         fs.entryPoint = "fragmentMain";
 
         rhi::PushConstantRange pcRange;
@@ -87,9 +102,17 @@ bool BloomPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         rhi::ShaderBytecode vs, fs;
         vs.stage = rhi::ShaderStage::Vertex;
         vs.spirv = k_SSAO_vert_spv;
+        vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+        vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+        vs.dxil.assign(std::begin(k_SSAO_vert_dxil), std::end(k_SSAO_vert_dxil));
+        vs.dxbc.assign(std::begin(k_SSAO_vert_dxbc), std::end(k_SSAO_vert_dxbc));
         vs.entryPoint = "vertexMain";
         fs.stage = rhi::ShaderStage::Pixel;
         fs.spirv = k_BloomComposite_frag_spv;
+        fs.dxil.assign(std::begin(k_BloomComposite_frag_dxil), std::end(k_BloomComposite_frag_dxil));
+        fs.dxil.assign(std::begin(k_BloomComposite_frag_dxil), std::end(k_BloomComposite_frag_dxil));
+        fs.dxil.assign(std::begin(k_BloomComposite_frag_dxil), std::end(k_BloomComposite_frag_dxil));
+        fs.dxbc.assign(std::begin(k_BloomComposite_frag_dxbc), std::end(k_BloomComposite_frag_dxbc));
         fs.entryPoint = "fragmentMain";
 
         rhi::PushConstantRange pcRange;

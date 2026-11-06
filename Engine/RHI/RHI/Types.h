@@ -47,8 +47,25 @@ constexpr u32 kBindingShadowObjects     = 26;
 constexpr u32 kBindingBindlessTextures = 5;   // Bindless 纹理数组（SampledImage）
 constexpr u32 kBindingBindlessSamplers = 6;   // Bindless 采样器数组（Sampler）
 constexpr u32 kBindingBindlessSSBO    = 30;  // Bindless SSBO 数组（StorageBuffer，binding 号最大以承载 VARIABLE_COUNT）
+// 非 bindless 后端（D3D11）的替代绑定（与 ShaderTypes: kGPUBinding_NB_* 一致），见 IRHICommandList::SetNonBindlessHandle
+constexpr u32 kBindingNBMaterialTextures = 100; // 材质 4 张纹理（句柄 = 材质纹理基址）
+constexpr u32 kBindingNBMaterialSamplers = 104; // 材质 4 个采样器（与纹理同一个基址）
+constexpr u32 kBindingNBMaterialSlots    = 4;   // 每个材质的纹理槽数
+/// SetNonBindlessHandle 的「不绑定任何资源」：bindless 句柄 0 是合法句柄，不能拿 0 表示「没有」
+constexpr u32 kNonBindlessNone           = ~0u;
+// 纹理数组桶（与 ShaderTypes: kGPUBinding_NB_TexBucket* 一致）：由后端按 bindless 堆内容自行提供，不经 SetNonBindlessHandle
+constexpr u32 kBindingNBTexBuckets       = 114; // 纹理数组桶 t114..t121
+constexpr u32 kBindingNBTexBucketCount   = 8;
+constexpr u32 kBindingNBTexBucketMap     = 122; // 句柄 → (1 << 31 | 桶号 << 24 | 层号)
+constexpr u32 kBindingNBTexBucketSampler = 123; // 桶路径的采样器
+constexpr u32 kTexBucketNone             = 0;   // 映射表里「未分桶」（空表 / 越界读到的 0 也就是未分桶）
+constexpr u32 kTexBucketValid            = 1u << 31; // 已分桶的标志位
 constexpr u32 kBindingLightGrid        = 7;   // 光源网格（Clustered Shading SSBO）
 constexpr u32 kBindingLightIndexList   = 8;   // 光源索引列表（Clustered Shading SSBO）
+// 【P9】网格着色器几何 SSBO（GBuffer 的 per-frame set；与 ShaderTypes: kGPUBinding_Mesh* 一致）
+//   内容是合批后的合并顶点/索引缓冲，`GBuffer.mesh.slang` 按索引读顶点（替代输入装配）。
+constexpr u32 kBindingMeshVertices      = 21;
+constexpr u32 kBindingMeshIndices       = 22;
 
 // 渲染管线限制常量（与 ShaderTypes: kGPU* 一致）
 constexpr u32 kMaxColorAttachments  = 8;   // 最大 MRT 颜色附件数
@@ -97,10 +114,17 @@ constexpr u32 kStageMaskCallable      = 0x2000;  // Callable Shader
 enum class Backend : u8 {
     Vulkan,
     D3D12,
-    Metal,
-    WebGPU,
+    D3D11,      // Windows 专用；SM 5.0 / DXBC，无 bindless、无 mesh shader
     Count
 };
+
+/// 是否是 D3D 风格的视口 / 裁剪空间约定：视口高度不能为负，NDC 的 y=+1 恒落在第 0 行。
+/// Vulkan 用负高度视口翻转 Y；D3D11 / D3D12 无法这样做，需要在裁剪空间自行翻转 Y 才能
+/// 得到与 Vulkan 一致的渲染结果（如点光阴影立方体面）。按后端判断坐标约定时用它，
+/// 不要直接写 `== Backend::D3D12`，否则新增 D3D 后端时会漏改。
+constexpr bool IsD3DStyleClipSpace(Backend backend) {
+    return backend == Backend::D3D12 || backend == Backend::D3D11;
+}
 
 // --- Queue type ---
 enum class QueueType : u8 {
@@ -177,6 +201,12 @@ enum class BufferUsage : u32 {
     TransferSrc       = 1 << 6,
     TransferDst       = 1 << 7,
     ShaderBindingTable= 1 << 8,  // VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR（RT SBT 专用）
+    // 光追构建用的 scratch 缓冲（GPU 只写、CPU 从不访问）。
+    // 【为什么要单独一个位】引擎给 TLAS 实例缓冲也是 `Storage | AccelerationStruct`，
+    // 与 scratch 的用途位完全相同；而 D3D12 要求 scratch 必须放在 DEFAULT 堆且带
+    // ALLOW_UNORDERED_ACCESS，实例缓冲却必须 CPU 可写（UPLOAD 堆）。后端无法从用途位
+    // 区分二者，故由调用方显式标注。Vulkan 侧忽略该位（它本来就处处主机可见）。
+    RayTracingScratch = 1 << 9,
 };
 inline BufferUsage operator|(BufferUsage a, BufferUsage b) { return BufferUsage(u32(a) | u32(b)); }
 inline BufferUsage operator&(BufferUsage a, BufferUsage b) { return BufferUsage(u32(a) & u32(b)); }
@@ -317,6 +347,12 @@ struct DeviceCaps {
     u32     maxPushConstantsSize   = 128;
     u32     maxSamplerAnisotropy   = 16;
     bool    supportsRayTracing     = false;
+    /// 【P2】交换链后缓冲能否绑定为「存储图像 / UAV」并直接写入。
+    /// Vulkan 的后缓冲带 VK_IMAGE_USAGE_STORAGE_BIT，可以；D3D12 的 FLIP 模型后缓冲由 DXGI 创建，
+    /// 资源标志只有 ALLOW_RENDER_TARGET，转 UNORDERED_ACCESS 会被调试层判为 id=524（缺
+    /// D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS，而 DXGI 创建的资源无法补这个标志）。
+    /// 供直接用 TraceRays 写后缓冲的样例（01.Triangle 的 RT 模式）判断能否走该路径。
+    bool    supportsBackBufferStorageImage = false;
     bool    supportsMeshShaders    = false;
     bool    supportsGraphicsPipelineLibrary = false;  // VK_EXT_graphics_pipeline_library fast-link
     bool    supportsWorkGraphs     = false;
@@ -326,6 +362,9 @@ struct DeviceCaps {
     bool    supportsCooperativeVectors = false;
     bool    supportsLinearAlgebra  = false;
     bool    supportsSamplerFeedback = false;
+    // 没有 bindless 的后端（D3D11）提供「纹理数组桶」：一次绘制覆盖多个材质的 GPU 驱动路径
+    // （GBuffer GPU 路径、Forward ExecuteIndirect、Nanite 材质纹理）在此为真时可用
+    bool    supportsTextureArrayMaterials = false;
     // 异步计算支持
     bool    supportsAsyncCompute   = false;  // GPU 是否有独立 Compute 队列族
     bool    supportsTransferQueue  = false;  // GPU 是否有独立 Copy 队列 (DMA)

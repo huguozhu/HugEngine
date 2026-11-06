@@ -1,15 +1,20 @@
-// AntiAliasing/AA_FXAA.cpp — FXAA 实现
+﻿// AntiAliasing/AA_FXAA.cpp — FXAA 实现
 #include "AA_FXAA.h"
+#include <iterator>
 #include "Core/Log.h"
 #include "Core/Assert.h"
 
 // 着色器
 #include "FXAA.vert.spv.h"
+#include "FXAA.vert.dxil.h"
+#include "FXAA.vert.dxbc.h"
 #include "FXAA.frag.spv.h"
+#include "FXAA.frag.dxil.h"
+#include "FXAA.frag.dxbc.h"
 
 namespace he::render {
 
-// FXAA 鎻忚堪绗﹂泦缁戝畾鍙穈r
+// FXAA 描述符集绑定号（输入 LDR 纹理）
 static constexpr u32 kFXAABindInput = 0;
 
 bool AA_FXAA::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
@@ -90,9 +95,17 @@ void AA_FXAA::CreatePSO() {
     rhi::ShaderBytecode vs, fs;
     vs.stage=rhi::ShaderStage::Vertex;
     vs.spirv=k_FXAA_vert_spv;
+    vs.dxil.assign(std::begin(k_FXAA_vert_dxil), std::end(k_FXAA_vert_dxil));
+    vs.dxil.assign(std::begin(k_FXAA_vert_dxil), std::end(k_FXAA_vert_dxil));
+    vs.dxil.assign(std::begin(k_FXAA_vert_dxil), std::end(k_FXAA_vert_dxil));
+    vs.dxbc.assign(std::begin(k_FXAA_vert_dxbc), std::end(k_FXAA_vert_dxbc));
     vs.entryPoint="vertexMain";
     fs.stage=rhi::ShaderStage::Pixel;
     fs.spirv=k_FXAA_frag_spv;
+    fs.dxil.assign(std::begin(k_FXAA_frag_dxil), std::end(k_FXAA_frag_dxil));
+    fs.dxil.assign(std::begin(k_FXAA_frag_dxil), std::end(k_FXAA_frag_dxil));
+    fs.dxil.assign(std::begin(k_FXAA_frag_dxil), std::end(k_FXAA_frag_dxil));
+    fs.dxbc.assign(std::begin(k_FXAA_frag_dxbc), std::end(k_FXAA_frag_dxbc));
     fs.entryPoint="fragmentMain";
 
     rhi::PushConstantRange pcr;

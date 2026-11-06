@@ -56,6 +56,21 @@ public:
     PlacedImage AllocateImage(const VkImageCreateInfo& info);
 
     // ============================================================
+    // 【P6】带生命周期的子分配（内存别名）
+    //
+    // firstPass / lastPass：本图在本次 RenderGraph 执行里首次 / 末次使用的 pass 序号（闭区间）。
+    // 生命周期**不重叠**的图可以共用同一段内存：只有生命周期与本次请求重叠的已分配区段才占位，
+    // 其余视为空闲，按偏移排序后找第一个放得下的空隙（first-fit，与 D3D12 后端
+    // `D3D12Device::AllocateTransient` 同一套判据）。
+    // 未给生命周期（firstPass > lastPass）按「整帧存活」处理 ⇒ 退化为不复用的线性分配。
+    //
+    // 【别名屏障】Vulkan 没有 D3D12 的 DiscardResource：复用一段内存上的新图在首次使用时
+    // 从 VK_IMAGE_LAYOUT_UNDEFINED 转换过去，UNDEFINED 语义即"丢弃原有内容"，与 D3D12 的
+    // 别名屏障 + Discard 等价（见各 pass 首次使用的布局转换）。
+    // ============================================================
+    PlacedImage AllocateImage(const VkImageCreateInfo& info, u32 firstPass, u32 lastPass);
+
+    // ============================================================
     // 帧切换：等待并回收下一帧将使用的 Heap
     // 必须在帧开始时调用（在录制任何使用该 Heap 的命令之前）
     // ============================================================
@@ -108,6 +123,16 @@ private:
         u64            bumpOffset  = 0;    // 当前分配游标
         VkFence        fence       = VK_NULL_HANDLE; // GPU 完成此 Heap 的信号
         bool           fenceSignaled = false; // 当前是否已信号（提交后为 true）
+
+        // 【P6】本帧已分配的区段：用于按生命周期做内存别名（first-fit）
+        struct Region {
+            u64 offset   = 0;
+            u64 size     = 0;
+            u32 firstPass = 0;
+            u32 lastPass  = ~0u;
+        };
+        std::vector<Region> regions;
+        u64            peak = 0;   // 本帧分配到过的最高字节数（堆扩容判据 / 统计）
     };
 
     // ============================================================

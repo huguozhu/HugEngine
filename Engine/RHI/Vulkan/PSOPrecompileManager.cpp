@@ -24,6 +24,13 @@ void PSOPrecompileManager::Shutdown() {
     if (m_WorkerThread.joinable()) {
         m_WorkerThread.join();
     }
+    // 【C1】在这里合并（而不是 worker 线程里）：join 之后没有并发的 PSO 创建，
+    // `vkMergePipelineCaches` 对主缓存的外部同步要求成立。合并结果随后会被
+    // `VulkanDevice::SavePipelineCache` 落盘（设备析构里的调用顺序已相应调整）。
+    if (m_WorkerCache != VK_NULL_HANDLE && m_MainCache != VK_NULL_HANDLE &&
+        m_CompiledCount.load() > 0) {
+        MergeCache();
+    }
     if (m_WorkerCache != VK_NULL_HANDLE) {
         vkDestroyPipelineCache(m_Device, m_WorkerCache, nullptr);
         m_WorkerCache = VK_NULL_HANDLE;
@@ -36,9 +43,12 @@ void PSOPrecompileManager::Shutdown() {
     HE_CORE_INFO("PSOPrecompileManager: 已关闭");
 }
 
-void PSOPrecompileManager::QueuePSO(const PipelineStateDesc& desc) {
+void PSOPrecompileManager::QueuePSO(const PipelineStateDesc& desc, VkPipelineLayout layout) {
     std::lock_guard<std::mutex> lock(m_QueueMutex);
-    m_Queue.push_back(desc);
+    QueueItem item;
+    item.desc   = desc;
+    item.layout = layout;   // 借用（生命周期由 VulkanDevice 持有到 Shutdown）
+    m_Queue.push_back(item);
     m_TotalCount.store(static_cast<u32>(m_Queue.size()), std::memory_order_release);
 }
 
@@ -55,12 +65,17 @@ void PSOPrecompileManager::StartPrecompile() {
     // 创建 worker 专用的 VkPipelineCache（从主缓存派生数据，独立编译目标）
     VkPipelineCacheCreateInfo cacheInfo{};
     cacheInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+    // 【C1 崩溃根因】派生数据必须活得比 `vkCreatePipelineCache` 久：原先 `cacheData` 声明在
+    // `if (m_MainCache != VK_NULL_HANDLE)` 的花括号里，`cacheInfo.pInitialData` 指向它之后
+    // 向量就在同一个函数里析构了，而 `vkCreatePipelineCache` 在块**外**才调用 ⇒ 驱动读到已释放的
+    // 堆内存（use-after-free）。实测表现：打开 Vulkan 预编译后 02.Cube 在 ParticleRenderer 初始化
+    // 之后立刻 0xC0000005（ACCESS_VIOLATION）退出 —— 之前把 Vulkan 预编译一刀切禁掉，正是掩盖了它。
+    std::vector<u8> cacheData;
     if (m_MainCache != VK_NULL_HANDLE) {
-        // 从主缓存获取初始数据，使 worker 复用已有的编译结果
         size_t dataSize = 0;
         vkGetPipelineCacheData(m_Device, m_MainCache, &dataSize, nullptr);
         if (dataSize > 0) {
-            std::vector<u8> cacheData(dataSize);
+            cacheData.resize(dataSize);
             vkGetPipelineCacheData(m_Device, m_MainCache, &dataSize, cacheData.data());
             cacheInfo.initialDataSize = dataSize;
             cacheInfo.pInitialData    = cacheData.data();
@@ -143,13 +158,15 @@ void PSOPrecompileManager::WorkerThreadFunc() {
     HE_CORE_INFO("PSOPrecompileManager: Worker 线程启动 (队列大小={})", m_TotalCount.load());
 
     while (!m_StopRequested.load(std::memory_order_acquire)) {
-        // 从队列取一个 PSO
+        // 从队列取一个 PSO（【C1】队列项还带主线程建好的真实 pipeline layout，worker 只借用）
         PipelineStateDesc desc;
+        VkPipelineLayout  sharedLayout = VK_NULL_HANDLE;
         {
             std::lock_guard<std::mutex> lock(m_QueueMutex);
             u32 idx = m_CompiledCount.load(std::memory_order_acquire);
             if (idx >= m_Queue.size()) break;  // 队列已清空
-            desc = m_Queue[idx];
+            desc         = m_Queue[idx].desc;
+            sharedLayout = m_Queue[idx].layout;
         }
 
         // ── 编译 PSO 到 Worker Cache ──
@@ -166,40 +183,51 @@ void PSOPrecompileManager::WorkerThreadFunc() {
                 continue;
             }
 
-            VkPipelineLayout layout = VK_NULL_HANDLE;
-            // 创建临时 pipeline layout（compute 用空 layout 即可满足编译需求）
-            VkPipelineLayoutCreateInfo layoutInfo{};
-            layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-            layoutInfo.setLayoutCount = 0;
-            layoutInfo.pSetLayouts    = nullptr;
-            // 处理 push constant（如果有）
-            std::vector<VkPushConstantRange> pcr;
-            for (auto& r : desc.pushConstantRanges) {
-                VkPushConstantRange range{};
-                range.stageFlags = r.stageMask | VK_SHADER_STAGE_COMPUTE_BIT;
-                range.offset     = r.offset;
-                range.size       = r.size;
-                pcr.push_back(range);
+            // 【C1】优先用主线程给的**真实**布局（含 desc 的 descriptorSetLayouts）。
+            // 没有时退回自建空布局：那只适合不声明任何描述符的着色器，否则校验层会报
+            // VUID-VkGraphicsPipelineCreateInfo-layout-07988（shader 有 set=0、布局里 0 个 set）。
+            VkPipelineLayout layout    = sharedLayout;
+            bool             ownLayout = false;
+            if (layout == VK_NULL_HANDLE) {
+                VkPipelineLayoutCreateInfo layoutInfo{};
+                layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+                layoutInfo.setLayoutCount = 0;
+                layoutInfo.pSetLayouts    = nullptr;
+                // 处理 push constant（如果有）
+                std::vector<VkPushConstantRange> pcr;
+                for (auto& r : desc.pushConstantRanges) {
+                    VkPushConstantRange range{};
+                    range.stageFlags = r.stageMask | VK_SHADER_STAGE_COMPUTE_BIT;
+                    range.offset     = r.offset;
+                    range.size       = r.size;
+                    pcr.push_back(range);
+                }
+                if (!pcr.empty()) {
+                    layoutInfo.pushConstantRangeCount = static_cast<u32>(pcr.size());
+                    layoutInfo.pPushConstantRanges    = pcr.data();
+                }
+                vkCreatePipelineLayout(m_Device, &layoutInfo, nullptr, &layout);
+                ownLayout = true;
             }
-            if (!pcr.empty()) {
-                layoutInfo.pushConstantRangeCount = static_cast<u32>(pcr.size());
-                layoutInfo.pPushConstantRanges    = pcr.data();
-            }
-            vkCreatePipelineLayout(m_Device, &layoutInfo, nullptr, &layout);
 
             VkComputePipelineCreateInfo compInfo{};
             compInfo.sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
             compInfo.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
             compInfo.stage.stage  = VK_SHADER_STAGE_COMPUTE_BIT;
             compInfo.stage.module = cs;
-            compInfo.stage.pName  = desc.computeShader->entryPoint.c_str();
+            // 【C1】入口点名必须与**主创建路径**一致（`VulkanPipeline.cpp` 用的是
+            // `kDefaultShaderEntryPoint`）：Slang 编译出的 SPIR-V 里阶段入口恒为 "main"，
+            // 而 `ShaderBytecode::entryPoint` 是 Slang 源里的函数名（如 "vertexMain"）。
+            // 这里原先用 `desc.entryPoint` ⇒ 校验层报 VUID-VkPipelineShaderStageCreateInfo-pName-00707
+            // 且流水线创建失败（预编译对这些 PSO 实际没产出任何缓存）。
+            compInfo.stage.pName  = kDefaultShaderEntryPoint;
             compInfo.layout       = layout;
 
             VkPipeline pipeline = VK_NULL_HANDLE;
             vkCreateComputePipelines(m_Device, m_WorkerCache, 1, &compInfo, nullptr, &pipeline);
 
             if (pipeline)      vkDestroyPipeline(m_Device, pipeline, nullptr);
-            if (layout)        vkDestroyPipelineLayout(m_Device, layout, nullptr);
+            if (ownLayout && layout) vkDestroyPipelineLayout(m_Device, layout, nullptr);
             vkDestroyShaderModule(m_Device, cs, nullptr);
         } else {
             // Graphics PSO（传统 VS+FS 路径）
@@ -221,7 +249,7 @@ void PSOPrecompileManager::WorkerThreadFunc() {
                 s.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
                 s.stage  = VK_SHADER_STAGE_VERTEX_BIT;
                 s.module = vs;
-                s.pName  = desc.vertexShader->entryPoint.c_str();
+                s.pName  = kDefaultShaderEntryPoint;   // 【C1】与主路径一致（见计算 PSO 处的说明）
                 stages.push_back(s);
             }
             if (fs) {
@@ -229,7 +257,7 @@ void PSOPrecompileManager::WorkerThreadFunc() {
                 s.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
                 s.stage  = VK_SHADER_STAGE_FRAGMENT_BIT;
                 s.module = fs;
-                s.pName  = desc.pixelShader->entryPoint.c_str();
+                s.pName  = kDefaultShaderEntryPoint;   // 【C1】与主路径一致（见计算 PSO 处的说明）
                 stages.push_back(s);
             }
 
@@ -279,24 +307,29 @@ void PSOPrecompileManager::WorkerThreadFunc() {
                           : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
 
             // Pipeline layout
-            VkPipelineLayout layout = VK_NULL_HANDLE;
-            VkPipelineLayoutCreateInfo layoutInfo{};
-            layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-            layoutInfo.setLayoutCount = 0;
-            layoutInfo.pSetLayouts    = nullptr;
-            std::vector<VkPushConstantRange> pcr;
-            for (auto& r : desc.pushConstantRanges) {
-                VkPushConstantRange range{};
-                range.stageFlags = r.stageMask | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-                range.offset     = r.offset;
-                range.size       = r.size;
-                pcr.push_back(range);
+            // 【C1】同计算路径：优先用主线程给的真实布局（含 desc 的 descriptorSetLayouts）
+            VkPipelineLayout layout    = sharedLayout;
+            bool             ownLayout = false;
+            if (layout == VK_NULL_HANDLE) {
+                VkPipelineLayoutCreateInfo layoutInfo{};
+                layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+                layoutInfo.setLayoutCount = 0;
+                layoutInfo.pSetLayouts    = nullptr;
+                std::vector<VkPushConstantRange> pcr;
+                for (auto& r : desc.pushConstantRanges) {
+                    VkPushConstantRange range{};
+                    range.stageFlags = r.stageMask | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+                    range.offset     = r.offset;
+                    range.size       = r.size;
+                    pcr.push_back(range);
+                }
+                if (!pcr.empty()) {
+                    layoutInfo.pushConstantRangeCount = static_cast<u32>(pcr.size());
+                    layoutInfo.pPushConstantRanges    = pcr.data();
+                }
+                vkCreatePipelineLayout(m_Device, &layoutInfo, nullptr, &layout);
+                ownLayout = true;
             }
-            if (!pcr.empty()) {
-                layoutInfo.pushConstantRangeCount = static_cast<u32>(pcr.size());
-                layoutInfo.pPushConstantRanges    = pcr.data();
-            }
-            vkCreatePipelineLayout(m_Device, &layoutInfo, nullptr, &layout);
 
             // Render pass（简化：单 RT + 可选深度）
             VkRenderPass rp = VK_NULL_HANDLE;
@@ -431,7 +464,7 @@ void PSOPrecompileManager::WorkerThreadFunc() {
             // 销毁临时 Vulkan 对象（编译结果已保存在 WorkerCache 中）
             if (pipeline) vkDestroyPipeline(m_Device, pipeline, nullptr);
             if (rp)       vkDestroyRenderPass(m_Device, rp, nullptr);
-            if (layout)   vkDestroyPipelineLayout(m_Device, layout, nullptr);
+            if (ownLayout && layout) vkDestroyPipelineLayout(m_Device, layout, nullptr);
             if (vs)       vkDestroyShaderModule(m_Device, vs, nullptr);
             if (fs)       vkDestroyShaderModule(m_Device, fs, nullptr);
         }
@@ -439,9 +472,9 @@ void PSOPrecompileManager::WorkerThreadFunc() {
         m_CompiledCount.fetch_add(1, std::memory_order_release);
     }
 
-    // 线程完成后自动合并 worker 缓存到主缓存
-    MergeCache();
-
+    // 【C1】合并**不在这里做**：`vkMergePipelineCaches` 要求调用方对主缓存做外部同步，而此刻主线程
+    // 正在用同一个主缓存创建 PSO（首帧起各 pass 惰性建 PSO）⇒ 在 worker 线程里合并是数据竞争。
+    // 合并移到 `Shutdown()`（join 之后、销毁 worker cache 之前），此时不再有并发创建。
     HE_CORE_INFO("PSOPrecompileManager: Worker 线程完成 — {}/{} 个 PSO 已编译",
                  m_CompiledCount.load(), m_TotalCount.load());
     m_Running.store(false, std::memory_order_release);

@@ -42,7 +42,8 @@ struct FSOutput {
     float4x4 lightViewProj;
     uint     objectIndex;
     uint     lightIndex;   // RSM 对应的光源在 u_Lights 中的索引
-    uint     _pad[2];
+    uint     _pad0;        // 显式填充用标量：HLSL cbuffer 中数组元素按 16 字节对齐，
+    uint     _pad1;        // 用 uint[2] 会把 vplAlbedo 推到 112（Vulkan / C++ 端在 80）
     float4   vplAlbedo;    // 该 draw 的 VPL 漫反射率（见文件头：不能从对象缓冲读）
 };
 

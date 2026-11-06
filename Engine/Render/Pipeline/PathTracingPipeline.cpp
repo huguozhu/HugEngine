@@ -10,6 +10,7 @@
 //   3. FXAA → BackBuffer 前通过 ToneMap PreBind 保证 RP 兼容。
 // ============================================================
 #include "Pipeline/PathTracingPipeline.h"
+#include <cstdlib>   // std::getenv（HE_PT_FXAA 调试开关）
 // 阶段 1 附录 E（E-2①）：注册点要读骨骼网格的缓冲与材质字段
 #include "Scene/SkeletalMeshComponent.h"
 #include "Pipeline/PTQualityCVars.h"
@@ -42,6 +43,21 @@ static constexpr u32 kPTFlag_Textures = 1u << 4;   // 材质贴图采样（r.PT.
 // 相机运动 → 时域降噪混合权重缩放：约 0.33m 平移或 0.33rad(~19°) 旋转 → 混合抬到 1.0
 static constexpr float kMotionBlendScale = 3.0f;
 
+// ============================================================
+//  HE_PT_FXAA 开关解析（T5）
+//
+//  语义：未设置 ⇒ 用默认值；`0/off/false/no` ⇒ 关闭；其它非空值（含 1/on/true）⇒ 开启。
+//  此前实现只判断 `getenv() != nullptr`，于是 HE_PT_FXAA=0 也会把 FXAA 打开，
+//  无法做「关闭」对照实验。
+// ============================================================
+static bool ParseFXAAEnv(bool defaultValue) {
+    const char* env = std::getenv("HE_PT_FXAA");
+    if (!env || !*env) return defaultValue;
+    return !(env[0] == '0' || env[0] == 'o' || env[0] == 'O'     // 0 / off
+             || env[0] == 'f' || env[0] == 'F'                   // false
+             || env[0] == 'n' || env[0] == 'N');                 // no
+}
+
 bool PathTracingPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_Device = device;
     // 采用调用方给出的初始尺寸（0 = 沿用默认），避免启动期被 OnResize 全量重建
@@ -50,7 +66,15 @@ bool PathTracingPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 hei
 
     // ── 后处理（ToneMap → LDR → FXAA）──
     m_PostProcess.Initialize(device, m_Width, m_Height);
-    m_PostProcess.EnableFXAA(device, m_Width, m_Height, true);  // 终端 AA 保证 RP 状态正确
+    // FXAA：两个后端默认都开启（终端 AA，保证 RP 状态正确）。
+    // 【T5】D3D12 早年「FXAA 输出偏暗（后缓冲 ~15/255、同帧 LDR ~111/255）」的根因是
+    // 后缓冲格式与 FXAA 的 PSO/RTV 不匹配，整条 FXAA 绘制被 D3D12 丢弃、后缓冲保留着
+    // 上一帧的陈旧内容；交换链统一成 BGRA8（见 D3D12SwapChain.cpp）后该 pass 已能真正执行，
+    // 实测亮度与 Vulkan 一致 ⇒ 不再对 D3D12 设例外，默认开启。
+    // HE_PT_FXAA=0/off 关闭、=1/on 强制开启（见 ParseFXAAEnv）。
+    const bool wantFXAA = ParseFXAAEnv(true);
+    m_PostProcess.EnableFXAA(device, m_Width, m_Height, wantFXAA);
+    HE_CORE_INFO("[T5] PT FXAA: {}", wantFXAA ? "on" : "off");
 
     // ToneMap HDR 输入采样器（线性，与 LightingPass 的 HDR sampler 同款）
     {
@@ -69,7 +93,11 @@ bool PathTracingPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 hei
         dd.format = rhi::Format::D32_FLOAT;
         dd.width  = m_Width;
         dd.height = m_Height;
-        dd.usage  = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource;
+        // TransferDst：`ClearDepthStencil` 走的是 vkCmdClearDepthStencilImage（TRANSFER_DST 布局），
+        // 缺这个用途 Vulkan 会报 VUID-vkCmdClearDepthStencilImage-pRanges-02659/02660 与
+        // VkImageMemoryBarrier-oldLayout-01213（实测 B1：05 一开粒子每帧 3 条）。D3D12 侧不要求。
+        dd.usage  = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource
+                  | rhi::TextureUsage::TransferDst;
         m_ParticleDepth = device->CreateTexture(dd);
 
         rhi::SamplerDesc sd;
@@ -82,9 +110,14 @@ bool PathTracingPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 hei
     }
 
     // ── 三缓冲光源 SSBO ──
+    // 【P10】每帧 CPU Map 写入 ⇒ 显式 cpuAccess=true（否则会被迁到 DEFAULT 堆，Map 变慢路径）
     for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-        m_LightBuffers[i] = device->CreateBuffer(
-            {sizeof(GPULight) * MAX_LIGHTS, rhi::BufferUsage::Storage});
+        rhi::BufferDesc lb;
+        lb.size = sizeof(GPULight) * MAX_LIGHTS;
+        lb.usage = rhi::BufferUsage::Storage;
+        lb.cpuAccess = true;
+        lb.debugName = "PathTracing.Lights";
+        m_LightBuffers[i] = device->CreateBuffer(lb);
     }
 
     // ── Ray Tracing 子系统 ──
@@ -211,12 +244,15 @@ void PathTracingPipeline::NextFrame() {
     // 【T2.4 步骤 (b)】推进快照槽位：命令载荷指向的快照在其被消费完之前不会被复用
     m_SnapshotSlot = (m_SnapshotSlot + 1u) % MAX_FRAMES_IN_FLIGHT;
     m_Assembler.Bind(&SnapBuf(), &m_MeshRegistry);
-    m_Assembler.SetFrameSlot(RenderFrameSlot());   // 随快照冻结给渲染命令
+    // 【先推进再冻结】此前用 RenderFrameSlot() 取槽位：有快照时它返回的是**上一帧快照**的槽位，
+    // 自己喂自己，槽位永远停在 0 ⇒ 按飞行帧多份的资源（剔除命令、描述符集、HDR 目标等）实际只用第 0 份，
+    // CPU 录制下一帧时改写 GPU 仍在使用的那份（Vulkan 下逐实例剔除的实例数被提前清零，实例化网格消失）
+    m_CurrentFrameSlot = (m_CurrentFrameSlot + 1) % MAX_FRAMES_IN_FLIGHT;
+    m_Assembler.SetFrameSlot(m_CurrentFrameSlot);   // 随快照冻结给渲染命令
     // 【必须每帧复位】`AssembleScene` 靠 `m_Assembled` 做"每帧只装配一次"的幂等；不复位就会
     // **只在第一帧装配**（静态场景看不出来，但动态场景会冻结，且多槽快照下其它槽永远为空）。
     m_Assembler.BeginFrame();
     m_Assembler.Settings().physicalUnitsEnabled = cvLightPhysicalUnits.Get();
-    m_CurrentFrameSlot = (m_CurrentFrameSlot + 1) % MAX_FRAMES_IN_FLIGHT;
 }
 
 void PathTracingPipeline::OnResize(u32 w, u32 h) {
@@ -238,7 +274,9 @@ void PathTracingPipeline::OnResize(u32 w, u32 h) {
         dd.format = rhi::Format::D32_FLOAT;
         dd.width  = w;
         dd.height = h;
-        dd.usage  = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource;
+        // 与 Initialize 同一用途集（TransferDst 见该处的说明）
+        dd.usage  = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource
+                  | rhi::TextureUsage::TransferDst;
         m_ParticleDepth = m_Device->CreateTexture(dd);
         m_ParticleRenderer.SetSceneDepth(m_ParticleDepth.get(), m_ParticleDepthSampler.get());
     }
@@ -337,6 +375,25 @@ void PathTracingPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& cam
     m_CurrViewProj = camera.GetViewProjMatrix();
     static bool firstFrame = true;
     if (firstFrame) { m_PrevViewProj = m_CurrViewProj; firstFrame = false; }
+
+    // ── A3：把本帧的**飞行帧槽位**派给"输入纹理逐帧轮换"的三个后处理 pass ──
+    //
+    // 时域降噪的历史、A-Trous 的输入（降噪输出）、ToneMap 的输入（A-Trous 输出 / 降噪输出）
+    // 都在**成对的两张纹理之间轮换** ⇒ 它们的描述符绑定内容每帧都变。若这些 pass 只备
+    // 一份描述符集，本帧改写它时，仍在 GPU 上执行的上两帧读到的会是本帧刚写进去的绑定 ——
+    // 实测表现就是 05 在 Vulkan 上重复运行后缓冲亮度在 58.36/66.24/74.23/76.33 之间跳变
+    // （D3D12 因 Present 恰好把在飞帧压到 1 而未显形）。
+    // 按槽位各备一份描述符集 + 本帧只写本槽位，就能与 RHI 的 kMaxFramesInFlight 个命令缓冲
+    // 槽位（`VulkanCommandList::Begin` 复用槽位前会 vkWaitForFences）对齐：本帧用过的集
+    // 要再过 kMaxFramesInFlight 帧才会被重写，那时它那一帧的栅栏早已等到。
+    // 这与 ForwardPipeline（`m_ToneMap->SetFrameSlot(RenderFrameSlot())`）、ToneMapPass 的
+    // 既有约定完全一致。
+    {
+        const u32 slot = RenderFrameSlot();
+        if (m_PTDenoiser) m_PTDenoiser->SetFrameSlot(slot);
+        if (m_PTAtrous)   m_PTAtrous->SetFrameSlot(slot);
+        if (auto* toneMap = m_PostProcess.GetToneMap()) toneMap->SetFrameSlot(slot);
+    }
 
     // 相机运动自适应降噪：静止时低混合高质量累积；运动时抬升混合缩短历史拖影。
     // （快速旋转时 PT 无累积、图像变噪，为路径追踪固有取舍，停下后自动恢复）
@@ -447,7 +504,11 @@ void PathTracingPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& cam
                 {{ptHDRHandle, ResourceAccess::Write}},
                 [this, pid, &camera, w, h](rhi::IRHICommandList* c) {
                     // 先把粒子深度附件清成远平面（内容确定 + 保证粒子通过深度测试）
-                    c->ClearDepthStencil(m_ParticleDepth.get(), 1.0f);
+                    // 【B1 临时开关】HE_PT_NO_PARTICLE_DEPTH_CLEAR=1 跳过这次清除，用于
+                    // "Clear vs 不 Clear" 的对照实验（验证完即删）
+                    static const bool s_skipClear =
+                        std::getenv("HE_PT_NO_PARTICLE_DEPTH_CLEAR") != nullptr;
+                    if (!s_skipClear) c->ClearDepthStencil(m_ParticleDepth.get(), 1.0f);
                     // 先设置粒子 PSO（BeginOffscreenPass 需要预绑定 PSO 来创建 RenderPass）
                     c->SetPipeline(m_ParticleRenderer.GetRenderPSO());
                     c->BeginOffscreenPass(

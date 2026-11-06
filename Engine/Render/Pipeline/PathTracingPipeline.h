@@ -74,6 +74,11 @@ public:
     // ── 访问器（供 02.Cube 的 ImGui 调用）──
     void SetSwapChain(rhi::IRHISwapChain* sc) { m_SwapChain = sc; }
     PTPass*               GetPT()        { return m_PT.get(); }
+    /// PT 时域降噪的**本帧输出**（诊断/落盘用：05 的 HE_DUMP_PT 落"降噪输出"目标）。
+    /// 返回的是降噪器 Render 末尾 swap 到历史位的那张 = 本帧刚写进去的结果。
+    rhi::IRHITexture* GetPTDenoisedOut() { return m_PTDenoiser ? m_PTDenoiser->GetLastWritten() : nullptr; }
+    /// A-Trous 空间滤波输出（诊断/落盘用；ToneMap 的输入就是它）
+    rhi::IRHITexture* GetPTAtrousOut()   { return m_PTAtrous ? m_PTAtrous->GetOutput() : nullptr; }
     RTPass*               GetRTPass()    { return m_RTPass ? m_RTPass.get() : m_SharedRTPass; }
     PostProcessChain*     GetPostProcess() { return &m_PostProcess; }
     bool                  IsRTEnabled()  const { return m_RTEnabled; }

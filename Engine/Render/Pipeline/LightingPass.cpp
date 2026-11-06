@@ -1,4 +1,5 @@
-#include "Core/Assert.h"   // HE_ASSERT
+﻿#include "Core/Assert.h"   // HE_ASSERT
+#include <iterator>
 // ============================================================
 // LightingPass.cpp — 延迟光照 Pass 实现
 // 拥有 HDR 目标纹理 + Lighting PSO + 描述符集
@@ -10,7 +11,11 @@
 
 // SPIR-V 嵌入头文件
 #include "DeferredLighting.vert.spv.h"
+#include "DeferredLighting.vert.dxil.h"
+#include "DeferredLighting.vert.dxbc.h"
 #include "DeferredLighting.frag.spv.h"
+#include "DeferredLighting.frag.dxil.h"
+#include "DeferredLighting.frag.dxbc.h"
 
 namespace he::render {
 
@@ -42,6 +47,9 @@ void LightingPass::Shutdown() {
     m_Device->DestroyTextureHandle(m_HDRTarget); m_HDRTarget = {};
     m_Device->DestroySamplerHandle(m_HDRSampler); m_HDRSampler = {};
     m_Device->DestroySamplerHandle(m_PointSampler); m_PointSampler = {};
+    m_Device->DestroyBufferHandle(m_PlaceholderLightGrid);      m_PlaceholderLightGrid = {};
+    m_Device->DestroyBufferHandle(m_PlaceholderLightIndexList); m_PlaceholderLightIndexList = {};
+    m_Device->DestroyBufferHandle(m_PlaceholderDDGIProbes);     m_PlaceholderDDGIProbes = {};
     m_Width = m_Height = 0;
 }
 
@@ -410,25 +418,42 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
             updateAllTex(kGPUBinding_PrefilterMap, ResT(m_PlaceholderCube));
         }
 
-        // Cluster SSBO 占位（binding 7/8）
-        rhi::BufferDesc gd;
-        gd.size = 16;
-        gd.usage = rhi::BufferUsage::Storage;
-        auto gb = device->CreateBuffer(gd);
-        updateAllBuf(kGPUBinding_LightGrid, gb.get());
-        updateAllBuf(kGPUBinding_LightIndexList, gb.get());
-
-        // DDGI 探针 SSBO 占位（binding 22）
-        updateAllBuf(kGPUBinding_DDGIProbes, gb.get());
+        // Cluster SSBO 占位（binding 7/8）与 DDGI 探针 SSBO 占位（binding 22）。
+        // 【必须由本对象持有】描述符集只记录缓冲本身（D3D11 记指针，Vulkan / D3D12 记缓冲句柄）：
+        // 此前用局部 unique_ptr，出了作用域缓冲就被销毁，描述符集里留下悬空引用
+        // （D3D11 实测读到乱值的 usage，或该地址被新缓冲复用后按错误的步长绑定）。
+        // 【每个 binding 一个】三处的元素类型不同（LightGridCell 8 字节、uint 4 字节、float4 16 字节）：
+        // D3D11 的结构化缓冲在创建时就固定步长，同一个缓冲不能同时按三种步长读
+        auto makePlaceholder = [&](u32 stride) {
+            rhi::BufferDesc gd;
+            gd.size            = 64;
+            gd.usage           = rhi::BufferUsage::Storage;
+            gd.structureStride = stride;
+            return device->CreateBufferHandle(gd);
+        };
+        m_PlaceholderLightGrid      = makePlaceholder(8);    // LightGridCell { offset, count }
+        m_PlaceholderLightIndexList = makePlaceholder(4);    // uint
+        m_PlaceholderDDGIProbes     = makePlaceholder(16);   // float4
+        updateAllBuf(kGPUBinding_LightGrid, ResB(m_PlaceholderLightGrid));
+        updateAllBuf(kGPUBinding_LightIndexList, ResB(m_PlaceholderLightIndexList));
+        updateAllBuf(kGPUBinding_DDGIProbes, ResB(m_PlaceholderDDGIProbes));
     }
 
     // ── 创建 PSO ──
     rhi::ShaderBytecode lVS, lFS;
     lVS.stage = rhi::ShaderStage::Vertex;
     lVS.spirv = k_DeferredLighting_vert_spv;
+    lVS.dxil.assign(std::begin(k_DeferredLighting_vert_dxil), std::end(k_DeferredLighting_vert_dxil));
+    lVS.dxil.assign(std::begin(k_DeferredLighting_vert_dxil), std::end(k_DeferredLighting_vert_dxil));
+    lVS.dxil.assign(std::begin(k_DeferredLighting_vert_dxil), std::end(k_DeferredLighting_vert_dxil));
+    lVS.dxbc.assign(std::begin(k_DeferredLighting_vert_dxbc), std::end(k_DeferredLighting_vert_dxbc));
     lVS.entryPoint = "main";
     lFS.stage = rhi::ShaderStage::Pixel;
     lFS.spirv = k_DeferredLighting_frag_spv;
+    lFS.dxil.assign(std::begin(k_DeferredLighting_frag_dxil), std::end(k_DeferredLighting_frag_dxil));
+    lFS.dxil.assign(std::begin(k_DeferredLighting_frag_dxil), std::end(k_DeferredLighting_frag_dxil));
+    lFS.dxil.assign(std::begin(k_DeferredLighting_frag_dxil), std::end(k_DeferredLighting_frag_dxil));
+    lFS.dxbc.assign(std::begin(k_DeferredLighting_frag_dxbc), std::end(k_DeferredLighting_frag_dxbc));
     lFS.entryPoint = "main";
 
     rhi::PushConstantRange lpc;

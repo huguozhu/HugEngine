@@ -14,7 +14,7 @@ float2 TriplanarUV(float3 P, float3 N) {
 }
 
 [shader("closesthit")]
-void main(inout RayPayload payload) {
+void main(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr) {   // 命中属性：DXR 的 closesthit 入口签名要求带它（SPIR-V 下等价）
     uint id = InstanceID();
 
     float3 bc = u_MatTex.Load(int3(id, 0, 0)).rgb;

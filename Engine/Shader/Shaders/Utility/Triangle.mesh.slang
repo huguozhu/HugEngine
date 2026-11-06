@@ -18,6 +18,13 @@ struct VertexOut
     float3 color    : COLOR0;
 };
 
+// 推送常量：与 Triangle.vert.slang / 01.Triangle.cpp 的 RotationPushConstant 逐字段一致
+struct TrianglePushConstant {
+    float angle;   // 绕 NDC 原点的旋转角（弧度）
+};
+
+[[vk::push_constant]] TrianglePushConstant g_PC;
+
 // 工作组：3 个线程（每个顶点一个），输出最多 3 个顶点和 1 个三角形
 [numthreads(3, 1, 1)]
 [outputtopology("triangle")]
@@ -31,10 +38,12 @@ void main(
     out indices uint3 prims[1])
 {
     // 三个顶点位置（与光栅化模式使用相同的三角形坐标）
+    // 【Y 方向】引擎的裁剪空间约定是 Y 向上（D3D 风格），Vulkan 后端用负高度视口翻转；
+    // 故 +0.5 表示屏幕上方，顶点 0 在上、底边在下。
     const float2 positions[3] = {
-        float2( 0.0, -0.5),   // 顶点 0：顶部
-        float2( 0.5,  0.5),   // 顶点 1：右下
-        float2(-0.5,  0.5),   // 顶点 2：左下
+        float2( 0.0,  0.5),   // 顶点 0：顶部
+        float2( 0.5, -0.5),   // 顶点 1：右下
+        float2(-0.5, -0.5),   // 顶点 2：左下
     };
 
     // 各顶点颜色（三色渐变：红/绿/蓝，便于在屏幕上区分三个顶点）
@@ -44,8 +53,16 @@ void main(
         float3(0.2, 0.2, 1.0),  // 顶点 2：蓝色
     };
 
-    // 每个线程输出其对应的顶点
-    verts[tid].position = float4(positions[tid], 0.0, 1.0);
+    // 设置输出数量：必须在写任何输出之前调用（D3D12 要求该调用支配所有输出写入；
+    // Vulkan 要求所有线程调用且参数一致）
+    SetMeshOutputCounts(3, 1);  // 3 个顶点，1 个三角形
+
+    // 每个线程输出其对应的顶点（在裁剪空间里绕原点旋转，与光栅化路径同一套角度）
+    const float c = cos(g_PC.angle);
+    const float s = sin(g_PC.angle);
+    const float2 p = float2(positions[tid].x * c - positions[tid].y * s,
+                            positions[tid].x * s + positions[tid].y * c);
+    verts[tid].position = float4(p, 0.0, 1.0);
     verts[tid].color    = colors[tid];
 
     // 仅线程 0 输出图元索引（只需输出一次）
@@ -54,6 +71,4 @@ void main(
         prims[0] = uint3(0, 1, 2);  // 三角形由顶点 0→1→2 组成（顺时针）
     }
 
-    // 设置输出数量（Vulkan 要求所有线程调用且参数一致）
-    SetMeshOutputCounts(3, 1);  // 3 个顶点，1 个三角形
 }

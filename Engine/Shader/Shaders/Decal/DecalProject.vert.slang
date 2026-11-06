@@ -11,8 +11,11 @@
 #include "MeshVS.slang"   // PositionOnlyVSOutput（同形状深度类 pass 接口唯一出处）
 #include "common.slang"
 
+// 显式 HLSL 语义（D3D12 按语义匹配输入布局）+ vk::location（Vulkan）。
+// 不写语义时 ShaderToDxil 会注入 TEXCOORD0，与 D3D12 布局里 location 0 的 POSITION 对不上，
+// 位置会从零缓冲读到 0，贴花盒子塌成一点。
 struct VSInput {
-    [[vk::location(0)]] float3 position;
+    [[vk::location(0)]] float3 position : POSITION0;
 };
 
 // 每个贴花一次 DrawIndexed，逐贴花参数走 push constant（240 字节，见 DecalPass.h 的同名结构）

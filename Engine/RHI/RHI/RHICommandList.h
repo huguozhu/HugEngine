@@ -76,6 +76,32 @@ enum class RHICommandType : u32 {
     CmdBindRTPipeline = 35,
     CmdDrawIndexedIndirect = 25,
     CmdDrawIndexedIndirectCount = 26,
+    // D3D12 命令流模式补齐的类型：帧主列表的全部录制调用都进流（回放侧逐一还原）
+    CmdPipelineBarrierTexture   = 36,   // 带纹理的屏障（上面的 CmdPipelineBarrier 是全局屏障）
+    CmdBufferBarrier            = 37,
+    CmdBeginDebugLabel          = 38,   // 载荷同 SetDrawDebugLabel（内联短文本）
+    CmdEndDebugLabel            = 39,
+    CmdInsertDebugLabel         = 40,
+    CmdClearDrawDebugLabel      = 41,
+    CmdTimelineSignal           = 42,   // 时间线信号 / 等待附在回放列表的那次提交上
+    CmdTimelineWait             = 43,
+    CmdWriteTimestamp           = 44,
+    CmdBeginQuery               = 45,
+    CmdEndQuery                 = 46,
+    CmdResetQueryPool           = 47,
+    CmdDrawMeshTasks            = 48,
+    CmdDrawMeshTasksIndirect    = 49,   // 载荷同 CmdDrawIndexedIndirect
+    CmdDrawMeshTasksIndirectCount = 50, // 载荷同 CmdDrawIndexedIndirectCount
+    CmdExecuteGeneratedCommands = 51,
+    // 【T10】D3D12 模式 2：录制期解析好的后端细节（回放侧不再查描述符集 / 设备状态表）
+    CmdResolvedBarrier          = 52,   // 一条已解析的原生资源屏障
+    CmdResolvedDescriptorTables = 53,   // 已拍下的描述符表快照 GPU 句柄（按帧分版本）
+    CmdResolvedRenderTargets    = 54,   // 已解析的 RTV/DSV 绑定（只读 DSV 切换等）
+    // 【P3】命令流承载光追：BLAS 构建、光线派发（TLAS 构建 / RT 管线绑定复用 34 / 35）
+    CmdBuildBLAS                = 55,   // 载荷 RHICommandBuildBLAS（几何数组在 arena）
+    CmdTraceRays                = 56,   // 载荷 RHICommandTraceRays（在 arena，超过 64B 内联上限）
+    // 【A2】UI 叠加：回放侧在正确的渲染通道内调用上层的叠加记录器（ImGui）
+    CmdDrawOverlay              = 57,   // 无载荷
 };
 
 /// 一条命令的载荷：类型擦除 + **内联存储**。
@@ -122,6 +148,78 @@ struct RHICommandDrawIndexedIndirectCount {
 struct RHICommandDrawIndexedIndirect { void* buffer = nullptr; u64 offset = 0; u32 drawCount = 0; u32 stride = 0; };
 struct RHICommandDraw { u32 vertexCount = 0, instanceCount = 1, firstVertex = 0, firstInstance = 0; };
 struct RHICommandPipelineBarrier { u32 srcStage = 0, dstStage = 0, srcState = 0, dstState = 0; };
+/// 带纹理的屏障 / 缓冲屏障（阶段与状态都按 RHI 枚举的数值保存）
+struct RHICommandPipelineBarrierTexture { void* texture = nullptr; u32 srcStage = 0, dstStage = 0, srcState = 0, dstState = 0; };
+struct RHICommandBufferBarrier { void* buffer = nullptr; u32 srcState = 0, dstState = 0; };
+/// 时间线信号 / 等待：围栏句柄（RHIFenceHandle）+ 值
+struct RHICommandTimeline { u64 fence = 0; u64 value = 0; };
+/// 查询：查询池 + 下标（ResetQueryPool 只用 pool）
+struct RHICommandQuery { void* pool = nullptr; u32 index = 0; u32 pad = 0; };
+/// 网格着色器直接绘制
+struct RHICommandDrawMeshTasks { u32 x = 0, y = 1, z = 1; u32 pad = 0; };
+/// DGC 执行描述（与 IRHICommandList::DGCExecuteDesc 逐字段对应；本头文件不依赖 RHI 类型）
+struct RHICommandExecuteGeneratedCommands {
+    void* indirectCommandsLayout = nullptr; void* indirectExecutionSet = nullptr;
+    u64 sequencesBufferAddr = 0; u64 sequenceCountAddr = 0;
+    u64 preprocessBufferAddr = 0; u64 preprocessBufferSize = 0;
+    u32 maxSequenceCount = 0; u32 maxDrawCount = 0;
+};
+/// 【P3】BLAS 构建的单个几何：RTGeometryDesc 的 POD 版（命令流里不能带 std::vector）。
+/// 枚举字段一律按底层整数存，回放侧再转回 RHI 枚举。
+struct RHIBLASGeometry {
+    void* vertexBuffer    = nullptr;
+    void* indexBuffer     = nullptr;
+    void* transformBuffer = nullptr;
+    u64   vertexStride    = 12;
+    u32   vertexFormat    = 0;   // Format 的数值
+    u32   indexFormat     = 0;   // Format 的数值
+    u32   maxVertex       = 0;
+    u32   maxPrimitiveCount = 0;
+    u32   type            = 0;   // RTGeometryType 的数值
+    u32   pad             = 0;
+};
+/// 【P3】BLAS 构建命令：几何数组放在命令流 arena 里（`geometryOffset` 是 arena 偏移）
+struct RHICommandBuildBLAS {
+    void* blas        = nullptr;
+    void* scratch     = nullptr;
+    u64   geometryOffset = 0;
+    u32   geometryCount  = 0;
+    u32   flags          = 0;   // ASBuildFlags 的位掩码（u8）
+    u32   update         = 0;
+    u32   pad            = 0;
+};
+/// 【P3】光线派发命令：SBT 四个槽位的偏移 / 步长 + 派发尺寸。
+/// SBTDesc 的 u64 字段合计超过 64B 内联上限 ⇒ 走 arena（`EnqueueArena`）。
+struct RHICommandTraceRays {
+    void* buffer = nullptr;      // SBT 缓冲
+    u64   rayGenOffset = 0;  u64 rayGenStride = 0;
+    u64   missOffset = 0;    u64 missStride = 0;
+    u64   hitOffset = 0;     u64 hitStride = 0;
+    u64   callableOffset = 0; u64 callableStride = 0;
+    u32   width = 0, height = 0, depth = 1, pad = 0;
+};
+/// 【T10】一条已解析的原生资源屏障：类型数值与 IRHICommandList::ResolvedBarrierType 一致
+/// （1 = 状态转换、2 = UAV、3 = 别名、4 = Discard）。before/after 是后端的状态枚举数值。
+struct RHICommandResolvedBarrier {
+    void* resource    = nullptr;
+    u32   type        = 1;
+    u32   subresource = 0xFFFFFFFFu;
+    u32   before      = 0;
+    u32   after       = 0;
+};
+/// 【T10】描述符表快照：录制线程已把描述符集内容拷进快照环，这里只带 GPU 句柄。
+/// `set` 是描述符集句柄（回放侧据此取采样器表基址，也可用于诊断）。
+struct RHICommandDescriptorTables {
+    u32 setIndex = 0; u32 pad = 0;
+    u64 set = 0; u64 srv = 0; u64 uav = 0; u64 sampler = 0;
+};
+/// 【T10】已解析的渲染目标绑定：RTV 数组放 arena（void* 数组），dsv 可为空
+struct RHICommandResolvedRenderTargets {
+    void* dsv        = nullptr;
+    u64   rtvsOffset = 0;
+    u32   count      = 0;
+    u32   pad        = 0;
+};
 
 /// L4-3 batch2: POD only (this header is RHI-free, so no Viewport/ScissorRect types)
 struct RHICommandSetViewport { float x = 0, y = 0, w = 0, h = 0, minZ = 0, maxZ = 1; };
@@ -144,7 +242,7 @@ struct RHICommandSetPipeline { void* pso = nullptr; };
 /// `SetDescriptorSet`：set 索引 + 描述符集句柄（`DescriptorSetHandle` 是 u64）
 struct RHICommandSetDescriptorSet { u32 set = 0; u32 pad = 0; u64 handle = 0; };
 /// `SetPushConstants` 的**内联头**：实际字节在 arena（`ArenaRawAt(offset, size)`）
-struct RHICommandSetPushConstants { u64 arenaOffset = 0; u32 size = 0; u32 pad = 0; };
+struct RHICommandSetPushConstants { u64 arenaOffset = 0; u32 size = 0; u32 offset = 0; };   // offset：推送常量内的字节偏移
 /// `SetVertexBuffer`：缓冲 + 槽位
 struct RHICommandSetVertexBuffer { void* buffer = nullptr; u32 slot = 0; u32 pad = 0; };
 /// `SetIndexBuffer`：缓冲 + 偏移
@@ -152,6 +250,7 @@ struct RHICommandSetIndexBuffer { void* buffer = nullptr; u32 offset = 0; u32 pa
 /// `DrawIndexed`（`instanceCount > 1` 时执行端走"实例化"重载）
 struct RHICommandDrawIndexed {
     u32 indexCount = 0; u32 startIndex = 0; i32 baseVertex = 0; u32 instanceCount = 1;
+    u32 firstInstance = 0;   // 起始实例（D3D12 的实例号依赖它，见 kInstanceIndexSlot）
 };
 /// `ExecuteSecondary`：要执行的次级列表（它已由录制者线程录好）
 struct RHICommandExecuteSecondary { void* secondary = nullptr; };
@@ -171,6 +270,8 @@ static_assert(sizeof(RHICommandDrawIndexed)      <= kInlinePayloadBytes, "载荷
 static_assert(sizeof(RHICommandSetDebugLabel)    <= kInlinePayloadBytes, "载荷超过内联上限");
 static_assert(sizeof(RHICommandExecuteSecondary) <= kInlinePayloadBytes, "载荷超过内联上限");
 static_assert(sizeof(RHICommandExecuteIndirect)  <= kInlinePayloadBytes, "载荷超过内联上限");
+static_assert(sizeof(RHICommandBuildBLAS)        <= kInlinePayloadBytes, "载荷超过内联上限（几何数组走 arena）");
+static_assert(sizeof(RHIBLASGeometry)            <= kInlinePayloadBytes, "载荷超过内联上限");
 
 /// 命令列表：命令数组 + 参数 arena。记录端写，执行端读；交接后只读（铁律 2）。
 class RHICommandList {
@@ -253,6 +354,12 @@ public:
     [[nodiscard]] u64           ArenaCapacity() const { return m_ArenaCapacity; }
     [[nodiscard]] u8*           ArenaData() { return m_Arena; }
 
+    /// 后端辅助位：随命令流一起交接给回放端的少量标量（D3D12 用来携带
+    /// "本帧用过的描述符快照环块掩码"，回放提交后据此登记围栏，见 MarkSetRingChunks）。
+    /// 必须在录制线程上设置（提交前），回放线程只读。
+    [[nodiscard]] u32  AuxMask() const { return m_AuxMask; }
+    void SetAuxMask(u32 mask) { m_AuxMask = mask; }
+
     /// 按类型读回内联载荷（执行端用）。长度不匹配时返回 nullptr —— 用返回值而不是断言，
     /// 是因为执行端将来要能对**越界/损坏的命令流**容错（那一层不允许直接 abort）。
     template <typename TPayload>
@@ -286,6 +393,7 @@ public:
         m_Commands.clear();
         m_ArenaUsed = 0u;
         m_HasSubmit = false;
+        m_AuxMask   = 0u;
     }
 
 private:
@@ -298,6 +406,7 @@ private:
     u64                     m_ArenaCapacity = 0;
     u64                     m_ArenaUsed     = 0;
     bool                    m_HasSubmit     = false;     // 是否已标记提交边界
+    u32                     m_AuxMask       = 0;         // 后端辅助位（见 AuxMask 的说明）
 };
 
 } // namespace he::rhi

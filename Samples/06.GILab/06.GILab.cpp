@@ -1,4 +1,4 @@
-// ============================================================
+﻿// ============================================================
 // 06.GILab — Cornell Box 场景 + 延迟渲染管线（GI 对比 / 开发实验室）
 //
 // 用途：检验与对比各种 GI（IBL/RSM/SSGI/DDGI/SSR）在同一 Cornell Box 场景下的效果，
@@ -598,7 +598,7 @@ void GILabUI::DrawMainPanel() {
 
 void GILabUI::DrawGIPanel() {
     ImGui::SetNextWindowPos(ImVec2(560.0f, 10.0f), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(430.0f, 700.0f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(390.0f, 520.0f), ImGuiCond_FirstUseEver);   // 适配 960x540 窗口
     ImGui::Begin("GI 控制台");
     {
         // ── 渲染管线选择（Forward / Deferred）──
@@ -1046,7 +1046,7 @@ void GILabFrameRecorder::RecordUiAndPresent(u64 renderFrameIndex, bool dumpThisF
     cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
         rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
 
-    imgui.EndFrame(cmdList.get());
+    if (imgui.IsInitialized()) imgui.EndFrame(cmdList.get());
     cmdList->EndRenderPass();
 
     // ── 白炉探针：把 HDR 目标上的两个像素拷进 host 可见缓冲 ──
@@ -1167,8 +1167,8 @@ int main() {
     // ---- 1. 引擎启动 ----
     EngineConfig config;
     config.appName      = "HugEngine — 06.GILab (Cornell Box GI 对比)";
-    config.windowWidth  = 1920;   // 窗口宽（960×2）
-    config.windowHeight = 1080;   // 窗口高（540×2）
+    config.windowWidth  = 960;    // 窗口宽（与 02.Cube 一致）
+    config.windowHeight = 540;    // 窗口高（与 02.Cube 一致）
 
     // 【默认模式 2：三线程】（游戏线程 + 渲染线程 + RHI 线程）
     //   · 渲染线程只**录制**；`Submit` / `Present` 经二级队列交给 **RHI 线程**（唯一提交者）；
@@ -1187,7 +1187,7 @@ int main() {
 
     // ---- 2. 创建 Vulkan RHI 设备 ----
     rhi::DeviceInitDesc rhiDesc;
-    rhiDesc.backend          = rhi::Backend::Vulkan;
+    rhiDesc.backend          = rhi::ResolveBackendFromEnv();
     rhiDesc.enableValidation = true;
     rhiDesc.windowHandle     = engine.GetWindow()->GetNativeHandleRaw();
 
@@ -1741,7 +1741,7 @@ int main() {
                        g_ProbeEnabled, g_ProbeInterval, g_FurnaceMode,
                        g_PendingPipelineSwitch, g_PendingHalfResApply};
 
-        imgui.BeginFrame();
+        if (imgui.IsInitialized()) imgui.BeginFrame();   // 非 Vulkan 后端没有 UI
         uiDeps.DrawMainPanel();   // 主窗口（实现见 main 之前）
 
         // ---- 独立 GI 控制面板：渲染管线 → GI 质量档位 → GI 四通道（可用性 + 参数） ----

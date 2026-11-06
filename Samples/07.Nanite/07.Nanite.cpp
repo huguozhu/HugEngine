@@ -1,4 +1,4 @@
-// ============================================================
+﻿// ============================================================
 // 07.Nanite — Cornell Box 场景 + 延迟渲染管线；Nanite 虚拟几何（cluster 光栅化）实验台
 //
 // 基线自 06.GILab 整体拷贝：先保证与既有验收口径（白炉 / 逐帧 dump / 开关不变性）完全一致，
@@ -173,8 +173,8 @@ int main() {
     // ============================================================
     EngineConfig config;
     config.appName      = "HugEngine — 07.Nanite (Cornell Box GI 对比)";
-    config.windowWidth  = 1920;   // 窗口宽（960×2）
-    config.windowHeight = 1080;   // 窗口高（540×2）
+    config.windowWidth  = 960;    // 窗口宽（与 02.Cube 一致）
+    config.windowHeight = 540;    // 窗口高（与 02.Cube 一致）
     // 【步骤 37 / L6 帧时判据】vsync 打开时墙钟帧率被锁在刷新率（60Hz），"有没有 60fps"
     // 这件事就没法从帧率上判定。`HE_NO_VSYNC=1` 关掉垂直同步，让墙钟帧率反映真实 GPU 吞吐。
     const bool noVsync = (std::getenv("HE_NO_VSYNC") != nullptr);
@@ -188,7 +188,7 @@ int main() {
     // 2. 创建 Vulkan RHI 设备
     // ============================================================
     rhi::DeviceInitDesc rhiDesc;
-    rhiDesc.backend          = rhi::Backend::Vulkan;
+    rhiDesc.backend          = rhi::ResolveBackendFromEnv();
     rhiDesc.enableValidation = true;
     rhiDesc.windowHandle     = engine.GetWindow()->GetNativeHandleRaw();
 
@@ -1142,7 +1142,8 @@ int main() {
         submitRender(recordScene);
         if (frameAborted) continue;
 
-        imgui.BeginFrame();
+        if (imgui.IsInitialized()) imgui.BeginFrame();   // 非 Vulkan 后端没有 UI
+        if (imgui.IsInitialized()) {   // 非 Vulkan 后端没有 UI，整块跳过
         ImGui::SetNextWindowPos({10, 10}, ImGuiCond_Once);
         ImGui::SetNextWindowBgAlpha(0.55f);
         ImGui::Begin("07.Nanite (Cornell Box)");
@@ -1287,7 +1288,7 @@ int main() {
         // ============================================================
         // 首次使用时默认摆放在主面板右侧（之后由 imgui.ini 恢复用户位置/大小）
         ImGui::SetNextWindowPos(ImVec2(560.0f, 10.0f), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(430.0f, 700.0f), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(390.0f, 320.0f), ImGuiCond_FirstUseEver);   // 适配 960x540 窗口
         ImGui::Begin("GI 控制台");
         {
             // ── 渲染管线选择（Forward / Deferred）──
@@ -1804,8 +1805,8 @@ int main() {
         // 独立 GPU Profiler 面板：各 pass 的 GPU 耗时统计
         // ============================================================
         // 首次使用时默认摆放在 GI 面板下方（之后由 imgui.ini 恢复）
-        ImGui::SetNextWindowPos(ImVec2(560.0f, 720.0f), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(430.0f, 260.0f), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowPos(ImVec2(560.0f, 340.0f), ImGuiCond_FirstUseEver);    // 适配 960x540 窗口
+        ImGui::SetNextWindowSize(ImVec2(390.0f, 190.0f), ImGuiCond_FirstUseEver);
         ImGui::Begin("GPU Profiler");
         {
             auto& pdata = deferredPipeline.GetProfiler().GetLastFrameData();
@@ -1819,15 +1820,18 @@ int main() {
             ImGui::Text("Total GPU: %.2fms (%.0f FPS)", totalMs, totalMs > 0 ? 1000.0f / totalMs : 0);
         }
         ImGui::End();
+        }   // end if (imgui.IsInitialized())
 
         // GPU Profiler 面板（按 F1 切换）
-        if (ImGui::IsKeyPressed(ImGuiKey_F1))
+        // 只在 ImGui 已初始化时查按键：没有 UI 后端时（如 D3D11 尚未接入 ImGui）没有 ImGui 上下文，
+        // 直接调用 ImGui::IsKeyPressed 会访问空上下文而崩溃
+        if (imgui.IsInitialized() && ImGui::IsKeyPressed(ImGuiKey_F1))
             deferredPipeline.GetProfilerPanel().Toggle();
         deferredPipeline.GetProfilerPanel().Draw();
 
         // ---- 命令 2：ImGui 录制 + End + Submit + 读数 + Present ----
         auto recordUiAndPresent = [&]() {
-            imgui.EndFrame(cmdList.get());
+            if (imgui.IsInitialized()) imgui.EndFrame(cmdList.get());
             cmdList->EndRenderPass();
 
             // ── 白炉探针：把 HDR 目标上的两个像素拷进 host 可见缓冲 ──

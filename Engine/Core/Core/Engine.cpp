@@ -68,6 +68,14 @@ void Engine::Initialize() {
     wdesc.width  = m_Config.windowWidth;
     wdesc.height = m_Config.windowHeight;
     wdesc.vsync  = m_Config.enableVSync;
+    // 【P10 测量钩子】`HE_NO_VSYNC=1` 强制关垂直同步（等价于 06/07 样例各自的同名开关）。
+    // 【为什么需要】04 等样例写死 `enableVSync = true`，垂直同步下帧率被刷新率锁死，
+    // 无法测出"Storage 缓冲换堆"这类 GPU 侧改动的收益。只在设了环境变量时生效，
+    // 默认行为与之前逐字节一致。
+    if (const char* v = std::getenv("HE_NO_VSYNC"); v != nullptr && v[0] != '\0' && v[0] != '0') {
+        wdesc.vsync = false;
+        HE_CORE_INFO("[P10] HE_NO_VSYNC=1：已关闭垂直同步（仅用于帧时间测量）");
+    }
 
     m_Window = std::make_unique<Window>(wdesc);
 

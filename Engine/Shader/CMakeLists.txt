@@ -293,6 +293,9 @@ if(SLANGC)
         # 纯数学/颜色工具（PI、sRGB、Luminance、ACES、PQ、BT.709→2020）——**零绑定**，
         # 任何 pass 都可安全引用，不必为此继承 common.slang 的 bindless 描述符布局。
         "${SHADER_DIR}/MathCommon.slang"
+        # D3D11 的纹理数组桶（M6）：按 bindless 句柄查表后对字面量下标的 Texture2DArray 采样；
+        # 只在 HE_SHADER_D3D11 下有内容
+        "${SHADER_DIR}/TexBuckets.slang"
         # 采样工具（余弦半球采样、Hammersley 低差异序列）——PT 与 RT 共用。
         "${SHADER_DIR}/Sampling.slang"
         # RT pass 共用小工具（Hash / Rand / 深度→世界坐标）——此前 4 个 rgen 各抄一份。
@@ -338,6 +341,11 @@ if(SLANGC)
             COMMAND ${CMAKE_COMMAND} -E make_directory ${SPV_OUT_DIR}
             COMMAND ${SLANGC} ${SRC} -target spirv -entry vertexMain -stage vertex
                     -I "${SHADER_DIR}" -o ${SPV} -Wno-39001
+            # 【为什么生成后还要 touch】`slangc` 在输出内容与磁盘上已有文件**逐字节相同**时**不重写**
+            # 该文件（mtime 保持旧值）⇒ CMake / MSBuild 每次都会把这里的 OUTPUT 判为"比输入旧"，
+            # 于是无条件重跑整条链；D3D12 那条链还有第二段（HLSL→DXIL），会一路连带下游 C++ 全量重编。
+            # 生成后显式 touch 一次，让 OUTPUT 的时间戳晚于输入，构建才真正增量。
+            COMMAND ${CMAKE_COMMAND} -E touch ${SPV}
             DEPENDS ${SRC} ${SLANG_INCLUDES}
             COMMENT "Slang -> SPIR-V: ${NAME}"
         )
@@ -354,6 +362,7 @@ if(SLANGC)
             COMMAND ${CMAKE_COMMAND} -E make_directory ${SPV_OUT_DIR}
             COMMAND ${SLANGC} ${SRC} -target spirv -entry fragmentMain -stage fragment
                     -I "${SHADER_DIR}" -o ${SPV} -Wno-39001
+            COMMAND ${CMAKE_COMMAND} -E touch ${SPV}   # slangc 内容未变时不写文件，见上面顶点循环的说明
             DEPENDS ${SRC} ${SLANG_INCLUDES}
             COMMENT "Slang -> SPIR-V: ${NAME}"
         )
@@ -370,6 +379,7 @@ if(SLANGC)
             COMMAND ${CMAKE_COMMAND} -E make_directory ${SPV_OUT_DIR}
             COMMAND ${SLANGC} ${SRC} -target spirv -entry main -stage compute
                     -I "${SHADER_DIR}" -o ${SPV} -Wno-39001
+            COMMAND ${CMAKE_COMMAND} -E touch ${SPV}   # slangc 内容未变时不写文件，见顶点循环的说明
             DEPENDS ${SRC} ${SLANG_INCLUDES}
             COMMENT "Slang -> SPIR-V: ${NAME}"
         )
@@ -399,6 +409,7 @@ if(SLANGC)
             COMMAND ${CMAKE_COMMAND} -E make_directory ${SPV_OUT_DIR}
             COMMAND ${SLANGC} ${SRC} -target spirv -entry main -stage ${SLANGC_STAGE}
                     -I "${SHADER_DIR}" -o ${SPV} -Wno-39001
+            COMMAND ${CMAKE_COMMAND} -E touch ${SPV}   # slangc 内容未变时不写文件，见顶点循环的说明
             DEPENDS ${SRC} ${SLANG_INCLUDES}
             COMMENT "Slang -> SPIR-V (RT): ${NAME} [${SLANGC_STAGE}]"
         )
@@ -422,6 +433,7 @@ if(SLANGC)
             COMMAND ${CMAKE_COMMAND} -E make_directory ${SPV_OUT_DIR}
             COMMAND ${SLANGC} ${SRC} -target spirv -entry main -stage ${SLANGC_STAGE}
                     -I "${SHADER_DIR}" -o ${SPV} -Wno-39001
+            COMMAND ${CMAKE_COMMAND} -E touch ${SPV}   # slangc 内容未变时不写文件，见顶点循环的说明
             DEPENDS ${SRC} ${SLANG_INCLUDES}
             COMMENT "Slang -> SPIR-V (Mesh): ${NAME} [${SLANGC_STAGE}]"
         )
@@ -456,6 +468,187 @@ if(SLANGC)
         list(APPEND SHADER_IDE_SOURCES "${_shader_rel}")
     endforeach()
     list(REMOVE_DUPLICATES SHADER_IDE_SOURCES)
+
+    # ========================================================================
+    #  D3D12：DXIL 字节码（与 SPIR-V 并列生成）
+    #
+    #  链路：slangc -target hlsl  →  ShaderToDxil（补丁 uint8_t/语义/[loop]）
+    #        →  dxc -T <stage>_6_6  →  DXIL  →  *.dxil.h（C++ 字节数组）
+    #  顶点着色器例外：ShaderToDxil 默认用 vs_6_8（T6：实例号用 SV_StartInstanceLocation，
+    #  取代逐实例 HE_INSTANCEINDEX 属性绕行；代价是需要 SM 6.8 设备）
+    #
+    #  为什么不直接用 `slangc -target dxil`：Slang 生成的 HLSL 里会出现
+    #  `vector<uint8_t,4>`，dxc 不认识 uint8_t（实测 -D 宏无效，必须文本替换）；
+    #  另外结构体成员没有语义，需要按名字注入 TEXCOORD/SV_Position。
+    # ========================================================================
+    if(WIN32 AND TARGET ShaderToDxil)
+        set(DXIL_OUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated_dxil")
+        set(DXIL_HEADERS "")
+        set(DXIL_FILES "")
+
+        # 每个阶段用哪个入口名，与 SPIR-V 那边保持一致
+        set(_dxil_pairs "")
+        foreach(SRC ${VERT_SLANG})
+            list(APPEND _dxil_pairs "${SRC}|vertexMain|vertex|vs")
+        endforeach()
+        foreach(SRC ${FRAG_SLANG})
+            list(APPEND _dxil_pairs "${SRC}|fragmentMain|fragment|ps")
+        endforeach()
+        foreach(SRC ${COMP_SLANG})
+            list(APPEND _dxil_pairs "${SRC}|main|compute|cs")
+        endforeach()
+        # 网格 / 任务着色器（*.mesh.slang / *.task.slang）：入口与 SPIR-V 一致为 main，
+        # dxc 目标分别为 ms_6_6 / as_6_6（任务着色器在 D3D12 叫放大着色器）
+        foreach(SRC ${MESH_SLANG})
+            # 【P9】GBuffer.mesh 已从桩补齐（从 Storage Buffer 读顶点、输出顶点/图元），
+            # 不再是"未写任何输出"的桩，正常生成 ms_6_6 DXIL（GBufferRenderer 建
+            # `GBufferMesh` 网格管线时消费它）。
+            if(SRC MATCHES "\\.task\\.slang$")
+                list(APPEND _dxil_pairs "${SRC}|main|amplification|as")
+            else()
+                list(APPEND _dxil_pairs "${SRC}|main|mesh|ms")
+            endif()
+        endforeach()
+
+        # ---- 光追着色器（DXIL 库）----
+        #
+        #  DXR 的 RT 管线是「每个着色器一份 DXIL 库 + 状态对象里导出/重命名」：
+        #    slangc -target hlsl -stage <raygeneration|miss|closesthit|anyhit|callable|intersection>
+        #    → ShaderToDxil <hlsl> main lib <out>（lib 目标不带 -E，整份编译单元即库）
+        #  Slang 的输出里已经带 `[shader("...")]` 属性（实测 RT_Sponza.rgen 就有），
+        #  这就是库导出入口的依据，无需 ShaderToDxil 再补。
+        foreach(SRC ${RT_SLANG})
+            # RT_PositionFetch 依赖 VK_KHR_ray_tracing_position_fetch 的
+            # gl_HitTriangleVertexPositionsEXT（DXR 无对应能力，顶点位置只能从顶点缓冲自查），
+            # 且当前没有任何 pass 使用它 ⇒ 不生成 DXIL
+            if(SRC MATCHES "RT_PositionFetch")
+                continue()
+            endif()
+            # RT_PBR 在 closesthit 里用 Texture.Sample（隐式导数采样），DXR 明确禁止
+            #（dxc: Opcode Sample not valid in shader model lib_6_6(closesthit)）；
+            # 它是 Vulkan 侧的备选命中着色器、当前没有任何 pass 引用 ⇒ 不生成 DXIL
+            if(SRC MATCHES "RT_PBR")
+                continue()
+            endif()
+            string(REGEX MATCH "rgen|rmiss|rchit|rahit|rcall|rint" RT_DXIL_STAGE "${SRC}")
+            if(RT_DXIL_STAGE STREQUAL "rgen")
+                set(_rt_slang_stage "raygeneration")
+            elseif(RT_DXIL_STAGE STREQUAL "rmiss")
+                set(_rt_slang_stage "miss")
+            elseif(RT_DXIL_STAGE STREQUAL "rchit")
+                set(_rt_slang_stage "closesthit")
+            elseif(RT_DXIL_STAGE STREQUAL "rahit")
+                set(_rt_slang_stage "anyhit")
+            elseif(RT_DXIL_STAGE STREQUAL "rcall")
+                set(_rt_slang_stage "callable")
+            else()
+                set(_rt_slang_stage "intersection")
+            endif()
+            list(APPEND _dxil_pairs "${SRC}|main|${_rt_slang_stage}|lib")
+        endforeach()
+
+        foreach(_pair ${_dxil_pairs})
+            string(REPLACE "|" ";" _parts "${_pair}")
+            list(GET _parts 0 SRC)
+            list(GET _parts 1 ENTRY)
+            list(GET _parts 2 SLANG_STAGE)
+            list(GET _parts 3 DXC_STAGE)
+
+            get_filename_component(FNAME ${SRC} NAME)
+            string(REGEX REPLACE "\\.slang$" "" NAME "${FNAME}")
+            string(REPLACE "." "_" SYM "${NAME}")
+
+            set(HLSL "${DXIL_OUT_DIR}/${NAME}.dxil.hlsl")
+            set(DXIL_H "${DXIL_OUT_DIR}/${NAME}.dxil.h")
+
+            # 第一段：slangc → HLSL（中间产物，失败则跳过该 shader）
+            add_custom_command(
+                OUTPUT ${HLSL}
+                COMMAND ${CMAKE_COMMAND} -E make_directory ${DXIL_OUT_DIR}
+                COMMAND ${SLANGC} ${SRC} -target hlsl -entry ${ENTRY} -stage ${SLANG_STAGE} -DHE_SHADER_HLSL -DHE_SHADER_D3D12 -DHE_NO_TEX -DHE_BYPASS_MATRIX
+                        -I "${SHADER_DIR}" -o ${HLSL} -Wno-39001
+                # 【必须 touch】slangc 在输出内容未变时不重写文件（mtime 不变）⇒ 这里的 OUTPUT 会被
+                # 永远判为过期，每次构建都重跑本段，并让第二段（HLSL→DXIL）跟着重跑、下游 C++ 全量重编。
+                COMMAND ${CMAKE_COMMAND} -E touch ${HLSL}
+                DEPENDS ${SRC} ${SLANG_INCLUDES}
+                COMMENT "Slang -> HLSL (D3D12): ${NAME}"
+            )
+            # 第二段：ShaderToDxil → .dxil.h
+            add_custom_command(
+                OUTPUT ${DXIL_H}
+                COMMAND $<TARGET_FILE:ShaderToDxil> ${HLSL} ${ENTRY} ${DXC_STAGE} ${DXIL_H} k_${SYM}_dxil
+                DEPENDS ${HLSL} ShaderToDxil
+                COMMENT "HLSL -> DXIL: ${NAME}"
+            )
+            list(APPEND DXIL_HEADERS ${DXIL_H})
+            list(APPEND DXIL_FILES ${DXIL_H})
+        endforeach()
+
+        add_custom_target(CompileShadersDxil ALL
+            DEPENDS ${DXIL_HEADERS}
+        )
+        add_dependencies(HugEngineShader CompileShadersDxil)
+
+        # 让样例能 include 到 *.dxil.h
+        target_include_directories(HugEngineShader INTERFACE ${DXIL_OUT_DIR})
+        message(STATUS "D3D12 shader path: DXIL enabled")
+    endif()
+
+    # ========================================================================
+    #  D3D11：DXBC 字节码（SM 5.0，与 SPIR-V / DXIL 并列生成）
+    #
+    #  链路：slangc -target hlsl -DHE_SHADER_HLSL -DHE_SHADER_D3D11
+    #        →  ShaderToDxil --dxbc（补丁 + 寄存器重新分配 + D3DCompile）
+    #        →  DXBC + 绑定表  →  *.dxbc.h（C++ 字节数组）
+    #
+    #  每个着色器由 cmake/CompileDxbc.cmake 生成：**失败不阻塞构建**，失败的着色器得到
+    #  占位头文件（不是 DXBC，运行时判定为不可用）。每次构建后 cmake/DxbcReport.cmake
+    #  汇总通过 / 失败清单到 generated_dxbc/dxbc_report.md。
+    #  入口与阶段与 DXIL 完全相同（_dxil_pairs），不含光追 / 网格着色器（D3D11 不支持）。
+    # ========================================================================
+    if(WIN32 AND HUGENGINE_RHI_D3D11 AND TARGET ShaderToDxil)
+        set(DXBC_OUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated_dxbc")
+        set(DXBC_HEADERS "")
+
+        foreach(_pair ${_dxil_pairs})
+            string(REPLACE "|" ";" _parts "${_pair}")
+            list(GET _parts 0 SRC)
+            list(GET _parts 1 ENTRY)
+            list(GET _parts 2 SLANG_STAGE)
+            list(GET _parts 3 DXBC_STAGE)
+
+            get_filename_component(FNAME ${SRC} NAME)
+            string(REGEX REPLACE "\\.slang$" "" NAME "${FNAME}")
+            string(REPLACE "." "_" SYM "${NAME}")
+
+            set(DXBC_H "${DXBC_OUT_DIR}/${NAME}.dxbc.h")
+            add_custom_command(
+                OUTPUT ${DXBC_H}
+                COMMAND ${CMAKE_COMMAND}
+                        -DSLANGC=${SLANGC}
+                        -DSHADER_TO_DXIL=$<TARGET_FILE:ShaderToDxil>
+                        -DSRC=${SRC} -DNAME=${NAME} -DENTRY=${ENTRY}
+                        -DSLANG_STAGE=${SLANG_STAGE} -DSTAGE=${DXBC_STAGE}
+                        -DSYM=k_${SYM}_dxbc -DSHADER_DIR=${SHADER_DIR} -DOUT_DIR=${DXBC_OUT_DIR}
+                        -P ${CMAKE_SOURCE_DIR}/cmake/CompileDxbc.cmake
+                DEPENDS ${SRC} ${SLANG_INCLUDES} ShaderToDxil ${CMAKE_SOURCE_DIR}/cmake/CompileDxbc.cmake
+                COMMENT "Slang -> DXBC (D3D11): ${NAME}"
+            )
+            list(APPEND DXBC_HEADERS ${DXBC_H})
+        endforeach()
+
+        add_custom_target(CompileShadersDxbc ALL
+            DEPENDS ${DXBC_HEADERS}
+            # 汇总报告：每次构建都重新统计（只读 *.dxbc.status，开销很小）
+            COMMAND ${CMAKE_COMMAND} -DOUT_DIR=${DXBC_OUT_DIR} -P ${CMAKE_SOURCE_DIR}/cmake/DxbcReport.cmake
+            COMMENT "D3D11 着色器编译报告"
+        )
+        add_dependencies(HugEngineShader CompileShadersDxbc)
+
+        # 让引擎与样例能 include 到 *.dxbc.h
+        target_include_directories(HugEngineShader INTERFACE ${DXBC_OUT_DIR})
+        message(STATUS "D3D11 shader path: DXBC enabled")
+    endif()
 
     add_custom_target(CompileShaders ALL
         DEPENDS ${SPV_HEADERS}

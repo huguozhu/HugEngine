@@ -1,15 +1,27 @@
-#include "Pipeline/GPUCulling.h"
+﻿#include "Pipeline/GPUCulling.h"
+#include <iterator>
 #include "Math/Geometry.h"   // 统一视锥提取（he::Frustum::FromViewProj）
 #include "Pipeline/MeshBatcher.h"  // IndirectDrawCommand
 #include "GPUCull.comp.spv.h"
+#include "GPUCull.comp.dxil.h"
+#include "GPUCull.comp.dxbc.h"
 #include "GPUCull_Phase1.comp.spv.h"
+#include "GPUCull_Phase1.comp.dxil.h"
+#include "GPUCull_Phase1.comp.dxbc.h"
 #include "GPUCull_TwoPhase.comp.spv.h"
+#include "GPUCull_TwoPhase.comp.dxil.h"
+#include "GPUCull_TwoPhase.comp.dxbc.h"
 #include "HiZDownsample.comp.spv.h"
+#include "HiZDownsample.comp.dxil.h"
+#include "HiZDownsample.comp.dxbc.h"
 #include "PersistentCull.comp.spv.h"
+#include "PersistentCull.comp.dxil.h"
+#include "PersistentCull.comp.dxbc.h"
 #include "Core/Log.h"
 #include "Core/Assert.h"
 #include <cstring>
 #include <cstdio>
+#include <cstdlib>   // 【T7 诊断】std::getenv（HE_T7_DEBUG）
 #include <glm/gtc/matrix_access.hpp>
 
 // ============================================================
@@ -72,6 +84,10 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
     // ── 单阶段/Phase 1 PSO ──
     m_CS.stage      = rhi::ShaderStage::Compute;
     m_CS.spirv      = k_GPUCull_comp_spv;
+    m_CS.dxil.assign(std::begin(k_GPUCull_comp_dxil), std::end(k_GPUCull_comp_dxil));
+    m_CS.dxil.assign(std::begin(k_GPUCull_comp_dxil), std::end(k_GPUCull_comp_dxil));
+    m_CS.dxil.assign(std::begin(k_GPUCull_comp_dxil), std::end(k_GPUCull_comp_dxil));
+    m_CS.dxbc.assign(std::begin(k_GPUCull_comp_dxbc), std::end(k_GPUCull_comp_dxbc));
     m_CS.entryPoint = "main";
 
     rhi::DescriptorSetLayoutDesc layoutDesc;
@@ -89,6 +105,7 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
     {
         rhi::BufferDesc d;
         d.size = sizeof(IndirectDrawCommand) * kMaxObjects;
+        d.debugName = "GPUCull.IndirectCmds";
         d.usage = rhi::BufferUsage::Storage | rhi::BufferUsage::Indirect;
         d.cpuAccess = true;
         m_IndirectCmdBuf = device->CreateBufferHandle(d);   // A-3
@@ -98,7 +115,10 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
     {
         rhi::BufferDesc d;
         d.size = sizeof(u32) * 4;
-        d.usage = rhi::BufferUsage::Storage;
+        // 【T7】计数缓冲同时是 `DrawIndexedIndirectCount` 的 countBuffer：
+        // Vulkan 要求 countBuffer 必须带 INDIRECT_BUFFER usage（VUID-vkCmdDrawIndexedIndirectCount-countBuffer-02715），
+        // 此前只声明 Storage ⇒ 一旦真正用 GPU 计数驱动绘制，校验层每帧报警。D3D12 侧该标志无副作用。
+        d.usage = rhi::BufferUsage::Storage | rhi::BufferUsage::Indirect;
         d.cpuAccess = true;
         m_DrawCountBuf = device->CreateBufferHandle(d);   // A-3
         HE_ASSERT(m_DrawCountBuf.IsValid(), "GPUCulling: 绘制计数缓冲句柄创建失败");
@@ -108,6 +128,25 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
         u32*  pCount = dcB ? static_cast<u32*>(dcB->Map()) : nullptr;
         if (pCount) { *pCount = 0; if (auto* ub = ResB(m_DrawCountBuf)) ub->Unmap(); }
         device->UpdateDescriptorSet(m_DescSet, kCullBindDrawCount, rhi::DescriptorType::StorageBuffer, ResB(m_DrawCountBuf));
+    }
+    {
+        // 【A4】常驻的「全 0 源」：每帧把绘制计数从这里拷 0（GPU 有序的清零，见 Dispatch）。
+        // 只需 16 字节（计数 + 保留位），只在 Initialize 写一次；`TransferSrc` 是 Vulkan
+        // `vkCmdCopyBuffer` 对源缓冲的硬要求（D3D12 无对应标志）。
+        rhi::BufferDesc d;
+        d.size      = sizeof(u32) * 4;
+        d.usage     = rhi::BufferUsage::TransferSrc;
+        d.cpuAccess = true;
+        d.debugName = "GPUCull.ClearZero";
+        m_ClearZeroBuf = device->CreateBufferHandle(d);   // A-3
+        HE_ASSERT(m_ClearZeroBuf.IsValid(), "GPUCulling: 清零源缓冲句柄创建失败");
+        if (m_ClearZeroBuf.IsValid()) {
+            auto* zB = ResB(m_ClearZeroBuf);
+            if (void* p = zB ? zB->Map() : nullptr) {
+                std::memset(p, 0, sizeof(u32) * 4);
+                if (auto* ub = ResB(m_ClearZeroBuf)) ub->Unmap();
+            }
+        }
     }
 
     // Push constants: 6 planes + float4x4 VP + float2 screen + 2 uint
@@ -129,6 +168,10 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
     // ── Phase 1 PSO（相同布局，不同 shader，输出候选索引）──
     m_Phase1CS.stage = rhi::ShaderStage::Compute;
     m_Phase1CS.spirv = k_GPUCull_Phase1_comp_spv;
+    m_Phase1CS.dxil.assign(std::begin(k_GPUCull_Phase1_comp_dxil), std::end(k_GPUCull_Phase1_comp_dxil));
+    m_Phase1CS.dxil.assign(std::begin(k_GPUCull_Phase1_comp_dxil), std::end(k_GPUCull_Phase1_comp_dxil));
+    m_Phase1CS.dxil.assign(std::begin(k_GPUCull_Phase1_comp_dxil), std::end(k_GPUCull_Phase1_comp_dxil));
+    m_Phase1CS.dxbc.assign(std::begin(k_GPUCull_Phase1_comp_dxbc), std::end(k_GPUCull_Phase1_comp_dxbc));
     m_Phase1CS.entryPoint = "main";
 
     m_Phase1Layout = device->CreateDescriptorSetLayout(layoutDesc);
@@ -147,6 +190,7 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
     {
         rhi::BufferDesc d;
         d.size = sizeof(u32) * kMaxObjects;
+        d.debugName = "GPUCull.Candidates";
         d.usage = rhi::BufferUsage::Storage;
         d.cpuAccess = true;
         m_CandidateBuf = device->CreateBufferHandle(d);   // A-3
@@ -166,6 +210,10 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
     // ── Phase 2 PSO（5 个 binding）──
     m_Phase2CS.stage = rhi::ShaderStage::Compute;
     m_Phase2CS.spirv = k_GPUCull_TwoPhase_comp_spv;
+    m_Phase2CS.dxil.assign(std::begin(k_GPUCull_TwoPhase_comp_dxil), std::end(k_GPUCull_TwoPhase_comp_dxil));
+    m_Phase2CS.dxil.assign(std::begin(k_GPUCull_TwoPhase_comp_dxil), std::end(k_GPUCull_TwoPhase_comp_dxil));
+    m_Phase2CS.dxil.assign(std::begin(k_GPUCull_TwoPhase_comp_dxil), std::end(k_GPUCull_TwoPhase_comp_dxil));
+    m_Phase2CS.dxbc.assign(std::begin(k_GPUCull_TwoPhase_comp_dxbc), std::end(k_GPUCull_TwoPhase_comp_dxbc));
     m_Phase2CS.entryPoint = "main";
 
     rhi::DescriptorSetLayoutDesc p2Layout;
@@ -211,6 +259,10 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
         rhi::ShaderBytecode hizCS;
         hizCS.stage = rhi::ShaderStage::Compute;
         hizCS.spirv = k_HiZDownsample_comp_spv;
+        hizCS.dxil.assign(std::begin(k_HiZDownsample_comp_dxil), std::end(k_HiZDownsample_comp_dxil));
+        hizCS.dxil.assign(std::begin(k_HiZDownsample_comp_dxil), std::end(k_HiZDownsample_comp_dxil));
+        hizCS.dxil.assign(std::begin(k_HiZDownsample_comp_dxil), std::end(k_HiZDownsample_comp_dxil));
+        hizCS.dxbc.assign(std::begin(k_HiZDownsample_comp_dxbc), std::end(k_HiZDownsample_comp_dxbc));
         hizCS.entryPoint = "main";
 
         rhi::PushConstantRange hizPCR;
@@ -274,6 +326,7 @@ void GPUCulling::Shutdown(rhi::IRHIDevice* device) {
     m_Device->DestroyPipelineStateHandle(m_Phase2PSO); m_Phase2PSO = {};
     m_Device->DestroyBufferHandle(m_IndirectCmdBuf); m_IndirectCmdBuf = {};
     m_Device->DestroyBufferHandle(m_DrawCountBuf); m_DrawCountBuf = {};
+    m_Device->DestroyBufferHandle(m_ClearZeroBuf); m_ClearZeroBuf = {};   // 【A4】清零源
     m_Device->DestroyPipelineStateHandle(m_PSO); m_PSO = {};
     m_Device->DestroyTextureHandle(m_HiZTexture); m_HiZTexture = {};
     m_Device->DestroySamplerHandle(m_HiZSampler);
@@ -331,7 +384,10 @@ void GPUCulling::SetDepthTexture(rhi::IRHIDevice* device, rhi::IRHITexture* dept
                                    u32 width, u32 height) {
     if (!m_Initialized) return;
     m_DepthInput = depthTex;
-    m_HiZMipCount = 1;  // 当前仅使用全分辨率深度
+    // 【T7 诊断开关】HE_T7_NO_HIZ=1 时只做视锥剔除（hizMipCount=0）：
+    // 单级 Hi-Z 的遮挡测试在保守方向之外仍可能误剔除，这个开关用于"关掉遮挡后画面是否恢复正常"的对照。
+    static const bool s_NoHiZ = std::getenv("HE_T7_NO_HIZ") != nullptr;
+    m_HiZMipCount = s_NoHiZ ? 0 : 1;  // 当前仅使用全分辨率深度
 
     // 单阶段/Phase 1: 绑定上帧深度
     device->UpdateDescriptorSet(m_DescSet, kCullBindDepth, rhi::DescriptorType::CombinedImageSampler,
@@ -408,6 +464,33 @@ void GPUCulling::Dispatch(rhi::IRHICommandList* cmd,
     pc.mips  = hizMips;
     pc.count = objectCount;
 
+    // ============================================================
+    // 【A4】每帧清零「可见物体计数」——单阶段剔除路径此前**从未**清零
+    // ============================================================
+    // 着色器用 `InterlockedAdd(u_DrawCount[0], 1, idx)` 原子累加本帧的可见数，并把命令写在
+    // 第 idx 条。而这个计数缓冲只在 `Initialize` 里清过一次 ⇒ 计数跨帧累加：
+    // 实测 03.Sponza-Forward 第 120 次读回 5229、第 240 次 10674（≈ 每帧 +45，正是每帧的
+    // 可见数）。后果有三条，全都直接毁掉画面：
+    //   ① 绘制端按这个值决定「画几条」⇒ 除了本帧那 45 条，还会把前几十帧残留在缓冲里的
+    //      陈旧命令一起执行（同一个物体被反复画，物体缓冲下标还可能是上一帧的）；
+    //   ② `Readback` 把它截断到 `kMaxObjects`（2048）⇒ 面板读数「可见 2048/104」；
+    //   ③ 计数超过命令缓冲容量后，着色器的写入越界被硬件丢弃，计数与命令彻底脱钩。
+    // 修法：与 Nanite 的「任务 13」同一口径 —— 清零必须在**命令缓冲内**完成（GPU 有序），
+    // 不能在录制期由主机写：主机往往领先 GPU 一到两帧，写下去的 0 会与上一帧尚未执行的
+    // 绘制抢同一个缓冲（Nanite 实测到过"两帧原子累加叠加"的 2 倍计数）。
+    // 这里从常驻的 0 源缓冲拷 16 字节（计数 + 保留位）过去，再把状态交回 UAV。
+    if (ResB(m_ClearZeroBuf) && ResB(m_DrawCountBuf)) {
+        cmd->CopyBuffer(ResB(m_ClearZeroBuf), ResB(m_DrawCountBuf), sizeof(u32) * 4, 0, 0);
+        // 拷贝目标 → UAV：D3D12 侧是状态转换（缓冲已在 CopyBuffer 里转到 COPY_DEST），
+        // Vulkan 侧由下面这条全局内存屏障保证「传输写 → 着色器写」的可见性。
+        cmd->BufferBarrier(ResB(m_DrawCountBuf), rhi::ResourceState::CopyDst,
+                           rhi::ResourceState::UnorderedAccess);
+        cmd->PipelineBarrier(rhi::PipelineStage::Transfer, rhi::PipelineStage::ComputeShader,
+                             rhi::ResourceState::CopyDst, rhi::ResourceState::UnorderedAccess);
+    } else {
+        HE_CORE_WARN("GPUCulling::Dispatch: 清零源缓冲缺失，本帧可见计数可能残留上一帧的值");
+    }
+
     cmd->SetPipeline(ResP(m_PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSet);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
@@ -418,9 +501,9 @@ void GPUCulling::Dispatch(rhi::IRHICommandList* cmd,
     snprintf(label, sizeof(label), "Cull Single (%u obj)", objectCount);
     cmd->SetDrawDebugLabel(label);
     cmd->Dispatch(groups, 1, 1);
-    // Dispatch 后清零 visibleCount, GBuffer 渲染回退 CPU 逐对象路径
-    // GPU Culling 结果仅用于 Readback（统计/调试），不直接驱动 DrawIndexedIndirect
-    m_LastVisibleCount = 0;
+    // 【T7】这里**不再**把 m_LastVisibleCount 清零。本派发已经把可见物体的间接命令与计数
+    // 直接写在 GPU 缓冲里，GBuffer 用 `DrawIndexedIndirectCount` 消费同一份计数（CPU 不参与
+    // 条数决定）。m_LastVisibleCount 只保留上一帧 Readback 读回的统计值（界面/日志显示）。
 }
 
 // ============================================================
@@ -577,8 +660,8 @@ void GPUCulling::DispatchPhase2(rhi::IRHICommandList* cmd, u32 screenW, u32 scre
     cmd->SetDrawDebugLabel(label);
     cmd->Dispatch(groups, 1, 1);
 
-    // Phase 2 完成后，最终可见物体数需要从 m_DrawCountBuf 读回
-    m_LastVisibleCount = 0;  // 延迟到 Readback 时更新
+    // 【T7】同 Dispatch：Phase 2 已把间接命令与计数写进 GPU 缓冲，绘制端直接消费该计数，
+    // 因此不再清零 m_LastVisibleCount（它只作为上一帧 Readback 的统计值）。
 }
 
 // ============================================================
@@ -612,6 +695,17 @@ void GPUCulling::Readback(rhi::IRHIDevice* device,
     void* dc   = dcBb ? dcBb->Map() : nullptr;
     if (dc) { count = *static_cast<u32*>(dc); if (auto* ub = ResB(m_DrawCountBuf)) ub->Unmap(); }
 
+    // 【T7 可观测性】这里读回的 count 是 GPU 剔除着色器写进计数缓冲的值（上一帧派发的结果），
+    // 不是 CPU 剔除结果 —— 它是"GPU 驱动路径确实在跑、且可见数非 0"的直接证据。
+    // 前两次（首帧 0 与第二帧的首个真实值）必打，之后每 120 帧打一次。
+    {
+        static u32 s_ReadbackTimes = 0;
+        ++s_ReadbackTimes;
+        if (s_ReadbackTimes <= 2u || s_ReadbackTimes % 120u == 0u) {
+            HE_CORE_INFO("GPU Cull: 可见 {} 个物体（GPU 计数缓冲读回，第 {} 次）", count, s_ReadbackTimes);
+        }
+    }
+
     if (count == 0) { m_LastVisibleCount = 0; return; }
     if (count > kMaxObjects) count = kMaxObjects;
 
@@ -623,6 +717,24 @@ void GPUCulling::Readback(rhi::IRHIDevice* device,
         auto* cmds = static_cast<IndirectDrawCommand*>(vi);
         for (u32 i = 0; i < count; ++i)
             outVisibleIndices[i] = cmds[i].firstInstance;
+        // 【T7 诊断】HE_T7_DEBUG=1 时打印前几条 GPU 写出的间接命令（前 3 次读回），
+        // 用于核对 indexCount/firstIndex/firstInstance 是否与合批一致（排查画面错乱）。
+        if (std::getenv("HE_T7_DEBUG")) {
+            static u32 s_DumpTimes = 0;
+            if (++s_DumpTimes <= 3u) {
+                const u32 n = (count < 8u) ? count : 8u;
+                for (u32 i = 0; i < n; ++i) {
+                    HE_CORE_INFO("[T7] 间接命令[{}]: indexCount={} instanceCount={} firstIndex={} "
+                                 "vertexOffset={} firstInstance={}",
+                                 i, cmds[i].indexCount, cmds[i].instanceCount, cmds[i].firstIndex,
+                                 cmds[i].vertexOffset, cmds[i].firstInstance);
+                }
+                // 完整可见集合（最多 64 条）：用于对照"开/关 Hi-Z"两个集合的差集
+                std::string ids;
+                for (u32 i = 0; i < count && i < 64u; ++i) ids += std::to_string(cmds[i].firstInstance) + " ";
+                HE_CORE_INFO("[T7] 可见集合({}): {}", count, ids);
+            }
+        }
         if (auto* ub = ResB(m_IndirectCmdBuf)) ub->Unmap();
     }
 
@@ -658,6 +770,10 @@ bool GPUCulling::InitializePTG(rhi::IRHIDevice* device) {
     // 2. 加载 PTG Shader
     m_PTGCS.stage = rhi::ShaderStage::Compute;
     m_PTGCS.spirv = k_PersistentCull_comp_spv;
+    m_PTGCS.dxil.assign(std::begin(k_PersistentCull_comp_dxil), std::end(k_PersistentCull_comp_dxil));
+    m_PTGCS.dxil.assign(std::begin(k_PersistentCull_comp_dxil), std::end(k_PersistentCull_comp_dxil));
+    m_PTGCS.dxil.assign(std::begin(k_PersistentCull_comp_dxil), std::end(k_PersistentCull_comp_dxil));
+    m_PTGCS.dxbc.assign(std::begin(k_PersistentCull_comp_dxbc), std::end(k_PersistentCull_comp_dxbc));
     m_PTGCS.entryPoint = "main";
 
     // 3. 创建 PTG 描述符布局（5 个 binding）
@@ -745,8 +861,9 @@ void GPUCulling::SignalPTG(rhi::IRHICommandList* cmd, const float4x4& viewProj,
     cmd->PipelineBarrier(
         rhi::PipelineStage::ComputeShader, rhi::PipelineStage::DrawIndirect,
         rhi::ResourceState::UnorderedAccess, rhi::ResourceState::IndirectArgument);
-    // PTG Signal 后清零, GBuffer 回退 CPU 逐对象路径
-    m_LastVisibleCount = 0;
+    // 【T7】PTG 已把间接命令与计数写进 GPU 缓冲，绘制端用 `DrawIndexedIndirectCount` 直接消费，
+    // 因此这里**不再**清零 m_LastVisibleCount（它只表示上一帧 Readback 的统计值）。
+    // 计数缓冲的清零由着色器在派发开头完成（见 PersistentCull.comp.slang 的 u_DrawCount[0] = 0）。
 }
 
 // ============================================================

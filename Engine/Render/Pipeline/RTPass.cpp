@@ -106,7 +106,10 @@ bool RTPass::Initialize(rhi::IRHIDevice* device,
     {
         rhi::BufferDesc sb;
         sb.size  = tlasSizes.buildScratchSize;
-        sb.usage = rhi::BufferUsage::Storage | rhi::BufferUsage::AccelerationStruct;
+        // RayTracingScratch：告诉后端这是构建临时缓冲（D3D12 要求 DEFAULT 堆 + UAV，不可映射），
+        // 与下面只被 GPU 读取的实例缓冲区分开（见 Engine/RHI/RHI/Types.h 的注释）
+        sb.usage = rhi::BufferUsage::Storage | rhi::BufferUsage::AccelerationStruct
+                 | rhi::BufferUsage::RayTracingScratch;
         m_TLASScratch = device->CreateBufferHandle(sb);   // A-3
     }
     {
@@ -354,7 +357,9 @@ void RTPass::BuildAS(rhi::IRHICommandList* cmd, const FrameSceneSnapshot& snapsh
         if (!entry.scratchBuffer || entry.scratchBuffer->GetSize() < sizes.buildScratchSize) {
             rhi::BufferDesc sb;
             sb.size  = sizes.buildScratchSize;
-            sb.usage = rhi::BufferUsage::Storage | rhi::BufferUsage::AccelerationStruct;
+            // 同上：构建临时缓冲（D3D12 下必须是 DEFAULT 堆 + ALLOW_UNORDERED_ACCESS）
+            sb.usage = rhi::BufferUsage::Storage | rhi::BufferUsage::AccelerationStruct
+                     | rhi::BufferUsage::RayTracingScratch;
             entry.scratchBuffer = m_Device->CreateBuffer(sb);
         }
 
@@ -386,9 +391,18 @@ void RTPass::BuildAS(rhi::IRHICommandList* cmd, const FrameSceneSnapshot& snapsh
     }
 
     if (!instances.empty()) {
-        void* mapped = rhi::GetDevice()->ResolveBuffer(m_TLASInstanceBuffer)->Map();
+        // 【T2 遗留：设备丢失后的空指针崩溃】设备被移除（如 GPU 挂起 0x887a0006）之后，
+        // ResolveBuffer 仍返回对象、但 Map 会失败返回空；此前直接 memcpy 到空指针，
+        // 把"设备丢失"变成 0xC0000005 访问违例（崩溃报告只看得到这里的栈，掩盖了真因）。
+        // 这里显式判空并报错，让日志留下真正的设备状态。
+        rhi::IRHIBuffer* instanceBuf = rhi::GetDevice()->ResolveBuffer(m_TLASInstanceBuffer);
+        void* mapped = instanceBuf ? instanceBuf->Map() : nullptr;
+        if (!mapped) {
+            HE_CORE_ERROR("RTPass::BuildAS: 实例缓冲不可映射（设备已丢失？），本帧跳过 TLAS 构建");
+            return;
+        }
         std::memcpy(mapped, instances.data(), instances.size() * sizeof(rhi::TLASInstanceDesc));
-        rhi::GetDevice()->ResolveBuffer(m_TLASInstanceBuffer)->Unmap();
+        instanceBuf->Unmap();
 
         cmd->BuildTLAS(rhi::GetDevice()->ResolveAccelerationStructure(m_TLAS), rhi::GetDevice()->ResolveBuffer(m_TLASScratch), rhi::GetDevice()->ResolveBuffer(m_TLASInstanceBuffer),
                        static_cast<u32>(instances.size()), false);

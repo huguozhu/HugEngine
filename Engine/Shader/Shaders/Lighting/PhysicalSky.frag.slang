@@ -8,11 +8,16 @@ static const float SKY_PI = 3.14159265359;
 [[vk::push_constant]] cbuffer PhysicalSkyPC {
     float4x4 invViewProjMatrix;  // [0..64]（VS 使用，与 Skybox.vert 对齐）
     float    intensity;          // [64..68]
-    float3   sunDirection;       // [68..80]
-    float    turbidity;          // [80..84]
-    float    groundAlbedo;       // [84..88]
-    float    sunIntensity;       // [88..92]
-    float    _pad;               // [92..96]
+    // 显式填充：Vulkan（std430）与 C++ 端都把 sunDirection 放在 80；不补齐时 D3D12 的 cbuffer
+    // 会把它紧贴在 68，后面字段全部错位
+    float    _pad0a;             // [68..72]
+    float    _pad0b;             // [72..76]
+    float    _pad0c;             // [76..80]
+    float3   sunDirection;       // [80..92]
+    float    turbidity;          // [92..96]
+    float    groundAlbedo;       // [96..100]
+    float    sunIntensity;       // [100..104]
+    float    _pad;               // [104..108]
 };
 
 // ── Perez 天空分布函数 ──

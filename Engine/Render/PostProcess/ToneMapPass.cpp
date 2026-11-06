@@ -1,6 +1,11 @@
-#include "PostProcess/ToneMapPass.h"
+﻿#include "PostProcess/ToneMapPass.h"
+#include <iterator>
 #include "ToneMap.vert.spv.h"
+#include "ToneMap.vert.dxil.h"
+#include "ToneMap.vert.dxbc.h"
 #include "ToneMap.frag.spv.h"
+#include "ToneMap.frag.dxil.h"
+#include "ToneMap.frag.dxbc.h"
 #include "Core/Log.h"
 #include "Core/Assert.h"
 
@@ -17,9 +22,17 @@ bool ToneMapPass::Initialize(rhi::IRHIDevice* device,u32 width,u32 height){
 
     m_VS.stage=rhi::ShaderStage::Vertex;
     m_VS.spirv=k_ToneMap_vert_spv;
+    m_VS.dxil.assign(std::begin(k_ToneMap_vert_dxil), std::end(k_ToneMap_vert_dxil));
+    m_VS.dxil.assign(std::begin(k_ToneMap_vert_dxil), std::end(k_ToneMap_vert_dxil));
+    m_VS.dxil.assign(std::begin(k_ToneMap_vert_dxil), std::end(k_ToneMap_vert_dxil));
+    m_VS.dxbc.assign(std::begin(k_ToneMap_vert_dxbc), std::end(k_ToneMap_vert_dxbc));
     m_VS.entryPoint="main";
     m_FS.stage=rhi::ShaderStage::Pixel;
     m_FS.spirv=k_ToneMap_frag_spv;
+    m_FS.dxil.assign(std::begin(k_ToneMap_frag_dxil), std::end(k_ToneMap_frag_dxil));
+    m_FS.dxil.assign(std::begin(k_ToneMap_frag_dxil), std::end(k_ToneMap_frag_dxil));
+    m_FS.dxil.assign(std::begin(k_ToneMap_frag_dxil), std::end(k_ToneMap_frag_dxil));
+    m_FS.dxbc.assign(std::begin(k_ToneMap_frag_dxbc), std::end(k_ToneMap_frag_dxbc));
     m_FS.entryPoint="main";
 
     rhi::DescriptorSetLayoutDesc layout;layout.bindings={

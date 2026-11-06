@@ -144,6 +144,8 @@ public:
     // GPU 缓冲（单阶段 & Phase 2 共用）
     rhi::RHIBufferHandle m_IndirectCmdBuf{};     // A-3：IndirectDrawCommand[]
     rhi::RHIBufferHandle m_DrawCountBuf{};
+    /// 【A4】常驻全 0 源（16B）：单阶段派发前把绘制计数从这里拷 0（GPU 有序，见 Dispatch）
+    rhi::RHIBufferHandle m_ClearZeroBuf{};
 
     // Phase 1 专用资源
     rhi::RHIBufferHandle m_CandidateBuf{};       // A-3：Phase 1 → Phase 2 候选列表（u32[]）

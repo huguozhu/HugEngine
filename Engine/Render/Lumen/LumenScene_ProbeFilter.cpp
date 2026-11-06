@@ -1,4 +1,4 @@
-// ============================================================
+﻿// ============================================================
 // LumenScene_ProbeFilter.cpp — 步骤 35：Screen Probe 的空间 + 时域滤波
 //
 // 【它在 L6 里的位置】L6 = 时间混合 + 空间滤波 + 异步 Compute。本文件是第一件事：
@@ -25,10 +25,13 @@
 // ============================================================
 
 #include "Lumen/LumenScene.h"
+#include <iterator>
 
 #include "Core/Log.h"
 #include "Lumen/ScreenProbe.slang"
 #include "ScreenProbe_Filter.comp.spv.h"
+#include "ScreenProbe_Filter.comp.dxil.h"
+#include "ScreenProbe_Filter.comp.dxbc.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -84,6 +87,10 @@ void LumenScene::CreateProbeFilterGPUObjects() {
     rhi::ShaderBytecode cs;
     cs.stage      = rhi::ShaderStage::Compute;
     cs.spirv      = k_ScreenProbe_Filter_comp_spv;
+    cs.dxil.assign(std::begin(k_ScreenProbe_Filter_comp_dxil), std::end(k_ScreenProbe_Filter_comp_dxil));
+    cs.dxil.assign(std::begin(k_ScreenProbe_Filter_comp_dxil), std::end(k_ScreenProbe_Filter_comp_dxil));
+    cs.dxil.assign(std::begin(k_ScreenProbe_Filter_comp_dxil), std::end(k_ScreenProbe_Filter_comp_dxil));
+    cs.dxbc.assign(std::begin(k_ScreenProbe_Filter_comp_dxbc), std::end(k_ScreenProbe_Filter_comp_dxbc));
     cs.entryPoint = "main";
 
     rhi::PipelineStateDesc pso;
@@ -145,19 +152,15 @@ void LumenScene::RunScreenProbeFilter(rhi::IRHICommandList* cmd, const float4x4&
             }
         }
 
-        rhi::BufferDesc sb;
-        sb.size = sizeof(u32) * 16u; sb.usage = rhi::BufferUsage::Storage; sb.cpuAccess = true;
-        m_ProbeFilterStatsBuf = m_Device->CreateBufferHandle(sb);
-        m_ProbeFilterStatsMapped = ResB(m_ProbeFilterStatsBuf)->Map();
+        m_ProbeFilterStats.Create(m_Device, sizeof(u32) * 16u);
 
         m_ProbeFilterBound = true;
         return;   // 本帧只建资源：新建资源当帧使用会读到未初始化的内容（§附二十）
     }
 
     // ── ① 先读上一帧的统计（"先读后清"：统计由 GPU 原子累加，先清就只会读到 0）──
-    if (m_ProbeFilterFrame >= 1 && m_ProbeFilterStatsMapped) {
-        u32 st[16] = {0};
-        std::memcpy(st, m_ProbeFilterStatsMapped, sizeof(st));
+    u32 st[16] = {0};
+    if (m_ProbeFilterFrame >= 1 && m_ProbeFilterStats.Read(st)) {   // 确定性回读（见 LumenStatsReadback）
         const u32 n = st[0];
         if (n) {
             const double invN = 1.0 / (double)n;
@@ -187,10 +190,7 @@ void LumenScene::RunScreenProbeFilter(rhi::IRHICommandList* cmd, const float4x4&
     }
 
     // ── ② 清零统计并派发 ──
-    if (m_ProbeFilterStatsMapped) {
-        u32 zero[16] = {0};
-        std::memcpy(m_ProbeFilterStatsMapped, zero, sizeof(zero));
-    }
+    m_ProbeFilterStats.RecordSnapshotAndClear(cmd);
 
     // 乒乓：读 r、写 w；dispatch 结束后 r = w
     const u32 r = m_ProbeFilterHistIdx;
@@ -199,7 +199,7 @@ void LumenScene::RunScreenProbeFilter(rhi::IRHICommandList* cmd, const float4x4&
     rhi::IRHIBuffer* histCell  = m_CellHistFromPool[r]  ? m_CellHistFromPool[r]  : ResB(m_CellProbeHistBuf[r]);
     rhi::IRHIBuffer* outProbe  = m_ProbeHistFromPool[w] ? m_ProbeHistFromPool[w] : ResB(m_ProbeFilterHistBuf[w]);
     rhi::IRHIBuffer* outCell   = m_CellHistFromPool[w]  ? m_CellHistFromPool[w]  : ResB(m_CellProbeHistBuf[w]);
-    if (!histProbe || !histCell || !outProbe || !outCell || !m_ProbeFilteredBuf.IsValid() || !m_ProbeFilterStatsBuf.IsValid()) return;
+    if (!histProbe || !histCell || !outProbe || !outCell || !m_ProbeFilteredBuf.IsValid() || !m_ProbeFilterStats.IsValid()) return;
 
     // 描述符必须**每帧重绑**：乒乓使绑定 3/4/5/6 的目标每帧都换（步骤 27 的 fade 缓冲教训）
     m_Device->UpdateDescriptorSet(m_ProbeFilterSet, 0, rhi::DescriptorType::StorageBuffer, ResB(m_ProbeBuf));
@@ -209,7 +209,7 @@ void LumenScene::RunScreenProbeFilter(rhi::IRHICommandList* cmd, const float4x4&
     m_Device->UpdateDescriptorSet(m_ProbeFilterSet, 4, rhi::DescriptorType::StorageBuffer, outCell);
     m_Device->UpdateDescriptorSet(m_ProbeFilterSet, 5, rhi::DescriptorType::StorageBuffer, histProbe);
     m_Device->UpdateDescriptorSet(m_ProbeFilterSet, 6, rhi::DescriptorType::StorageBuffer, outProbe);
-    m_Device->UpdateDescriptorSet(m_ProbeFilterSet, 7, rhi::DescriptorType::StorageBuffer, ResB(m_ProbeFilterStatsBuf));
+    m_Device->UpdateDescriptorSet(m_ProbeFilterSet, 7, rhi::DescriptorType::StorageBuffer, m_ProbeFilterStats.Live());
 
     ProbeFilterPC pc{};
     pc.prevViewProj = m_ProbePrevViewProj;

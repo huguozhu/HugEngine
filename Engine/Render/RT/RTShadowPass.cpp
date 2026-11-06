@@ -1,4 +1,4 @@
-// ============================================================
+﻿// ============================================================
 // RTShadowPass.cpp — 硬件 Ray Tracing 阴影 Pass 实现
 // ============================================================
 #include "RT/RTShadowPass.h"
@@ -11,9 +11,13 @@
 
 // RT 着色器 SPIR-V
 #include "RT_Shadow.rgen.spv.h"
+#include "RT_Shadow.rgen.dxil.h"
 #include "RT_Shadow.rahit.spv.h"
+#include "RT_Shadow.rahit.dxil.h"
 #include "RT_Common.rmiss.spv.h"
+#include "RT_Common.rmiss.dxil.h"
 
+#include <iterator>   // std::begin / std::end（填 dxil 字节码用）
 #include <glm/gtc/type_ptr.hpp>
 #include <cstring>
 #include <algorithm>  // std::max / std::clamp
@@ -62,6 +66,7 @@ bool RTShadowPass::Initialize(rhi::IRHIDevice* device, u32 fullWidth, u32 fullHe
         rhi::ShaderBytecode bc;
         bc.stage = rhi::ShaderStage::RayGen;
         bc.spirv = k_RT_Shadow_rgen_spv;
+        bc.dxil.assign(std::begin(k_RT_Shadow_rgen_dxil), std::end(k_RT_Shadow_rgen_dxil));
         bc.entryPoint = "main";
         shaders.push_back(bc);
     }
@@ -69,6 +74,7 @@ bool RTShadowPass::Initialize(rhi::IRHIDevice* device, u32 fullWidth, u32 fullHe
         rhi::ShaderBytecode bc;
         bc.stage = rhi::ShaderStage::AnyHit;
         bc.spirv = k_RT_Shadow_rahit_spv;
+        bc.dxil.assign(std::begin(k_RT_Shadow_rahit_dxil), std::end(k_RT_Shadow_rahit_dxil));
         bc.entryPoint = "main";
         shaders.push_back(bc);
     }
@@ -76,6 +82,7 @@ bool RTShadowPass::Initialize(rhi::IRHIDevice* device, u32 fullWidth, u32 fullHe
         rhi::ShaderBytecode bc;
         bc.stage = rhi::ShaderStage::Miss;
         bc.spirv = k_RT_Common_rmiss_spv;
+        bc.dxil.assign(std::begin(k_RT_Common_rmiss_dxil), std::end(k_RT_Common_rmiss_dxil));
         bc.entryPoint = "main";
         shaders.push_back(bc);
     }

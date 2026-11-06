@@ -57,6 +57,11 @@ public:
     mutable DeviceCaps m_CapsCache{};
     mutable bool       m_CapsCacheValid = false;
 
+    /// 设备厂商 ID（`VkPhysicalDeviceProperties::vendorID`）。
+    /// 【C1】供渲染层按厂商决定是否启动 PSO 后台预编译（Intel 驱动会崩预编译线程）。
+    /// 查询结果只取一次（驱动查询，且厂商在设备生命周期内不变）。
+    u32 GetDeviceVendorId() const override;
+
     // 【§14.8 任务 18】该格式能否作为**存储图像**（UAV）。实现 = `vkGetPhysicalDeviceFormatProperties`
     //   查 `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT`；查询结果按格式缓存（见 .cpp 的成员）。
     bool SupportsStorageImage(he::rhi::Format format) const override;
@@ -93,6 +98,8 @@ public:
 
     // Transient Resource — 使用瞬态内存池创建纹理（RenderGraph 别名分析驱动）
     std::unique_ptr<IRHITexture>        CreateTransientTexture(const TextureDesc& desc) override;
+    // 【P6】带生命周期的瞬态纹理：生命周期不重叠的图共用同一段堆内存（与 D3D12 同一套 first-fit 判据）
+    std::unique_ptr<IRHITexture>        CreateTransientTexture(const TextureDesc& desc, u32 firstPass, u32 lastPass) override;
     void AdvanceTransientResources() override { m_TransientAllocator.AdvanceFrame(); }
 
     // PSO 预热管理器 — 后台编译 PSO 变体到独立 VkPipelineCache
@@ -174,6 +181,16 @@ public:
     void* CreateImGuiRenderPass(u32 swapchainFormat) override;
     void  DestroyImGuiRenderPass(void* rp) override;
     void* GetImGuiCommandBuffer(IRHICommandList* cmd) const override;
+
+    // 【A2】UI 叠加记录器：命令流模式下由影子列表回放时调用（见 IRHIDevice::SetOverlayRecorder）
+    void SetOverlayRecorder(OverlayRecorder recorder) override { m_OverlayRecorder = recorder; }
+    /// 有提交路由（模式 2）时，回放发生在 RHI 线程、可能晚于上层下一帧的 ImGui::NewFrame，
+    /// 叠加所需的 draw data 已失效 ⇒ 命令流模式下拒绝叠加并给出明确日志，绝不静默画错。
+    [[nodiscard]] bool HasSubmitRouter() const { return m_SubmitRouter != nullptr; }
+    /// 真正调用叠加记录器（只有 Vulkan 命令列表在"回放侧/直接录制"两处调用）
+    void InvokeOverlayRecorder(void* cmdBuffer) const {
+        if (m_OverlayRecorder) m_OverlayRecorder(cmdBuffer);
+    }
 
     // Debug Object Naming — 为 GPU 资源设置调试名称
     void SetResourceDebugName(IRHIBuffer* resource, const char* name) override;
@@ -342,7 +359,11 @@ private:
     VkDevice         m_Device          = VK_NULL_HANDLE;
     /// 提交路由（模式 2）：非空时 `Submit`/`Present` 交给它，由 RHI 线程真正提交（见 SubmitRouter.h）
     ISubmitRouter*   m_SubmitRouter    = nullptr;
+    /// 【A2】UI 叠加记录器（默认空：没有注册时命令流模式不画 UI）
+    OverlayRecorder  m_OverlayRecorder = nullptr;
     VkPipelineCache  m_PipelineCache   = VK_NULL_HANDLE;  // 持久化 PSO 编译缓存（磁盘 + GPU 驱动）
+    /// 【C1】厂商 ID 的缓存（0 = 还没查过；`vendorID` 本身不会是 0）
+    mutable u32      m_VendorIdCache   = 0;
 
     // ============================================================
     // 瞬态资源分配器 — 帧内临时纹理内存池
@@ -354,6 +375,8 @@ private:
     // PSO 预热管理器 — 后台线程编译 PSO 预热驱动缓存
     // ============================================================
     PSOPrecompileManager m_PSOPrecompileManager;
+    /// 【C1】为 PSO 预编译建的 pipeline layout（worker 借用；设备在 Shutdown 里销毁它们）
+    std::vector<VkPipelineLayout> m_PrecompileLayouts;
 
     // PSO 创建限流队列（主线程写入 → NextFrame 逐帧 drain）
     std::deque<PipelineStateDesc> m_PendingCreates;
@@ -422,6 +445,7 @@ private:
     VmaAllocator               m_VmaAllocator     = VK_NULL_HANDLE;
     VkDebugUtilsMessengerEXT m_DebugMessenger = VK_NULL_HANDLE;
     bool m_ValidationEnabled = false;
+    bool m_PipelineStatisticsSupported = false;   // 是否启用了 pipelineStatisticsQuery 特性（管线统计查询池）
 
     VulkanRTDispatch m_RT;
     VulkanDGCFuncs   m_DGCFuncs;

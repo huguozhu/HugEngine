@@ -30,10 +30,15 @@
 
 // RT 着色器 SPIR-V（编译生成的内嵌头文件）
 #include "RT_Sponza.rgen.spv.h"
+#include "RT_Sponza.rgen.dxil.h"
 #include "RT_Sponza.rmiss.spv.h"
+#include "RT_Sponza.rmiss.dxil.h"
 #include "RT_Sponza.rchit.spv.h"
+#include "RT_Sponza.rchit.dxil.h"
 #include "RT_Bindless.rcall.spv.h"
+#include "RT_Bindless.rcall.dxil.h"
 
+#include <iterator>   // std::begin / std::end（填 dxil 字节码用）
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
@@ -118,7 +123,7 @@ int main() {
     // 2. 创建 Vulkan RHI 设备
     // ============================================================
     rhi::DeviceInitDesc rhiDesc;
-    rhiDesc.backend          = rhi::Backend::Vulkan;
+    rhiDesc.backend          = rhi::ResolveBackendFromEnv();
     rhiDesc.enableValidation = true;
     rhiDesc.windowHandle     = engine.GetWindow()->GetNativeHandleRaw();
 
@@ -427,6 +432,21 @@ int main() {
     pipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
 
     // ============================================================
+    // 【P7】HE_NO_INDIRECT=1 —— 关掉 GPU 驱动的 ExecuteIndirect 绘制
+    //
+    // 并行录制（MTCR）的 bundle 路径只录制 `filteredItems` 里的逐 draw 命令，**不**走
+    // ExecuteIndirect；而 `m_UseExecuteIndirect` 默认为 true，于是串行路径走的是 GPU 驱动
+    // 的间接绘制分支。两条路径的 draw 来源不同，截图自然对不上（实测 1080p 里 78% 像素不同）。
+    // 做「并行录制 vs 串行录制」的干净 A/B 时，必须先把 draw 来源统一成逐 draw：
+    // 这个开关把 indirect 关掉，串行路径就落到与 bundle 完全相同的逐 draw 循环上，
+    // 唯一的差别只剩「谁录这条命令」。
+    // ============================================================
+    if (std::getenv("HE_NO_INDIRECT")) {
+        pipeline.SetUseExecuteIndirect(false);
+        HE_CORE_INFO("ExecuteIndirect 已关闭（HE_NO_INDIRECT=1）：串行/并行走同一份逐 draw 来源");
+    }
+
+    // ============================================================
     // 5.5 RT 路径初始化（Ray Tracing 渲染 Path）
     // ============================================================
     bool rtSupported = device->GetCaps().supportsRayTracing;
@@ -461,15 +481,11 @@ int main() {
         rtLayout1 = device->CreateDescriptorSetLayout(rtSet1Desc);
 
         // 5.5.2 准备 Shader 字节码
-        rhi::ShaderBytecode rgen{ rhi::ShaderStage::RayGen,
-            k_RT_Sponza_rgen_spv, {}, "main" };
-        rhi::ShaderBytecode rmiss{ rhi::ShaderStage::Miss,
-            k_RT_Sponza_rmiss_spv, {}, "main" };
-        rhi::ShaderBytecode rchit{ rhi::ShaderStage::ClosestHit,
-            k_RT_Sponza_rchit_spv, {}, "main" };
+        rhi::ShaderBytecode rgen = he::rhi::MakeShaderBytecode(rhi::ShaderStage::RayGen, k_RT_Sponza_rgen_spv, k_RT_Sponza_rgen_dxil, "main");
+        rhi::ShaderBytecode rmiss = he::rhi::MakeShaderBytecode(rhi::ShaderStage::Miss, k_RT_Sponza_rmiss_spv, k_RT_Sponza_rmiss_dxil, "main");
+        rhi::ShaderBytecode rchit = he::rhi::MakeShaderBytecode(rhi::ShaderStage::ClosestHit, k_RT_Sponza_rchit_spv, k_RT_Sponza_rchit_dxil, "main");
         // Callable: bindless 纹理采样（Phase 5 测试 CallableKHR 是否绕过 slangc bug）
-        rhi::ShaderBytecode rcall{ rhi::ShaderStage::Callable,
-            k_RT_Bindless_rcall_spv, {}, "main" };
+        rhi::ShaderBytecode rcall = he::rhi::MakeShaderBytecode(rhi::ShaderStage::Callable, k_RT_Bindless_rcall_spv, k_RT_Bindless_rcall_dxil, "main");
 
         // 5.5.3 Shader Group 定义
         // Group 0=RayGen, 1=Miss, 2=Hit, 3=Callable（bindless 采样）
@@ -581,6 +597,22 @@ int main() {
     bool   animCameraMode = false; // T 键切换：动画相机模式（默认关闭）
 
     // ============================================================
+    // 【P7】HE_NO_CAM_ANIM=1 —— 把相机钉死在配置文件给出的位姿上
+    //
+    // 并行录制（MTCR）的 A/B 需要「同一帧号 = 同一位姿」，否则两趟截图无法逐像素对比。
+    // 本样例默认已经是手动相机（动画相机要按 T 才切换、clip 默认不播放），但下面三条路径
+    // 都可能把相机交给动画：① 运行时按 T；② ImGui 面板的「播放动画」复选框；
+    // ③ 上一趟留在 imgui.ini 里的窗口状态。打开这个开关后每帧强制回手动相机并停播，
+    // 任何输入都改不回来 —— 位姿只由 cfg 的 cam_pos_*/cam_yaw/cam_pitch 决定。
+    // ============================================================
+    const bool noCamAnim = (std::getenv("HE_NO_CAM_ANIM") != nullptr);
+    if (noCamAnim) {
+        animCameraMode  = false;
+        camAnim->playing = false;
+        HE_CORE_INFO("相机动画已锁定为关闭（HE_NO_CAM_ANIM=1）：位姿固定为配置文件值");
+    }
+
+    // ============================================================
     // 9. 窗口调整回调
     // ============================================================
     // 【T2.4】回调跑在游戏线程，而里面全是 RHI（交换链 Resize / SetSwapChain / 管线 OnResize）
@@ -652,6 +684,11 @@ int main() {
         // 导致鼠标与键盘都无法操作相机。它属于游戏线程的帧前准备，必须在装配快照之前执行。
         // --- 相机控制 ---
         {
+            // 【P7】锁定模式：每帧先把动画相机按下去，保证这一帧的位姿只来自手动相机
+            if (noCamAnim) {
+                animCameraMode   = false;
+                camAnim->playing = false;
+            }
             // 右键拖拽旋转
             // 相机输入统一在 Samples/Common/CameraInput.h（六个样例共用，手感一致）；
             // 这里只保留样例自己的策略：T 键切换"动画相机 / 手动相机"。
@@ -805,7 +842,8 @@ int main() {
         submitRender(recordScene);
         if (frameAborted) continue;   // Acquire 失败：跳过本帧剩余部分
 
-        imgui.BeginFrame();
+        if (imgui.IsInitialized()) imgui.BeginFrame();   // 非 Vulkan 后端没有 UI
+        if (imgui.IsInitialized()) {   // 非 Vulkan 后端没有 UI，整块跳过
         ImGui::SetNextWindowPos({10, 10}, ImGuiCond_Once);
         ImGui::SetNextWindowBgAlpha(0.55f);
         ImGui::Begin("03.Sponza-Forward 控制面板");
@@ -1011,9 +1049,10 @@ int main() {
                 meshCount, dirLightCount, 1);
         }
         ImGui::End();
+        }   // end if (imgui.IsInitialized())
         // ---- 命令 2：ImGui 录制 + End + Submit + Present ----
         auto recordUiAndPresent = [&]() {
-            imgui.EndFrame(cmdList.get());
+            if (imgui.IsInitialized()) imgui.EndFrame(cmdList.get());
             cmdList->EndRenderPass();  // 关闭 ImGui RP
             framePresenter.EndRecording();   // L4-2：End + Submit 收口
             framePresenter.EndFrame(true);

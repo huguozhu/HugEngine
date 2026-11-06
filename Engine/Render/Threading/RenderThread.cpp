@@ -1,5 +1,7 @@
 #include "Threading/RenderThread.h"
 
+#include "RHI/RHI.h"   // 【设备兜底】未调用 SetDevice 的样例退回进程级 RHI 设备（rhi::GetDevice）
+
 #include <chrono>
 #include <functional>
 
@@ -66,7 +68,12 @@ bool RenderThread::PumpOnce() {
     RenderThreadContext ctx;
     ctx.frameIndex = frame.frameIndex;
     ctx.frameSlot  = frame.frameSlot;
-    ctx.device     = m_Device;   // 【T2.6】本次泵帧的 RHI 出口
+    // 【T2.6】本次泵帧的 RHI 出口。
+    // 【设备兜底】样例可以显式 `SetDevice`（06.GILab / 02.Cube 都这么做）；漏登记的样例（03/04/05/07）
+    // 在壳模式泵帧时会把 device 为空的本上下文发布到线程局部 ⇒ 各 pass 的 ResB/ResT 恒为 nullptr，
+    // 随后解引用空指针。这里退回进程级 RHI 设备（每个样例创建完设备都会 `rhi::SetDevice`），
+    // 语义与"没有上下文时回退到各 pass 自己的 m_Device"一致。
+    ctx.device     = m_Device ? m_Device : rhi::GetDevice();
 
     // 【T2.6】把"本帧上下文"发布到线程局部，供各 pass 的解析 helper 回退使用；
     //命令全部执行完后清除，避免下一帧/其它路径拿到过期上下文。

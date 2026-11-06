@@ -7,23 +7,29 @@
 #include "ShaderTypes.slang"  // GPUObjectData / GPULight 共享定义
 // ============================================================
 
-layout(location = 0) in float3 inPosition;
-layout(location = 1) in float3 inNormal;
+// explicit semantics (D3D12) + vk::location (Vulkan)
+struct RSMVertexInput {
+    [[vk::location(0)]] float3 inPosition : POSITION0;
+    [[vk::location(1)]] float3 inNormal   : NORMAL0;
+};
 
 // GPU Object（128 bytes，匹配 CPU GPUObjectData）
 // GPUObjectData 定义来自 ShaderTypes.slang（C++/Slang 共享）
 
-[[vk::binding(kGPUBinding_ObjectData, kGPUDescSet_PerFrame)]] StructuredBuffer<GPUObjectData> u_Objects;
+[[vk::binding(kGPUBinding_ObjectData, kGPUDescSet_PerFrame)]] StructuredBuffer<GPUObjectData> u_Objects : register(t2, space0);
 
 [[vk::push_constant]] cbuffer RSMConstants {
     float4x4 lightViewProj;
     uint     objectIndex;
     uint     lightIndex;   // Fragment 侧用（光源颜色/强度），VS 不读但必须保持布局一致
-    uint     _pad[2];
+    uint     _pad0;        // 显式填充用标量（同 RSM_Generate.frag：HLSL 数组元素按 16 字节对齐）
+    uint     _pad1;
     float4   vplAlbedo;    // Fragment 侧用（VPL 漫反射率），同样只为布局一致
 };
 
-RSMVSOutput vertexMain() {
+RSMVSOutput vertexMain(RSMVertexInput vin) {
+    const float3 inPosition = vin.inPosition;
+    const float3 inNormal   = vin.inNormal;
     GPUObjectData obj = u_Objects[objectIndex];
     float4 worldPos4 = mul(obj.worldMatrix, float4(inPosition, 1.0));
 

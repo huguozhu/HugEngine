@@ -13,6 +13,9 @@ set(RHI_SOURCES
     RHI/BindlessSlotRing.h
     RHI/FrameRetireQueue.h
     RHI/SwapChain.h
+    # P8：按帧截图公共工具（环境变量解析 / 默认路径 / WIC 写 PNG），D3D12 与 Vulkan 共用
+    RHI/ScreenCapture.h
+    RHI/ScreenCapture.cpp
     RHI/ThreadAffinity.h
     RHI/RHICommandList.h
     # A-1 翻译层（命令流 -> RHI 调用；只在 RHI 线程上调用）
@@ -98,4 +101,101 @@ if(HUGENGINE_RHI_VULKAN)
     target_compile_definitions(HugEngineRHI PUBLIC HE_RHI_VULKAN)
 
     message(STATUS "Vulkan backend: ENABLED (${Vulkan_INCLUDE_DIRS})")
+endif()
+
+    # ========================================================================
+    #  D3D12 后端（Windows 专用）
+    #
+    #  与 Vulkan 后端并列：同一份 IRHIDevice/IRHICommandList 接口，
+    #  由 CreateDevice(Backend::D3D12) 选择。全部实现放在 Engine/RHI/D3D12/。
+    #  由根 CMakeLists 的 HUGENGINE_RHI_D3D12 选项控制。
+    # ========================================================================
+    if(WIN32 AND HUGENGINE_RHI_D3D12)
+        set(RHI_D3D12_SOURCES
+            D3D12/D3D12Common.h
+            D3D12/D3D12Converters.h
+            D3D12/D3D12Converters.cpp
+            D3D12/D3D12Device.h
+            D3D12/D3D12Device.cpp
+            D3D12/D3D12Resources.h
+            D3D12/D3D12Resources.cpp
+            D3D12/D3D12RayTracing.h
+            D3D12/D3D12RayTracing.cpp
+            D3D12/D3D12SwapChain.h
+            D3D12/D3D12SwapChain.cpp
+            D3D12/D3D12CommandList.h
+            D3D12/D3D12CommandList.cpp
+            D3D12/D3D12BindlessHeap.h
+            D3D12/D3D12BindlessHeap.cpp
+        )
+        target_sources(HugEngineRHI PRIVATE ${RHI_D3D12_SOURCES})
+        huge_source_group(${RHI_D3D12_SOURCES})
+
+        # 需要 DXGI / D3D12 的导入库。d3d12.lib 与 dxgi.lib 在 Windows SDK 里。
+        # d3dcompiler 提供 D3DReflect（从 DXIL 反射输入签名与绑定信息）
+        target_link_libraries(HugEngineRHI PUBLIC d3d12 dxgi dxguid)
+
+        # DXC：DXIL 反射（IDxcUtils::CreateReflection）需要 dxcompiler。
+        # 优先用 Vulkan SDK 自带的（与 slangc 使用的同一份，版本匹配）。
+        if(DEFINED ENV{VULKAN_SDK})
+            target_include_directories(HugEngineRHI PRIVATE "$ENV{VULKAN_SDK}/Include/dxc")
+            target_link_directories(HugEngineRHI PRIVATE "$ENV{VULKAN_SDK}/Lib")
+            target_link_libraries(HugEngineRHI PUBLIC dxcompiler)
+            message(STATUS "D3D12 DXIL reflection: dxcompiler from $ENV{VULKAN_SDK}")
+        else()
+            message(WARNING "VULKAN_SDK 未设置 —— DXIL 反射可能失败")
+        endif()
+        target_compile_definitions(HugEngineRHI PUBLIC HE_RHI_D3D12)
+
+        message(STATUS "D3D12 backend: ENABLED")
+    endif()
+
+    # ========================================================================
+    #  D3D11 后端（Windows 专用，实现中）
+    #
+    #  由根 CMakeLists 的 HUGENGINE_RHI_D3D11 选项控制；实现放在 Engine/RHI/D3D11/，
+    #  由 CreateDevice(Backend::D3D11) 选择（HE_RHI_BACKEND=d3d11）。
+    # ========================================================================
+    if(WIN32 AND HUGENGINE_RHI_D3D11)
+        set(RHI_D3D11_SOURCES
+            D3D11/D3D11Common.h
+            D3D11/D3D11BindlessHeap.h
+            D3D11/D3D11BindlessHeap.cpp
+            D3D11/D3D11Device.h
+            D3D11/D3D11Device.cpp
+            D3D11/D3D11Converters.h
+            D3D11/D3D11Converters.cpp
+            D3D11/D3D11Resources.h
+            D3D11/D3D11Resources.cpp
+            D3D11/D3D11PipelineState.cpp
+            D3D11/D3D11SwapChain.h
+            D3D11/D3D11SwapChain.cpp
+            D3D11/D3D11CommandList.h
+            D3D11/D3D11CommandList.cpp
+        )
+        target_sources(HugEngineRHI PRIVATE ${RHI_D3D11_SOURCES})
+        huge_source_group(${RHI_D3D11_SOURCES})
+        # d3d11 / dxgi：设备与交换链；dxguid：调试名等 GUID；d3dcompiler：D3DReflect 反射 DXBC 输入签名
+        target_link_libraries(HugEngineRHI PUBLIC d3d11 dxgi dxguid d3dcompiler)
+        target_compile_definitions(HugEngineRHI PUBLIC HE_RHI_D3D11)
+        message(STATUS "D3D11 backend: ENABLED (实现中)")
+    endif()
+
+# ---------------------------------------------------------------------------
+# 把 dxcompiler.dll 复制到输出目录：D3D12 后端在运行期用 IDxcUtils::CreateReflection
+# 读取结构化缓冲的元素大小（StructuredBuffer<T> 的 SRV stride 必须等于 sizeof(T)）。
+# 若该 DLL 不在进程可搜索路径里，DxcCreateInstance 会失败，stride 只能退化成 4，
+# 导致着色器按错误步长读取（实测表现为顶点塌缩、画面全黑）。
+# ---------------------------------------------------------------------------
+find_program(HE_DXC_EXE NAMES dxc)
+if(HE_DXC_EXE)
+    get_filename_component(HE_DXC_DIR "${HE_DXC_EXE}" DIRECTORY)
+    if(EXISTS "${HE_DXC_DIR}/dxcompiler.dll")
+        add_custom_command(TARGET HugEngineRHI POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${HE_DXC_DIR}/dxcompiler.dll"
+                    "$<TARGET_FILE_DIR:HugEngineRHI>/dxcompiler.dll"
+            COMMENT "Copy dxcompiler.dll for runtime shader reflection")
+        message(STATUS "dxcompiler.dll for runtime reflection: ${HE_DXC_DIR}")
+    endif()
 endif()

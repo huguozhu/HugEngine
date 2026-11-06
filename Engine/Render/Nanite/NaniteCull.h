@@ -455,6 +455,34 @@ public:
     [[nodiscard]] u32 GetBVHClusterCount() const { return m_BVHData.clusterCount; }
     [[nodiscard]] u32 GetBVHInstanceDomain() const { return m_BVHInstanceDomain; }
     [[nodiscard]] u32 GetBVHVisibleCapacity() const { return kNaniteMaxVisibleClusterRefs; }
+
+    /// 【A5】上一帧 GPU 写出的可见簇数（主机侧直接 Map 读，**无同步、无停顿**）
+    ///
+    /// 计数缓冲是 `cpuAccess = true` 的持久映射内存（引擎里所有 Storage 缓冲都是这种口径），
+    /// 因此读它不需要围栏：读到的值只是"上一帧 GPU 写出的"（与 `GPUCulling::Readback` 的
+    /// 滞后一帧统计同一口径）。光栅端用它当派发上界 —— 详见 `NaniteRenderer` 里的使用处。
+    /// 缓冲未就绪时返回 0（调用方退回静态上界）。
+    [[nodiscard]] u32 ReadLastVisibleClusterCount() const;
+
+    /// 【A5】可见簇引用数的 **CPU 可算上界** = 簇数 × 实例域（本帧元数据，与 GPU 写出的可见数无关）
+    ///
+    /// 【为什么要它】光栅端不能读回可见计数（那是同一帧 GPU 刚写出的值，读回要等 GPU），所以
+    ///   既有的做法是"按**容量**派发、由 shader 按 `slot >= visibleCount` 早退"。容量本身是
+    ///   `kNaniteMaxBVHInstances × kNaniteMaxBVHClusters` = 64 × 16384 = **1,048,576**，于是
+    ///   硬光栅每帧要发 1024×1024 = 1,048,576 个网格着色器组（软光栅 3 趟各 1,048,576 个工作组）
+    ///   —— 而实际引用数只有 clusterCount × instanceCount（样例：6 × 64 = 384）。实测 07.Nanite
+    ///   每帧 2.07 s，正是这个"按容量派发"的固定开销（把 `nanite_enable` 关掉立刻回到 129 fps）。
+    ///
+    /// 【为什么这样做不降低正确性】可见引用表是**紧凑**的（`InterlockedAdd` 取到的槽位连续），
+    ///   每条引用都在某一个实例的某一棵 BVH 上被接受；而 BVH 的叶子表是 [0, clusterCount) 的
+    ///   一个排列（`BuildNaniteClusterBVH`：`order` = 0..clusterCount-1，每簇恰好出现一次）⇒
+    ///   引用总数恒 ≤ clusterCount × instanceCount。按这个上界派发覆盖了所有可能的槽位。
+    [[nodiscard]] u32 GetVisibleRefBound() const {
+        const u64 bound = static_cast<u64>(m_BVHData.clusterCount) *
+                          static_cast<u64>(m_BVHInstanceDomain);
+        return bound < static_cast<u64>(kNaniteMaxVisibleClusterRefs)
+             ? static_cast<u32>(bound) : kNaniteMaxVisibleClusterRefs;
+    }
     [[nodiscard]] static constexpr u32 MaxBVHInstances() { return kNaniteMaxBVHInstances; }
 
     /// 【§14.8 任务 15】本帧的 LOD/Hi-Z 参数（读回日志用；都是 `SetCullChainFrame` 与

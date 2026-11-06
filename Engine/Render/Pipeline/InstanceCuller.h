@@ -37,6 +37,9 @@
 
 namespace he::render {
 
+class MeshRegistry;          // PrepareInstances 的参数（前向声明）
+struct FrameSceneSnapshot;
+
 /// 与 InstancedCull.comp.slang 的 IndirectCmd 一致（= VkDrawIndexedIndirectCommand，20 字节）
 struct alignas(4) InstanceIndirectCommand {
     u32 indexCount    = 0;
@@ -92,6 +95,8 @@ public:
         u32  cullCmdHandle[rhi::kMaxFramesInFlight] = { 0, 0, 0 };  // 命令缓冲的 bindless SSBO 句柄
         /// 上一次读回的可见实例数（GPU 异步写入，可能滞后一帧；仅统计/调试用）
         u32  visibleInstanceCount = 0;
+        /// 本帧是否已在渲染通道开始前派发过剔除（见 PrepareInstances）：通道内据此决定走间接绘制
+        bool culledThisFrame = false;
 
         // 本帧/上帧是否在快照里出现过：用于回组件销毁后的缓冲回收（见 BeginInstancesFrame）
         bool seenThisFrame = false;
@@ -123,6 +128,15 @@ public:
     /// 【为什么把回收挂在这里】快照**每帧都包含全部实例化组件**（含实例数为 0 的），
     /// 因此"本帧又见到这个 meshIndex"就是该条目仍然有效的证据 —— 不需要渲染侧持有组件指针。
     void BeginInstancesFrame(rhi::IRHIDevice* device);
+
+    /// **渲染通道开始前**调用（每帧一次，替代 BeginInstancesFrame）：推进帧边界，上传快照里全部
+    /// 实例变换，并对开了逐实例剔除的条目派发剔除。
+    /// 【为什么要提到通道外】Vulkan 不允许在渲染通道内派发计算（vkCmdDispatch 必须在通道外）：
+    /// 此前剔除在绘制循环里、通道之内派发，Vulkan 下派发无效，命令里的实例数恒为 0（可见实例 0，
+    /// 实例全部不画）；D3D12 没有这条限制所以正常。通道内的绘制只读本帧结果（culledThisFrame）
+    void PrepareInstances(rhi::IRHICommandList* cmd, rhi::IRHIDevice* device,
+                          const MeshRegistry* meshRegistry, const FrameSceneSnapshot& snapshot,
+                          u32 frameSlot, const float4x4& viewProj);
 
     /// 上传/复用**某个 meshIndex** 的实例变换缓冲（按值吃数据 ⇒ 渲染侧不再读组件）
     /// · 版本号未变且容量够 → 直接返回既有句柄（不重传）
