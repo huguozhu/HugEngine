@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     HugEngine 门禁脚本：配置 → 构建 → shader 绑定契约对账 → 单元测试。
 
