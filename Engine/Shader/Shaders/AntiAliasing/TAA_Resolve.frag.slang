@@ -20,7 +20,12 @@ struct TAAUniforms {
     float    blendFactor;      // 基础混合系数 (0.05)
     float    unused;
 };
-[[vk::binding(5, 0)]] cbuffer u_TAA : register(b5) { TAAUniforms u_TAA; }
+// 【为什么是 binding 7 而不是 5】本文件包含 common.slang，而后者在 binding 5 / 6 / 30 声明了
+// bindless 的 u_Textures[] / u_Samplers[] / u_Materials[]。用 5 只是靠「TAA 没用到这些数组、
+// 编 SPIR-V 时被裁掉」才没有真正撞车；一旦哪天这里采样 bindless 纹理，两个变量就会同时落在
+// (set=0, binding=5)，校验层报布局与 shader 不匹配。故 UBO 放在 7（TAA 自身 0..4 是纹理）。
+// 注：原写法还带一个孤立的 `: register(b5)`（全仓库唯一一处），一并去掉，与其余 shader 一致。
+[[vk::binding(7, 0)]] cbuffer u_TAA { TAAUniforms u_TAA; }
 
 // ── Push Constants ──
 [[vk::push_constant]] cbuffer TAA_PC {

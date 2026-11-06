@@ -105,7 +105,8 @@ set=0:
   binding 2: u_Depth           (CombinedImageSampler)  — GBuffer Depth
   binding 3: u_Normal          (CombinedImageSampler)  — GBuffer B
   binding 4: u_Velocity        (CombinedImageSampler)  — GBuffer D
-  binding 5: u_TAAUniforms     (UniformBuffer)          — TAAUniforms 结构体
+  binding 7: u_TAAUniforms     (UniformBuffer)          — TAAUniforms 结构体
+              （原为 5；因 common.slang 在 5/6/30 声明了 bindless 数组，改用 7 避免同槽）
 
 Push constant (16 bytes):
   float2 jitterOffset    — 当前帧子像素抖动（NDC 坐标）

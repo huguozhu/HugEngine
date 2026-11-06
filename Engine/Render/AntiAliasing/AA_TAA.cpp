@@ -13,7 +13,11 @@ static constexpr u32 kTAABindHistoryColor = 1;   // 历史颜色
 static constexpr u32 kTAABindDepth        = 2;   // 深度
 static constexpr u32 kTAABindNormal       = 3;   // 法线
 static constexpr u32 kTAABindVelocity     = 4;   // 运动矢量
-static constexpr u32 kTAABindUniforms     = 5;   // TAA 参数 UBO
+// 【为什么是 7 而不是 5】TAA_Resolve.frag 包含了 common.slang，而后者在 binding 5 / 6 / 30
+// 声明了 bindless 的 u_Textures[] / u_Samplers[] / u_Materials[]。此前这里用 5，只是靠
+// 「TAA 没用到 u_Textures、编 SPIR-V 时被裁掉」才没有真正撞车——一旦哪天 TAA 采样 bindless
+// 纹理，两个变量就会同时落在 (set=0, binding=5)，校验层直接报布局与 shader 不匹配。
+static constexpr u32 kTAABindUniforms     = 7;   // TAA 参数 UBO（避开 common.slang 的 5/6/30）
 
 // ── Halton(2, 3) 序列，8 样本循环 ──
 float2 AA_TAA::HaltonSample(u32 index) {
