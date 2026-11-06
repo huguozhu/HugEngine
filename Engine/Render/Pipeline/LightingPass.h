@@ -18,9 +18,10 @@ struct RenderGraph;
 
 // ============================================================
 // 注（P0/D2 数据模型下沉）：
-// ShadowChannel / GIBlendMode / GISourceSlotData / GIChannelBlendData
-// 已迁至 GI/GITypes.h —— 那里只依赖 Core/Types.h，不含任何 RHI 类型，
-// 使单元测试可直接包含并验证层栈与降级逻辑，无需链接 HugEngineRender。
+// ShadowChannel / GIBlendMode / GIChannelBlendParams 已迁至 GI/GITypes.h —— 那里只依赖
+// Core/Types.h 与共享契约切片，不含任何 RHI 类型，使单元测试可直接包含并验证层栈与
+// 降级逻辑，无需链接 HugEngineRender。源槽类型（GISourceSlot）本身来自 C++/Slang
+// 共享的 ShaderTypes/GITypes.slang，C++ 侧不再有镜像。
 // ============================================================
 
 // ============================================================
@@ -102,9 +103,10 @@ struct LightingInputs {
     // ── 分层合成（P2：多源间接光的归一化加权，通道通用）──
     // 混合参数经 UBO 传递给 shader（3 通道 × 24B，避免超出 push constant 128B 上限）
     // ── 分层合成（Wave 1：源数组，按源 id 分派采样）──
-    GIChannelBlendData diffuseBlend;    // 间接漫反射（IBL/DDGI/SSGI/RSM/RTGI 任意组合）
-    GIChannelBlendData specularBlend;   // 间接镜面（IBL/SSR/RT 反射）
-    GIChannelBlendData aoBlend;         // 环境光遮蔽（SSAO/RTAO）
+    // 类型就是 shader 的 GIChannelBlendParams（共享契约），这里不再有第二份定义
+    GIChannelBlendParams diffuseBlend;    // 间接漫反射（IBL/DDGI/SSGI/RSM/RTGI 任意组合）
+    GIChannelBlendParams specularBlend;   // 间接镜面（IBL/SSR/RT 反射）
+    GIChannelBlendParams aoBlend;         // 环境光遮蔽（SSAO/RTAO）
 };
 
 // ============================================================

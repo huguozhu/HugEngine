@@ -187,22 +187,19 @@ void LightingPass::Render(rhi::IRHICommandList* cmd, const LightingInputs& in) {
     lpc.giIntensity = in.giIntensity;                      // 间接漫反射 GI 总强度（默认 1.0）
     lpc.aoIntensity = in.aoIntensity;                      // AO 强度（默认 1.0）
     // ── 分层合成（Wave 1）：填充 GIBlendParams UBO（3 通道 × 源数组）──
-    // C++ 侧 GIChannelBlendData 与 shader 侧 GIChannelBlendParams 布局一致，
-    // 按通道 memcpy；源的具体分派由 shader 按 id 完成
+    // 源槽类型与 shader **共用同一份定义**（ShaderTypes/GITypes.slang），三个通道就是
+    // GIChannelBlendParams 本身，故这里直接赋值，不再有"两份布局"和尺寸交叉检查。
+    // 源的具体分派由 shader 按 id 完成。
     {
-        static_assert(sizeof(GISourceSlotData) == sizeof(GISourceSlot),
-                      "GISourceSlotData 必须与 shader 的 GISourceSlot 布局一致");
-        static_assert(sizeof(GIChannelBlendData) == sizeof(GIChannelBlendParams),
-                      "GIChannelBlendData 必须与 shader 的 GIChannelBlendParams 布局一致");
         if (m_BlendUBO[slot].IsValid()) {
             auto* bub    = ResB(m_BlendUBO[slot]);
             HE_ASSERT(bub, "LightingPass: Blend UBO 句柄解析失败");
             void* mapped = bub ? bub->Map() : nullptr;
             if (mapped) {
                 auto* bp = static_cast<GIBlendParams*>(mapped);
-                std::memcpy(&bp->diffuse,  &in.diffuseBlend,  sizeof(GIChannelBlendData));
-                std::memcpy(&bp->specular, &in.specularBlend, sizeof(GIChannelBlendData));
-                std::memcpy(&bp->ao,       &in.aoBlend,       sizeof(GIChannelBlendData));
+                bp->diffuse  = in.diffuseBlend;
+                bp->specular = in.specularBlend;
+                bp->ao       = in.aoBlend;
                 if (auto* bub = ResB(m_BlendUBO[slot])) bub->Unmap();
             }
         }

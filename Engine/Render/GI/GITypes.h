@@ -7,12 +7,13 @@
 // 与 **RHI 依赖**彻底解耦，使单元测试可以只包含本头文件、**无需链接 HugEngineRender**
 // （链接 Render 会连带拉入 RHI/Vulkan 以及 slangc 生成的 SPV 头，代价过高）。
 //
-// 约束：本头文件只允许依赖 Core/Types.h 与标准库。
+// 约束：本头文件只允许依赖 Core/Types.h、标准库，以及 C++/Slang 共享契约里的 **GI 切片**
+//       （`ShaderTypes/GITypes.slang`，只含 uint/float、不牵入 Math/GLM）。
 //       任何 rhi:: 类型、纹理句柄、设备指针都不得出现在这里。
 //
 // 内容来源（迁移前的位置）：
 //   · Pipeline/LightingPass.h → ShadowChannel / GIBlendMode /
-//                              GISourceSlotData / GIChannelBlendData
+//                              GIChannelBlendParams（唯一类型在共享契约里）
 //   · GI/GIConfig.h           → 源标识 / 频段 / 层栈 / 档位 / 管线能力 / GIConfig
 //   · GI/GIRegistry.h         → 可用性与降级规则 GIRegistry
 // ============================================================
@@ -20,6 +21,15 @@
 #include "Core/Types.h"
 
 namespace he::render {
+
+// C++/Slang 共享的 GI GPU 契约：GISourceSlot / GIChannelBlendParams / GISOURCE_* / GICONF_*
+// 【必须在命名空间内 include】C++ 侧的这些结构必须落在 he::render，与 Material.h / GITypes.h
+// 的其余读者一致。若某个 TU 先在**全局**作用域包含共享契约，include guard 会让后续在
+// he::render 内的包含被跳过 ⇒ 同一个 TU 里名字绑到全局类型，而别的 TU 绑到 he::render 的
+// 类型，内联自由函数（如 AddGIBlendSource）的签名随之不同 ⇒ ODR 违规，且**不报错**。
+// 【为什么只包含这一片】本头是 RHI-free 的纯数据模型，单元测试直接包含它；
+// ShaderTypes/GITypes.slang 只含 uint/float，因此这里不会牵入 Math/GLM。
+#include "ShaderTypes/GITypes.slang"
 
 // ============================================================
 // 阴影通道
@@ -271,46 +281,42 @@ struct GIChannelStack {
 };
 
 // ============================================================
-// shader UBO 的镜像结构
+// 每通道合成参数：**C++ 与 Slang 共用同一个类型**
 //
-// 这两个结构必须与 ShaderTypes.slang 的 GISourceSlot / GIChannelBlendParams
-// 布局**逐字段一致**（GITypes.h 的单测会断言 sizeof，防止 C++/slang 双侧漂移）。
+// `GIChannelBlendParams` 定义在共享契约 `ShaderTypes/GITypes.slang`（本文件顶部 include），
+// C++ 侧不再有镜像。此前这里有一个带 `Add()` 与默认值的包装 `GIChannelBlendData`：它与
+// shader 结构逐字段重复，靠 `sizeof` + `offsetof` 互锁 —— 尺寸断言挡不住「同尺寸、字段换了
+// 位置」，而位置一换就是 §9.2-AF 那类静默错位（不报错、不崩溃，只是读到别的字段）。
+// 现在类型就是同一个，漂移在语法层不可能发生；默认值放在共享切片的 `#ifdef __cplusplus`
+// 分支里，CPU 侧 `GIChannelBlendParams b{}` 直接拿到"归一化加权 + 5% 边缘带宽"。
+//
+// Wave 1：由「三个固定语义槽」改为「源数组」——槽位是通用容器，语义由 id 决定。
+// 这样新增 GI 只需 GISourceId 加一项 + SampleSource 加一个 case，
+// 不再需要改 UBO 结构 / 帧图映射 / shader 分支。
 // ============================================================
 
-/// 单个 GI 源槽（与 shader 的 GISourceSlot 布局一致）
-struct GISourceSlotData {
-    u32   id              = 0;        // GISourceId（决定 shader 走哪条采样分支）
-    float weight          = 0.0f;     // 相对权重（0 = 不参与）
-    float falloffDistance = 0.0f;     // 「距离让位」（0 = 不启用）
-    u32   confidence      = 0;        // GISourceConfidence 位掩码（逐像素可信度判据）
-};
-static_assert(sizeof(GISourceSlotData) == 16, "GISourceSlotData must be 16 bytes（与 shader GISourceSlot 对齐）");
+/// 追加一个源到通道合成参数（weight<=0 忽略；超出容量忽略）
+/// 置信度掩码在此统一推导：调用方不必（也不应）自己填，避免又出现"两份真值"。
+inline void AddGIBlendSource(GIChannelBlendParams& blend, u32 sourceId,
+                             float weight, float falloffDistance = 0.0f) {
+    if (weight <= 0.0f || blend.count >= kGIMaxSourcesPerChannel) return;
+    GISourceSlot& slot = blend.sources[blend.count];
+    slot.id              = sourceId;
+    slot.weight          = weight;
+    slot.falloffDistance = falloffDistance;
+    slot.confidence      = ToConfidenceMask((GISourceId)sourceId);
+    blend.count++;
+}
 
-/// 单通道的合成参数（与 shader 的 GIChannelBlendParams 布局一致）
-///
-/// Wave 1：由「三个固定语义槽」改为「源数组」——槽位是通用容器，语义由 id 决定。
-/// 这样新增 GI 只需 GISourceId 加一项 + SampleSource 加一个 case，
-/// 不再需要改 UBO 结构 / 帧图映射 / shader 分支。
-struct GIChannelBlendData {
-    static constexpr u32 kMaxSources = 4;
-    GISourceSlotData sources[kMaxSources];
-    u32 count       = 0;
-    u32 mode        = 1;      // GIBlendMode（0=相加对照, 1=归一化加权）
-    u32 furnaceMode = 0;      // 白炉数值测试
-    float edgeFade  = 0.05f;  // 屏幕覆盖置信度的边缘淡出带宽（占短边的比例，§3.2）
-
-    /// 追加一个源（weight<=0 忽略；超出容量忽略）
-    /// 置信度掩码在此统一推导：调用方不必（也不应）自己填，避免又出现"两份真值"。
-    void Add(u32 sourceId, float w, float falloff = 0.0f) {
-        if (w <= 0.0f || count >= kMaxSources) return;
-        sources[count].id              = sourceId;
-        sources[count].weight          = w;
-        sources[count].falloffDistance = falloff;
-        sources[count].confidence      = ToConfidenceMask((GISourceId)sourceId);
-        count++;
-    }
-};
-static_assert(sizeof(GIChannelBlendData) == 80, "GIChannelBlendData must be 80 bytes（与 shader GIChannelBlendParams 对齐）");
+// 布局钉子：UBO 里三个通道各占 80B，`count/mode/furnaceMode/edgeFade` 落在 64/68/72/76。
+// 共享切片里"顺手加个字段"会让三通道步长与 shader 侧偏移同时漂移，这里把它拦在编译期。
+static_assert(sizeof(GIChannelBlendParams) == 80,
+              "GIChannelBlendParams 必须 80 字节（GIBlendParams 的三通道步长）");
+static_assert(offsetof(GIChannelBlendParams, count)       == 64, "count 偏移必须为 64");
+static_assert(offsetof(GIChannelBlendParams, mode)        == 68, "mode 偏移必须为 68");
+static_assert(offsetof(GIChannelBlendParams, furnaceMode) == 72, "furnaceMode 偏移必须为 72");
+static_assert(offsetof(GIChannelBlendParams, edgeFade)    == 76, "edgeFade 偏移必须为 76");
+static_assert(kGIMaxSourcesPerChannel == 4, "每通道源槽数必须是 4（与 shader 循环上界一致）");
 
 // ============================================================
 // 管线 GI 能力位 — 各管线支持的 GI 源子集

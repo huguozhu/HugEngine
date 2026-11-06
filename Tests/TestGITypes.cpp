@@ -8,11 +8,12 @@
 //   4. GIConfig 门控谓词**严格由层栈派生**（防止再引入「影子开关」）
 //   5. 四档预设 GIConfigFromPreset 的基线与精度
 //   6. GIRegistry 可用性判断与逐源降级（含每通道兜底）
-//   7. shader UBO 镜像结构的布局不漂移
+//   7. shader UBO 布局（与 Slang 共用的类型）的尺寸与容量不漂移
 //
-// 为什么能脱离 RHI：这些类型已下沉到 `GI/GITypes.h`（只依赖 Core/Types.h），
-// 故本文件只需把 `Engine/Render` 加入 include 路径，**无需链接 HugEngineRender**
-// （链接它会连带拉入 RHI/Vulkan 与 slangc 生成的 SPV 头，代价过高）。
+// 为什么能脱离 RHI：这些类型已下沉到 `GI/GITypes.h`（只依赖 Core/Types.h 与 C++/Slang
+// 共享契约的 GI 切片 `ShaderTypes/GITypes.slang`，该切片不含向量类型、不牵入 Math/GLM），
+// 故本文件只需把 `Engine/Render` 与 `Engine/Shader/Shaders` 加入 include 路径，
+// **无需链接 HugEngineRender**（链接它会连带拉入 RHI/Vulkan 与 slangc 生成的 SPV 头，代价过高）。
 //
 // 边界说明：本文件验证的是 **C++ 侧的配置 / 注册表 / 降级逻辑**，
 // 不是 shader 里的合成数学（那部分由 06.GILab 的白炉测试覆盖）。
@@ -682,39 +683,41 @@ TEST_CASE("GIRegistry::Degrade：不改动入参（纯函数语义）") {
 }
 
 // ============================================================
-// 7. shader UBO 镜像结构（防 C++/slang 双侧漂移）
+// 7. shader UBO 布局（C++/slang 共用同一类型，验"共享定义没有意外膨胀"）
 // ============================================================
-TEST_CASE("shader UBO 镜像：结构与容量与 ShaderTypes.slang 一致") {
-    // 布局：GISourceSlot = {u32,float,float,u32} = 16B
-    CHECK(sizeof(GISourceSlotData) == 16u);
-    // GIChannelBlendParams = 4×16B 源槽 + count/mode/furnaceMode/_pad = 80B
-    CHECK(sizeof(GIChannelBlendData) == 80u);
+TEST_CASE("shader UBO 布局：源槽与通道参数与 ShaderTypes.slang 一致") {
+    // 布局：GISourceSlot = {u32,float,float,u32} = 16B —— 该类型与 shader **共用同一份定义**
+    // （ShaderTypes/GITypes.slang），故这里验的是"共享定义没有意外膨胀"，而非两侧比对。
+    CHECK(sizeof(GISourceSlot) == 16u);
+    // GIChannelBlendParams = 4×16B 源槽 + count/mode/furnaceMode/edgeFade = 80B
+    CHECK(sizeof(GIChannelBlendParams) == 80u);
 
     // 容量常量必须与 shader 的 kGIMaxSourcesPerChannel = 4 一致
     CHECK(GIChannelStack::kMaxSources      == 4u);
-    CHECK(GIChannelBlendData::kMaxSources  == 4u);
-    CHECK(GIChannelStack::kMaxSources == GIChannelBlendData::kMaxSources);
+    CHECK(kGIMaxSourcesPerChannel          == 4u);
+    CHECK(GIChannelStack::kMaxSources == kGIMaxSourcesPerChannel);
 }
 
-TEST_CASE("GIChannelBlendData::Add：weight<=0 忽略、容量上限生效") {
-    GIChannelBlendData b;
+TEST_CASE("AddGIBlendSource：weight<=0 忽略、容量上限生效、默认值正确") {
+    GIChannelBlendParams b{};
     CHECK(b.count == 0u);
+    CHECK(b.mode == 1u);                                     // 默认归一化加权
+    CHECK(b.edgeFade == doctest::Approx(0.05f));             // 默认 5% 边缘带宽（§3.2）
 
-    b.Add(static_cast<u32>(GISourceId::IBL), 1.0f);
-    b.Add(static_cast<u32>(GISourceId::DDGI), 0.5f, 20.0f);
+    AddGIBlendSource(b, static_cast<u32>(GISourceId::IBL), 1.0f);
+    AddGIBlendSource(b, static_cast<u32>(GISourceId::DDGI), 0.5f, 20.0f);
     CHECK(b.count == 2u);
-    CHECK(b.mode == 1u);                                     // 默认归一化
     CHECK(b.sources[1].falloffDistance == doctest::Approx(20.0f));
 
-    b.Add(static_cast<u32>(GISourceId::SSGI), 0.0f);         // weight<=0 → 忽略
+    AddGIBlendSource(b, static_cast<u32>(GISourceId::SSGI), 0.0f);   // weight<=0 → 忽略
     CHECK(b.count == 2u);
 
-    b.Add(static_cast<u32>(GISourceId::SSGI), 1.0f);
-    b.Add(static_cast<u32>(GISourceId::RSM),  1.0f);
-    CHECK(b.count == GIChannelBlendData::kMaxSources);
+    AddGIBlendSource(b, static_cast<u32>(GISourceId::SSGI), 1.0f);
+    AddGIBlendSource(b, static_cast<u32>(GISourceId::RSM),  1.0f);
+    CHECK(b.count == kGIMaxSourcesPerChannel);
 
-    b.Add(static_cast<u32>(GISourceId::GTAO), 1.0f);         // 超容量 → 忽略
-    CHECK(b.count == GIChannelBlendData::kMaxSources);
+    AddGIBlendSource(b, static_cast<u32>(GISourceId::GTAO), 1.0f);   // 超容量 → 忽略
+    CHECK(b.count == kGIMaxSourcesPerChannel);
 }
 
 // ── 逐像素置信度判据（§3.2，任务 9）──
@@ -755,14 +758,14 @@ TEST_CASE("ToConfidenceMask：屏幕空间源带 CAMERA_COVERAGE 位，DDGI 带 
     CHECK(ToConfidenceMask(GISourceId::None) == kGIConfNone);
 }
 
-TEST_CASE("GIChannelBlendData::Add：置信度掩码由源 id 统一推导") {
-    GIChannelBlendData b;
-    b.Add(static_cast<u32>(GISourceId::IBL),  1.0f);
-    b.Add(static_cast<u32>(GISourceId::SSGI), 1.0f);
-    b.Add(static_cast<u32>(GISourceId::RSM),  1.0f);
-    b.Add(static_cast<u32>(GISourceId::DDGI), 1.0f);
+TEST_CASE("AddGIBlendSource：置信度掩码由源 id 统一推导") {
+    GIChannelBlendParams b{};
+    AddGIBlendSource(b, static_cast<u32>(GISourceId::IBL),  1.0f);
+    AddGIBlendSource(b, static_cast<u32>(GISourceId::SSGI), 1.0f);
+    AddGIBlendSource(b, static_cast<u32>(GISourceId::RSM),  1.0f);
+    AddGIBlendSource(b, static_cast<u32>(GISourceId::DDGI), 1.0f);
     CHECK(b.count == 4u);
-    // 调用方不填置信度，Add 自己推导 —— 少一个"忘记填"的机会
+    // 调用方不填置信度，AddGIBlendSource 自己推导 —— 少一个"忘记填"的机会
     CHECK(b.sources[0].confidence == kGIConfNone);
     CHECK(b.sources[1].confidence == kGIConfCameraCoverage);
     CHECK(b.sources[2].confidence == kGIConfNone);

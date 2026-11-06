@@ -891,27 +891,23 @@ void ForwardPipeline::RefreshRSMFrustum(const CameraData& camera) {
 void ForwardPipeline::FillGIBlendUBO() {
     if (!m_GIBuffers[RenderFrameSlot()]) return;
     // 与 Deferred 帧图里那段 fillSlots **同构**：逐通道把层栈的源写进 UBO 槽位，
-    // 置信度掩码由 GIChannelBlendData::Add 统一推导（前向没有屏幕空间源 ⇒ 掩码全 None）。
+    // 置信度掩码由 AddGIBlendSource 统一推导（前向没有屏幕空间源 ⇒ 掩码全 None）。
     GIBlendParams bp{};
-    auto fillSlots = [this](GIChannelBlendData& b, const GIChannelStack& st) {
+    auto fillSlots = [this](GIChannelBlendParams& b, const GIChannelStack& st) {
         b.count = 0;
         b.mode  = (u32)st.mode;
         b.edgeFade = m_GIConfig.edgeFade;
         for (u32 i = 0; i < st.count; i++) {
             const GISourceDesc& s = st.sources[i];
-            b.Add((u32)s.id, s.weight, s.falloffDistance);
+            AddGIBlendSource(b, (u32)s.id, s.weight, s.falloffDistance);
         }
     };
-    // CPU 侧用 GIChannelBlendData 逐槽构造（置信度掩码在那里统一推导），
-    // 再按 LightingPass 的同一做法 memcpy 进 shader 结构 —— 两份布局有 static_assert 保证一致
-    GIChannelBlendData d{}, sp{}, ao{};
-    fillSlots(d,  m_GIConfig.diffuse);
-    fillSlots(sp, m_GIConfig.specular);
-    fillSlots(ao, m_GIConfig.ao);
-    d.furnaceMode = m_GIConfig.furnaceMode ? 1u : 0u;
-    std::memcpy(&bp.diffuse,  &d,  sizeof(GIChannelBlendData));
-    std::memcpy(&bp.specular, &sp, sizeof(GIChannelBlendData));
-    std::memcpy(&bp.ao,       &ao, sizeof(GIChannelBlendData));
+    // 直接写进 GIBlendParams 的三个通道（它们的类型就是 shader 的 GIChannelBlendParams），
+    // 不再经过"CPU 包装 → memcpy"这一跳
+    fillSlots(bp.diffuse,  m_GIConfig.diffuse);
+    fillSlots(bp.specular, m_GIConfig.specular);
+    fillSlots(bp.ao,       m_GIConfig.ao);
+    bp.diffuse.furnaceMode = m_GIConfig.furnaceMode ? 1u : 0u;
 
     // RSM 内联求和的两个参数（任务 30 / 任务 34）：采样缩放与光源 VP 都由**同一个**按场景
     // 包围盒拟合的固定光锥推出 —— 与 RSM_Generate pass 用的是同一份（RefreshRSMFrustum）。
