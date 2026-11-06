@@ -37,6 +37,8 @@ if(SLANGC)
     #   · ShaderTypes.slang 还被 C++ 直接 include（Material.h / LightingPass.cpp），
     #     依赖 Shaders/ 在 target_include_directories 中
     # 故移动入口 shader 无需改写任何 include；但不要让共享头离开根目录。
+    # 例外：ShaderTypes/ 子目录放**共享 GPU 契约的切片**（宏 / 绑定号 / 常量 / 结构按域拆开，
+    # 让 C++ 头按需包含、减少展开）；入口仍是根目录的 ShaderTypes.slang（兼容层）。
     set(VERT_SLANG
         # Lighting
         "${SHADER_DIR}/Lighting/DeferredLighting.vert.slang"
@@ -262,6 +264,21 @@ if(SLANGC)
     # 单个着色器文件本身由各自 SRC 依赖。改为显式列表而非 glob 所有 .slang，
     # 否则修改任一 shader（如 PBR.frag）会因 "DEPENDS 所有 shader" 触发全部重编译。
     set(SLANG_INCLUDES
+        # C++/Slang 共享 GPU 契约的**切片**：拆开是为了让 C++ 头按需包含、减少展开
+        # （GI/GITypes.h 只吃 GITypes.slang 这一片，不再展开全部 549 行）。
+        # 每个切片都必须列在这里 —— 漏一个就会让增量构建复用**过期 SPV**，
+        # 症状是"改了契约但画面/布局没变"，且没有任何报错。
+        "${SHADER_DIR}/ShaderTypes/GPUDefines.slang"
+        "${SHADER_DIR}/ShaderTypes/GPUBindings.slang"
+        "${SHADER_DIR}/ShaderTypes/GPUConstants.slang"
+        "${SHADER_DIR}/ShaderTypes/GITypes.slang"
+        "${SHADER_DIR}/ShaderTypes/GIBlendParams.slang"
+        "${SHADER_DIR}/ShaderTypes/GPUSceneTypes.slang"
+        "${SHADER_DIR}/ShaderTypes/PushConstants/Forward.slang"
+        "${SHADER_DIR}/ShaderTypes/PushConstants/Deferred.slang"
+        "${SHADER_DIR}/ShaderTypes/PushConstants/RT.slang"
+        "${SHADER_DIR}/ShaderTypes/PushConstants/PT.slang"
+        # 总入口（兼容层）：所有 .slang 仍然 include 它，行为与拆分前一致
         "${SHADER_DIR}/ShaderTypes.slang"
         "${SHADER_DIR}/common.slang"
         "${SHADER_DIR}/pbr_common.slang"
