@@ -467,3 +467,31 @@ if(SLANGC)
 else()
     message(FATAL_ERROR "slangc NOT found — install Vulkan SDK: https://vulkan.lunarg.com/")
 endif()
+
+# ============================================================
+# 绑定契约对账（可选目标，不参与 ALL）
+#
+# 把每个 shader 在 Vulkan / DX12 / DX11 上的**实际**绑定落点导出，与
+# ShaderTypes/GPUBindings.slang 的 kGPUBinding_*、以及 RHI/Types.h 的镜像常量比对。
+#
+# 为什么不做进构建：它是"验收"而不是"生成"，还要跑 3 倍 slangc（146 入口 × 3 后端），
+# 放进 ALL 会明显拖慢日常构建；CI / 改契约后显式调用即可：
+#     cmake --build Build --target AuditShaderBindings
+# 报告落在 <build>/Engine/Shader/shader_audit/（contract.md / contract.csv）。
+# 详见 Tools/shader/README.md。
+# ============================================================
+if(SLANGC)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_custom_target(AuditShaderBindings
+            COMMAND ${Python3_EXECUTABLE}
+                    "${CMAKE_SOURCE_DIR}/Tools/shader/binding_audit.py"
+                    --slangc "${SLANGC}"
+                    --out "${CMAKE_CURRENT_BINARY_DIR}/shader_audit"
+            COMMENT "对账 shader 绑定契约（Vulkan / DX12 / DX11）"
+            VERBATIM
+        )
+    else()
+        message(STATUS "未找到 Python3：跳过 AuditShaderBindings 目标")
+    endif()
+endif()
