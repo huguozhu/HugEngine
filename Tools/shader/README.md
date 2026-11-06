@@ -74,17 +74,20 @@ cmake --build Build --target AuditShaderBindings
 5. **RHI 镜像漂移**：`Engine/RHI/RHI/Types.h` 的 `kBinding* / kDescSet* / kMax*`
    与共享契约的 `kGPU*` 数值不一致（这层原本没有任何编译期检查）。
 
-### 当前已知结果（2026-11-06 全量跑）
+**按后端过滤条件编译**：合并 D3D11/D3D12 之后，同一资源在不同分支里有**不同的
+`vk::binding`**（例如 `u_InstanceTransforms` 在 `#if defined(HE_SHADER_D3D11)` 里是
+`kGPUBinding_NB_InstanceTransforms`、在 `#else` 里是 `kGPUBinding_BindlessSSBO`）。
+脚本按 `TARGET_DEFINES` 过滤未命中分支（与 CMake 的 Dxil/Dxbc 规则同一组宏），并剥掉
+声明末尾的 `: register(...)` 再取参数名——否则会出现两类误报。
+
+### 当前已知结果（2026-11-06 全量跑，合并三后端之后）
 
 - **Vulkan 列 0 问题**：所有入口的 `(set, binding)` 与契约一致，没有槽位冲突；
-- **DX12 列**：全部可编，但 register/space 与 Vulkan 完全不同（见上表），
-  后端必须按反射建根签名；
-- **DX11 列**：RT / compute 之外的图形 shader 有一批编不过，当前两类典型错误：
-  - `error X3502: 'fragmentMain': input parameter 'input_0' missing semantics`
-  - `error X3503: 'vertexMain': function return value missing semantics`
-  这是全屏三角形 VS/FS 的**接口语义**问题（Slang 编 SPIR-V 时不需要语义、按 location
-  自动分配；fxc 编 DXBC 必须显式给 `TEXCOORD0` 之类），与绑定无关。DX11 后端接入前
-  要先补这类语义，或按后端拆一套 VS/FS 签名。
+- **DX12 / DX11 列只是"原始 slangc"视角**：真实链路会先经 `Tools/ShaderToDxil`
+  注入语义、按 `vk::binding` 重排寄存器（t/s/u = binding，描述符集 CB = `b(8+binding)`），
+  所以报告里出现的 DX11 缺语义错误（`X3502`/`X3503`）**不代表后端编不过**，以
+  `Build/Engine/Shader/generated_dxbc/dxbc_report.md` 为准；
+- 剩余的"未进反射"条目是声明了但未被使用（被裁掉）或只出现在其它后端分支里的资源。
 
 ### 局限
 

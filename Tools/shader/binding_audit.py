@@ -94,6 +94,94 @@ DX11_LIMITS = {"b": 14, "s": 16, "u": 8, "t": 128}
 # 共享契约里允许定义 bindings/constants 的切片（GPU_CONST 可以出现在其中任一文件）
 CONST_SLICE_GLOBS = ["ShaderTypes/*.slang", "ShaderTypes/PushConstants/*.slang"]
 
+# 每个后端编译时由 CMake 传入的宏（见 Engine/Shader/CMakeLists.txt 的 Dxil/Dxbc 规则）。
+# 合并 D3D11/D3D12 之后，同一资源在不同分支里有**不同的 vk::binding**：
+#   #if defined(HE_SHADER_D3D11)
+#   [[vk::binding(kGPUBinding_NB_InstanceTransforms, ...)]] ... u_InstanceTransforms;
+#   #else
+#   [[vk::binding(kGPUBinding_BindlessSSBO, ...)]] ... u_InstanceTransforms[256] : register(...);
+#   #endif
+# 所以解析源码时必须按目标过滤条件编译分支，否则会拿 D3D11 的编号去和 Vulkan 反射比对。
+TARGET_DEFINES = {
+    "vk":   set(),
+    "dx12": {"HE_SHADER_HLSL", "HE_SHADER_D3D12", "HE_NO_TEX", "HE_BYPASS_MATRIX"},
+    "dx11": {"HE_SHADER_HLSL", "HE_SHADER_D3D11"},
+}
+
+RE_COND = re.compile(r"^\s*#\s*(if|ifdef|ifndef|elif|else|endif)\b(.*)$")
+
+
+def _eval_cond(kind: str, expr: str, defines: set) -> bool | None:
+    """求值 #if/#ifdef/#ifndef 的条件；None = 无法判定（按"两边都保留"处理）。"""
+    expr = expr.strip()
+    if kind == "ifdef":
+        name = expr.split()[0] if expr else ""
+        return (name in defines) if name else None
+    if kind == "ifndef":
+        name = expr.split()[0] if expr else ""
+        return (name not in defines) if name else None
+    m = re.fullmatch(r"(!?)\s*defined\s*\(?\s*(\w+)\s*\)?", expr)
+    if m:
+        v = m.group(2) in defines
+        return (not v) if m.group(1) else v
+    if re.fullmatch(r"[01]", expr):
+        return expr == "1"
+    return None
+
+
+def strip_inactive(text: str, defines: set) -> str:
+    """按目标宏过滤条件编译：未命中的分支替换成空行（行号保持不变）。
+
+    只处理可以判定的条件（defined / !defined / 0 / 1）；复杂表达式按"两边都保留"处理，
+    宁可多报也不漏报。
+    """
+    out: list[str] = []
+    stack: list[list] = []          # [parent_active, taken, unknown]
+    active = True
+    for line in text.splitlines():
+        m = RE_COND.match(line)
+        if not m:
+            out.append(line if active else "")
+            continue
+        kind, expr = m.group(1), m.group(2)
+        if kind in ("if", "ifdef", "ifndef"):
+            cond = _eval_cond(kind, expr, defines)
+            unknown = cond is None
+            stack.append([active, unknown or cond, unknown])
+            active = active and (cond if not unknown else True)
+        elif kind == "elif":
+            if not stack:
+                out.append("")
+                continue
+            parent, taken, unknown = stack[-1]
+            if unknown:
+                active = parent
+            else:
+                cond = _eval_cond("if", expr, defines)
+                if cond is None:
+                    stack[-1][2] = True
+                    active = parent
+                elif taken:
+                    active = False
+                else:
+                    stack[-1][1] = cond
+                    active = parent and cond
+        elif kind == "else":
+            if not stack:
+                out.append("")
+                continue
+            parent, taken, unknown = stack[-1]
+            if unknown:
+                active = parent
+            else:
+                active = parent and (not taken)
+                stack[-1][1] = True
+        else:  # endif
+            if stack:
+                active = stack.pop()[0]
+        out.append("")
+    return "\n".join(out)
+
 RE_BINDING_ATTR = re.compile(r"\[\[\s*vk::binding\(\s*([^,]+?)\s*,\s*([^)]+?)\s*\)\s*\]\]")
 RE_GPU_CONST_INT = re.compile(r"GPU_CONST\(\s*GPU_UINT\s+(\w+)\s*=\s*(\d+)\s*\)")
 RE_RHI_CONST_INT = re.compile(r"constexpr\s+u32\s+(\w+)\s*=\s*(\d+)\s*;")
@@ -203,13 +291,16 @@ def iter_shader_files(shaders_dir: Path):
             yield f, m.group(1)
 
 
-def parse_shader_source(path: Path, consts: dict[str, int]) -> list[SourceBinding]:
+def parse_shader_source(path: Path, consts: dict[str, int],
+                        defines: set | None = None) -> list[SourceBinding]:
     """从 shader 源码里抽 `[[vk::binding(X, Y)]] <声明>` 的 (参数名, set, binding)。
 
     只做**文本层**解析：属性后面跟到第一个 `;` 为止，从这一段里取参数名
     （`cbuffer NAME {` 取 NAME；否则取最后一个标识符，兼容 `u_X[]` 这种数组写法）。
     """
     text = path.read_text(encoding="utf-8")
+    if defines is not None:
+        text = strip_inactive(text, defines)   # 只保留当前目标会看到的分支
     lines = text.splitlines()
     out: list[SourceBinding] = []
     for i, line in enumerate(lines):
@@ -231,7 +322,10 @@ def parse_shader_source(path: Path, consts: dict[str, int]) -> list[SourceBindin
             name = mc.group(1)
             type_kw = "cbuffer"
         else:
-            mn = re.findall(r"([A-Za-z_]\w*)\s*(?:\[[^\]]*\])?\s*$", chunk.strip())
+            # 声明末尾可能带 `: register(...)`（D3D 目标用；Slang 侧也允许）——
+            # 先剥掉它，否则名字提取会匹配到 register 里的标识符而失败。
+            decl = re.sub(r":\s*register\([^)]*\)", " ", chunk)
+            mn = re.findall(r"([A-Za-z_]\w*)\s*(?:\[[^\]]*\])?\s*$", decl.strip())
             if mn:
                 name = mn[-1]
             mt = re.match(r"\s*(?:const\s+|uniform\s+)?([A-Za-z_]\w*)", chunk)
@@ -277,13 +371,14 @@ def include_closure(path: Path, root: Path, seen: set[Path] | None = None) -> li
     return out
 
 
-def collect_source_bindings(src: Path, root: Path, cache: dict) -> tuple[list[SourceBinding], list[str]]:
+def collect_source_bindings(src: Path, root: Path, cache: dict,
+                            target: str) -> tuple[list[SourceBinding], list[str]]:
     """合并 shader 自身 + 其 include 闭包里的绑定声明（同名以先出现者为准）。"""
     bindings: list[SourceBinding] = []
     push: list[str] = []
     seen_names: set[str] = set()
     for f in include_closure(src, root):
-        bs, ps = cache.get(f, ([], []))
+        bs, ps = cache.get((f, target), ([], []))
         for b in bs:
             if b.name not in seen_names:
                 seen_names.add(b.name)
@@ -294,9 +389,12 @@ def collect_source_bindings(src: Path, root: Path, cache: dict) -> tuple[list[So
     return bindings, push
 
 
-def parse_push_constants(path: Path) -> list[str]:
+def parse_push_constants(path: Path, defines: set | None = None) -> list[str]:
     """抽取 `[[vk::push_constant]] cbuffer NAME { … }` 的名字（DX 侧没有 push constant）。"""
-    lines = path.read_text(encoding="utf-8").splitlines()
+    text = path.read_text(encoding="utf-8")
+    if defines is not None:
+        text = strip_inactive(text, defines)
+    lines = text.splitlines()
     names: list[str] = []
     for i, line in enumerate(lines):
         if "[[vk::push_constant]]" not in line:
@@ -327,9 +425,12 @@ def compile_and_reflect(slangc: str, src: Path, shaders_dir: Path, target: str,
     out = workdir / (tag + BACKENDS[target][1])
     refl = workdir / (tag + ".json")
     cmd = [slangc, str(src), "-target", BACKENDS[target][0],
-           "-entry", entry, "-stage", stage,
-           "-I", str(shaders_dir), "-o", str(out),
-           "-reflection-json", str(refl), "-Wno-39001"]
+           "-entry", entry, "-stage", stage]
+    # 与 CMake 的 Dxil/Dxbc 规则用同一组宏：不同分支的声明不同（见 TARGET_DEFINES）
+    for d in sorted(TARGET_DEFINES.get(target, set())):
+        cmd.append("-D" + d)
+    cmd += ["-I", str(shaders_dir), "-o", str(out),
+            "-reflection-json", str(refl), "-Wno-39001"]
 
     res = BackendResult()
     try:
@@ -378,7 +479,16 @@ def audit_one(args_tuple) -> ShaderResult:
     m = RE_STAGE_FILE.search(src.name)
     ext = m.group(1)
     stage, entry = STAGE_MAP[ext]
-    source, push = collect_source_bindings(src, shaders_dir, cache)
+    source = []
+    push: list[str] = []
+    for t in targets:                      # 每个目标看到的分支不同，取并集用于列表展示
+        bs, ps = collect_source_bindings(src, shaders_dir, cache, t)
+        for b in bs:
+            if all(x.name != b.name for x in source):
+                source.append(b)
+        for n in ps:
+            if n not in push:
+                push.append(n)
     res = ShaderResult(shader=str(src.relative_to(shaders_dir)).replace("\\", "/"),
                        path=src, stage=stage, entry=entry,
                        source=source, push_constants=push)
@@ -406,7 +516,18 @@ def analyze(results: list[ShaderResult]) -> tuple[list[dict], list[str], list[st
         for t in ("dx12", "dx11"):
             b = r.backends.get(t)
             if b and not b.ok:
-                notes.append(f"[{t} 不支持/编译失败] {r.shader}: {b.error}")
+                if t == "dx11":
+                    # DX11 的真实链路是 slangc → ShaderToDxil（注入语义/循环属性）→ fxc，
+                    # 这里只跑原始 slangc，缺语义的错误属于预期，不代表后端编不过。
+                    notes.append(f"[dx11 原始 slangc 失败（真实链路会经 ShaderToDxil 补语义）] "
+                                 f"{r.shader}: {b.error}")
+                elif t == "dx12":
+                    # DX12 的寄存器由 ShaderToDxil 按 vk::binding 重排（t/s/u = binding，
+                    # 描述符集 CB = b(8+binding)），这里只反映 Slang 原始输出的形态。
+                    notes.append(f"[dx12 原始 slangc 失败（真实链路会经 ShaderToDxil 重排寄存器）] "
+                                 f"{r.shader}: {b.error}")
+                else:
+                    notes.append(f"[{t} 不支持/编译失败] {r.shader}: {b.error}")
 
         src_by_name = {s.name: s for s in r.source}
 
@@ -488,7 +609,9 @@ def analyze(results: list[ShaderResult]) -> tuple[list[dict], list[str], list[st
         if vk and vk.ok:
             for s in r.source:
                 if s.name not in vk.params:
-                    notes.append(f"[已裁剪] {r.shader}: {s.name}（源码声明了，反射里没有）")
+                    notes.append(f"[未进反射] {r.shader}: {s.name}"
+                             f"（源码里有声明，但 Vulkan 反射里没有 —— 未使用被裁掉，"
+                             f"或只出现在其它后端的分支里）")
 
     return rows, errors, notes
 
@@ -585,8 +708,12 @@ def main(argv: list[str]) -> int:
 
     workdir = Path(tempfile.mkdtemp(prefix="shader_audit_"))
     # 预解析所有 .slang（含共享头）的绑定声明：线程池里只读缓存，避免重复解析
-    cache = {f.resolve(): (parse_shader_source(f, consts), parse_push_constants(f))
-             for f in shaders_dir.rglob("*.slang")}
+    cache = {}
+    for f in shaders_dir.rglob("*.slang"):
+        for t in targets:
+            defs = TARGET_DEFINES.get(t, set())
+            cache[(f.resolve(), t)] = (parse_shader_source(f, consts, defs),
+                                       parse_push_constants(f, defs))
     results: list[ShaderResult] = []
     try:
         with ThreadPoolExecutor(max_workers=args.jobs) as pool:
