@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <map>
 #include <sstream>
@@ -307,7 +308,7 @@ static void CollectConstants(const std::vector<std::string>& lines, std::map<std
     }
 }
 
-/// 常量表：ShaderTypes.slang（从源码目录逐级向上查找）+ 源码文件本身
+/// 常量表：ShaderTypes.slang 及其切片（从源码目录逐级向上查找）+ 源码文件本身
 static bool ResolveInt(const std::string& token, const std::string& srcPath, int& out) {
     const std::string t = Trim(token);
     if (t.empty()) return false;
@@ -330,7 +331,25 @@ static bool ResolveInt(const std::string& token, const std::string& srcPath, int
             if (slash == std::string::npos) break;
             dir.resize(slash);
             const auto& types = GetSourceLines(dir + "/ShaderTypes.slang");
-            if (!types.empty()) { CollectConstants(types, table); break; }
+            if (!types.empty()) {
+                CollectConstants(types, table);
+                // 【切片兼容】ShaderTypes.slang 已退化为总入口，`kGPUBinding_*` / `kGPUDescSet_*`
+                // 现在定义在 ShaderTypes/*.slang 与 ShaderTypes/PushConstants/*.slang 里。
+                // 不扫这两个目录的话，所有用常量名的 `[[vk::binding(kGPUBinding_X, ...)]]`
+                // 都会解析失败 ⇒ DXBC 大面积"没有可用的 DXBC"、D3D12 寄存器退化为自动分配。
+                namespace fs = std::filesystem;
+                std::error_code ec;
+                for (const char* sub : { "/ShaderTypes", "/ShaderTypes/PushConstants" }) {
+                    const fs::path sliceDir(dir + sub);
+                    if (!fs::is_directory(sliceDir, ec)) continue;
+                    for (const auto& entry : fs::directory_iterator(sliceDir, ec)) {
+                        if (!entry.is_regular_file(ec)) continue;
+                        if (entry.path().extension() != ".slang") continue;
+                        CollectConstants(GetSourceLines(entry.path().string()), table);
+                    }
+                }
+                break;
+            }
         }
         CollectConstants(GetSourceLines(srcPath), table);
         it = s_tables.emplace(srcPath, std::move(table)).first;
