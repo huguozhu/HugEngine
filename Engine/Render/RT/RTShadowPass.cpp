@@ -27,14 +27,9 @@ static constexpr u32 kRTShadowBindDepth  = 2;   // 娣卞害
 static constexpr u32 kRTShadowBindNormal = 3;   // 娉曠嚎
 static constexpr u32 kRTShadowBindParams = 4;   // 鍙傛暟 UBO
 
-// 阴影光源结构（GPU 侧，64B/个，与 RT_Shadow.rgen.slang 的 ShadowLight 一致）
-struct ShadowLightGPU {
-    float4 pos_type;      // xyz=位置/方向, w=类型(0=Dir,1=Point,2=Spot)
-    float4 color_radius;  // rgb=颜色, w=强度（用于剔除无效光源）
-    float4 spotDir_angle; // xyz=聚光方向, w=cos(内锥角)
-    float4 radius;        // x=光源半径（软阴影）
-};
-static_assert(sizeof(ShadowLightGPU) == 64, "ShadowLightGPU must be 64 bytes");
+// 阴影光源结构来自共享契约（ShaderTypes/GPUSceneTypes.slang 的 ShadowLight，64B/个），
+// 与 RT_Shadow.rgen.slang 共用同一份定义 —— 这里不再有 ShadowLightGPU 镜像。
+static_assert(sizeof(ShadowLight) == 64, "ShadowLight 必须 64 字节（阴影光源 UBO 步长）");
 
 static constexpr u32 kShadowMaxLights = 16;
 
@@ -112,7 +107,7 @@ bool RTShadowPass::Initialize(rhi::IRHIDevice* device, u32 fullWidth, u32 fullHe
     // ── 创建阴影光源 Uniform Buffer（48B × 16 = 768B）──
     {
         rhi::BufferDesc ub;
-        ub.size  = sizeof(ShadowLightGPU) * kShadowMaxLights;
+        ub.size  = sizeof(ShadowLight) * kShadowMaxLights;
         ub.usage = rhi::BufferUsage::Uniform;
         m_LightUB = device->CreateBufferHandle(ub);   // A-3
         if (!m_LightUB.IsValid()) {
@@ -193,7 +188,7 @@ void RTShadowPass::FillLightBuffer(const RTExecuteContext& ctx) {
     if (!m_LightUB.IsValid() || !ctx.lightBuffer) return;
 
     auto* ubBuf    = ResB(m_LightUB);
-    ShadowLightGPU* dst = ubBuf ? static_cast<ShadowLightGPU*>(ubBuf->Map()) : nullptr;
+    ShadowLight* dst = ubBuf ? static_cast<ShadowLight*>(ubBuf->Map()) : nullptr;
     const GPULight* src = static_cast<const GPULight*>(ctx.lightBuffer->Map());
     if (!dst || !src) { if (dst) if (auto* ubu = ResB(m_LightUB)) ubu->Unmap(); if (src) ctx.lightBuffer->Unmap(); return; }
 
@@ -201,7 +196,7 @@ void RTShadowPass::FillLightBuffer(const RTExecuteContext& ctx) {
     const u32 maxCount = std::min(ctx.lightCount, kShadowMaxLights);
     for (u32 i = 0; i < maxCount; ++i) {
         if (src[i].colorIntensity.w <= 0.0f) continue;  // 跳过无效光源
-        ShadowLightGPU& sl = dst[count++];
+        ShadowLight& sl = dst[count++];
         sl.pos_type     = src[i].directionType;
         sl.color_radius = src[i].colorIntensity;
         // 避免 GLM swizzle（.xyz），用 vec3(vec4) 构造提取前三分量

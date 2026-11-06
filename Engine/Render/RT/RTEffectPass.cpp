@@ -113,7 +113,7 @@ void RTEffectPass::PrepareOutputUAV(rhi::IRHICommandList* cmd) {
 // ============================================================
 bool RTEffectPass::CreateHitLightUB(rhi::IRHIDevice* device) {
     rhi::BufferDesc ub;
-    ub.size  = sizeof(RTHitLightGPU) * 16;
+    ub.size  = sizeof(RTHitLight) * 16;
     ub.usage = rhi::BufferUsage::Uniform;
     m_LightUB = device->CreateBufferHandle(ub);   // A-3
     if (!m_LightUB.IsValid()) {
@@ -125,13 +125,13 @@ bool RTEffectPass::CreateHitLightUB(rhi::IRHIDevice* device) {
 
 // ============================================================
 // FillHitLightUB — 从 GPULight[] SSBO 显式抽取命中点光源数据
-// GPULight 为 64B/个，RTHitLightGPU 为 48B/个（紧密布局）
+// GPULight 为 64B/个，RTHitLight 为 48B/个（紧密布局）
 // ============================================================
 void RTEffectPass::FillHitLightUB(const RTExecuteContext& ctx) {
     if (!m_LightUB.IsValid() || !ctx.lightBuffer) return;
 
     auto* ubBuf   = ResB(m_LightUB);
-    RTHitLightGPU* dst = ubBuf ? static_cast<RTHitLightGPU*>(ubBuf->Map()) : nullptr;
+    RTHitLight* dst = ubBuf ? static_cast<RTHitLight*>(ubBuf->Map()) : nullptr;
     const GPULight* src = static_cast<const GPULight*>(ctx.lightBuffer->Map());
     if (!dst || !src) { if (dst) if (auto* ubu = ResB(m_LightUB)) ubu->Unmap(); if (src) ctx.lightBuffer->Unmap(); return; }
 
@@ -139,14 +139,14 @@ void RTEffectPass::FillHitLightUB(const RTExecuteContext& ctx) {
     const u32 maxCount = std::min(ctx.lightCount, 16u);
     for (u32 i = 0; i < maxCount; ++i) {
         if (src[i].colorIntensity.w <= 0.0f) continue;  // 跳过无效光源
-        RTHitLightGPU& l = dst[count++];
+        RTHitLight& l = dst[count++];
         l.colorIntensity = src[i].colorIntensity;
         l.positionRange  = src[i].positionRange;
         l.directionType  = src[i].directionType;
     }
     // 剩余位清零（避免残留光源影响 ClosestHit 的 lightCount 循环边界外读取）
     for (u32 i = count; i < 16; ++i)
-        dst[i] = RTHitLightGPU{};
+        dst[i] = RTHitLight{};
 
     if (auto* ubu = ResB(m_LightUB)) ubu->Unmap();
     ctx.lightBuffer->Unmap();

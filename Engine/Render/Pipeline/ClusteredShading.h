@@ -23,8 +23,11 @@ namespace he::render {
 class ClusteredShading {
 public:
     // --- 网格参数 ---
-    static constexpr u32 kTileSize   = 64;   // 屏幕空间 tile 大小（像素）
-    static constexpr u32 kDepthSlices = 12;  // Z 方向切片数（对数分布）
+    // 【不再手抄数值】直接引用共享契约（ShaderTypes/GPUConstants.slang）里的同一份常量：
+    // 此前这里是独立的 64 / 12，与 shader 的 kGPUClusterTileSize / kGPUClusterSlices 各写一份，
+    // 改一侧就会让 CPU 划分的 cluster 与 shader 的索引公式对不上（画面错位且无报错）。
+    static constexpr u32 kTileSize    = kGPUClusterTileSize;   // 屏幕空间 tile 大小（像素）
+    static constexpr u32 kDepthSlices = kGPUClusterSlices;     // Z 方向切片数（对数分布）
     static constexpr u32 kMaxLightsPerCluster = 64;
 
     // 每个 cluster 的 AABB（世界空间）

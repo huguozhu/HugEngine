@@ -53,13 +53,10 @@ struct RTExecuteContext {
 //  若先推常量会应用到上一 Pass 的布局，范围不匹配导致写入失败）
 // ============================================================
 // 反射/GI ClosestHit 光源（48B/个，从 GPULight[] 显式抽取 → UniformBuffer）
-// 与 RT_HitCommon.slang 的 RTHitLight 布局一致（避免 ClosestHit 访问 SSBO）
-struct RTHitLightGPU {
-    float4 colorIntensity;   // rgb=颜色, w=强度
-    float4 positionRange;    // xyz=位置, w=范围
-    float4 directionType;    // xyz=方向, w=类型 (0=Dir,1=Point,2=Spot)
-};
-static_assert(sizeof(RTHitLightGPU) == 48, "RTHitLightGPU must be 48 bytes");
+// 类型定义在共享契约（ShaderTypes/GPUSceneTypes.slang 的 `RTHitLight`，与
+// RT_HitCommon.slang 共用同一份）—— 这里不再有 `RTHitLightGPU` 镜像。
+// ============================================================
+static_assert(sizeof(RTHitLight) == 48, "RTHitLight 必须 48 字节（ClosestHit 光源 UBO 步长）");
 
 class RTEffectPass {
     HE_DECLARE_NON_COPYABLE(RTEffectPass);
@@ -158,7 +155,7 @@ public:
     rhi::DescriptorSetLayoutHandle m_RayGenLayout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_RayGenSet    = rhi::kInvalidSet;
     rhi::RHITextureHandle m_Output{};   // A-3
-    rhi::RHIBufferHandle  m_LightUB{};   // A-3：RTHitLightGPU[16]（反射/GI ClosestHit）
+    rhi::RHIBufferHandle  m_LightUB{};   // A-3：RTHitLight[16]（反射/GI ClosestHit）
     rhi::PushConstantRange m_PCRange;
     u32 m_Width = 0, m_Height = 0;
     bool m_OutputWritten = false;   // 输出纹理是否已被写入（首帧屏障用 Undefined）

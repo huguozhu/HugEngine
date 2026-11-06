@@ -28,12 +28,9 @@
 [[vk::binding(6, 0)]] Texture2D<float4> g_TriangleNormals;
 
 // === 命中点光源 cbuffer（binding 5, set0, ClosestHit 阶段）===
-// 48B/个，由 C++ 每帧从 GPULight[] SSBO 显式抽取（避免 ClosestHit 访问 SSBO）
-struct RTHitLight {
-    float4 colorIntensity;   // rgb=颜色, w=强度
-    float4 positionRange;    // xyz=位置, w=范围
-    float4 directionType;    // xyz=方向, w=类型 (0=Dir,1=Point,2=Spot)
-};
+// 48B/个，由 C++ 每帧从 GPULight[] SSBO 显式抽取（避免 ClosestHit 访问 SSBO）。
+// 结构定义在共享契约（ShaderTypes/GPUSceneTypes.slang 的 RTHitLight）：C++ 侧
+// `RTEffectPass` 用的是**同一个类型**，不再有 RTHitLightGPU 镜像。
 [[vk::binding(5, 0)]] cbuffer RTHitLightCB {
     RTHitLight g_HitLights[16];
 };

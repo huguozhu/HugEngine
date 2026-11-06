@@ -751,25 +751,22 @@ bool RTPass::CreateLightBuffer(rhi::IRHIDevice* device, u32 maxLights) {
 void RTPass::UpdateLightBuffer(rhi::IRHIBuffer* lightBuffer) {
     if (!m_LightUB.IsValid() || !lightBuffer) return;
 
-    // GPULight = 64 bytes: colorIntensity(16) + directionType(16) + positionRange(16) + coneAngles(8) + shadowIndex(4) + pad(4)
-    u8* src = static_cast<u8*>(lightBuffer->Map());
-    u8* dst = static_cast<u8*>(rhi::GetDevice()->ResolveBuffer(m_LightUB)->Map());
+    // 两端都按共享契约的**类型**解释内存（GPULight 64B/个 → LightUB 32B/个），
+    // 不再手抄 "64 / 32 / 12 / 16" 这些字节偏移 —— 结构一改，那些数字就会静默错位。
+    // 布局：LightUB = { ci = colorIntensity, dt = directionType }，lightCount 紧跟在数组之后。
+    const auto* src = static_cast<const GPULight*>(lightBuffer->Map());
+    auto* dst = static_cast<LightUB*>(rhi::GetDevice()->ResolveBuffer(m_LightUB)->Map());
     if (!src || !dst) return;
 
     u32 count = 0;
     for (u32 i = 0; i < m_LightMaxCount; ++i) {
-        u32 srcOff = i * 64;
-        float intensity = *reinterpret_cast<float*>(src + srcOff + 12); // colorIntensity.w
-        if (intensity <= 0.0f) continue;  // 跳过无效光源
-
-        // colorIntensity (float4 at offset 0)
-        std::memcpy(dst + i * 32, src + srcOff, 16);
-        // directionType (float4 at offset 16)
-        std::memcpy(dst + i * 32 + 16, src + srcOff + 16, 16);
+        if (src[i].colorIntensity.w <= 0.0f) continue;  // 跳过无效光源
+        dst[i].ci = src[i].colorIntensity;
+        dst[i].dt = src[i].directionType;
         count++;
     }
-    // lightCount at end
-    *reinterpret_cast<u32*>(dst + m_LightMaxCount * 32) = count;
+    // lightCount 紧跟在 LightUB 数组之后（指针步长由类型给出，不再写死 32）
+    *reinterpret_cast<u32*>(dst + m_LightMaxCount) = count;
 
     rhi::GetDevice()->ResolveBuffer(m_LightUB)->Unmap();
     lightBuffer->Unmap();

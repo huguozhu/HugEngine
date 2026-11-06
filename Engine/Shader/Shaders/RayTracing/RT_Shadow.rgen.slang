@@ -25,13 +25,9 @@
 [[vk::binding(3, 0)]] Texture2D<float4> g_GBufferB;          // worldNormal.xyz + roughness.w
 
 // 光源 Uniform Buffer（由 RTShadowPass 每帧从 GPULight[] 显式抽取，
-// 避免与 GPULight SSBO 的 64B 布局不匹配——旧版 bug 根源）
-struct ShadowLight {
-    float4 pos_type;      // xyz=位置/方向, w=类型(0=方向光, 1=点光源, 2=聚光灯)
-    float4 color_radius;  // rgb=颜色, w=强度（用于剔除无效光源）
-    float4 spotDir_angle; // xyz=聚光方向, w=cos(内锥角)（聚光灯专用）
-    float4 radius;        // x=光源半径（软阴影），与 C++ ShadowLightGPU 布局一致（16×64B）
-};
+// 避免与 GPULight SSBO 的 64B 布局不匹配——旧版 bug 根源）。
+// 结构定义在共享契约（ShaderTypes/GPUSceneTypes.slang 的 ShadowLight）：C++ 侧
+// RTShadowPass 用的是**同一个类型**，不再有 ShadowLightGPU 镜像。
 [[vk::binding(4, 0)]] cbuffer ShadowLightCB {
     ShadowLight g_Lights[16];
 };
