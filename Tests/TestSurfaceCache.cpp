@@ -86,6 +86,11 @@ TEST_CASE("SurfaceCache: 走完一条生命周期") {
     CHECK(table.Evict(0));                  // 幂等
 }
 
+// 【为什么只在 Release 下跑】Debug 构建里非法迁移会走 HE_ASSERT → std::abort（这是
+// SurfaceCacheTypes.cpp 有意为之的"非法迁移可断言"），进程直接中止，doctest 无法把它当
+// 普通失败记录；Release 下 HE_ASSERT 编译为空，本用例验证的"拒绝且不改状态"才可观测。
+// 若不这样分档，Debug 全量测试永远是 389/390，CI 门禁无法使用。
+#if !defined(HE_BUILD_DEBUG)
 TEST_CASE("SurfaceCache: 非法迁移被拒绝且不改状态") {
     SurfaceCachePageTable table;
     table.Resize(2);
@@ -108,6 +113,7 @@ TEST_CASE("SurfaceCache: 非法迁移被拒绝且不改状态") {
     // 越界页号
     CHECK_FALSE(table.Request(99, 0, 0));
 }
+#endif // !HE_BUILD_DEBUG
 
 TEST_CASE("SurfaceCache: 校验和随任一字段变化") {
     SurfaceCachePageTable a;
