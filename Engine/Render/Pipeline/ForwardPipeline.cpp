@@ -99,6 +99,13 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height)
         { 0, 0, rhi::VertexFormat::Float3, offsetof(he::StaticVertex, position) },
         { 1, 0, rhi::VertexFormat::Float3, offsetof(he::StaticVertex, normal) },
         { 2, 0, rhi::VertexFormat::Float2, offsetof(he::StaticVertex, uv) },
+        // 【手机 GPU 必须补齐】PBR.vert 的 SPIR-V 里声明了 location 3(joints)/4(weights)
+        // （蒙皮走 useInstanceID==3 分支）。管线若只声明 0~2：桌面驱动把缺失属性读成 0，
+        // 而 Maleoon/Mali 驱动会报 "The index of attributeMap is out of its size"，
+        // 并把已有属性的映射整体错位 ⇒ 真机上立方体/球体被"打碎"（实测）。
+        // 非蒙皮网格不进蒙皮分支，这里指向偏移 0 的合法数据即可。
+        { 3, 0, rhi::VertexFormat::UInt4,  0 },
+        { 4, 0, rhi::VertexFormat::Float4, 0 },
     };
 
     // --- 阴影子系统初始化（必须在描述符集之前，因为需要纹理/缓冲区访问器）---

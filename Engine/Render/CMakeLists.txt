@@ -185,9 +185,7 @@ set(RENDER_SOURCES
     AntiAliasing/AA_SMAA.h
     AntiAliasing/AA_SMAA.cpp
     AntiAliasing/AA_MSAA.h
-    # ShaderHotReload
     ShaderHotReload.h
-    ShaderHotReload.cpp
     # Lumen（虚拟化几何 GI）：持久资源宿主 + Provider，后续步骤在其上追加 atlas / SDF / 探针
     Lumen/LumenScene.h
     Lumen/LumenScene.cpp
@@ -249,6 +247,11 @@ set(RENDER_SOURCES
 )
 
 target_sources(HugEngineRender PRIVATE ${RENDER_SOURCES})
+
+# ShaderHotReload：Windows 专属（ReadDirectoryChangesW 监听文件变化）；鸿蒙构建不编译
+if(WIN32)
+    target_sources(HugEngineRender PRIVATE ShaderHotReload.cpp)
+endif()
 
 # IDE 目录树：按磁盘目录分组，.h 和 .cpp 合并在一起
 huge_source_group(${RENDER_SOURCES})

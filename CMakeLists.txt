@@ -1,4 +1,15 @@
-﻿cmake_minimum_required(VERSION 3.28)
+# ============================================================
+# 平台判定：Windows（默认） / HarmonyOS NEXT（-DCMAKE_TOOLCHAIN_FILE=cmake/OHOS.toolchain.cmake）
+# 鸿蒙构建把 D3D 后端、DXC/DXBC/DXIL 工具链、GLFW、编辑器、物理等全部裁掉，
+# 只留 Vulkan + Core/Scene/Asset/Render 与 01/02 两个样例。
+# ============================================================
+if(CMAKE_SYSTEM_NAME STREQUAL "OHOS" OR OHOS OR DEFINED ENV{OHOS_NDK_ROOT})
+    set(HUGENGINE_PLATFORM_OHOS ON)
+else()
+    set(HUGENGINE_PLATFORM_OHOS OFF)
+endif()
+message(STATUS "HugEngine: HUGENGINE_PLATFORM_OHOS=${HUGENGINE_PLATFORM_OHOS}")
+cmake_minimum_required(VERSION 3.28)
 project(HugEngine
     VERSION 0.1.0
     DESCRIPTION "Modern real-time rendering engine"
@@ -31,34 +42,61 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 # Options
 # ============================================================
 option(HUGENGINE_BUILD_SAMPLES   "Build sample projects" ON)
-option(HUGENGINE_BUILD_EDITOR    "Build editor"          ON)
+# 鸿蒙：构建 native 入口模块（libentry.so）；由 Platforms/OHOS 的 hvigor 工程传入 ON
+option(HUGENGINE_BUILD_OHOS_ENTRY "Build HarmonyOS native entry (libentry.so)" OFF)
+if(HUGENGINE_PLATFORM_OHOS)
+    option(HUGENGINE_BUILD_EDITOR "Build editor" OFF)
+else()
+    option(HUGENGINE_BUILD_EDITOR "Build editor" ON)
+endif()
 option(HUGENGINE_BUILD_TESTS     "Build tests"           OFF)
 option(HUGENGINE_RHI_VULKAN      "Enable Vulkan backend" ON)
 # D3D 后端只在 Windows 上可用；非 Windows 平台即使打开也会被忽略
-option(HUGENGINE_RHI_D3D12       "Enable D3D12 backend (Windows only)" ON)
-option(HUGENGINE_RHI_D3D11       "Enable D3D11 backend (Windows only)" ON)
-
-# Vulkan SDK（ImGui Vulkan 后端 + RHI 均需要）
-if(HUGENGINE_RHI_VULKAN)
-    # 自动检测本机最新版本的 Vulkan SDK（cmake/VulkanSDK.cmake），
-    # 不写死版本路径、不下载；找不到则报错终止配置
-    include(cmake/VulkanSDK.cmake)
-    find_package(Vulkan REQUIRED)
+if(HUGENGINE_PLATFORM_OHOS)
+    option(HUGENGINE_RHI_D3D12   "Enable D3D12 backend (Windows only)" OFF)
+    option(HUGENGINE_RHI_D3D11   "Enable D3D11 backend (Windows only)" OFF)
+else()
+    option(HUGENGINE_RHI_D3D12   "Enable D3D12 backend (Windows only)" ON)
+    option(HUGENGINE_RHI_D3D11   "Enable D3D11 backend (Windows only)" ON)
 endif()
 
-# Git（用于下载测试资源 + 子模块管理）
-find_package(Git REQUIRED)
+# Vulkan：Windows 用本机 SDK；鸿蒙用 NDK sysroot 里的 libvulkan + 头文件
+if(HUGENGINE_RHI_VULKAN)
+    if(HUGENGINE_PLATFORM_OHOS)
+        find_library(HUGENGINE_VULKAN_LIB NAMES vulkan REQUIRED)
+        find_path(HUGENGINE_VULKAN_INCLUDE_DIR NAMES vulkan/vulkan.h REQUIRED)
+        add_library(Vulkan::Vulkan UNKNOWN IMPORTED)
+        set_target_properties(Vulkan::Vulkan PROPERTIES
+            IMPORTED_LOCATION "${HUGENGINE_VULKAN_LIB}"
+            INTERFACE_INCLUDE_DIRECTORIES "${HUGENGINE_VULKAN_INCLUDE_DIR}")
+        message(STATUS "HugEngine: OHOS Vulkan -> ${HUGENGINE_VULKAN_LIB}")
+    else()
+        include(cmake/VulkanSDK.cmake)
+        find_package(Vulkan REQUIRED)
+    endif()
+endif()
+
+# Git（下载测试资源 + 子模块管理）；鸿蒙不下载资产（随 rawfile 打包）
+if(NOT HUGENGINE_PLATFORM_OHOS)
+    find_package(Git REQUIRED)
+endif()
 
 # ============================================================
 # 下载测试资源（Sponza glTF 等）
 # ============================================================
-include(cmake/DownloadAssets.cmake)
+if(NOT HUGENGINE_PLATFORM_OHOS)
+    include(cmake/DownloadAssets.cmake)
+endif()
 
 # ============================================================
 # External dependencies
 # NOTE: External deps processed BEFORE C++26 to avoid
 #       propagating CXX_STANDARD to sub-builds
 # ============================================================
+# vendored 第三方的可重复补丁（glm 对齐门限）
+include(cmake/PatchDeps.cmake)
+huge_patch_dependencies()
+
 add_subdirectory(Engine/External)
 
 # ============================================================
@@ -141,4 +179,17 @@ endforeach()
 # 测试
 if(TARGET HugEngineTests)
     set_target_properties(HugEngineTests PROPERTIES FOLDER "Tests")
+endif()
+
+# ============================================================
+if(HUGENGINE_BUILD_OHOS_ENTRY)
+    add_subdirectory(Platforms/OHOS/entry/src/main/cpp)
+endif()
+
+# 鸿蒙侧源码的编译自检（仅桌面构建；只编不链接）
+#   cmake --build build --target OhosStubCheck
+# 用 stub 头 + HE_PLATFORM_OHOS_STUBCHECK 把鸿蒙分支真正编译一遍。
+# ============================================================
+if(NOT HUGENGINE_PLATFORM_OHOS)
+    add_subdirectory(Platforms/OHOS/stubcheck)
 endif()

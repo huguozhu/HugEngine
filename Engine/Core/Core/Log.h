@@ -26,7 +26,9 @@ enum class LogLevel : u8 {
 
 class Logger {
 public:
+    /// 幂等：重复调用会直接返回（鸿蒙侧 NativeEntry 可能先于 Engine 初始化日志）
     static void Initialize(LogLevel level = LogLevel::Info);
+    static bool IsInitialized()  { return s_CoreLogger != nullptr; }
     static void Shutdown();
 
     static spdlog::logger* GetCoreLogger()   { return s_CoreLogger.get(); }
