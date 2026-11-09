@@ -285,7 +285,25 @@ void VulkanDevice::Initialize(const DeviceInitDesc& desc) {
     std::vector<const char*> validationLayers;
 
     if (m_ValidationEnabled) {
-        validationLayers.push_back("VK_LAYER_KHRONOS_validation");
+        // 【手机上没有校验层】鸿蒙/Android 设备通常不安装 VK_LAYER_KHRONOS_validation，
+        // 强行启用会让 vkCreateInstance 返回 VK_ERROR_LAYER_NOT_PRESENT（-6），
+        // 之后 instance 为空，再枚举设备就崩。这里先枚举实例层，存在才启用。
+        u32 layerCount = 0;
+        vkEnumerateInstanceLayerProperties(&layerCount, nullptr);
+        std::vector<VkLayerProperties> availableLayers(layerCount);
+        if (layerCount > 0) {
+            vkEnumerateInstanceLayerProperties(&layerCount, availableLayers.data());
+        }
+        const bool hasValidation = std::any_of(
+            availableLayers.begin(), availableLayers.end(),
+            [](const VkLayerProperties& l) { return std::strcmp(l.layerName, "VK_LAYER_KHRONOS_validation") == 0; });
+        if (hasValidation) {
+            validationLayers.push_back("VK_LAYER_KHRONOS_validation");
+        } else {
+            m_ValidationEnabled = false;
+            HE_CORE_WARN("设备没有 VK_LAYER_KHRONOS_validation（{} 个实例层），本次关闭校验层",
+                         layerCount);
+        }
     }
 
     VkInstanceCreateInfo instanceInfo{};
@@ -297,9 +315,14 @@ void VulkanDevice::Initialize(const DeviceInitDesc& desc) {
     instanceInfo.ppEnabledLayerNames = validationLayers.data();
 
     VkResult result = vkCreateInstance(&instanceInfo, nullptr, &m_Instance);
-    HE_ASSERT(result == VK_SUCCESS, "Failed to create Vulkan instance");
-
-    HE_CORE_INFO("Vulkan instance created");
+    // 【不能只靠断言】Release（NDEBUG）下 HE_ASSERT 会被裁掉；鸿蒙设备没有验证层时
+    // vkCreateInstance 会返回 VK_ERROR_LAYER_NOT_PRESENT，此时 m_Instance 仍是空句柄，
+    // 再调 vkEnumeratePhysicalDevices 会被 loader 直接 abort（真机实测 SIGABRT）。
+    if (result != VK_SUCCESS) {
+        HE_CORE_ERROR("vkCreateInstance 失败: result={}（实例扩展/验证层不可用？）", static_cast<int>(result));
+        return;
+    }
+    HE_CORE_INFO("Vulkan instance created（instance={:p}）", static_cast<void*>(m_Instance));
 
     // 2. 设置调试回调
     if (m_ValidationEnabled) {
@@ -485,7 +508,12 @@ void VulkanDevice::CreateSurface(void* windowHandle) {
 // ============================================================
 void VulkanDevice::SelectPhysicalDevice() {
     u32 count = 0;
-    vkEnumeratePhysicalDevices(m_Instance, &count, nullptr);
+    const VkResult enumResult = vkEnumeratePhysicalDevices(m_Instance, &count, nullptr);
+    if (enumResult != VK_SUCCESS || count == 0) {
+        HE_CORE_ERROR("vkEnumeratePhysicalDevices 失败: result={} count={}（instance={:p}）",
+                      static_cast<int>(enumResult), count, static_cast<void*>(m_Instance));
+        return;
+    }
     std::vector<VkPhysicalDevice> devices(count);
     vkEnumeratePhysicalDevices(m_Instance, &count, devices.data());
 

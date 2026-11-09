@@ -44,9 +44,13 @@ void VulkanSwapChain::CreateSwapchain() {
     std::vector<VkSurfaceFormatKHR> formats(formatCount);
     vkGetPhysicalDeviceSurfaceFormatsKHR(m_Physical, m_Surface, &formatCount, formats.data());
 
-    // 优先选择格式：HDR10（A2B10G10R10 + ST.2084）否则 BGRA8 sRGB
-    m_Format = VK_FORMAT_B8G8R8A8_UNORM;
+    // 选择格式：HDR10（A2B10G10R10 + ST.2084）> BGRA8 sRGB > RGBA8 sRGB > 表面报告的第一个。
+    // 【必须从 formats 里选】以前把 BGRA8 写死，只在"表面确实报 BGRA8"时才覆盖；手机
+    // （HarmonyOS / Mali 系）只报 RGBA8，于是交换链按 BGRA8 创建、驱动静默换成 RGBA8，
+    // 而 PSO/RenderPass 仍按 BGRA8 声明 ⇒ 红蓝通道颠倒（真机实测：红三角形变蓝、金球变青）。
+    m_Format = VK_FORMAT_UNDEFINED;
     m_ColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+
     if (m_HDR) {
         for (auto& f : formats) {
             if (f.format == VK_FORMAT_A2B10G10R10_UNORM_PACK32
@@ -57,15 +61,30 @@ void VulkanSwapChain::CreateSwapchain() {
             }
         }
     }
-    // 未命中 HDR10 时回退 SDR
-    for (auto& f : formats) {
-        if (f.format == VK_FORMAT_B8G8R8A8_UNORM && f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR
-            && m_Format == VK_FORMAT_B8G8R8A8_UNORM) {
-            m_Format = f.format;
-            m_ColorSpace = f.colorSpace;
-            break;
+    if (m_Format == VK_FORMAT_UNDEFINED) {
+        // SDR：先 BGRA8（桌面最常见），没有再要 RGBA8（手机常见）
+        const VkFormat kSdrPreference[] = { VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM };
+        for (const VkFormat want : kSdrPreference) {
+            for (auto& f : formats) {
+                if (f.format == want && f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+                    m_Format = f.format;
+                    m_ColorSpace = f.colorSpace;
+                    break;
+                }
+            }
+            if (m_Format != VK_FORMAT_UNDEFINED) break;
         }
     }
+    if (m_Format == VK_FORMAT_UNDEFINED && formatCount > 0) {
+        // 都没有：用表面报告的第一个（宁可格式少见，也不能和实际交换链不一致）
+        m_Format = formats[0].format;
+        m_ColorSpace = formats[0].colorSpace;
+    }
+    if (m_Format == VK_FORMAT_UNDEFINED) {
+        m_Format = VK_FORMAT_B8G8R8A8_UNORM;
+    }
+    HE_CORE_INFO("[Vulkan 交换链] 选用格式 {} colorSpace {}（表面共报 {} 种）",
+                 static_cast<int>(m_Format), static_cast<int>(m_ColorSpace), formatCount);
 
     u32 presentModeCount;
     vkGetPhysicalDeviceSurfacePresentModesKHR(m_Physical, m_Surface, &presentModeCount, nullptr);
