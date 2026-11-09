@@ -4,7 +4,11 @@
 // Platform detection macros
 // ============================================================
 
-#if defined(_WIN32) || defined(_WIN64)
+// 【自检钩子】Platforms/OHOS/stubcheck 用它在 Windows 编译器上编译鸿蒙侧源码：
+// 只声明 HE_PLATFORM_OHOS，不定义 HE_PLATFORM_WINDOWS（避免两套平台分支同时生效）。
+#if defined(HE_PLATFORM_OHOS_STUBCHECK)
+    #define HE_PLATFORM_OHOS 1
+#elif defined(_WIN32) || defined(_WIN64)
     #define HE_PLATFORM_WINDOWS 1
     #if defined(_WIN64)
         #define HE_PLATFORM_WINDOWS_64 1
@@ -18,6 +22,11 @@
     #elif TARGET_OS_MAC
         #define HE_PLATFORM_MACOS 1
     #endif
+#elif defined(__OHOS__) || defined(OHOS_PLATFORM) || defined(HE_PLATFORM_OHOS)
+    // 鸿蒙（HarmonyOS NEXT）：NDK 的 clang 预定义 __OHOS__。
+    // 【顺序】必须排在 __linux__ 之前——鸿蒙 NDK 同时会定义 __linux__，
+    // 若先命中 Linux 分支，后面的 WSI / 文件系统 / 线程实现会全部走错分支。
+    #define HE_PLATFORM_OHOS 1
 #elif defined(__linux__)
     #define HE_PLATFORM_LINUX 1
 #endif

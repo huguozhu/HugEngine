@@ -77,7 +77,7 @@ void Engine::Initialize() {
         HE_CORE_INFO("[P10] HE_NO_VSYNC=1：已关闭垂直同步（仅用于帧时间测量）");
     }
 
-    m_Window = std::make_unique<Window>(wdesc);
+    m_Window = CreatePlatformWindow(wdesc);
 
     HE_CORE_INFO("Engine initialized successfully");
 }

@@ -7,11 +7,13 @@
 set(CMAKE_SUPPRESS_DEVELOPER_WARNINGS ON CACHE BOOL "")
 
 # --- GLFW 3.3.9 ---
+if(WIN32)
 set(GLFW_BUILD_DOCS     OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(GLFW_INSTALL        OFF CACHE BOOL "" FORCE)
 add_subdirectory(glfw)
+endif()
 
 # --- GLM 1.0.1 (header-only) ---
 set(GLM_TEST_ENABLE OFF CACHE BOOL "" FORCE)
@@ -47,11 +49,16 @@ add_library(imgui STATIC
     ${IMGUI_DIR}/imgui_draw.cpp
     ${IMGUI_DIR}/imgui_widgets.cpp
     ${IMGUI_DIR}/imgui_tables.cpp
-    ${IMGUI_DIR}/backends/imgui_impl_glfw.cpp
     ${IMGUI_DIR}/backends/imgui_impl_vulkan.cpp
 )
 target_include_directories(imgui PUBLIC ${IMGUI_DIR} ${IMGUI_DIR}/backends)
-target_link_libraries(imgui PUBLIC glfw Vulkan::Vulkan)
+target_link_libraries(imgui PUBLIC Vulkan::Vulkan)
+
+# GLFW 输入后端只在 Windows 上编译；鸿蒙用 imgui_impl_ohos（Platforms/OHOS，P3）
+if(WIN32)
+    target_sources(imgui PRIVATE ${IMGUI_DIR}/backends/imgui_impl_glfw.cpp)
+    target_link_libraries(imgui PUBLIC glfw)
+endif()
 # D3D12 后端的 ImGui 渲染（与 imgui.cpp 同版本 v1.91.0 的官方 backends/imgui_impl_dx12）
 if(WIN32)
     target_sources(imgui PRIVATE ${IMGUI_DIR}/backends/imgui_impl_dx12.cpp)
@@ -75,7 +82,10 @@ set(USE_STATIC_MSVC_RUNTIME_LIBRARY OFF CACHE BOOL "" FORCE)   # 用动态 CRT�
 set(JPH_USE_DX12 OFF CACHE BOOL "" FORCE)                      # 不需要 Jolt 自带图形渲染后端
 set(JPH_USE_VK   OFF CACHE BOOL "" FORCE)
 set(JPH_USE_MTL  OFF CACHE BOOL "" FORCE)
-add_subdirectory(JoltPhysics/Build)
+# Jolt 只在桌面构建：鸿蒙首版只移植"立方体+球体+天空盒+触摸相机"，不含物理
+if(NOT HUGENGINE_PLATFORM_OHOS)
+    add_subdirectory(JoltPhysics/Build)
+endif()
 # Jolt 库目标名固定为 "Jolt"（Build/Jolt/CMakeLists.txt）
 
 # --- 单元测试框架：doctest（header-only，本地 vendor，见 Engine/External/doctest）---

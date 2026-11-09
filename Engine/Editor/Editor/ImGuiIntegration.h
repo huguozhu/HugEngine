@@ -2,9 +2,11 @@
 
 #include "Core/Types.h"
 
-struct GLFWwindow;
 struct ImGuiContext;
 
+namespace he {
+    class IWindow;
+}
 namespace he::rhi {
     class IRHIDevice;
     class IRHICommandList;
@@ -25,7 +27,7 @@ public:
     ImGuiIntegration();
     ~ImGuiIntegration();
 
-    void Initialize(GLFWwindow* window, rhi::IRHIDevice* device,
+    void Initialize(IWindow* window, rhi::IRHIDevice* device,
                     rhi::IRHISwapChain* swapchain);
     void Shutdown();
 
@@ -42,7 +44,7 @@ private:
     /// 把 ImGui 的 draw data 编码进给定原生命令缓冲（VkCommandBuffer）。
     static void RecordVulkanOverlay(void* nativeCmdBuffer);
 
-    GLFWwindow*   m_Window     = nullptr;
+    IWindow*      m_Window     = nullptr;
     ImGuiContext* m_Context    = nullptr;
     bool          m_Initialized = false;
     bool          m_IsD3D12     = false;     // true = 用 imgui_impl_dx12 渲染，否则 imgui_impl_vulkan

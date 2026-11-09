@@ -1,4 +1,4 @@
-﻿// ============================================================
+// ============================================================
 // ImGuiIntegration.cpp — ImGui v1.91 + GLFW + Vulkan / D3D12 / D3D11
 //
 // Vulkan 特定资源（RenderPass / DescriptorPool）通过 RHI 接口创建，
@@ -12,8 +12,16 @@
 #include "Core/Log.h"
 
 #include "Vulkan/VulkanDevice.h"  // VulkanDeviceAccess（获取 Vk 句柄）
+#include "Platform/IVfs.h"   // 鸿蒙：字体从沙箱解析
+#include "Platform/IWindow.h"  // GetContentScale（UI 密度缩放）
 #include "imgui.h"
+#if HE_PLATFORM_WINDOWS
+#include "Platform/WindowWin32.h"   // GetGlfwWindow(IWindow*)
 #include "imgui_impl_glfw.h"
+#endif
+#if HE_PLATFORM_OHOS
+#include "imgui_impl_ohos.h"   // 触摸输入后端
+#endif
 #include "imgui_impl_vulkan.h"
 #if defined(HE_RHI_D3D12)
 #include "D3D12/D3D12Device.h"   // D3D12 原生句柄（imgui_impl_dx12 需要）
@@ -30,9 +38,15 @@ namespace he::editor {
 ImGuiIntegration::ImGuiIntegration() = default;
 ImGuiIntegration::~ImGuiIntegration() { Shutdown(); }
 
-void ImGuiIntegration::Initialize(GLFWwindow* window, rhi::IRHIDevice* device,
+void ImGuiIntegration::Initialize(IWindow* window, rhi::IRHIDevice* device,
                                    rhi::IRHISwapChain* swapchain) {
     m_Window = window;
+#if HE_PLATFORM_WINDOWS
+    // Windows：ImGui 的 GLFW 后端需要 GLFWwindow*（鸿蒙走 imgui_impl_ohos，见 P3）
+    GLFWwindow* glfwWindow = GetGlfwWindow(window);
+#else
+    void* glfwWindow = nullptr;
+#endif
     m_Device = device;
 
     // 【多后端】Vulkan 用 imgui_impl_vulkan，D3D12 用 imgui_impl_dx12，D3D11 用 imgui_impl_dx11。
@@ -57,6 +71,14 @@ void ImGuiIntegration::Initialize(GLFWwindow* window, rhi::IRHIDevice* device,
     m_Context = ImGui::CreateContext();
     ImGui::StyleColorsDark();
 
+    // --- 内容缩放（手机高 DPI：1260px 宽的屏上 16px 字会小到看不清）---
+    // Windows 恒为 1；鸿蒙由 ArkTS 把 display.densityPixels 传进 WindowOHOS。
+    const f32 uiScale = (window ? window->GetContentScale() : 1.0f);
+    if (uiScale > 0.0f && uiScale != 1.0f) {
+        ImGui::GetStyle().ScaleAllSizes(uiScale);   // 行高、内边距、滚动条一起放大
+        HE_CORE_INFO("ImGui: UI 缩放 = {}", uiScale);
+    }
+
     // --- 加载中文字体支持 ---
     {
         ImGuiIO& io = ImGui::GetIO();
@@ -71,20 +93,53 @@ void ImGuiIntegration::Initialize(GLFWwindow* window, rhi::IRHIDevice* device,
         };
 
         ImFontConfig fontConfig{};
-        fontConfig.SizePixels = 16.0f;
+        // 字号同样乘以 UI 缩放：直接按物理像素栅格化，比放大位图清晰
 
-        ImFont* cjkFont = io.Fonts->AddFontFromFileTTF(
-            "C:\\Windows\\Fonts\\simhei.ttf", 16.0f, &fontConfig, chineseRanges);
-        if (cjkFont) {
-            io.FontDefault = cjkFont;
-            HE_CORE_INFO("ImGui 中文字体已加载: simhei.ttf");
-        } else {
-            HE_CORE_WARN("ImGui 中文字体加载失败，中文将无法正常显示");
+#if HE_PLATFORM_WINDOWS
+        const char* fontCandidates[] = { "C:\\Windows\\Fonts\\simhei.ttf" };
+#else
+        // 鸿蒙：字体随包放在 rawfile 的 content/font/ 下，解压到沙箱后由 vfs 解析。
+        // 优先思源黑体（NotoSansSC，需自行放入 rawfile），退回随包 Roboto（无中文）。
+        // 鸿蒙：优先用**设备自带**的中文字体（免随包分发，也没有授权问题）；
+        // 其次找随包的思源黑体；最后退回 Roboto（无中文，中文会显示成问号）。
+        static const String s_fontCjk   = vfs::Resolve("font/NotoSansSC-Regular.otf");
+        static const String s_fontLatin = vfs::Resolve("font/Roboto-Regular.ttf");
+        const char* fontCandidates[] = {
+            "/system/fonts/HarmonyOS_Sans_SC.ttf",   // 设备系统字体（HarmonyOS Sans 简体中文）
+            s_fontCjk.c_str(),
+            s_fontLatin.c_str(),
+        };
+#endif
+        ImFont* cjkFont = nullptr;
+        // 【图集大小】高 DPI 下字号被放大（手机上 ~52px），若仍按"全 CJK 区段"（2 万字形）
+        // 烘焙，图集会超过纹理上限 ⇒ 字体纹理创建失败、ImGui 整块不绘制（真机实测）。
+        // 放大时改用 ImGui 内置的**常用汉字表**（约 2500 字 + 标点），图集装得下。
+        const ImWchar* glyphRanges = chineseRanges;
+#if HE_PLATFORM_OHOS
+        if (uiScale > 1.5f) {
+            glyphRanges = io.Fonts->GetGlyphRangesChineseSimplifiedCommon();
+        }
+#endif
+        for (const char* fontPath : fontCandidates) {
+            cjkFont = io.Fonts->AddFontFromFileTTF(fontPath, 16.0f * uiScale, &fontConfig, glyphRanges);
+            if (cjkFont) {
+                io.FontDefault = cjkFont;
+                HE_CORE_INFO("ImGui 中文字体已加载: {}（字号 {}，图集 {}x{}）", fontPath, 16.0f * uiScale,
+                             io.Fonts->TexWidth, io.Fonts->TexHeight);
+                break;
+            }
+        }
+        if (!cjkFont) {
+            HE_CORE_WARN("ImGui 中文字体加载失败，中文将无法正常显示（鸿蒙请把字体放到 rawfile/content/font/）");
         }
     }
 
-    if (m_IsD3D12 || m_IsD3D11) ImGui_ImplGlfw_InitForOther(window, true);
-    else           ImGui_ImplGlfw_InitForVulkan(window, true);
+#if HE_PLATFORM_OHOS
+    ImGui_ImplOhos_Init(window);          // 鸿蒙：触摸后端（Vulkan 渲染后端两端共用）
+#else
+    if (m_IsD3D12 || m_IsD3D11) ImGui_ImplGlfw_InitForOther(glfwWindow, true);
+    else           ImGui_ImplGlfw_InitForVulkan(glfwWindow, true);
+#endif
     CreateImGuiResources(device, swapchain);
 
     m_Initialized = true;
@@ -185,7 +240,11 @@ void ImGuiIntegration::Shutdown() {
     } else
 #endif
     ImGui_ImplVulkan_Shutdown();
+#if HE_PLATFORM_OHOS
+    ImGui_ImplOhos_Shutdown();
+#else
     ImGui_ImplGlfw_Shutdown();
+#endif
     ImGui::DestroyContext(m_Context);
     m_Context = nullptr;
     m_Window  = nullptr;
@@ -204,7 +263,11 @@ void ImGuiIntegration::BeginFrame() {
     else
 #endif
     ImGui_ImplVulkan_NewFrame();
+#if HE_PLATFORM_OHOS
+    ImGui_ImplOhos_NewFrame(m_Window);
+#else
     ImGui_ImplGlfw_NewFrame();
+#endif
     ImGui::NewFrame();
 }
 

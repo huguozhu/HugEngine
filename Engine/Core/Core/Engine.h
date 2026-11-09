@@ -3,7 +3,7 @@
 #include "Core/Core.h"
 #include "Core/Log.h"
 #include "Core/RenderThreadingMode.h"   // 三态渲染线程模式（阶段 0 T0.5）
-#include "Platform/Window.h"
+#include "Platform/IWindow.h"
 #include "Threading/JobSystem.h"
 
 // ============================================================
@@ -51,12 +51,12 @@ public:
     void Initialize();
     void Shutdown();
 
-    Window*    GetWindow()    { return m_Window.get(); }
+    IWindow*   GetWindow()    { return m_Window.get(); }
     JobSystem* GetJobSystem() { return m_JobSystem.get(); }
 
 private:
     EngineConfig                    m_Config;
-    std::unique_ptr<Window>         m_Window;
+    std::unique_ptr<IWindow>        m_Window;
     std::unique_ptr<JobSystem>      m_JobSystem;
 };
 
