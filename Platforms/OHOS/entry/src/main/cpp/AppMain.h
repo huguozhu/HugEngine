@@ -23,6 +23,9 @@ void AppStart(u32 width, u32 height, int mode);
 /// 当前运行的样例编号（1/2）
 int AppCurrentMode();
 
+/// 请求截取下一帧到 path（PNG）；返回 false 表示当前没有在跑的样例
+bool AppScreenshot(const char* path);
+
 /// 停渲染线程并等待其退出（设备/交换链在线程内销毁）
 void AppStop();
 

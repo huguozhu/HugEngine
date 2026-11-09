@@ -1,6 +1,9 @@
 import native from 'libentry.so';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { display } from '@kit.ArkUI';
+import { common } from '@kit.AbilityKit';
+import { systemShare } from '@kit.ShareKit';
+import { fileUri } from '@kit.CoreFileKit';
 
 // ============================================================
 // Index —— 样例切换（01.Triangle / 02.Cube）+ XComponent 渲染 + 触摸转发
@@ -63,6 +66,33 @@ struct Index {
     this.mode = mode;
   }
 
+  /// 分享当前画面：native 截下一帧 → 等落盘 → 调系统分享面板
+  private async shareScreenshot(): Promise<void> {
+    if (!this.ready) return;
+    const ctx = getContext(this) as common.UIAbilityContext;
+    const path = ctx.filesDir + '/share_shot.png';
+    if (!native.screenshot(path)) {
+      hilog.error(0x0000, TAG, '截图请求失败');
+      return;
+    }
+    // 截帧发生在下一帧 Present，等它落盘（60FPS 下 400ms 足够）
+    await new Promise<void>((resolve) => setTimeout(() => resolve(), 400));
+    try {
+      // 【必须用文档 URI】直接把 file:///data/... 交给分享面板，别的应用没有访问权，
+      // 分享会失败（实测错误码 1003702002）。fileUri.getUriFromPath 会生成可授权的 URI。
+      const uri = fileUri.getUriFromPath(path);
+      const data = new systemShare.SharedData({ utd: 'general.png', uri });
+      const controller = new systemShare.ShareController(data);
+      await controller.show(ctx, {
+        selectionMode: systemShare.SelectionMode.SINGLE,
+        previewMode: systemShare.SharePreviewMode.DETAIL,
+      });
+      hilog.info(0x0000, TAG, '分享面板已展示');
+    } catch (err) {
+      hilog.error(0x0000, TAG, '分享失败: %{public}s', JSON.stringify(err));
+    }
+  }
+
   build() {
     Column() {
       // ---- 顶部样例切换（不参与渲染区域的触摸转发）----
@@ -96,6 +126,13 @@ struct Index {
           .margin({ right: 6, bottom: 6 })
           .backgroundColor(this.mode === 4 ? '#3A6FD8' : '#444444')
           .onClick(() => this.switchTo(4))
+        Button('分享截图')
+          .type(ButtonType.Capsule)
+          .height(36)
+          .fontSize(14)
+          .margin({ right: 6, bottom: 6 })
+          .backgroundColor('#2E7D32')
+          .onClick(() => { this.shareScreenshot(); })
       }
       .width('100%')
       .padding({ left: 12, right: 12, top: 8, bottom: 8 })

@@ -41,6 +41,8 @@ std::atomic<u32>  g_PendingH{ 0 };
 std::atomic<u32>  g_SurfaceW{ 1 };
 std::atomic<u32>  g_SurfaceH{ 1 };
 std::atomic<int>  g_Mode{ 1 };   // 1 = 01.Triangle（默认），2 = 02.Cube
+// 当前样例的截图入口：不同样例的 App 类型不同，用类型擦除的回调转发
+std::function<void(const char*)> g_Screenshot;
 
 /// 通用循环：两个 App 的接口一致（Initialize/Frame/Resize/Shutdown）
 template <typename TApp>
@@ -56,6 +58,9 @@ void RunAppLoop(Engine& engine, IWindow* window, const char* appName) {
 
     g_SurfaceW.store(window->GetWidth());
     g_SurfaceH.store(window->GetHeight());
+
+    // 按需截图：把当前 App 的截帧入口挂到全局回调（App 析构前清掉）
+    g_Screenshot = [&app](const char* path) { app.RequestScreenshot(path); };
 
     f64 lastTime = Time::Now();
     HE_CORE_INFO("[OHOS] 渲染循环启动: {}（{}x{}）", appName, window->GetWidth(), window->GetHeight());
@@ -143,6 +148,12 @@ bool AppIsRunning() {
 void AppStop() {
     g_Running.store(false);
     if (g_Thread.joinable()) g_Thread.join();
+}
+
+bool AppScreenshot(const char* path) {
+    if (!g_Screenshot || !path || !*path) return false;
+    g_Screenshot(path);
+    return true;
 }
 
 void AppResize(u32 width, u32 height) {

@@ -99,6 +99,22 @@ napi_value NativeStart(napi_env env, napi_callback_info info) {
     return undef;
 }
 
+// ---- screenshot(path)：截当前帧到 path（PNG），供 ArkTS 调系统分享 ----
+napi_value NativeScreenshot(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value argv[1] = { nullptr };
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    bool ok = false;
+    if (argc >= 1) {
+        const std::string path = GetString(env, argv[0]);
+        ok = he::ohos::AppScreenshot(path.c_str());
+        HE_CORE_INFO("[OHOS] 截图请求: {} → {}", path, ok ? "已排队" : "失败");
+    }
+    napi_value result = nullptr;
+    napi_get_boolean(env, ok, &result);
+    return result;
+}
+
 // ---- setUiScale(scale)：屏幕密度，ImGui 用它在高 DPI 屏上放大字体与控件 ----
 napi_value NativeSetUiScale(napi_env env, napi_callback_info info) {
     size_t argc = 1;
@@ -236,6 +252,7 @@ napi_value Init(napi_env env, napi_value exports) {
     napi_property_descriptor desc[] = {
         { "init",     nullptr, NativeInit,     nullptr, nullptr, nullptr, napi_default, nullptr },
         { "start",    nullptr, NativeStart,    nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "screenshot", nullptr, NativeScreenshot, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "resize",   nullptr, NativeResize,   nullptr, nullptr, nullptr, napi_default, nullptr },
         { "touch",    nullptr, NativeTouch,    nullptr, nullptr, nullptr, napi_default, nullptr },
         { "setUiScale", nullptr, NativeSetUiScale, nullptr, nullptr, nullptr, napi_default, nullptr },

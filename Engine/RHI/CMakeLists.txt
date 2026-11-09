@@ -52,6 +52,8 @@ target_include_directories(HugEngineRHI
 )
 
 target_link_libraries(HugEngineRHI PUBLIC HugEngineCore)
+# 截图写出（非 Windows 用 stb_image_write）需要 stb 头文件路径
+target_link_libraries(HugEngineRHI PRIVATE stb)
 
 # --- Vulkan backend (system SDK, not FetchContent) ---
 if(HUGENGINE_RHI_VULKAN)

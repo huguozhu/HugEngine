@@ -36,6 +36,7 @@ public:
     /// path 为空 = `<exe 目录>/capture_frameN.png`；frameIndex <= 0 取消。
     /// 未调用时读环境变量 HE_CAPTURE_FRAME（与 D3D12 一致）。
     void RequestCapture(u32 frameIndex, const char* path = nullptr) override;
+    void RequestCaptureNextFrame(const char* path = nullptr) override;
     /// 【绕过路由】真正呈现（模式 2 由 RHI 线程经 `IRHIDevice::ExecutePresent` 调用）。
     /// imageIndex / waitSemaphore 由渲染线程在 `Present` 时捕获 —— RHI 线程不再读交换链状态。
     void PresentNow(u32 imageIndex, void* waitSemaphore, bool vsync);

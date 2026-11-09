@@ -53,6 +53,10 @@ public:
     // 见 RHI/ScreenCapture.h 的通道顺序说明），再调用 rhi::SaveRgbaToPng 落盘。
     // ========================================================
     virtual void RequestCapture(u32 frameIndex, const char* path = nullptr) = 0;
+
+    /// 下一帧截图（运行期按需截图用：调用方不知道后端内部的帧计数）
+    /// 默认退化为"第 0 帧"（= 不截图）；支持按需截图的后端会覆盖它
+    virtual void RequestCaptureNextFrame(const char* path = nullptr) { RequestCapture(0, path); }
 };
 
 } // namespace he::rhi

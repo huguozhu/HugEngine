@@ -414,6 +414,14 @@ void VulkanSwapChain::RequestCapture(u32 frameIndex, const char* path) {
     HE_CORE_INFO("[Vulkan 截图] 已按帧号请求截图：第 {} 帧 → {}", frameIndex, out);
 }
 
+void VulkanSwapChain::RequestCaptureNextFrame(const char* path) {
+    // 按需截图：抓"下一帧"（Present 之后 m_FrameCount 会 +1）
+    m_CaptureInit = true;
+    m_CaptureAt   = static_cast<int>(m_FrameCount) + 1;
+    m_CapturePath = (path && *path) ? path : std::string();
+    HE_CORE_INFO("[Vulkan 截图] 已请求下一帧截图 → {}", m_CapturePath.empty() ? "<默认路径>" : m_CapturePath);
+}
+
 void VulkanSwapChain::CaptureIfRequested(u32 imageIndex) {
     if (!m_CaptureInit) {
         m_CaptureInit = true;

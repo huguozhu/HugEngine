@@ -153,10 +153,24 @@ std::string DefaultCapturePath(u64 frameIndex) {
     return name;
 }
 
+// 非 Windows：用仓库自带的 stb_image_write 写 PNG（鸿蒙等平台走这条），
+// 这样"按需截图 → 系统分享"在手机上也能用，不必依赖 WIC。
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#define STB_IMAGE_WRITE_STATIC
+#include <stb_image_write.h>
+
 bool SaveRgbaToPng(const char* path, const unsigned char* rgba, u32 width, u32 height) {
-    (void)path; (void)rgba; (void)width; (void)height;
-    HE_CORE_WARN("[截图] 当前平台未实现 PNG 写出（仅 Windows/WIC 可用）");
-    return false;
+    if (!path || !*path || !rgba || width == 0 || height == 0) {
+        HE_CORE_ERROR("[截图] PNG 写出参数非法: path={} {}x{}", path ? path : "(null)", width, height);
+        return false;
+    }
+    const int ok = stbi_write_png(path, static_cast<int>(width), static_cast<int>(height),
+                                  4, rgba, static_cast<int>(width) * 4);
+    if (ok == 0) {
+        HE_CORE_ERROR("[截图] PNG 写出失败（stb_image_write）: {}", path);
+        return false;
+    }
+    return true;
 }
 
 #endif // _WIN32
