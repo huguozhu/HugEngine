@@ -15,6 +15,7 @@
 set(CUBE02_APP_DIR     "${CMAKE_SOURCE_DIR}/Samples/02.Cube/App")
 set(TRIANGLE01_APP_DIR "${CMAKE_SOURCE_DIR}/Samples/01.Triangle/App")
 set(SPONZA03_APP_DIR   "${CMAKE_SOURCE_DIR}/Samples/03.Sponza-Forward/App")
+set(SPONZA04_APP_DIR   "${CMAKE_SOURCE_DIR}/Samples/04.Sponza-Deferred/App")
 
 add_library(entry SHARED
     NativeEntry.cpp
@@ -28,6 +29,8 @@ add_library(entry SHARED
     ${TRIANGLE01_APP_DIR}/01.Triangle.App.h
     ${SPONZA03_APP_DIR}/03.Sponza.App.cpp
     ${SPONZA03_APP_DIR}/03.Sponza.App.h
+    ${SPONZA04_APP_DIR}/04.Deferred.App.cpp
+    ${SPONZA04_APP_DIR}/04.Deferred.App.h
 )
 
 target_include_directories(entry PRIVATE
@@ -35,6 +38,7 @@ target_include_directories(entry PRIVATE
     ${CUBE02_APP_DIR}
     ${TRIANGLE01_APP_DIR}
     ${SPONZA03_APP_DIR}
+    ${SPONZA04_APP_DIR}
     ${CMAKE_SOURCE_DIR}/Samples/Common
 )
 

@@ -28,7 +28,7 @@ struct Index {
   private viewH: number = 1;
   // 诊断：只打第一条触摸日志，避免刷屏
   private touchLogged: boolean = false;
-  // 当前样例：1 = 01.Triangle，2 = 02.Cube，3 = 03.Sponza
+  // 当前样例：1 = 01.Triangle，2 = 02.Cube，3 = 03.Sponza，4 = 04.Deferred
   @State private mode: number = 1;
 
   /// 把 ArkUI 的触摸事件转成 native 的 (phase, 归一化坐标)
@@ -66,29 +66,39 @@ struct Index {
   build() {
     Column() {
       // ---- 顶部样例切换（不参与渲染区域的触摸转发）----
-      Row({ space: 8 }) {
+      // 4 个样例按钮：屏幕宽度不够时自动换行（Flex wrap），避免被挤出屏幕
+      Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start }) {
         Button('01 三角形')
           .type(ButtonType.Capsule)
-          .height(40)
-          .fontSize(16)
+          .height(36)
+          .fontSize(14)
+          .margin({ right: 6, bottom: 6 })
           .backgroundColor(this.mode === 1 ? '#3A6FD8' : '#444444')
           .onClick(() => this.switchTo(1))
         Button('02 立方体')
           .type(ButtonType.Capsule)
-          .height(40)
-          .fontSize(16)
+          .height(36)
+          .fontSize(14)
+          .margin({ right: 6, bottom: 6 })
           .backgroundColor(this.mode === 2 ? '#3A6FD8' : '#444444')
           .onClick(() => this.switchTo(2))
         Button('03 Sponza')
           .type(ButtonType.Capsule)
-          .height(40)
-          .fontSize(16)
+          .height(36)
+          .fontSize(14)
+          .margin({ right: 6, bottom: 6 })
           .backgroundColor(this.mode === 3 ? '#3A6FD8' : '#444444')
           .onClick(() => this.switchTo(3))
+        Button('04 延迟')
+          .type(ButtonType.Capsule)
+          .height(36)
+          .fontSize(14)
+          .margin({ right: 6, bottom: 6 })
+          .backgroundColor(this.mode === 4 ? '#3A6FD8' : '#444444')
+          .onClick(() => this.switchTo(4))
       }
       .width('100%')
       .padding({ left: 12, right: 12, top: 8, bottom: 8 })
-      .justifyContent(FlexAlign.Start)
       .backgroundColor('#1A1A1A')
 
       // ---- 渲染区域（触摸在此转发给 native）----

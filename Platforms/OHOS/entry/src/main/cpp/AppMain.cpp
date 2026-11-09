@@ -26,6 +26,7 @@
 #include "01.Triangle.App.h"
 #include "02.Cube.App.h"
 #include "03.Sponza.App.h"
+#include "04.Deferred.App.h"
 
 #include <atomic>
 #include <thread>
@@ -85,12 +86,13 @@ void RunAppLoop(Engine& engine, IWindow* window, const char* appName) {
 }
 
 void RenderLoop(u32 width, u32 height, int mode) {
-    // mode：1 = 01.Triangle，2 = 02.Cube，3 = 03.Sponza
+    // mode：1 = 01.Triangle，2 = 02.Cube，3 = 03.Sponza，4 = 04.Deferred
     const bool triangle = (mode == 1);
 
     EngineConfig cfg;
     cfg.appName      = triangle ? "HugEngine — 01.Triangle (OHOS)"
-                     : (mode == 2 ? "HugEngine — 02.Cube (OHOS)" : "HugEngine — 03.Sponza (OHOS)");
+                     : (mode == 2 ? "HugEngine — 02.Cube (OHOS)"
+                        : (mode == 3 ? "HugEngine — 03.Sponza (OHOS)" : "HugEngine — 04.Deferred (OHOS)"));
     cfg.windowWidth  = width;
     cfg.windowHeight = height;
     cfg.enableVSync  = true;
@@ -109,8 +111,10 @@ void RenderLoop(u32 width, u32 height, int mode) {
         RunAppLoop<samples::triangle01::App>(engine, window, "01.Triangle");
     } else if (mode == 2) {
         RunAppLoop<samples::cube02::App>(engine, window, "02.Cube");
-    } else {
+    } else if (mode == 3) {
         RunAppLoop<samples::sponza03::App>(engine, window, "03.Sponza");
+    } else {
+        RunAppLoop<samples::sponza04::App>(engine, window, "04.Deferred");
     }
 }
 
@@ -118,7 +122,7 @@ void RenderLoop(u32 width, u32 height, int mode) {
 
 void AppStart(u32 width, u32 height, int mode) {
     if (g_Running.load()) return;
-    g_Mode.store((mode >= 1 && mode <= 3) ? mode : 1);
+    g_Mode.store((mode >= 1 && mode <= 4) ? mode : 1);
 
     g_Running.store(true);
     g_PendingW.store(0);
