@@ -1,3 +1,4 @@
+#include "Platform/IVfs.h"
 #include "Features/FeatureTextureGen.h"
 
 #include "AI/Runtime/AIDevice.h"
@@ -22,7 +23,7 @@ bool FeatureTextureGen::Initialize(rhi::IRHIDevice* device, rhi::IRHISwapChain* 
     if (!m_Device || !m_AI) return false;
 
     // 输出路径：Content/Generated/tex_gen_checker.png（与 glTF 纹理同目录）
-    String outPath = String(HUGE_CONTENT_DIR) + "Generated/tex_gen_checker.png";
+    String outPath = he::vfs::ResolveWritable("Generated/tex_gen_checker.png");
     std::filesystem::path outP(outPath);
     std::error_code ec;
     std::filesystem::create_directories(outP.parent_path(), ec);

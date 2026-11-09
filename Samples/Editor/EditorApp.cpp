@@ -1,9 +1,11 @@
-﻿// Samples/Editor/EditorApp.cpp
+// Samples/Editor/EditorApp.cpp
 
 #include "EditorApp.h"
 #include "RHI/FramePresenter.h"   // 【T2.5】帧外壳收口
 #include "Core/Engine.h"
-#include "Platform/Window.h"
+#include "Platform/IWindow.h"
+#include "Platform/Time.h"
+#include "Platform/WindowWin32.h"   // 过渡期：GetGlfwWindow（P0-3 后由 IInput 取代）
 #include "RHI/RHI.h"
 #include "Pipeline/ForwardPipeline.h"
 #include "ShaderHotReload.h"
@@ -77,7 +79,7 @@ void EditorApp::InitEngine() {
 
     m_Engine = std::make_unique<Engine>(config);
     m_Engine->Initialize();
-    m_Window = m_Engine->GetWindow()->GetNativeHandle();
+    m_Window = he::GetGlfwWindow(m_Engine->GetWindow());
 
     m_Engine->GetWindow()->SetResizeCallback([&](u32 w, u32 h) {
         m_SwapChain->Resize(w, h);
@@ -93,7 +95,7 @@ void EditorApp::InitEngine() {
     rhi::DeviceInitDesc rhiDesc;
     rhiDesc.backend          = rhi::ResolveBackendFromEnv();
     rhiDesc.enableValidation = true;
-    rhiDesc.windowHandle     = m_Engine->GetWindow()->GetNativeHandleRaw();
+    rhiDesc.windowHandle     = m_Engine->GetWindow()->GetNativeWindow();
 
     m_Device = rhi::CreateDevice(rhiDesc.backend);
     m_Device->Initialize(rhiDesc);
@@ -101,7 +103,7 @@ void EditorApp::InitEngine() {
 
     // ���� SwapChain
     m_SwapChain = m_Device->CreateSwapChain({
-        .windowHandle = m_Engine->GetWindow()->GetNativeHandleRaw(),
+        .windowHandle = m_Engine->GetWindow()->GetNativeWindow(),
         .width  = m_Engine->GetWindow()->GetWidth(),
         .height = m_Engine->GetWindow()->GetHeight(),
         .vsync  = true,
@@ -185,7 +187,7 @@ void EditorApp::InitEditor() {
     m_EditorCtx->Initialize(m_World.get(), m_SceneGraph.get(), m_CmdHistory.get());
 
     m_ImGui = std::make_unique<editor::ImGuiIntegration>();
-    m_ImGui->Initialize(m_Window, m_Device.get(), m_SwapChain.get());
+    m_ImGui->Initialize(m_Engine->GetWindow(), m_Device.get(), m_SwapChain.get());
 
     // ������壨��ǰΪռλʵ�֣�
     m_Viewport  = std::make_unique<editor::ViewportPanel>();
@@ -203,7 +205,7 @@ void EditorApp::InitEditor() {
     m_ContentBrowser->Initialize(m_EditorCtx.get());
     m_ProjectSettings->Initialize(m_EditorCtx.get());
 
-    m_LastTime = glfwGetTime();
+    m_LastTime = he::Time::Now();
 }
 
 void EditorApp::InitAIGC() {
@@ -232,7 +234,7 @@ void EditorApp::InitAIGC() {
 
 void EditorApp::MainLoop() {
     while (!m_Engine->GetWindow()->ShouldClose()) {
-        f64 now = glfwGetTime();
+        f64 now = he::Time::Now();
         f32 dt  = static_cast<f32>(now - m_LastTime);
         m_LastTime = now;
 

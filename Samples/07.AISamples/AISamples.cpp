@@ -1,4 +1,4 @@
-﻿// ============================================================
+// ============================================================
 // 07.AISamples — AI 综合示例（原 05~10 六个 AI Sample 合并）
 //
 // 共享引擎/RHI/AI 设备/渲染管线/相机，6 个功能模块独立文件：
@@ -8,7 +8,9 @@
 
 #include "Core/Core.h"
 #include "Core/Engine.h"
-#include "Platform/Window.h"
+#include "Platform/IWindow.h"
+#include "Platform/Time.h"
+#include "Platform/IInput.h"
 #include "RHI/RHI.h"
 #include "RHI/FramePresenter.h"   // L4-1：帧外壳（acquire/present）收口
 #include "RHI/ThreadAffinity.h"      // T2.4：渲染线程启动/停止钩子里认领与撤销 RHI 归属
@@ -31,8 +33,6 @@
 #include "Features/FeatureMaterialGen.h"
 #include "Features/FeatureMeshAnimGen.h"
 
-#define GLFW_INCLUDE_NONE
-#include <GLFW/glfw3.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -60,13 +60,13 @@ int main() {
     rhi::DeviceInitDesc rhiDesc;
     rhiDesc.backend          = rhi::ResolveBackendFromEnv();
     rhiDesc.enableValidation = false;
-    rhiDesc.windowHandle     = engine.GetWindow()->GetNativeHandleRaw();
+    rhiDesc.windowHandle     = engine.GetWindow()->GetNativeWindow();
     auto device = rhi::CreateDevice(rhiDesc.backend);
     device->Initialize(rhiDesc);
     rhi::SetDevice(device.get());
 
     auto swapchain = device->CreateSwapChain({
-        .windowHandle = engine.GetWindow()->GetNativeHandleRaw(),
+        .windowHandle = engine.GetWindow()->GetNativeWindow(),
         .width  = engine.GetWindow()->GetWidth(),
         .height = engine.GetWindow()->GetHeight(),
         .vsync  = true,
@@ -91,9 +91,8 @@ int main() {
     cmdList->SetSwapChain(swapchain.get());
     cmdList->SetPipeline(pipeline.GetPipelineState());
 
-    GLFWwindow* glfwWin = engine.GetWindow()->GetNativeHandle();
     editor::ImGuiIntegration imgui;
-    imgui.Initialize(glfwWin, device.get(), swapchain.get());
+    imgui.Initialize(engine.GetWindow(), device.get(), swapchain.get());
 
     render::CameraController camCtrl;
     camCtrl.SetAspectRatio((float)swapchain->GetWidth(), (float)swapchain->GetHeight());
@@ -164,43 +163,31 @@ int main() {
     };
 
     // --- 7. 主循环 ---
-    f64 lastTime = glfwGetTime();
+    f64 lastTime = he::Time::Now();
     // L4-1：帧外壳的 acquire/present 收口（L4-3 把整帧变成命令流时只改这里）
     rhi::FramePresenter framePresenter(swapchain.get());
 
     while (!engine.GetWindow()->ShouldClose()) {
-        f64 now = glfwGetTime();
+        f64 now = he::Time::Now();
         f32 dt  = (f32)(now - lastTime);
         lastTime = now;
 
         engine.GetWindow()->PollEvents();
         // 【T2.4】AcquireNextImage 已移入渲染命令（命令 1）—— 交换链归属在渲染线程
 
-        // 相机控制（WASD + 右键）
-        bool mouseDown = glfwGetMouseButton(glfwWin, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
-        if (mouseDown && !rightMouseDown) {
-            rightMouseDown = true;
-            glfwGetCursorPos(glfwWin, &lastMouseX, &lastMouseY);
-            glfwSetInputMode(glfwWin, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-        } else if (!mouseDown && rightMouseDown) {
-            rightMouseDown = false;
-            glfwSetInputMode(glfwWin, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-        } else if (mouseDown && rightMouseDown) {
-            double cx, cy;
-            glfwGetCursorPos(glfwWin, &cx, &cy);
-            float dx = (float)(cx - lastMouseX), dy = (float)(cy - lastMouseY);
-            lastMouseX = cx;
-            lastMouseY = cy;
-            camCtrl.Rotate(dx * 0.003f, -dy * 0.003f);
+        // 相机控制（WASD + 右键）：输入来自平台无关快照（Windows 用 GLFW、鸿蒙用触摸填充）
+        auto& in = he::PollInput(engine.GetWindow());
+        if (in.mouseDown[1]) {
+            camCtrl.Rotate(in.mouseDelta.x * 0.003f, -in.mouseDelta.y * 0.003f);
         }
         render::CameraController::MoveInput moveIn;
-        moveIn.forward  = glfwGetKey(glfwWin, GLFW_KEY_W) == GLFW_PRESS;
-        moveIn.backward = glfwGetKey(glfwWin, GLFW_KEY_S) == GLFW_PRESS;
-        moveIn.left     = glfwGetKey(glfwWin, GLFW_KEY_A) == GLFW_PRESS;
-        moveIn.right    = glfwGetKey(glfwWin, GLFW_KEY_D) == GLFW_PRESS;
-        moveIn.up       = glfwGetKey(glfwWin, GLFW_KEY_E) == GLFW_PRESS;
-        moveIn.down     = glfwGetKey(glfwWin, GLFW_KEY_Q) == GLFW_PRESS;
-        moveIn.sprint   = glfwGetKey(glfwWin, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS;
+        moveIn.forward  = in.IsDown(he::Key::W);
+        moveIn.backward = in.IsDown(he::Key::S);
+        moveIn.left     = in.IsDown(he::Key::A);
+        moveIn.right    = in.IsDown(he::Key::D);
+        moveIn.up       = in.IsDown(he::Key::E);
+        moveIn.down     = in.IsDown(he::Key::Q);
+        moveIn.sprint   = in.IsDown(he::Key::LeftShift);
         camCtrl.Update(dt, moveIn);
 
         // 当前功能 CPU 逻辑

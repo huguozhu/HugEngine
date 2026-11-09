@@ -1,4 +1,4 @@
-﻿// ============================================================
+// ============================================================
 // 07.Nanite — Cornell Box 场景 + 延迟渲染管线；Nanite 虚拟几何（cluster 光栅化）实验台
 //
 // 基线自 06.GILab 整体拷贝：先保证与既有验收口径（白炉 / 逐帧 dump / 开关不变性）完全一致，
@@ -11,7 +11,9 @@
 #include "Core/Core.h"
 #include "Core/Engine.h"
 #include <chrono>   // 步骤 37：CPU 侧帧时（判定 CPU 受限还是 GPU 受限）
-#include "Platform/Window.h"
+#include "Platform/IWindow.h"
+#include "Platform/IVfs.h"
+#include "Platform/Time.h"
 #include "RHI/RHI.h"
 #include "RHI/FramePresenter.h"   // L4-1：帧外壳（acquire/present）收口
 #include "RHI/ThreadAffinity.h"      // T2.4：渲染线程启动/停止钩子认领与撤销 RHI 归属
@@ -51,8 +53,6 @@
 #include <unordered_map>
 #include <vector>
 
-#define GLFW_INCLUDE_NONE
-#include <GLFW/glfw3.h>
 #include "CameraInput.h"   // 样例共用：鼠标/键盘控制相机
 
 // stb_image — 纹理解码
@@ -68,7 +68,7 @@ using namespace he;
 // （读写同一路径，因此指向临时文件即完全不触碰仓库内的正式配置）
 static String g_ConfigPath = []{
     if (const char* p = std::getenv("HE_NANITE_CONFIG")) return String(p);
-    return String(HUGE_CONTENT_DIR) + "Config/07_Nanite.cfg";
+    return he::vfs::ResolveWritable("Config/07_Nanite.cfg");
 }();
 
 static std::unordered_map<String, String> LoadConfigFile(const String& path) {
@@ -164,7 +164,7 @@ int main() {
     //    之所以放在最前面：初始化阶段（设备/交换链/资源创建）同样是崩溃高发区。
     // ============================================================
     {
-        const std::string crashLog = std::string(HUGE_CONTENT_DIR) + "Config/07_Nanite_crash.log";
+        const std::string crashLog = he::vfs::ResolveWritable("Config/07_Nanite_crash.log");
         he::InstallCrashHandler(crashLog.c_str(), nullptr);
     }
 
@@ -190,7 +190,7 @@ int main() {
     rhi::DeviceInitDesc rhiDesc;
     rhiDesc.backend          = rhi::ResolveBackendFromEnv();
     rhiDesc.enableValidation = true;
-    rhiDesc.windowHandle     = engine.GetWindow()->GetNativeHandleRaw();
+    rhiDesc.windowHandle     = engine.GetWindow()->GetNativeWindow();
 
     auto device = rhi::CreateDevice(rhiDesc.backend);
     device->Initialize(rhiDesc);
@@ -200,7 +200,7 @@ int main() {
     // 3. 创建 SwapChain
     // ============================================================
     auto swapchain = device->CreateSwapChain({
-        .windowHandle = engine.GetWindow()->GetNativeHandleRaw(),
+        .windowHandle = engine.GetWindow()->GetNativeWindow(),
         .width  = engine.GetWindow()->GetWidth(),
         .height = engine.GetWindow()->GetHeight(),
         .vsync  = !noVsync,   // 与 EngineConfig 同源（HE_NO_VSYNC=1 时同时关掉，否则帧率仍被锁 60）
@@ -212,7 +212,7 @@ int main() {
     World world;
     SceneGraph sceneGraph(world);
 
-    String sponzaPath = String(HUGE_CONTENT_DIR) + "gltf/Sponza/glTF/Sponza.gltf";
+    String sponzaPath = he::vfs::Resolve("gltf/Sponza/glTF/Sponza.gltf");
     HE_CORE_INFO("加载 Sponza 场景: {}", sponzaPath);
 
     auto result = asset::LoadGLTF(world, sceneGraph, sponzaPath);
@@ -309,7 +309,7 @@ int main() {
 
     // --- 天空盒 ---
     {
-        String hdrPath = String(HUGE_CONTENT_DIR) + "Textures/skybox.hdr";
+        String hdrPath = he::vfs::Resolve("Textures/skybox.hdr");
         int hdrW, hdrH, hdrCh;
         float* hdrData = stbi_loadf(hdrPath.c_str(), &hdrW, &hdrH, &hdrCh, 4);
         if (!hdrData) {
@@ -872,12 +872,11 @@ int main() {
     // ============================================================
     // 8. ImGui 初始化
     // ============================================================
-    GLFWwindow* glfwWin = engine.GetWindow()->GetNativeHandle();
     editor::ImGuiIntegration imgui;
-    imgui.Initialize(glfwWin, device.get(), swapchain.get());
+    imgui.Initialize(engine.GetWindow(), device.get(), swapchain.get());
     // 各面板的窗口位置/大小/折叠状态由 ImGui 自动序列化——保存到配置目录（与 07_Nanite.cfg 同处）
     // 用绝对路径（HUGE_CONTENT_DIR）避免依赖当前工作目录
-    static String g_ImGuiIniPath = String(HUGE_CONTENT_DIR) + "Config/07_Nanite_imgui.ini";
+    static String g_ImGuiIniPath = he::vfs::ResolveWritable("Config/07_Nanite_imgui.ini");
     ImGui::GetIO().IniFilename = g_ImGuiIniPath.c_str();
 
     // ============================================================
@@ -963,7 +962,7 @@ int main() {
     // ============================================================
     HE_CORE_INFO("07.Nanite (Cornell Box) 启动 — WASD=移动, 右键拖拽=旋转, Shift=加速, E/Q=升降");
     u64 frameIndex = 0;
-    f64 lastTime   = glfwGetTime();
+    f64 lastTime   = he::Time::Now();
 
     // ============================================================
     // 渲染线程化（T2.4）：一帧两条命令 —— ① Acquire + 录制（管线 + 打开 ImGui 的 RP）；
@@ -1002,7 +1001,7 @@ int main() {
     rhi::FramePresenter framePresenter(swapchain.get());
 
     while (!engine.GetWindow()->ShouldClose()) {
-        f64 now       = glfwGetTime();
+        f64 now       = he::Time::Now();
         f32 deltaTime = static_cast<f32>(now - lastTime);
         lastTime      = now;
         // 【步骤 37】CPU 侧耗时：从帧首到 Present 之前。与墙钟帧时一起看才能判定"CPU 受限还是
@@ -1010,6 +1009,7 @@ int main() {
         const auto cpuT0 = std::chrono::steady_clock::now();
 
         engine.GetWindow()->PollEvents();
+        auto& in = he::PollInput(engine.GetWindow());   // 本帧输入快照（平台无关）
 
         bool frameAborted = false;   // 渲染命令里 Acquire 失败时置位
         // 管线 CPU 侧耗时累计（命令 1 累加、命令 2 的帧率读数消费 ⇒ 提到帧体层级）
@@ -1029,7 +1029,7 @@ int main() {
                 }
             }
             static he::samples::CameraInput camInput;   // 跨帧保存右键/光标状态
-            if (camInput.Update(glfwWin, camCtrl, deltaTime, {.toggleKey = GLFW_KEY_T})) {
+            if (camInput.Update(in, camCtrl, deltaTime, {.toggleKey = he::Key::T})) {
                 animCameraMode = !animCameraMode;
                 camInput.Reset();   // 切回手动时丢弃过期光标坐标，避免视角跳一下
             }
@@ -2100,7 +2100,7 @@ int main() {
                                     << g_MirrorRig.boxGreen.z << " " << g_MirrorRig.halfGreen << "\n";
                 }
                 // 采样完成即请求关窗：让脚本无需超时等待，也保证退出前正常走完清理与保存流程
-                if (dumpWritten) glfwSetWindowShouldClose(engine.GetWindow()->GetNativeHandle(), GLFW_TRUE);
+                if (dumpWritten) engine.GetWindow()->RequestClose();
             }
 
             // 垂直同步必须与创建时一致：只改 SwapChainDesc 而这里仍传 true，帧率照样被锁在刷新率

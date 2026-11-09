@@ -13,7 +13,9 @@
 
 #include "Core/Core.h"
 #include "Core/Engine.h"
-#include "Platform/Window.h"
+#include "Platform/IWindow.h"
+#include "Platform/Time.h"
+#include "Platform/WindowWin32.h"   // 过渡期：GetGlfwWindow（P0-3 后由 IInput 取代）
 #include "RHI/RHI.h"
 #include "RHI/FramePresenter.h"   // L4-1：帧外壳（acquire/present）收口
 #include "Editor/ImGuiIntegration.h"
@@ -48,7 +50,6 @@
 #include <memory>
 #include <vector>
 
-#include <GLFW/glfw3.h>   // glfwGetTime()：旋转动画的帧时间
 
 using namespace he;
 
@@ -153,7 +154,7 @@ bool InitGfx(Gfx& g, Engine& engine, rhi::Backend backend) {
     desc.enableValidation = !s_ValidationConsumed;
     s_ValidationConsumed = true;
     if (const char* v = std::getenv("HE_TRIANGLE_VALIDATION")) desc.enableValidation = (std::atoi(v) != 0);
-    desc.windowHandle     = engine.GetWindow()->GetNativeHandleRaw();
+    desc.windowHandle     = engine.GetWindow()->GetNativeWindow();
 
     g.device = rhi::CreateDevice(desc.backend);
     g.device->Initialize(desc);
@@ -172,7 +173,7 @@ bool InitGfx(Gfx& g, Engine& engine, rhi::Backend backend) {
     const u32 swW = engine.GetWindow()->GetWidth();
     const u32 swH = engine.GetWindow()->GetHeight();
     g.swapchain = g.device->CreateSwapChain({
-        .windowHandle = engine.GetWindow()->GetNativeHandleRaw(),
+        .windowHandle = engine.GetWindow()->GetNativeWindow(),
         .width = swW, .height = swH, .vsync = true,
     });
     if (!g.swapchain) {
@@ -337,7 +338,7 @@ bool InitGfx(Gfx& g, Engine& engine, rhi::Backend backend) {
 
     // ---- ImGui（每个后端一套实现，必须重建）----
     g.imgui = std::make_unique<editor::ImGuiIntegration>();
-    g.imgui->Initialize(engine.GetWindow()->GetNativeHandle(), g.device.get(), g.swapchain.get());
+    g.imgui->Initialize(engine.GetWindow(), g.device.get(), g.swapchain.get());
 
     // ---- 命令列表与帧外壳 ----
     g.cmdList = g.device->CreateCommandList();
@@ -480,7 +481,7 @@ int main() {
     // ---- 旋转动画状态：角度按帧时间累加，三条路径共用同一个角度 ----
     f32  rotationAngle = 0.0f;                       // 弧度
     f32  rotationSpeed = 1.0f;                       // 弧度/秒（面板可调，0 = 停）
-    f64  lastFrameTime = glfwGetTime();
+    f64  lastFrameTime = he::Time::Now();
 
     HE_CORE_INFO("01.Triangle started — ImGui 切换渲染模式 / 渲染后端（当前 {}）", BackendName(gfx.backend));
     u64 frameIndex = 0;
@@ -490,7 +491,7 @@ int main() {
         if (!gfx.framePresenter->BeginFrame()) continue;
 
         // 帧时间 → 旋转角：2π 取模，长时间运行也不会丢精度
-        const f64 nowTime = glfwGetTime();
+        const f64 nowTime = he::Time::Now();
         const f32 deltaTime = static_cast<f32>(nowTime - lastFrameTime);
         lastFrameTime = nowTime;
         rotationAngle += rotationSpeed * deltaTime;

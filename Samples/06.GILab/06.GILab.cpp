@@ -1,4 +1,4 @@
-﻿// ============================================================
+// ============================================================
 // 06.GILab — Cornell Box 场景 + 延迟渲染管线（GI 对比 / 开发实验室）
 //
 // 用途：检验与对比各种 GI（IBL/RSM/SSGI/DDGI/SSR）在同一 Cornell Box 场景下的效果，
@@ -8,7 +8,9 @@
 
 #include "Core/Core.h"
 #include "Core/Engine.h"
-#include "Platform/Window.h"
+#include "Platform/IWindow.h"
+#include "Platform/IVfs.h"
+#include "Platform/Time.h"
 #include "RHI/RHI.h"
 #include "RHI/FramePresenter.h"   // L4-1：帧外壳（acquire/present）收口
 #include "Debug/FrameDumpRecorder.h"
@@ -51,8 +53,6 @@
 #include <unordered_map>
 #include <vector>
 
-#define GLFW_INCLUDE_NONE
-#include <GLFW/glfw3.h>
 
 // stb_image — 纹理解码
 #define STB_IMAGE_IMPLEMENTATION
@@ -65,7 +65,7 @@ using namespace he;
 // （读写同一路径，因此指向临时文件即完全不触碰仓库内的正式配置）
 static String g_ConfigPath = []{
     if (const char* p = std::getenv("HE_GILAB_CONFIG")) return String(p);
-    return String(HUGE_CONTENT_DIR) + "Config/06_GILab.cfg";
+    return he::vfs::ResolveWritable("Config/06_GILab.cfg");
 }();
 
 static std::unordered_map<String, String> LoadConfigFile(const String& path) {
@@ -143,7 +143,7 @@ Entity CreateShapeEntity(World& world, SceneGraph& sg,
 static void CreateSkybox(World& world, SceneGraph& sceneGraph, rhi::IRHIDevice* device,
                          const String& hdrPath) {
 {
-    String hdrPath = String(HUGE_CONTENT_DIR) + "Textures/skybox.hdr";
+    String hdrPath = he::vfs::Resolve("Textures/skybox.hdr");
     int hdrW, hdrH, hdrCh;
     float* hdrData = stbi_loadf(hdrPath.c_str(), &hdrW, &hdrH, &hdrCh, 4);
     if (!hdrData) {
@@ -376,7 +376,7 @@ static bool BuildScene(World& world, SceneGraph& sceneGraph, rhi::IRHIDevice* de
     }
 
     // 天空盒：HDR 等距柱状图 → 立方体贴图 → 场景实体
-    CreateSkybox(world, sceneGraph, device, String(HUGE_CONTENT_DIR) + "Textures/skybox.hdr");
+    CreateSkybox(world, sceneGraph, device, he::vfs::Resolve("Textures/skybox.hdr"));
 
     // 纹理：创建/去重/默认占位在 TextureCache（由调用方持有 —— 它必须活得比本函数久，
     // 因为 bindless 堆持有这些纹理/采样器指针）；这里只按 glTF 的 uri 取并注册 bindless 槽
@@ -1144,7 +1144,7 @@ void GILabFrameRecorder::RecordUiAndPresent(u64 renderFrameIndex, bool dumpThisF
         camSnap.farPlane = cam.farPlane; camSnap.aspect = cam.aspectRatio;
         if (giDump.TryWriteBack(device.get(), camSnap)) {
             // 采样完成即请求关窗：让脚本无需超时等待，也保证退出前正常走完清理与保存流程
-            glfwSetWindowShouldClose(engine.GetWindow()->GetNativeHandle(), GLFW_TRUE);
+            engine.GetWindow()->RequestClose();
         }
     }
 
@@ -1160,7 +1160,7 @@ int main() {
     //    崩溃时打印"函数名 + 源文件:行号"的完整调用栈，并写出 minidump。
     //    之所以放在最前面：初始化阶段（设备/交换链/资源创建）同样是崩溃高发区。
     {
-        const std::string crashLog = std::string(HUGE_CONTENT_DIR) + "Config/06_GILab_crash.log";
+        const std::string crashLog = he::vfs::ResolveWritable("Config/06_GILab_crash.log");
         he::InstallCrashHandler(crashLog.c_str(), nullptr);
     }
 
@@ -1189,7 +1189,7 @@ int main() {
     rhi::DeviceInitDesc rhiDesc;
     rhiDesc.backend          = rhi::ResolveBackendFromEnv();
     rhiDesc.enableValidation = true;
-    rhiDesc.windowHandle     = engine.GetWindow()->GetNativeHandleRaw();
+    rhiDesc.windowHandle     = engine.GetWindow()->GetNativeWindow();
 
     auto device = rhi::CreateDevice(rhiDesc.backend);
     device->Initialize(rhiDesc);
@@ -1197,7 +1197,7 @@ int main() {
 
     // ---- 3. 创建 SwapChain ----
     auto swapchain = device->CreateSwapChain({
-        .windowHandle = engine.GetWindow()->GetNativeHandleRaw(),
+        .windowHandle = engine.GetWindow()->GetNativeWindow(),
         .width  = engine.GetWindow()->GetWidth(),
         .height = engine.GetWindow()->GetHeight(),
         .vsync  = !noVsync,   // 与 EngineConfig 同源（HE_NO_VSYNC=1 时同时关掉，否则帧率仍被锁 60）
@@ -1207,7 +1207,7 @@ int main() {
     World world;
     SceneGraph sceneGraph(world);
 
-    const String sponzaPath = String(HUGE_CONTENT_DIR) + "gltf/Sponza/glTF/Sponza.gltf";
+    const String sponzaPath = he::vfs::Resolve("gltf/Sponza/glTF/Sponza.gltf");
     Entity pointLightEntities[2];   // 面板编辑/配置序列化要按索引访问，故由 BuildScene 回传
     // 纹理缓存必须由 main 持有：bindless 堆会长期持有这些纹理/采样器指针，
     // 若让缓存随 BuildScene 作用域析构，下一帧 Flush() 更新描述符集就是野指针（实测崩溃）。
@@ -1488,12 +1488,11 @@ int main() {
     cmdList->SetPipeline(deferredPipeline.GetToneMap()->GetPSO());
 
     // ---- 8. ImGui 初始化 ----
-    GLFWwindow* glfwWin = engine.GetWindow()->GetNativeHandle();
     editor::ImGuiIntegration imgui;
-    imgui.Initialize(glfwWin, device.get(), swapchain.get());
+    imgui.Initialize(engine.GetWindow(), device.get(), swapchain.get());
     // 各面板的窗口位置/大小/折叠状态由 ImGui 自动序列化——保存到配置目录（与 06_GILab.cfg 同处）
     // 用绝对路径（HUGE_CONTENT_DIR）避免依赖当前工作目录
-    static String g_ImGuiIniPath = String(HUGE_CONTENT_DIR) + "Config/06_GILab_imgui.ini";
+    static String g_ImGuiIniPath = he::vfs::ResolveWritable("Config/06_GILab_imgui.ini");
     ImGui::GetIO().IniFilename = g_ImGuiIniPath.c_str();
 
     // ---- 9. 相机 — 从配置文件加载，否则使用默认位置 ----
@@ -1566,7 +1565,7 @@ int main() {
     // ---- 11. 主渲染循环 ----
     HE_CORE_INFO("06.GILab (Cornell Box) 启动 — WASD=移动, 右键拖拽=旋转, Shift=加速, E/Q=升降");
     u64 frameIndex = 0;
-    f64 lastTime   = glfwGetTime();
+    f64 lastTime   = he::Time::Now();
 
     // ── 渲染线程化（方案 B 阶段 0 T0.3/T0.4）：帧渲染经命令队列交给"渲染线程" ──
     // 【阶段 0 的语义】`RenderThread` 是**壳**：`SubmitAndPump` 在调用线程上立即执行命令，
@@ -1647,11 +1646,12 @@ int main() {
     rhi::FramePresenter framePresenter(swapchain.get());
 
     while (!engine.GetWindow()->ShouldClose()) {
-        f64 now       = glfwGetTime();
+        f64 now       = he::Time::Now();
         f32 deltaTime = static_cast<f32>(now - lastTime);
         lastTime      = now;
 
         engine.GetWindow()->PollEvents();
+        auto& in = he::PollInput(engine.GetWindow());   // 本帧输入快照（平台无关）
 
         // 【帧首落地】下拉选择与当前生效模式不一致时，在这里统一切换（下一帧命令即按新模式走）
         if (g_UiThreadingMode != static_cast<int>(he::GetRenderThreadingMode())) {
@@ -1699,7 +1699,7 @@ int main() {
             }
         }
         static he::samples::CameraInput camInput;   // 跨帧保存右键/光标/切换键状态
-        if (camInput.Update(glfwWin, camCtrl, deltaTime, {.toggleKey = GLFW_KEY_T})) {
+        if (camInput.Update(in, camCtrl, deltaTime, {.toggleKey = he::Key::T})) {
             animCameraMode = !animCameraMode;
             camInput.Reset();   // 切回手动时丢弃过期的光标坐标，避免视角跳一下
         }

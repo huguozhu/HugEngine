@@ -6,23 +6,20 @@
 // 【为什么要有它】02/03/04/05/06/07 六个样例各自抄了同一段 ~12 行：右键拖拽 → `Rotate`、
 // WASD/QE/Shift → `MoveInput` → `Update`。抄多份的代价不只是行数：灵敏度、Y 轴方向、
 // 光标捕获/恢复、切换键去抖这些细节一旦某个样例改了就各不相同（用户在不同样例里手感不一样）。
-// 本模块把**轮询与状态机**收在一处，各样例只保留自己的**策略**（是否启用升降、切换键是什么、
-// 按下切换键后做什么）。
+// 本模块把**轮询与状态机**收在一处，各样例只保留自己的**策略**。
 //
-// 【放在 Samples/Common 而不是引擎】它直接依赖 GLFW（`GLFWwindow*`、`glfwGetKey`…），
-// 而引擎的 `render::CameraController` 刻意不依赖任何窗口库（`MoveInput` 是纯数据）。
-// 把 GLFW 轮询放进引擎会让引擎反向依赖窗口后端；放在样例共用目录即可。
+// 【P0-3 起不再依赖 GLFW】输入由引擎的 `he::PollInput(window)` 提供一份平台无关快照
+// （Windows 用 GLFW 轮询填充，鸿蒙用触摸事件填充）。这样同一份相机逻辑在两端都能用，
+// 鸿蒙上"右键拖拽"由触摸拖动映射而来（见 InputOHOS.cpp）。
 //
 // 【用法（每帧一次）】
-//     static he::samples::CameraInput camInput;                       // 跨帧保存状态
-//     if (camInput.Update(glfwWin, camCtrl, deltaTime, options)) {    // 返回 true = 切换键刚按下
-//         animCameraMode = !animCameraMode;                           // 样例自己的策略
-//     }
+//     static he::samples::CameraInput camInput;
+//     auto& in = he::PollInput(engine.GetWindow());
+//     if (camInput.Update(in, camCtrl, deltaTime, options)) { ... }
 // ============================================================
 
+#include "Platform/IInput.h"
 #include "Pipeline/CameraController.h"
-
-#include <GLFW/glfw3.h>   // 样例侧直接轮询输入（引擎层不依赖窗口库）
 
 namespace he::samples {
 
@@ -32,7 +29,7 @@ struct CameraInputOptions {
     bool  invertY         = false;    ///< 是否反转俯仰方向
     bool  enableVertical  = true;     ///< 是否响应 Q/E 升降
     bool  enableSprint    = true;     ///< 是否响应 Shift 加速
-    int   toggleKey       = 0;        ///< 切换键（GLFW_KEY_*；0 = 不检测）
+    Key   toggleKey       = Key::Count;   ///< 切换键（Key::Count = 不检测）
 };
 
 /// 相机输入状态机：跨帧保存"右键是否按下 / 上次光标位置 / 切换键去抖"
@@ -40,56 +37,50 @@ class CameraInput {
 public:
     /// 清空内部状态（例如从动画相机切回手动相机时调用，避免用到过期的光标坐标）
     void Reset() {
-        m_RightDown    = false;
+        m_RightDown     = false;
         m_ToggleWasDown = false;
-        m_LastX = m_LastY = 0.0;
     }
 
-    /// 每帧调用一次：轮询鼠标/键盘并驱动 `camCtrl`。
+    /// 每帧调用一次：消费平台无关的输入快照并驱动 `camCtrl`。
     /// 返回 true 表示 `opt.toggleKey` 本帧**刚按下**（调用方可据此切换动画相机等）。
-    bool Update(GLFWwindow* win, render::CameraController& camCtrl, float deltaTime,
-                const CameraInputOptions& opt = {}) {
-        if (!win) return false;
+    /// 【为什么用重载而不是默认实参】`const CameraInputOptions& = {}` 依赖聚合体的
+    // default member initializer；clang 在类定义内解析默认实参时会报
+    // "default member initializer needed within definition of enclosing class"。
+    // 加构造函数又会破坏指定初始化（`.toggleKey = ...`），所以用重载。
+    bool Update(const InputState& in, render::CameraController& camCtrl, float deltaTime) {
+        return Update(in, camCtrl, deltaTime, CameraInputOptions{});
+    }
 
+    bool Update(const InputState& in, render::CameraController& camCtrl, float deltaTime,
+                const CameraInputOptions& opt) {
         bool toggled = false;
 
-        // ── 右键拖拽旋转 ──
-        const bool down = glfwGetMouseButton(win, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
-        if (down && !m_RightDown) {
-            // 刚按下：记录起点并捕获光标（否则拖出窗口会断）
-            glfwGetCursorPos(win, &m_LastX, &m_LastY);
-            glfwSetInputMode(win, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-        } else if (!down && m_RightDown) {
-            glfwSetInputMode(win, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-        } else if (down && m_RightDown) {
-            double cx = 0.0, cy = 0.0;
-            glfwGetCursorPos(win, &cx, &cy);
-            const float dx = static_cast<float>(cx - m_LastX);
-            const float dy = static_cast<float>(cy - m_LastY);
-            m_LastX = cx;
-            m_LastY = cy;
-            camCtrl.Rotate(dx * opt.lookSensitivity,
-                           (opt.invertY ? dy : -dy) * opt.lookSensitivity);
+        // ── 鼠标右键拖拽旋转（桌面）；移动端由 InputOHOS 把单指拖动映射成 mouseDelta ──
+        const bool down = in.mouseDown[1];   // 1 = 右键
+        if (down && m_RightDown) {
+            // 按住期间用相对位移旋转（光标已被隐藏/锁定，不会跳变）
+            camCtrl.Rotate(in.mouseDelta.x * opt.lookSensitivity,
+                           (opt.invertY ? in.mouseDelta.y : -in.mouseDelta.y) * opt.lookSensitivity);
         }
         m_RightDown = down;
 
         // ── 切换键（边沿触发，去抖）──
-        if (opt.toggleKey != 0) {
-            const bool k = glfwGetKey(win, opt.toggleKey) == GLFW_PRESS;
+        if (opt.toggleKey != Key::Count) {
+            const bool k = in.IsDown(opt.toggleKey);
             if (k && !m_ToggleWasDown) toggled = true;
             m_ToggleWasDown = k;
         }
 
         // ── WASD / QE / Shift ──
-        render::CameraController::MoveInput in;
-        in.forward  = glfwGetKey(win, GLFW_KEY_W) == GLFW_PRESS;
-        in.backward = glfwGetKey(win, GLFW_KEY_S) == GLFW_PRESS;
-        in.left     = glfwGetKey(win, GLFW_KEY_A) == GLFW_PRESS;
-        in.right    = glfwGetKey(win, GLFW_KEY_D) == GLFW_PRESS;
-        in.up       = opt.enableVertical && glfwGetKey(win, GLFW_KEY_E) == GLFW_PRESS;
-        in.down     = opt.enableVertical && glfwGetKey(win, GLFW_KEY_Q) == GLFW_PRESS;
-        in.sprint   = opt.enableSprint   && glfwGetKey(win, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS;
-        camCtrl.Update(deltaTime, in);
+        render::CameraController::MoveInput move;
+        move.forward  = in.IsDown(Key::W);
+        move.backward = in.IsDown(Key::S);
+        move.left     = in.IsDown(Key::A);
+        move.right    = in.IsDown(Key::D);
+        move.up       = opt.enableVertical && in.IsDown(Key::E);
+        move.down     = opt.enableVertical && in.IsDown(Key::Q);
+        move.sprint   = opt.enableSprint   && in.IsDown(Key::LeftShift);
+        camCtrl.Update(deltaTime, move);
 
         return toggled;
     }
@@ -98,10 +89,8 @@ public:
     [[nodiscard]] bool IsRightMouseDown() const { return m_RightDown; }
 
 private:
-    bool   m_RightDown     = false;   ///< 上一帧右键状态（用于边沿检测与光标捕获/恢复）
-    bool   m_ToggleWasDown = false;   ///< 上一帧切换键状态（去抖）
-    double m_LastX = 0.0;             ///< 上次光标 X（拖动增量）
-    double m_LastY = 0.0;             ///< 上次光标 Y
+    bool m_RightDown     = false;   ///< 上一帧右键状态（边沿检测）
+    bool m_ToggleWasDown = false;   ///< 上一帧切换键状态（去抖）
 };
 
 } // namespace he::samples

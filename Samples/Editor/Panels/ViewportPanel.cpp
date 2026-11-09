@@ -1,6 +1,7 @@
 // Samples/Editor/Panels/ViewportPanel.cpp
 
 #include "ViewportPanel.h"
+#include "Platform/Time.h"
 #include "Editor/EditorContext.h"
 #include "Pipeline/ForwardPipeline.h"
 #include "Scene/World.h"
@@ -40,8 +41,8 @@ void ViewportPanel::Initialize(EditorContext* ctx,
 void ViewportPanel::Render(rhi::IRHICommandList* cmdList) {
     if (!m_Ctx || !m_Pipeline) return;
 
-    static f64 lastTime = glfwGetTime();
-    f64 now = glfwGetTime();
+    static f64 lastTime = he::Time::Now();
+    f64 now = he::Time::Now();
     float dt = static_cast<float>(now - lastTime);
     lastTime = now;
 

@@ -1,6 +1,8 @@
 // Samples/Editor/Panels/ContentBrowserPanel.h
 #pragma once
 
+#include "Platform/IVfs.h"
+
 // ============================================================
 // ContentBrowserPanel — 资源浏览器
 //
@@ -23,7 +25,7 @@ public:
     void Initialize(EditorContext* ctx) {
         m_Ctx = ctx;
         // 使用 CMake 编译定义提供的 Content 绝对路径，避免工作目录依赖
-        m_CurrentPath = String(HUGE_CONTENT_DIR);
+        m_CurrentPath = he::vfs::AssetsRoot();
     }
     void Render();
 

@@ -12,7 +12,9 @@
 #include "Core/Core.h"
 #include "Core/CVar.h"
 #include "Core/Engine.h"
-#include "Platform/Window.h"
+#include "Platform/IWindow.h"
+#include "Platform/IVfs.h"
+#include "Platform/Time.h"
 #include "RHI/RHI.h"
 #include "RHI/FramePresenter.h"   // L4-1：帧外壳（acquire/present）收口
 #include "RHI/ThreadAffinity.h"      // T2.4：渲染线程启动/停止钩子认领与撤销 RHI 归属
@@ -68,8 +70,6 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
 
-#define GLFW_INCLUDE_NONE
-#include <GLFW/glfw3.h>
 #include "CameraInput.h"   // 样例共用：鼠标/键盘控制相机
 
 using namespace he;
@@ -88,7 +88,7 @@ he::CVar<int> cvHDR("r.HDR.Enable", 0, "1=启用 HDR10 输出（需显示器/扩
 // ============================================================
 // 相机配置读写（简易 key=value 格式）
 // ============================================================
-static String g_ConfigPath = String(HUGE_CONTENT_DIR) + "Config/02_Cube.cfg";
+static String g_ConfigPath = he::vfs::ResolveWritable("Config/02_Cube.cfg");
 
 static std::unordered_map<String, String> LoadConfigFile(const String& path) {
     std::unordered_map<String, String> map;
@@ -220,7 +220,7 @@ int main() {
     // 在 shader 编译线程随机 SIGSEGV。关闭验证层后稳定（RT 管线编译约 20s/个）。
     // 在 NVIDIA/其他稳定驱动上可恢复为 true 以获得验证信息。
     rhiDesc.enableValidation = transientSelfTest;
-    rhiDesc.windowHandle     = engine.GetWindow()->GetNativeHandleRaw();
+    rhiDesc.windowHandle     = engine.GetWindow()->GetNativeWindow();
 
     auto device = rhi::CreateDevice(rhiDesc.backend);
     device->Initialize(rhiDesc);
@@ -229,7 +229,7 @@ int main() {
     // --- 3. 创建 SwapChain ---
     // HDR 开关：开启时 SwapChain 优先选 A2B10G10R10 + HDR10 ST.2084（需显示器/扩展支持，否则自动回退 SDR）
     auto swapchain = device->CreateSwapChain({
-        .windowHandle = engine.GetWindow()->GetNativeHandleRaw(),
+        .windowHandle = engine.GetWindow()->GetNativeWindow(),
         .width  = engine.GetWindow()->GetWidth(),
         .height = engine.GetWindow()->GetHeight(),
         .vsync  = true,
@@ -493,7 +493,7 @@ int main() {
     std::shared_ptr<he::asset::SkeletonAsset> foxSkeleton;   // 源骨架（任务 22 的重定向来源）
     {
         he::asset::glTFResult foxResult = he::asset::LoadGLTF(
-            world, sceneGraph, String(HUGE_CONTENT_DIR) + "Models/Skeletal/Fox.glb");
+            world, sceneGraph, he::vfs::Resolve("Models/Skeletal/Fox.glb"));
         if (foxResult.success && !foxResult.skeletons.empty()) {
             foxSkeleton = foxResult.skeletons[0];
             skeletalEntity = world.CreateEntity("SkeletalFox");
@@ -696,7 +696,7 @@ int main() {
     // --- 天空盒（从 skybox 目录加载 6 面纹理）---
     // 【已注释】测试点光阴影：移除天空盒（连同物理天空，场景无天空光照）
     if (true) {
-        String skyDir = String(HUGE_CONTENT_DIR) + "Textures/skybox/";
+        String skyDir = he::vfs::Resolve("Textures/skybox/");
         const char* faceFiles[6] = {
             "daylight0.png", "daylight1.png", "daylight2.png",
             "daylight3.png", "daylight4.png", "daylight5.png",
@@ -789,7 +789,7 @@ int main() {
     std::unique_ptr<rhi::IRHITexture> decalTextureOwn;
     std::unique_ptr<rhi::IRHISampler> decalSamplerOwn;
     {
-        String texPath = String(HUGE_CONTENT_DIR) + "Generated/tex_gen_checker.png";
+        String texPath = he::vfs::ResolveWritable("Generated/tex_gen_checker.png");
         int w = 0, h = 0, ch = 0;
         u8* pixels = stbi_load(texPath.c_str(), &w, &h, &ch, 4);
         if (pixels) {
@@ -886,12 +886,11 @@ int main() {
     HE_CORE_INFO("[Cube 进度] 6.3 SetPipeline 完成");
 
     // --- 6.5. 获取 GLFW 窗口句柄 ---
-    GLFWwindow* glfwWin = engine.GetWindow()->GetNativeHandle();
 
     // --- 6.6. ImGui ---
     HE_CORE_INFO("[Cube 进度] 6.6 开始 ImGui 初始化");
     editor::ImGuiIntegration imgui;
-    imgui.Initialize(glfwWin, device.get(), swapchain.get());
+    imgui.Initialize(engine.GetWindow(), device.get(), swapchain.get());
     HE_CORE_INFO("[Cube 进度] 6.7 ImGui 完成 initialized={}", imgui.IsInitialized());
 
     // --- 7. 相机 ---
@@ -1028,7 +1027,7 @@ int main() {
     // --- 9. 主循环 ---
     HE_CORE_INFO("02.Cube demo started — WASD=移动, 右键拖拽=旋转, 滚轮=缩放, Shift=加速");
     u64  frameIndex = 0;
-    f64  lastTime   = glfwGetTime();
+    f64  lastTime   = he::Time::Now();
 
     // ============================================================
     // 渲染线程化（T2.4）：一帧两条命令 —— ① Acquire + 录制（当前管线 + BackBuffer pass 开始）；
@@ -1076,11 +1075,12 @@ int main() {
         ++rdFrame;
         RenderDocFrameBegin(rdFrame);
         // 计算帧时间
-        f64 now       = glfwGetTime();
+        f64 now       = he::Time::Now();
         f32 deltaTime = static_cast<f32>(now - lastTime);
         lastTime      = now;
 
         engine.GetWindow()->PollEvents();
+        auto& in = he::PollInput(engine.GetWindow());   // 本帧输入快照（平台无关）
 
         bool frameAborted = false;   // 渲染命令里 Acquire 失败时置位
 
@@ -1093,7 +1093,7 @@ int main() {
             // 鼠标/键盘相机输入统一在 Samples/Common/CameraInput.h（六个样例共用，手感一致）；
             // 02 没有 T 键/动画相机切换，故只调 Update。
             static he::samples::CameraInput camInput;   // 跨帧保存右键/光标状态
-            camInput.Update(glfwWin, camCtrl, deltaTime);
+            camInput.Update(in, camCtrl, deltaTime);
         }
 
         // ============================================================
@@ -1103,10 +1103,10 @@ int main() {
             auto* px = world.GetComponent<TransformComponent>(collisionProbeEntity);
             if (px) {
                 float3 move(0.0f);
-                if (glfwGetKey(glfwWin, GLFW_KEY_J) == GLFW_PRESS) move.x -= 1.0f;
-                if (glfwGetKey(glfwWin, GLFW_KEY_L) == GLFW_PRESS) move.x += 1.0f;
-                if (glfwGetKey(glfwWin, GLFW_KEY_I) == GLFW_PRESS) move.z += 1.0f;
-                if (glfwGetKey(glfwWin, GLFW_KEY_K) == GLFW_PRESS) move.z -= 1.0f;
+                if (in.IsDown(he::Key::J)) move.x -= 1.0f;
+                if (in.IsDown(he::Key::L)) move.x += 1.0f;
+                if (in.IsDown(he::Key::I)) move.z += 1.0f;
+                if (in.IsDown(he::Key::K)) move.z -= 1.0f;
                 if (glm::dot(move, move) > 0.0f)
                     px->position += glm::normalize(move) * 5.0f * deltaTime;
 
@@ -1134,12 +1134,12 @@ int main() {
             auto* cm = world.GetComponent<CharacterMovementComponent>(characterEntity);
             if (cm) {
                 cm->inputDirection = float2(0.0f);
-                if (glfwGetKey(glfwWin, GLFW_KEY_LEFT)  == GLFW_PRESS) cm->inputDirection.x -= 1.0f;
-                if (glfwGetKey(glfwWin, GLFW_KEY_RIGHT) == GLFW_PRESS) cm->inputDirection.x += 1.0f;
-                if (glfwGetKey(glfwWin, GLFW_KEY_UP)    == GLFW_PRESS) cm->inputDirection.y -= 1.0f;
-                if (glfwGetKey(glfwWin, GLFW_KEY_DOWN)  == GLFW_PRESS) cm->inputDirection.y += 1.0f;
-                cm->bRunning   = glfwGetKey(glfwWin, GLFW_KEY_R) == GLFW_PRESS;
-                if (glfwGetKey(glfwWin, GLFW_KEY_SPACE) == GLFW_PRESS) cm->bWantsJump = true;
+                if (in.IsDown(he::Key::Left)) cm->inputDirection.x -= 1.0f;
+                if (in.IsDown(he::Key::Right)) cm->inputDirection.x += 1.0f;
+                if (in.IsDown(he::Key::Up)) cm->inputDirection.y -= 1.0f;
+                if (in.IsDown(he::Key::Down)) cm->inputDirection.y += 1.0f;
+                cm->bRunning   = in.IsDown(he::Key::R);
+                if (in.IsDown(he::Key::Space)) cm->bWantsJump = true;
             }
             he::MovementSystem::Update(world, deltaTime);
         }
@@ -1829,7 +1829,7 @@ int main() {
                     "| 右键拖拽旋转 WASD移动",
                     fps,
                     camCtrl.GetCamera().position.x, camCtrl.GetCamera().position.y, camCtrl.GetCamera().position.z);
-                glfwSetWindowTitle(glfwWin, buf);
+                engine.GetWindow()->SetTitle(buf);
                 titleTimer = 0.0;
                 titleFrame = 0;
             }        };

@@ -9,7 +9,9 @@
 
 #include "Core/Core.h"
 #include "Core/Engine.h"
-#include "Platform/Window.h"
+#include "Platform/IWindow.h"
+#include "Platform/IVfs.h"
+#include "Platform/Time.h"
 #include "RHI/RHI.h"
 #include "RHI/FramePresenter.h"   // L4-1：帧外壳（acquire/present）收口
 #include "RHI/ThreadAffinity.h"      // T2.4：渲染线程启动/停止钩子认领与撤销 RHI 归属
@@ -47,8 +49,6 @@
 #include <unordered_map>
 #include <vector>
 
-#define GLFW_INCLUDE_NONE
-#include <GLFW/glfw3.h>
 #include "CameraInput.h"   // 样例共用：鼠标/键盘控制相机
 
 // stb_image — 纹理解码
@@ -60,7 +60,7 @@ using namespace he;
 // ============================================================
 // 配置读写（简易 key=value 格式）
 // ============================================================
-static String g_ConfigPath = String(HUGE_CONTENT_DIR) + "Config/03_Sponza-Forward.cfg";
+static String g_ConfigPath = he::vfs::ResolveWritable("Config/03_Sponza-Forward.cfg");
 
 static std::unordered_map<String, String> LoadConfigFile(const String& path) {
     std::unordered_map<String, String> map;
@@ -125,7 +125,7 @@ int main() {
     rhi::DeviceInitDesc rhiDesc;
     rhiDesc.backend          = rhi::ResolveBackendFromEnv();
     rhiDesc.enableValidation = true;
-    rhiDesc.windowHandle     = engine.GetWindow()->GetNativeHandleRaw();
+    rhiDesc.windowHandle     = engine.GetWindow()->GetNativeWindow();
 
     auto device = rhi::CreateDevice(rhiDesc.backend);
     device->Initialize(rhiDesc);
@@ -135,7 +135,7 @@ int main() {
     // 3. 创建 SwapChain
     // ============================================================
     auto swapchain = device->CreateSwapChain({
-        .windowHandle = engine.GetWindow()->GetNativeHandleRaw(),
+        .windowHandle = engine.GetWindow()->GetNativeWindow(),
         .width  = engine.GetWindow()->GetWidth(),
         .height = engine.GetWindow()->GetHeight(),
         .vsync  = true,
@@ -148,7 +148,7 @@ int main() {
     SceneGraph sceneGraph(world);
 
     // Content 目录由 CMake 编译定义提供（解决不同工作目录下的路径问题）
-    String sponzaPath = String(HUGE_CONTENT_DIR) + "gltf/Sponza/glTF/Sponza.gltf";
+    String sponzaPath = he::vfs::Resolve("gltf/Sponza/glTF/Sponza.gltf");
     HE_CORE_INFO("加载 Sponza 场景: {}", sponzaPath);
 
     auto result = asset::LoadGLTF(world, sceneGraph, sponzaPath);
@@ -251,7 +251,7 @@ int main() {
     // --- 天空盒（从 skybox.hdr 生成 Cubemap）---
     {
         // 加载 HDR 全景图（stbi_loadf 返回 float 数据）
-        String hdrPath = String(HUGE_CONTENT_DIR) + "Textures/skybox.hdr";
+        String hdrPath = he::vfs::Resolve("Textures/skybox.hdr");
         int hdrW, hdrH, hdrCh;
         float* hdrData = stbi_loadf(hdrPath.c_str(), &hdrW, &hdrH, &hdrCh, 4);
         if (!hdrData) {
@@ -533,10 +533,9 @@ int main() {
     // ============================================================
     // 7. ImGui 初始化
     // ============================================================
-    GLFWwindow* glfwWin = engine.GetWindow()->GetNativeHandle();
 
     editor::ImGuiIntegration imgui;
-    imgui.Initialize(glfwWin, device.get(), swapchain.get());
+    imgui.Initialize(engine.GetWindow(), device.get(), swapchain.get());
 
     // ============================================================
     // 8. 相机 — 从配置文件加载，否则使用默认位置
@@ -664,7 +663,7 @@ int main() {
     // ============================================================
     HE_CORE_INFO("03.Sponza-Forward 启动 — WASD=移动, 右键拖拽=旋转, Shift=加速, E/Q=升降");
     u64 frameIndex = 0;
-    f64 lastTime   = glfwGetTime();
+    f64 lastTime   = he::Time::Now();
 
     int  renderMode  = 0;  // 默认光栅化渲染（ForwardPipeline），按 T 切换 RT 模式
     int  rtSampleCount = 1;                   // RT 每像素采样数（1-16）
@@ -673,11 +672,12 @@ int main() {
     rhi::FramePresenter framePresenter(swapchain.get());
 
     while (!engine.GetWindow()->ShouldClose()) {
-        f64 now       = glfwGetTime();
+        f64 now       = he::Time::Now();
         f32 deltaTime = static_cast<f32>(now - lastTime);
         lastTime      = now;
 
         engine.GetWindow()->PollEvents();
+        auto& in = he::PollInput(engine.GetWindow());   // 本帧输入快照（平台无关）
 
         // --- 相机控制（鼠标右键拖拽旋转 / WASD+EQ 移动 / Shift 加速 / T 切换相机动画）---
         // 【回归修复】这段在把帧体拆成两条渲染命令时被整段丢失（与 06.GILab 同一处错误），
@@ -701,7 +701,7 @@ int main() {
                 }
             }
             static he::samples::CameraInput camInput;   // 跨帧保存右键/光标状态
-            if (camInput.Update(glfwWin, camCtrl, deltaTime, {.toggleKey = GLFW_KEY_T})) {
+            if (camInput.Update(in, camCtrl, deltaTime, {.toggleKey = he::Key::T})) {
                 animCameraMode = !animCameraMode;
                 camInput.Reset();   // 切回手动时丢弃过期光标坐标，避免视角跳一下
             }
