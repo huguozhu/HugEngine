@@ -35,10 +35,10 @@ imgui.ini
 screenshot.png
 pipeline_cache.bin
 
-# AI 生成资产（运行时产物）
+# AI 鐢熸垚璧勪骇锛堣繍琛屾椂浜х墿锛?
 Content/Generated/
 
-# 闃插憜锛氳鍦ㄦ簮鐮佺洰褰曟墽琛?cmake 浜х敓鐨勬瀯寤轰骇鐗╋紙in-source build 姹℃煋锛?
+# 闂冩彃鎲滈敍姘愁嚖閸︺劍绨惍浣烘窗瑜版洘澧界悰?cmake 娴溠呮晸閻ㄥ嫭鐎杞伴獓閻椻晪绱檌n-source build 濮光剝鐓嬮敍?
 CMakeCache.txt
 cmake_install.cmake
 *.vcxproj
@@ -48,7 +48,7 @@ CMakeFiles/
 *.slnx
 
 # ---- HarmonyOS / DevEco ----
-# 构建产物（hvigor/ninja/cmake 输出，不入库）
+# 鏋勫缓浜х墿锛坔vigor/ninja/cmake 杈撳嚭锛屼笉鍏ュ簱锛?
 build-ohos/
 Platforms/OHOS/.hvigor/
 Platforms/OHOS/.cxx/
@@ -65,3 +65,6 @@ Platforms/OHOS/entry/.preview/
 .hvigor/
 .cxx/
 oh_modules/
+# ---- 鸿蒙 rawfile：由 deploy.ps1 从 Content/ 拷入，不入库（Sponza 约 56 MB）----
+Platforms/OHOS/entry/src/main/resources/rawfile/content/gltf/
+Platforms/OHOS/entry/src/main/resources/rawfile/content/Textures/skybox.hdr

@@ -46,6 +46,7 @@
 #include <rawfile/raw_file_manager.h>   // OH_ResourceManager_InitNativeResourceManager
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <native_window/external_window.h>
 #include <napi/native_api.h>
 
@@ -128,14 +129,28 @@ napi_value NativeInit(napi_env env, napi_callback_info info) {
     g_Height = GetU32(env, argv[2]);
     const std::string filesDir = GetString(env, argv[3]);
 
-    // ---- 资产：rawfile → 沙箱（只解压一次；已存在则跳过）----
-    const std::string contentDir = filesDir + "/content";
-    if (!std::filesystem::exists(contentDir)) {
+    // ---- 资产：rawfile → 沙箱 ----
+    // 【版本标记】只判断"目录存在"会导致换了 rawfile 资产后旧沙箱不更新（实测：加了
+    // Sponza 资源后手机上仍只有旧文件）。这里写一个版本文件，版本不一致就重解压。
+    constexpr const char* kContentVersion = "2";   // 资产有变更时 +1
+    const std::string contentDir  = filesDir + "/content";
+    const std::string versionFile = contentDir + "/.unpack_version";
+
+    bool needUnpack = !std::filesystem::exists(contentDir);
+    if (!needUnpack) {
+        std::string have;
+        if (std::ifstream vf(versionFile); vf) { std::getline(vf, have); }
+        needUnpack = (have != kContentVersion);
+    }
+    if (needUnpack) {
         // ArkTS 传入的 ResourceManager（napi 对象）→ NDK 句柄，再交给解压器
         NativeResourceManager* mgr = OH_ResourceManager_InitNativeResourceManager(env, argv[4]);
+        HE_CORE_INFO("[OHOS] 解压 rawfile 资产（版本 {}）", kContentVersion);
         he::ohos::UnpackRawfileToSandbox(mgr, "content", contentDir);
+        std::ofstream vf(versionFile, std::ios::trunc);
+        if (vf) vf << kContentVersion;
     } else {
-        HE_CORE_INFO("[OHOS] 沙箱资产已存在，跳过解压: {}", contentDir);
+        HE_CORE_INFO("[OHOS] 沙箱资产已是版本 {}，跳过解压: {}", kContentVersion, contentDir);
     }
     // VFS：只读资产在 content/ 下；配置/日志写 filesDir/
     he::vfs::SetRoots(contentDir + "/", filesDir + "/");

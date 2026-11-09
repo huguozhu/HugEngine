@@ -27,6 +27,25 @@ $ability = 'EntryAbility'
 $env:DEVECO_SDK_HOME = Join-Path $deveco 'sdk'
 $env:PATH = (Join-Path $deveco 'jbr\bin') + ';' + (Join-Path $deveco 'tools\node') + ';' + $env:PATH
 
+# ---- 同步 rawfile 资产（Sponza 场景 + HDR 天空盒；体积大，不入库）----
+$repo    = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $root))
+$rawContent = Join-Path $root 'entry\src\main\resources\rawfile\content'
+function Sync-Assets {
+    $sponzaSrc = Join-Path $repo 'Content\gltf\Sponza'
+    $sponzaDst = Join-Path $rawContent 'gltf\Sponza'
+    if ((Test-Path $sponzaSrc) -and -not (Test-Path $sponzaDst)) {
+        Write-Host '== 拷贝 Sponza 资产到 rawfile ==' -ForegroundColor Cyan
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $sponzaDst) | Out-Null
+        Copy-Item $sponzaSrc $sponzaDst -Recurse -Force
+    }
+    $hdrSrc = Join-Path $repo 'Content\Textures\skybox.hdr'
+    $hdrDst = Join-Path $rawContent 'Textures\skybox.hdr'
+    if ((Test-Path $hdrSrc) -and -not (Test-Path $hdrDst)) {
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $hdrDst) | Out-Null
+        Copy-Item $hdrSrc $hdrDst -Force
+    }
+}
+Sync-Assets
 Write-Host '== 构建 hap ==' -ForegroundColor Cyan
 Push-Location $root
 try {
