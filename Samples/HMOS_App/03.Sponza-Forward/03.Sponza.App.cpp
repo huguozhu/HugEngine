@@ -386,6 +386,11 @@ void App::Resize(u32 width, u32 height) {
     g.camera.SetAspectRatio(static_cast<float>(width), static_cast<float>(height));
 }
 
+void App::RequestScreenshot(const char* path) {
+    Impl& g = *m_Impl;
+    if (g.swapchain) g.swapchain->RequestCaptureNextFrame(path);
+}
+
 void App::Shutdown() {
     Impl& g = *m_Impl;
     if (!g.device) {

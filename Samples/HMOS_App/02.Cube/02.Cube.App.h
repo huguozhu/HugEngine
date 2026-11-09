@@ -56,6 +56,9 @@ public:
     /// 交换链尺寸变化（旋转/分屏/拖拽窗口）
     void Resize(u32 width, u32 height);
 
+    /// 请求截取下一帧到 path（PNG），用于"分享当前画面"
+    void RequestScreenshot(const char* path);
+
     /// 释放全部 GPU 资源（先于 Engine/Window 销毁调用）
     void Shutdown();
 

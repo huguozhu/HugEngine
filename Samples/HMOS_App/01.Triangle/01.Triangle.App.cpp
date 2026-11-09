@@ -505,6 +505,11 @@ bool App::Frame(f32 deltaTime, const InputState& /*input*/) {
     return true;
 }
 
+void App::RequestScreenshot(const char* path) {
+    Impl& g = *m_Impl;
+    if (g.swapchain) g.swapchain->RequestCaptureNextFrame(path);
+}
+
 void App::Shutdown() {
     Impl& g = *m_Impl;
     if (!g.device) {
