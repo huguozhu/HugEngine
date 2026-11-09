@@ -13,7 +13,7 @@
 //   4. Shutdown() → 销毁所有堆和缓存
 // ============================================================
 
-#define VK_USE_PLATFORM_WIN32_KHR
+#include "Vulkan/VulkanPlatform.h"
 #include <vulkan/vulkan.h>
 
 #include "Core/Types.h"

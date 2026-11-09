@@ -29,6 +29,7 @@ set(RHI_SOURCES
     RHI/TextureLayoutTracker.cpp
     RHI/RHIBase.cpp
     Vulkan/VulkanDevice.h
+    Vulkan/VulkanPlatform.h
     Vulkan/VulkanSwapChain.h
     Vulkan/VulkanCommandList.h
     Vulkan/VulkanResources.h
@@ -59,6 +60,7 @@ if(HUGENGINE_RHI_VULKAN)
 
     set(RHI_VULKAN_SOURCES
         Vulkan/VulkanDevice.cpp
+        Vulkan/VulkanPlatform.cpp
         Vulkan/VulkanBindlessHeap.h
         Vulkan/VulkanBindlessHeap.cpp
         Vulkan/VulkanRT.cpp

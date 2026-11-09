@@ -2,7 +2,7 @@
 // VulkanConverters.cpp — RHI 跨平台类型 → Vulkan 专用类型转换实现
 // ============================================================
 
-#define VK_USE_PLATFORM_WIN32_KHR
+#include "VulkanPlatform.h"
 #include <vulkan/vulkan.h>
 
 #include "VulkanConverters.h"

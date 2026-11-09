@@ -9,7 +9,7 @@
 //   VulkanRTPipelineState       — RT 管线状态 + 着色器组句柄
 // ============================================================
 
-#define VK_USE_PLATFORM_WIN32_KHR
+#include "VulkanPlatform.h"
 #include <vulkan/vulkan.h>
 
 // VMA（AS 底层存储缓冲用）

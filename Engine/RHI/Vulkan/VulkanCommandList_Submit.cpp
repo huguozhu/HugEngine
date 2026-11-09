@@ -6,7 +6,7 @@
 #include "RHI/ThreadAffinity.h"   // T0.1：命令列表提交只允许在拥有线程（渲染线程）
 #include "Core/Log.h"
 
-#define VK_USE_PLATFORM_WIN32_KHR
+#include "VulkanPlatform.h"
 #include <vulkan/vulkan.h>
 
 #include "VulkanCommandList.h"

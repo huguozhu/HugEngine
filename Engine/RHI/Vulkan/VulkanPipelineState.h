@@ -5,7 +5,7 @@
 // 从 VulkanPipeline.h 拆分（RT 类型已移至 VulkanRT.h）
 // ============================================================
 
-#define VK_USE_PLATFORM_WIN32_KHR
+#include "VulkanPlatform.h"
 #include <vulkan/vulkan.h>
 
 #include "RHI/Shader.h"

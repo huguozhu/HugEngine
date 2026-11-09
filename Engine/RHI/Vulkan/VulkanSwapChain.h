@@ -5,7 +5,7 @@
 // 从 VulkanInternal.h 拆分，独立于其他 Vulkan 类型
 // ============================================================
 
-#define VK_USE_PLATFORM_WIN32_KHR
+#include "VulkanPlatform.h"
 #include <vulkan/vulkan.h>
 
 #include "RHI/SwapChain.h"

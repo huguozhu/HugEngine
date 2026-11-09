@@ -127,7 +127,9 @@ static VkShaderModule CreateShaderModuleSafe(VkDevice device,
 // ============================================================
 // 辅助函数：将 RHI 类型映射到 Vulkan 类型（与 VulkanPipeline.cpp 中一致）
 // ============================================================
-static VkFormat ToVkFormat(Format fmt) {
+// 【改名】VulkanConverters.h 里已有全局 ToVkFormat(Format)：同名的本地 static 版本在
+// clang 下会被判定为"static 声明跟随非 static 声明"，且调用有歧义，故本地版本改名。
+static VkFormat ToVkFormatLocal(Format fmt) {
     switch (fmt) {
     case Format::RGBA8_UNORM:  return VK_FORMAT_R8G8B8A8_UNORM;
     case Format::BGRA8_UNORM:  return VK_FORMAT_B8G8R8A8_UNORM;
@@ -340,7 +342,7 @@ void PSOPrecompileManager::WorkerThreadFunc() {
 
             for (u32 i = 0; i < desc.colorAttachmentCount; ++i) {
                 VkAttachmentDescription ad{};
-                ad.format         = ToVkFormat(desc.colorFormats[i]);
+                ad.format         = ToVkFormatLocal(desc.colorFormats[i]);
                 ad.samples        = VK_SAMPLE_COUNT_1_BIT;
                 ad.loadOp         = (desc.colorLoadOp == LoadOp::Clear) ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
                 ad.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
@@ -358,7 +360,7 @@ void PSOPrecompileManager::WorkerThreadFunc() {
             if (desc.depthFormat != Format::Unknown) {
                 hasDepth = true;
                 VkAttachmentDescription dd{};
-                dd.format         = ToVkFormat(desc.depthFormat);
+                dd.format         = ToVkFormatLocal(desc.depthFormat);
                 dd.samples        = VK_SAMPLE_COUNT_1_BIT;
                 dd.loadOp         = (desc.depthLoadOp == LoadOp::Clear) ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
                 dd.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;

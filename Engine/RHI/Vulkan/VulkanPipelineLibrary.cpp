@@ -107,7 +107,10 @@ void PipelineLibraryCache::Shutdown() {
             (void)hash;
             if (lib != VK_NULL_HANDLE && m_DDQ) {
                 VkDevice dev = m_Device;
-                m_DDQ->Enqueue([dev, lib]() { vkDestroyPipeline(dev, lib, nullptr); });
+                // 【不要直接捕获结构化绑定】clang（鸿蒙 NDK 15）在 C++20 下仍禁止 lambda
+                // 按值捕获 structured binding，先落到普通局部变量再捕获。
+                const VkPipeline pipeline = lib;
+                m_DDQ->Enqueue([dev, pipeline]() { vkDestroyPipeline(dev, pipeline, nullptr); });
             }
         }
         map.clear();

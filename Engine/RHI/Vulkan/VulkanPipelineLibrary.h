@@ -7,7 +7,7 @@
 // （~0.5ms vs 单片 50ms）。依赖 VK_EXT_graphics_pipeline_library。
 // ============================================================
 
-#define VK_USE_PLATFORM_WIN32_KHR
+#include "VulkanPlatform.h"
 #include <vulkan/vulkan.h>
 
 #include "RHI/Shader.h"

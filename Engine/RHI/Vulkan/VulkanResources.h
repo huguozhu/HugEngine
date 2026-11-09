@@ -5,7 +5,7 @@
 // 从 VulkanInternal.h 拆分
 // ============================================================
 
-#define VK_USE_PLATFORM_WIN32_KHR
+#include "VulkanPlatform.h"
 #include <vulkan/vulkan.h>
 
 // VMA (Vulkan Memory Allocator)

@@ -10,7 +10,7 @@
 #include "RHI/ThreadAffinity.h"   // T0.1：线程归属断言（RHI 只允许在拥有线程上调用）
 #include "Core/Log.h"
 
-#define VK_USE_PLATFORM_WIN32_KHR
+#include "VulkanPlatform.h"
 #include <vulkan/vulkan.h>
 
 #include "VulkanQueryPool.h"
@@ -276,10 +276,9 @@ void VulkanDevice::Initialize(const DeviceInitDesc& desc) {
 
     std::vector<const char*> instanceExtensions = {
         VK_KHR_SURFACE_EXTENSION_NAME,
-#ifdef VK_USE_PLATFORM_WIN32_KHR
-        VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
-#endif
     };
+    // 平台相关的 surface 扩展（Win32: VK_KHR_win32_surface / 鸿蒙: VK_OHOS_surface）
+    vkplat::AppendSurfaceInstanceExtensions(instanceExtensions);
     // 始终加载 debug utils 扩展（对象命名 + 调试标签无需验证层）
     instanceExtensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 
@@ -472,21 +471,13 @@ void VulkanDevice::Shutdown() {
 }
 
 // ============================================================
-// CreateSurface — Win32 窗口表面
+// CreateSurface — 由原生窗口句柄创建表面（平台差异收在 VulkanPlatform.cpp）
 // ============================================================
 void VulkanDevice::CreateSurface(void* windowHandle) {
-#if defined(VK_USE_PLATFORM_WIN32_KHR)
-    VkWin32SurfaceCreateInfoKHR surfaceInfo{};
-    surfaceInfo.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
-    surfaceInfo.hinstance = GetModuleHandle(nullptr);
-    surfaceInfo.hwnd = static_cast<HWND>(windowHandle);
-
-    VkResult result = vkCreateWin32SurfaceKHR(m_Instance, &surfaceInfo, nullptr, &m_Surface);
-    HE_ASSERT(result == VK_SUCCESS, "Failed to create Win32 surface");
-    HE_CORE_INFO("Vulkan Win32 surface created");
-#else
-    HE_ASSERT(false, "Only Win32 surface supported for now");
-#endif
+    const bool ok = vkplat::CreateSurface(m_Instance, windowHandle, &m_Surface);
+    // 表面创建失败时后续交换链一定失败，直接断言，避免"窗口黑屏但日志看起来正常"
+    HE_ASSERT(ok && m_Surface != VK_NULL_HANDLE);
+    (void)ok;
 }
 
 // ============================================================
@@ -513,6 +504,13 @@ void VulkanDevice::SelectPhysicalDevice() {
     VkPhysicalDeviceProperties props;
     vkGetPhysicalDeviceProperties(m_Physical, &props);
     HE_CORE_INFO("Using GPU: {}", props.deviceName);
+    // 【关键限制】手机 GPU（Mali / Adreno / Maleoon 等）常见 maxPushConstantsSize = 128，
+    // 桌面通常 256。引擎按 256 字节声明推送范围，超过设备上限属于未定义行为
+    // （真机表现：几何被打碎 / 矩阵错乱，且没有验证层提示）。
+    HE_CORE_INFO("[Vulkan] 设备限制: maxPushConstantsSize={} maxStorageBufferRange={} maxPerStageDescriptorStorageBuffers={}",
+                 props.limits.maxPushConstantsSize,
+                 props.limits.maxStorageBufferRange,
+                 props.limits.maxPerStageDescriptorStorageBuffers);
 }
 
 // ============================================================
@@ -1155,7 +1153,14 @@ void VulkanDevice::SubmitStreamReplay(VulkanCommandList* src) {
         }
         String line;
         for (u32 ty = 0; ty < hist.size(); ++ty) {
-            if (hist[ty]) line += std::format("{}={} ", ty, hist[ty]);
+            // 【不用 std::format】鸿蒙 NDK 的 libc++（clang 15）尚未提供 <format>；
+            // 这里只是调试直方图，用字符串拼接即可，保持两端都能编译。
+            if (hist[ty]) {
+                line += std::to_string(ty);
+                line += '=';
+                line += std::to_string(hist[ty]);
+                line += ' ';
+            }
         }
         HE_CORE_INFO("[L4-3] histogram: {}", line);
     }

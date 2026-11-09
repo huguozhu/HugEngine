@@ -14,7 +14,7 @@
 #include "RHI/RayTracing.h"
 #include "Core/Log.h"
 
-#define VK_USE_PLATFORM_WIN32_KHR
+#include "VulkanPlatform.h"
 #include <vulkan/vulkan.h>
 
 // Vulkan 类型的完整定义（供 static_cast 使用）

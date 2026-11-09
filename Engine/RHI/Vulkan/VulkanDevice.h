@@ -13,7 +13,7 @@
 // 或按需 include 子模块头文件。
 // ============================================================
 
-#define VK_USE_PLATFORM_WIN32_KHR
+#include "VulkanPlatform.h"
 #include <vulkan/vulkan.h>
 
 // VMA (Vulkan Memory Allocator)

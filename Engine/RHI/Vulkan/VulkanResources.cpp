@@ -10,7 +10,7 @@
 #include "Core/Assert.h"
 #include "RHI/ThreadAffinity.h"   // Map/Unmap 的线程归属断言
 
-#define VK_USE_PLATFORM_WIN32_KHR
+#include "VulkanPlatform.h"
 #include <vulkan/vulkan.h>
 
 #include <cstring>

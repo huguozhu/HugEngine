@@ -6,7 +6,7 @@
 // 依赖 VulkanSwapChain（m_pSwapChain 成员），forward declare VulkanDevice
 // ============================================================
 
-#define VK_USE_PLATFORM_WIN32_KHR
+#include "VulkanPlatform.h"
 #include <vulkan/vulkan.h>
 #include "RHI/RHICommandList.h"   // L4-3：命令流容器
 
