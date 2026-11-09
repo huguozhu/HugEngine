@@ -62,6 +62,9 @@ struct App::Impl {
     rhi::Backend backend = rhi::Backend::Vulkan;
     bool         ready   = false;
 
+    /// 天空盒组件（面板里可开关；鸿蒙上默认关，用于排查过曝）
+    SkyboxComponent* skybox = nullptr;
+
     /// HDR 全景图 → 6 面立方体贴图（与 03 同一套算法）
     void CreateSkybox() {
         const String hdrPath = vfs::Resolve("Textures/skybox.hdr");
@@ -136,7 +139,9 @@ struct App::Impl {
         Entity skyEntity = world.CreateEntity("Skybox");
         world.AddComponent<TransformComponent>(skyEntity);
         auto* skyComp = world.AddComponent<SkyboxComponent>(skyEntity);
+        skybox = skyComp;
         skyComp->SetCubemap(std::move(cubemap), std::move(cmSampler));
+
         sceneGraph->SetParent(skyEntity, Entity{kInvalidEntity});
     }
 
@@ -295,7 +300,9 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
     if (auto* ddgi = g.pipeline->GetDDGI()) ddgi->SetEnabled(false);
     if (auto* ssr = g.pipeline->GetSSR())   ssr->SetEnabled(false);
     g.pipeline->GetSSAO().enabled              = false;
-    g.pipeline->GetClusteredShading().enabled  = false;
+    // 【排查】Clustered 关闭后 Lighting 可能走另一条（未验证的）路径：真机上过曝。
+    // 先保持开启，验证它是否是过曝的根源。
+    g.pipeline->GetClusteredShading().enabled  = true;
     g.pipeline->GetGPUCulling().enabled        = false;
     HE_CORE_INFO("04.App: 延迟管线初始化完成（SSGI/DDGI/SSR/SSAO/Clustered 已关）");
 
