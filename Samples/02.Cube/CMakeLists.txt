@@ -23,3 +23,32 @@ target_compile_definitions(02.Cube PRIVATE
 # 样例共用头文件（相机输入等），见 Samples/Common/
 target_include_directories(02.Cube PRIVATE ${CMAKE_SOURCE_DIR}/Samples/Common)
 add_dependencies(02.Cube CompileShaders)
+
+# ------------------------------------------------------------------
+# 02.Cube.Subset —— 可移植子集（立方体 + 球体 + 天空盒 + 相机）
+#
+# 与鸿蒙入口共用 Samples/02.Cube/App/02.Cube.App.cpp：
+#   · Windows：本文件（Main_Subset.cpp）
+#   · 鸿蒙：  Platforms/OHOS/entry/src/main/cpp/AppMain.cpp
+# 平时用这个 target 回归"鸿蒙将要跑的那份渲染逻辑"。
+# ------------------------------------------------------------------
+if(NOT HUGENGINE_PLATFORM_OHOS)
+    add_executable(02.Cube.Subset
+        Main_Subset.cpp
+        App/02.Cube.App.cpp
+        App/02.Cube.App.h
+    )
+    target_link_libraries(02.Cube.Subset PRIVATE
+        HugEngineCore
+        HugEngineRHI
+        HugEngineShader
+        HugEngineScene
+        HugEngineRender
+        HugEngineEditor
+        stb
+    )
+    target_include_directories(02.Cube.Subset PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/App
+        ${CMAKE_SOURCE_DIR}/Samples/Common)
+    add_dependencies(02.Cube.Subset CompileShaders)
+endif()
