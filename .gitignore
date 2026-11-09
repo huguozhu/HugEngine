@@ -35,10 +35,10 @@ imgui.ini
 screenshot.png
 pipeline_cache.bin
 
-# AI �����ʲ�������ʱ���
+# AI 生成资产（运行时产物）
 Content/Generated/
 
-# 防呆：误在源码目录执行 cmake 产生的构建产物（in-source build 污染）
+# 闃插憜锛氳鍦ㄦ簮鐮佺洰褰曟墽琛?cmake 浜х敓鐨勬瀯寤轰骇鐗╋紙in-source build 姹℃煋锛?
 CMakeCache.txt
 cmake_install.cmake
 *.vcxproj
@@ -46,3 +46,22 @@ cmake_install.cmake
 *.dir/
 CMakeFiles/
 *.slnx
+
+# ---- HarmonyOS / DevEco ----
+# 构建产物（hvigor/ninja/cmake 输出，不入库）
+build-ohos/
+Platforms/OHOS/.hvigor/
+Platforms/OHOS/.cxx/
+Platforms/OHOS/entry/build/
+Platforms/OHOS/build/
+Platforms/OHOS/oh_modules/
+Platforms/OHOS/entry/oh_modules/
+Platforms/OHOS/local.properties
+Platforms/OHOS/entry/.preview/
+*.hap
+*.app
+*.hsp
+*.har
+.hvigor/
+.cxx/
+oh_modules/
