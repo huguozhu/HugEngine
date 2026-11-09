@@ -1,18 +1,15 @@
 // ============================================================
-
-#include "Core/Platform.h"   // HE_PLATFORM_*：必须在使用 #if 之前可见
-// AppMain.cpp —— 鸿蒙端渲染循环（P2：02 的可移植子集）
-
+// AppMain.cpp —— 鸿蒙端渲染循环（01.Triangle / 02.Cube 可切换）
 //
-
-// 与 Windows 的 Samples/02.Cube/Main_Subset.cpp 共用同一份 App：
-
-//   立方体 + 球体 + 地面 + 天空盒 + Forward 管线（阴影 / 天空 / 相机）
-
-// 本文件只负责"鸿蒙特有的三件事"：起线程、转发 resize、转发触摸。
-
+// 两个样例的渲染逻辑都在引擎侧的 App 里（与 Windows 共用同一份源码）：
+//   · 01.Triangle → Samples/01.Triangle/App/01.Triangle.App.cpp
+//   · 02.Cube     → Samples/02.Cube/App/02.Cube.App.cpp
+//
+// 本文件只负责鸿蒙特有的三件事：起渲染线程、转发 resize、转发触摸，
+// 以及"切换样例"（AppStop → AppStart，WindowOHOS 的原生窗口保持不变）。
 // ============================================================
 
+#include "Core/Platform.h"
 
 #include "AppMain.h"
 
@@ -26,7 +23,8 @@
 #include "Platform/Time.h"
 #include "RHI/RHI.h"
 
-#include "02.Cube.App.h"   // Samples/02.Cube/App（CMake 已加 include 目录）
+#include "01.Triangle.App.h"
+#include "02.Cube.App.h"
 
 #include <atomic>
 #include <thread>
@@ -40,30 +38,17 @@ std::atomic<u32>  g_PendingW{ 0 };
 std::atomic<u32>  g_PendingH{ 0 };
 std::atomic<u32>  g_SurfaceW{ 1 };
 std::atomic<u32>  g_SurfaceH{ 1 };
+std::atomic<int>  g_Mode{ 1 };   // 1 = 01.Triangle（默认），2 = 02.Cube
 
-void RenderLoop(u32 width, u32 height) {
-    EngineConfig cfg;
-    cfg.appName      = "HugEngine — 02.Cube (OHOS)";
-    cfg.windowWidth  = width;
-    cfg.windowHeight = height;
-    cfg.enableVSync  = true;
-    cfg.logLevel     = LogLevel::Info;
-
-    Engine engine(cfg);
-    engine.Initialize();
-
-    IWindow* window = engine.GetWindow();
-    if (!window || window->GetNativeWindow() == nullptr) {
-        HE_CORE_ERROR("[OHOS] 没有可用的原生窗口，渲染线程退出");
-        return;
-    }
-
-    samples::cube02::App app;
-    samples::cube02::App::Options opt;
-    opt.enableImGui = true;    // 触摸输入后端见 Engine/Editor/Editor/imgui_impl_ohos.cpp
+/// 通用循环：两个 App 的接口一致（Initialize/Frame/Resize/Shutdown）
+template <typename TApp>
+void RunAppLoop(Engine& engine, IWindow* window, const char* appName) {
+    TApp app;
+    typename TApp::Options opt;
+    opt.enableImGui = true;   // 触摸输入后端见 Engine/Editor/Editor/imgui_impl_ohos.cpp
 
     if (!app.Initialize(engine, rhi::Backend::Vulkan, opt)) {
-        HE_CORE_ERROR("[OHOS] 02.Cube.App 初始化失败");
+        HE_CORE_ERROR("[OHOS] {} 初始化失败", appName);
         return;
     }
 
@@ -71,7 +56,7 @@ void RenderLoop(u32 width, u32 height) {
     g_SurfaceH.store(window->GetHeight());
 
     f64 lastTime = Time::Now();
-    HE_CORE_INFO("[OHOS] 渲染循环启动: {}x{}", window->GetWidth(), window->GetHeight());
+    HE_CORE_INFO("[OHOS] 渲染循环启动: {}（{}x{}）", appName, window->GetWidth(), window->GetHeight());
 
     while (g_Running.load() && !window->ShouldClose()) {
         window->PollEvents();
@@ -94,20 +79,52 @@ void RenderLoop(u32 width, u32 height) {
         app.Frame(dt, in);
     }
 
-    HE_CORE_INFO("[OHOS] 渲染循环退出");
+    HE_CORE_INFO("[OHOS] 渲染循环退出: {}", appName);
     app.Shutdown();
+}
+
+void RenderLoop(u32 width, u32 height, int mode) {
+    const bool triangle = (mode != 2);
+
+    EngineConfig cfg;
+    cfg.appName      = triangle ? "HugEngine — 01.Triangle (OHOS)" : "HugEngine — 02.Cube (OHOS)";
+    cfg.windowWidth  = width;
+    cfg.windowHeight = height;
+    cfg.enableVSync  = true;
+    cfg.logLevel     = LogLevel::Info;
+
+    Engine engine(cfg);
+    engine.Initialize();
+
+    IWindow* window = engine.GetWindow();
+    if (!window || window->GetNativeWindow() == nullptr) {
+        HE_CORE_ERROR("[OHOS] 没有可用的原生窗口，渲染线程退出");
+        return;
+    }
+
+    if (triangle) {
+        RunAppLoop<samples::triangle01::App>(engine, window, "01.Triangle");
+    } else {
+        RunAppLoop<samples::cube02::App>(engine, window, "02.Cube");
+    }
 }
 
 } // namespace
 
-void AppStart(u32 width, u32 height) {
+void AppStart(u32 width, u32 height, int mode) {
     if (g_Running.load()) return;
+    g_Mode.store(mode == 2 ? 2 : 1);
+
     g_Running.store(true);
     g_PendingW.store(0);
     g_PendingH.store(0);
     g_SurfaceW.store(width  ? width  : 1);
     g_SurfaceH.store(height ? height : 1);
-    g_Thread = std::thread(RenderLoop, width ? width : 960, height ? height : 540);
+    g_Thread = std::thread(RenderLoop, width ? width : 960, height ? height : 540, g_Mode.load());
+}
+
+int AppCurrentMode() {
+    return g_Mode.load();
 }
 
 bool AppIsRunning() {

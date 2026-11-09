@@ -3,17 +3,17 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { display } from '@kit.ArkUI';
 
 // ============================================================
-// Index —— XComponent(surface) + 触摸转发
+// Index —— 样例切换（01.Triangle / 02.Cube）+ XComponent 渲染 + 触摸转发
 //
 // 时序：
-//   1. XComponent 的 surface 就绪 → onLoad：取 surfaceId 交给 native.init
-//   2. 触摸事件 → native.touch（**归一化坐标**，与 native 侧 TouchPhase 对齐）
-//   3. surface 销毁 → native.shutdown（停渲染线程、断开窗口）
-//   4. 尺寸变化（旋转/分屏）→ native.resize（native 重建交换链 + 重设窗口缓冲几何）
+//   1. XComponent 的 surface 就绪 → onLoad：取 surfaceId 交给 native.init（默认启动 01）
+//   2. 顶部两个按钮 → native.start(1|2)：整份重建渲染实例，XComponent 窗口保持不变
+//   3. 触摸事件 → native.touch（**归一化坐标**，与 native 侧 TouchPhase 对齐）
+//   4. surface 销毁 → native.shutdown；尺寸变化 → native.resize
 //
-// 【触摸为什么挂在 Column 上】XComponent(SURFACE) 会自己消费触摸事件（实测其 onTouch
-// 从未触发），因此给它设 hitTestBehavior(HitTestMode.None)，由外层 Column 统一接收，
-// 再转成归一化坐标交给 native。
+// 【触摸为什么挂在渲染区域的 Column 上】XComponent(SURFACE) 会自己消费触摸事件
+// （实测其 onTouch 从未触发），因此给它设 hitTestBehavior(HitTestMode.None)，
+// 由外层容器统一接收再转给 native。
 // ============================================================
 
 const TAG = 'HugEngine';
@@ -23,11 +23,13 @@ const TAG = 'HugEngine';
 struct Index {
   private controller: XComponentController = new XComponentController();
   private ready: boolean = false;
-  // 最近一次组件尺寸（vp），用于把触摸点归一化
+  // 最近一次渲染区域尺寸（vp），用于把触摸点归一化
   private viewW: number = 1;
   private viewH: number = 1;
   // 诊断：只打第一条触摸日志，避免刷屏
   private touchLogged: boolean = false;
+  // 当前样例：1 = 01.Triangle，2 = 02.Cube
+  @State private mode: number = 1;
 
   /// 把 ArkUI 的触摸事件转成 native 的 (phase, 归一化坐标)
   private handleTouch(event: TouchEvent): void {
@@ -53,55 +55,88 @@ struct Index {
     native.touch(0, phase, nx, ny);
   }
 
+  /// 切换样例：native 侧停旧实例、起新实例（surface 不变）
+  private switchTo(mode: number): void {
+    if (!this.ready || this.mode === mode) return;
+    hilog.info(0x0000, TAG, '切换样例: %{public}d', mode);
+    native.start(mode);
+    this.mode = mode;
+  }
+
   build() {
     Column() {
-      XComponent({
-        id: 'hugengine',
-        type: XComponentType.SURFACE,
-        libraryname: 'entry',
-        controller: this.controller
-      })
-        .width('100%')
-        .height('100%')
-        // 不参与命中测试：触摸交给外层 Column（见文件头说明）
-        .hitTestBehavior(HitTestMode.None)
-        .onLoad(() => {
-          const surfaceId: string = this.controller.getXComponentSurfaceId();
-          const ctx = getContext(this);
-          const filesDir: string = ctx.filesDir;
-          // 高 DPI：1260px 宽的屏上 16px 字太小，把屏幕密度交给 native 放大 ImGui
-          const d = display.getDefaultDisplaySync();
-          native.setUiScale(d.densityPixels);
-          // 首帧用 960x540 起步；onAreaChange 会按真实尺寸调 native.resize 重建交换链。
-          // resourceManager 交给 native，把 rawfile 里的 content/ 解压到沙箱（只解一次）
-          native.init(surfaceId, 960, 540, filesDir, ctx.resourceManager);
-          this.ready = true;
-          hilog.info(0x0000, TAG, 'native.init 完成: surfaceId=%{public}s', surfaceId);
+      // ---- 顶部样例切换（不参与渲染区域的触摸转发）----
+      Row({ space: 8 }) {
+        Button('01 三角形')
+          .type(ButtonType.Capsule)
+          .height(40)
+          .fontSize(16)
+          .backgroundColor(this.mode === 1 ? '#3A6FD8' : '#444444')
+          .onClick(() => this.switchTo(1))
+        Button('02 立方体')
+          .type(ButtonType.Capsule)
+          .height(40)
+          .fontSize(16)
+          .backgroundColor(this.mode === 2 ? '#3A6FD8' : '#444444')
+          .onClick(() => this.switchTo(2))
+      }
+      .width('100%')
+      .padding({ left: 12, right: 12, top: 8, bottom: 8 })
+      .justifyContent(FlexAlign.Start)
+      .backgroundColor('#1A1A1A')
+
+      // ---- 渲染区域（触摸在此转发给 native）----
+      Column() {
+        XComponent({
+          id: 'hugengine',
+          type: XComponentType.SURFACE,
+          libraryname: 'entry',
+          controller: this.controller
         })
-        .onDestroy(() => {
-          if (this.ready) {
-            native.shutdown();
-            this.ready = false;
-          }
-        })
-        .onAreaChange((_old: Area, now: Area) => {
-          const w = Number(now.width);
-          const h = Number(now.height);
-          if (w > 0 && h > 0) {
-            this.viewW = w;
-            this.viewH = h;
-            // 旋转/分屏：native 需要**像素**尺寸，这里把 vp 换算成 px
+          .width('100%')
+          .height('100%')
+          // 不参与命中测试：触摸交给外层 Column（见文件头说明）
+          .hitTestBehavior(HitTestMode.None)
+          .onLoad(() => {
+            const surfaceId: string = this.controller.getXComponentSurfaceId();
+            const ctx = getContext(this);
+            const filesDir: string = ctx.filesDir;
+            // 高 DPI：1260px 宽的屏上 16px 字太小，把屏幕密度交给 native 放大 ImGui
+            const d = display.getDefaultDisplaySync();
+            native.setUiScale(d.densityPixels);
+            // resourceManager 交给 native，把 rawfile 里的 content/ 解压到沙箱（只解一次）
+            native.init(surfaceId, 960, 540, filesDir, ctx.resourceManager);
+            this.ready = true;
+            hilog.info(0x0000, TAG, 'native.init 完成: surfaceId=%{public}s', surfaceId);
+          })
+          .onDestroy(() => {
             if (this.ready) {
-              native.resize(Math.round(vp2px(w)), Math.round(vp2px(h)));
+              native.shutdown();
+              this.ready = false;
             }
-          }
-        })
+          })
+          .onAreaChange((_old: Area, now: Area) => {
+            const w = Number(now.width);
+            const h = Number(now.height);
+            if (w > 0 && h > 0) {
+              this.viewW = w;
+              this.viewH = h;
+              // 旋转/分屏：native 需要**像素**尺寸，这里把 vp 换算成 px
+              if (this.ready) {
+                native.resize(Math.round(vp2px(w)), Math.round(vp2px(h)));
+              }
+            }
+          })
+      }
+      .width('100%')
+      .layoutWeight(1)
+      .backgroundColor(Color.Black)
+      .onTouch((event: TouchEvent) => {
+        this.handleTouch(event);
+      })
     }
     .width('100%')
     .height('100%')
     .backgroundColor(Color.Black)
-    .onTouch((event: TouchEvent) => {
-      this.handleTouch(event);
-    })
   }
 }

@@ -17,7 +17,11 @@
 namespace he::ohos {
 
 /// 起渲染线程（调用前必须已 AttachNativeWindow）
-void AppStart(u32 width, u32 height);
+/// mode：1 = 01.Triangle，2 = 02.Cube（其余值按 1 处理）
+void AppStart(u32 width, u32 height, int mode);
+
+/// 当前运行的样例编号（1/2）
+int AppCurrentMode();
 
 /// 停渲染线程并等待其退出（设备/交换链在线程内销毁）
 void AppStop();

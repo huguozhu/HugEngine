@@ -12,7 +12,8 @@
 #  本目录，所有源码/头文件路径全部错位（实测：VMA 头找不到）。
 # ============================================================
 
-set(CUBE02_APP_DIR "${CMAKE_SOURCE_DIR}/Samples/02.Cube/App")
+set(CUBE02_APP_DIR     "${CMAKE_SOURCE_DIR}/Samples/02.Cube/App")
+set(TRIANGLE01_APP_DIR "${CMAKE_SOURCE_DIR}/Samples/01.Triangle/App")
 
 add_library(entry SHARED
     NativeEntry.cpp
@@ -22,11 +23,14 @@ add_library(entry SHARED
     AppMain.h
     ${CUBE02_APP_DIR}/02.Cube.App.cpp
     ${CUBE02_APP_DIR}/02.Cube.App.h
+    ${TRIANGLE01_APP_DIR}/01.Triangle.App.cpp
+    ${TRIANGLE01_APP_DIR}/01.Triangle.App.h
 )
 
 target_include_directories(entry PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CUBE02_APP_DIR}
+    ${TRIANGLE01_APP_DIR}
     ${CMAKE_SOURCE_DIR}/Samples/Common
 )
 

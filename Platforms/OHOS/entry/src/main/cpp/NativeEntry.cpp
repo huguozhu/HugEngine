@@ -80,6 +80,24 @@ double GetDouble(napi_env env, napi_value value) {
     return v;
 }
 
+// ---- start(mode)：切换样例（1 = 01.Triangle，2 = 02.Cube）----
+// 渲染线程会整份重建（设备/交换链/管线），但 XComponent 的原生窗口保持不变。
+napi_value NativeStart(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value argv[1] = { nullptr };
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    const int mode = (argc >= 1) ? static_cast<int>(GetDouble(env, argv[0])) : 1;
+    HE_CORE_INFO("[OHOS] 切换样例: {}（当前 {}）", mode == 2 ? "02.Cube" : "01.Triangle",
+                 he::ohos::AppCurrentMode());
+    if (he::ohos::AppIsRunning()) {
+        he::ohos::AppStop();
+    }
+    he::ohos::AppStart(g_Width, g_Height, mode);
+    napi_value undef = nullptr;
+    napi_get_undefined(env, &undef);
+    return undef;
+}
+
 // ---- setUiScale(scale)：屏幕密度，ImGui 用它在高 DPI 屏上放大字体与控件 ----
 napi_value NativeSetUiScale(napi_env env, napi_callback_info info) {
     size_t argc = 1;
@@ -146,7 +164,7 @@ napi_value NativeInit(napi_env env, napi_callback_info info) {
 
     HE_CORE_INFO("[OHOS] surfaceId={} 窗口={}x{} filesDir={}", surfaceId, g_Width, g_Height, filesDir);
     he::AttachNativeWindow(nativeWindow, g_Width, g_Height);
-    he::ohos::AppStart(g_Width, g_Height);
+    he::ohos::AppStart(g_Width, g_Height, 1);   // 默认 01.Triangle
 
     napi_value undef = nullptr;
     napi_get_undefined(env, &undef);
@@ -202,6 +220,7 @@ napi_value NativeShutdown(napi_env env, napi_callback_info) {
 napi_value Init(napi_env env, napi_value exports) {
     napi_property_descriptor desc[] = {
         { "init",     nullptr, NativeInit,     nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "start",    nullptr, NativeStart,    nullptr, nullptr, nullptr, napi_default, nullptr },
         { "resize",   nullptr, NativeResize,   nullptr, nullptr, nullptr, napi_default, nullptr },
         { "touch",    nullptr, NativeTouch,    nullptr, nullptr, nullptr, napi_default, nullptr },
         { "setUiScale", nullptr, NativeSetUiScale, nullptr, nullptr, nullptr, napi_default, nullptr },
@@ -212,7 +231,7 @@ napi_value Init(napi_env env, napi_value exports) {
     // 早于 pages/Index 的 native.init；此时 Engine 还没建，logger 必须在这里补上，
     // 否则本条 HE_CORE_INFO 会空指针崩溃（真机实测：SIGSEGV in spdlog::logger::should_log）。
     he::Logger::Initialize(he::LogLevel::Info);
-    HE_CORE_INFO("[OHOS] libentry.so 已加载（init/resize/touch/shutdown）");
+    HE_CORE_INFO("[OHOS] libentry.so 已加载（init/start/resize/touch/setUiScale/shutdown）");
     return exports;
 }
 

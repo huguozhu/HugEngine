@@ -116,8 +116,18 @@ void ImGuiIntegration::Initialize(IWindow* window, rhi::IRHIDevice* device,
         // 放大时改用 ImGui 内置的**常用汉字表**（约 2500 字 + 标点），图集装得下。
         const ImWchar* glyphRanges = chineseRanges;
 #if HE_PLATFORM_OHOS
+        // 常用字表（约 2500 字）不含"渲/栅"等界面用字，单独把它们补进去：
+        // 用 GlyphRangesBuilder 拼一份"常用字 + 本工程面板文案用字"的区间表。
+        static ImVector<ImWchar> s_ohosRanges;
         if (uiScale > 1.5f) {
-            glyphRanges = io.Fonts->GetGlyphRangesChineseSimplifiedCommon();
+            if (s_ohosRanges.empty()) {
+                ImFontGlyphRangesBuilder builder;
+                builder.AddRanges(io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
+                builder.AddText("渲染后端光栅化当前模式转速停转立方体球体相机阴影天空盒"
+                                "可调垂直同步分辨率帧率三角形支持不可用关闭开启");
+                builder.BuildRanges(&s_ohosRanges);
+            }
+            glyphRanges = s_ohosRanges.Data;
         }
 #endif
         for (const char* fontPath : fontCandidates) {

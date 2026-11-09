@@ -210,3 +210,17 @@ cmake --build build --config Debug --target OhosStubCheck   # 鸿蒙分支语法
 
 验证方式（无需手指）：`hdc shell "uinput -T -g 300 1600 900 1300 600 1500"` 模拟单指拖拽，
 对比前后截图可见视角变化；日志 `[OHOS] 首次收到触摸: id=0 phase=0 (0.238, 0.589)`。
+### 8.4 01.Triangle 迁移与两个真机专属坑（2026-11-09 第三轮）
+
+- 把 `01.Triangle` 的渲染部分抽成 `Samples/01.Triangle/App/01.Triangle.App.{h,cpp}`
+  （与 `02.Cube.App` 同接口），桌面 `01.Triangle` 与鸿蒙入口共用；新增 Windows 验证目标 `01.Triangle.Subset`。
+- 页面顶部加了两个按钮切换样例：`native.start(1|2)` → 停旧实例、起新实例（XComponent 窗口不变）。
+
+| 现象 | 根因 | 修法 |
+|---|---|---|
+| 启动即 SIGABRT（`vkEnumeratePhysicalDevices` / `vkGetPhysicalDeviceProperties`） | `vkCreateInstance` 返回 `VK_ERROR_LAYER_NOT_PRESENT(-6)`：手机上**没有** `VK_LAYER_KHRONOS_validation`，而 01 的 App 沿用桌面的"首次开校验层"；Release 下 `HE_ASSERT` 被裁掉，空 instance 继续往下走 | 引擎侧先 `vkEnumerateInstanceLayerProperties`，层存在才启用；`vkCreateInstance` 失败改为记错误并返回；01 的 App 在鸿蒙上直接关校验层 |
+| 颜色整体红蓝颠倒（红三角形变蓝、金球变青、天空发黄） | 交换链把 `B8G8R8A8_UNORM` 写死，只在"表面确实报 BGRA8"时才覆盖；手机只报 `R8G8B8A8(37)`，驱动静默替换后与 PSO/RenderPass 声明的格式不一致 | `VulkanSwapChain` 改为**从表面报告的格式里选**（HDR10 > BGRA8 sRGB > RGBA8 sRGB > 第一个），并打印选用结果 |
+| 面板里"渲/栅"显示成问号 | 高 DPI 下为压图集只用了 ImGui 常用字表（约 2500 字） | 用 `ImFontGlyphRangesBuilder` 在常用字表上补进本工程面板用字 |
+
+真机结果：`01.Triangle` 红色三角形 + 旋转 + 面板（FPS ~118），`02.Cube` 金色球 + 红色立方体 + 天空盒（FPS ~21），
+顶部按钮可来回切换。
