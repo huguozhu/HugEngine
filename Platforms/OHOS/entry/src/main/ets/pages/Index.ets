@@ -28,7 +28,7 @@ struct Index {
   private viewH: number = 1;
   // 诊断：只打第一条触摸日志，避免刷屏
   private touchLogged: boolean = false;
-  // 当前样例：1 = 01.Triangle，2 = 02.Cube
+  // 当前样例：1 = 01.Triangle，2 = 02.Cube，3 = 03.Sponza
   @State private mode: number = 1;
 
   /// 把 ArkUI 的触摸事件转成 native 的 (phase, 归一化坐标)
@@ -79,6 +79,12 @@ struct Index {
           .fontSize(16)
           .backgroundColor(this.mode === 2 ? '#3A6FD8' : '#444444')
           .onClick(() => this.switchTo(2))
+        Button('03 Sponza')
+          .type(ButtonType.Capsule)
+          .height(40)
+          .fontSize(16)
+          .backgroundColor(this.mode === 3 ? '#3A6FD8' : '#444444')
+          .onClick(() => this.switchTo(3))
       }
       .width('100%')
       .padding({ left: 12, right: 12, top: 8, bottom: 8 })
