@@ -1,0 +1,6 @@
+{
+  "string": [
+    { "name": "app_name", "value": "HugEngine" },
+    { "name": "module_desc", "value": "HugEngine Vulkan renderer (HarmonyOS NEXT)" }
+  ]
+}

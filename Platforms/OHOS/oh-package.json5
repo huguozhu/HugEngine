@@ -1,0 +1,8 @@
+{
+  "modelVersion": "6.0.0",
+  "name": "hugengine.ohos",
+  "version": "1.0.0",
+  "description": "HugEngine 示例 02（HarmonyOS NEXT / Vulkan）",
+  "dependencies": {},
+  "devDependencies": {}
+}

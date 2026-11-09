@@ -1,0 +1,17 @@
+{
+  "apiType": "stageMode",
+  "buildOption": {
+    "externalNativeOptions": {
+      // 【关键】源码目录是**仓库根**：引擎/第三方用 ${CMAKE_SOURCE_DIR} 表示仓库根，
+      // 若指向 cpp/ 子目录，所有源码与头文件路径都会错位（实测 VMA 头找不到）。
+      "path": "../../../CMakeLists.txt",
+      "arguments": "-DHUGENGINE_BUILD_OHOS_ENTRY=ON -DHUGENGINE_BUILD_SAMPLES=OFF -DHUGENGINE_BUILD_EDITOR=ON -DHUGENGINE_BUILD_TESTS=OFF -DHUGENGINE_RHI_D3D12=OFF -DHUGENGINE_RHI_D3D11=OFF",
+      "cppFlags": "-O2 -DNDEBUG"
+    }
+  },
+  "targets": [
+    {
+      "name": "default"
+    }
+  ]
+}

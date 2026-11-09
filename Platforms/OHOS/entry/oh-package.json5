@@ -1,0 +1,7 @@
+{
+  "name": "entry",
+  "version": "1.0.0",
+  "description": "HugEngine 鸿蒙入口模块（libentry.so + XComponent）",
+  "main": "",
+  "dependencies": {}
+}

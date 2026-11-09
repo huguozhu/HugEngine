@@ -1,0 +1,11 @@
+{
+  "modelVersion": "6.0.0",
+  "dependencies": {},
+  "execution": {
+    // 不让 hvigor 常驻 daemon：命令行一次构建一个进程，日志更好收集
+    "daemon": false
+  },
+  "logging": {
+    "level": "info"
+  }
+}
