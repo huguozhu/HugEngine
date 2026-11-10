@@ -21,11 +21,11 @@ find_program(SLANGC
     HINTS ENV VULKAN_SDK "$ENV{VULKAN_SDK}/bin" "$ENV{VULKAN_SDK}/Bin"
 )
 
-if(HUGENGINE_PLATFORM_OHOS)
+if(HUGENGINE_PLATFORM_MOBILE)
     # 鸿蒙：交叉构建机/设备上没有 slangc ⇒ 使用仓库内预编译的 SPIR-V 头（PC 上生成后提交）
     target_include_directories(HugEngineShader INTERFACE
         ${CMAKE_CURRENT_SOURCE_DIR}/PrebuiltShaders)
-    message(STATUS "HugEngine: OHOS 构建使用 PrebuiltShaders（跳过 slangc）")
+    message(STATUS "HugEngine: 移动构建使用 PrebuiltShaders（跳过 slangc）")
 elseif(SLANGC)
     message(STATUS "Shader compiler: ${SLANGC} (Slang)")
 

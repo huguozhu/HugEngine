@@ -21,6 +21,12 @@
     #ifndef VK_USE_PLATFORM_WIN32_KHR
         #define VK_USE_PLATFORM_WIN32_KHR
     #endif
+#elif HE_PLATFORM_ANDROID
+    // 【必须在 include vulkan.h 之前】否则 vulkan_android.h 的 include guard
+    // 会因 vulkan.h 已加载而失效，vkCreateAndroidSurfaceKHR 不会被声明。
+    #ifndef VK_USE_PLATFORM_ANDROID_KHR
+        #define VK_USE_PLATFORM_ANDROID_KHR
+    #endif
 #endif
 
 #include <vulkan/vulkan.h>
@@ -30,6 +36,12 @@
     #include <vulkan/vulkan_ohos.h>
     #ifndef HE_VULKAN_USE_OHOS_SURFACE
         #define HE_VULKAN_USE_OHOS_SURFACE 1
+    #endif
+#elif HE_PLATFORM_ANDROID
+    // Android NDK 的 VK_KHR_android_surface：提供 vkCreateAndroidSurfaceKHR
+    #include <vulkan/vulkan_android.h>
+    #ifndef HE_VULKAN_USE_ANDROID_SURFACE
+        #define HE_VULKAN_USE_ANDROID_SURFACE 1
     #endif
 #endif
 

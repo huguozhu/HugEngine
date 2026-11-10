@@ -35,6 +35,12 @@ else()
     set(HUGENGINE_PLATFORM_MOBILE OFF)
 endif()
 message(STATUS "HugEngine: HUGENGINE_PLATFORM_ANDROID=${HUGENGINE_PLATFORM_ANDROID} MOBILE=${HUGENGINE_PLATFORM_MOBILE}")
+# Android：NDK 的 libvulkan.so 不导出 Vulkan 1.3 的 vkGetDeviceBufferMemoryRequirements /
+# vkGetDeviceImageMemoryRequirements，而 VMA 在 VMA_VULKAN_VERSION>=1.3 时才会用它们。
+# 该宏必须对**所有** include vk_mem_alloc.h 的 TU 一致，因此全局定义而不是写在某个 .cpp 里。
+if(HUGENGINE_PLATFORM_ANDROID)
+    add_compile_definitions(VMA_VULKAN_VERSION=1002000)
+endif()
 
 # VS 解决方案目录分组
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
@@ -54,9 +60,13 @@ function(huge_source_group)
 endfunction()
 
 # Output directories
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+# 【Android 例外】AGP 会通过工具链传入自己的输出目录（决定 .so 打进 APK 的位置），
+# 这里覆盖会导致 APK 里找不到 libhgengine.so，所以 Android 构建不设这些变量。
+if(NOT ANDROID)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+endif()
 
 # ============================================================
 # Options
@@ -82,16 +92,23 @@ else()
     option(HUGENGINE_RHI_D3D11   "Enable D3D11 backend (Windows only)" ON)
 endif()
 
-# Vulkan：Windows 用本机 SDK；鸿蒙用 NDK sysroot 里的 libvulkan + 头文件
+# Vulkan：Windows 用本机 SDK；鸿蒙用 NDK sysroot 里的 libvulkan + 头文件；
+# Android 用 NDK 的 libvulkan，但**头文件用随仓库的 1.4 头**（NDK r27 的 1.3 头缺少
+# VK_EXT_device_generated_commands，引擎的 DGC 路径编不过）。
 if(HUGENGINE_RHI_VULKAN)
     if(HUGENGINE_PLATFORM_MOBILE)
         find_library(HUGENGINE_VULKAN_LIB NAMES vulkan REQUIRED)
-        find_path(HUGENGINE_VULKAN_INCLUDE_DIR NAMES vulkan/vulkan.h REQUIRED)
+        if(HUGENGINE_PLATFORM_ANDROID)
+            set(HUGENGINE_VULKAN_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/Engine/External/VulkanHeaders/include")
+            message(STATUS "HugEngine: Android Vulkan -> ${HUGENGINE_VULKAN_LIB}（头文件用仓库内 1.4）")
+        else()
+            find_path(HUGENGINE_VULKAN_INCLUDE_DIR NAMES vulkan/vulkan.h REQUIRED)
+            message(STATUS "HugEngine: OHOS Vulkan -> ${HUGENGINE_VULKAN_LIB}")
+        endif()
         add_library(Vulkan::Vulkan UNKNOWN IMPORTED)
         set_target_properties(Vulkan::Vulkan PROPERTIES
             IMPORTED_LOCATION "${HUGENGINE_VULKAN_LIB}"
             INTERFACE_INCLUDE_DIRECTORIES "${HUGENGINE_VULKAN_INCLUDE_DIR}")
-        message(STATUS "HugEngine: OHOS Vulkan -> ${HUGENGINE_VULKAN_LIB}")
     else()
         include(cmake/VulkanSDK.cmake)
         find_package(Vulkan REQUIRED)
@@ -211,6 +228,11 @@ endif()
 # ============================================================
 if(HUGENGINE_BUILD_OHOS_ENTRY)
     add_subdirectory(Platforms/OHOS/entry/src/main/cpp)
+endif()
+
+# Android native 入口（libhgengine.so）：由 Platforms/Android 的 Gradle 传 ON
+if(HUGENGINE_BUILD_ANDROID_ENTRY)
+    add_subdirectory(Platforms/Android/app/src/main/cpp)
 endif()
 
 # 鸿蒙侧源码的编译自检（仅桌面构建；只编不链接）

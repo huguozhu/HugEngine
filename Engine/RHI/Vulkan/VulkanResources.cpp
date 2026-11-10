@@ -4,6 +4,13 @@
 // ============================================================
 
 // VMA 实现：在且仅在此编译单元中编译 VMA 单头文件的函数体
+// 【Android 特例】NDK 的 libvulkan.so（API 31）不导出 Vulkan 1.3 的
+// vkGetDeviceBufferMemoryRequirements / vkGetDeviceImageMemoryRequirements，
+// 而 VMA 只在 VMA_VULKAN_VERSION >= 1.3 时才会调用它们 —— 因此把 VMA 限死在 1.2 接口。
+#include "Core/Platform.h"
+#if HE_PLATFORM_ANDROID
+    #define VMA_VULKAN_VERSION 1002000
+#endif
 #define VMA_IMPLEMENTATION
 #include "RHI/RHI.h"
 #include "Core/Log.h"

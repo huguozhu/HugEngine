@@ -566,10 +566,18 @@ void VulkanDevice::CreateLogicalDevice() {
         queueInfos.push_back(compInfo);
     }
 
+    // 【为什么按版本判断】VK_EXT_descriptor_indexing 自 Vulkan 1.2 起并入核心，
+    // 1.2+ 的设备**不再枚举**这个扩展名。若照样请求，vkCreateDevice 会返回
+    // VK_ERROR_EXTENSION_NOT_PRESENT（Android 模拟器 SwiftShader 实测踩到）。
+    VkPhysicalDeviceProperties devProps{};
+    vkGetPhysicalDeviceProperties(m_Physical, &devProps);
+
     std::vector<const char*> deviceExtensions = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-        VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME,  // Bindless 资源
     };
+    if (devProps.apiVersion < VK_API_VERSION_1_2) {
+        deviceExtensions.push_back(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME);   // Bindless 资源
+    }
 
     // 条件启用 Ray Tracing 扩展
     VkPhysicalDeviceRayTracingPipelineFeaturesKHR rtPipelineFeature{};
@@ -672,11 +680,35 @@ void VulkanDevice::CreateLogicalDevice() {
     // （例如 GTX 1070/Pascal 不支持 UBO update-after-bind）
     VkPhysicalDeviceDescriptorIndexingFeatures supDescIdx{};
     supDescIdx.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
+
+    // 引擎请求的其余特性（1.0 核心 / 1.1 / 1.2 / 1.3）都先查询设备能力，再决定是否请求。
+    // 只要请求了设备不支持的特性，vkCreateDevice 会以 VK_ERROR_FEATURE_NOT_PRESENT 失败
+    // （Android 模拟器 SwiftShader 实测：-8，整个引擎起不来）。
+    VkPhysicalDeviceVulkan11Features sup11{};
+    sup11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+    VkPhysicalDeviceVulkan12Features sup12{};
+    sup12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+    VkPhysicalDeviceVulkan13Features sup13{};
+    sup13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+    VkPhysicalDeviceFeatures supCore{};   // 设备实际支持的 Vulkan 1.0 核心特性
     {
+        sup11.pNext = &sup12;
+        sup12.pNext = &sup13;
         VkPhysicalDeviceFeatures2 feat2{};
         feat2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
         feat2.pNext = &supDescIdx;
+        // 把 1.1/1.2/1.3 串在 DescriptorIndexing 之后（pNext 链一次查全）
+        supDescIdx.pNext = &sup11;
         vkGetPhysicalDeviceFeatures2(m_Physical, &feat2);
+        supCore = feat2.features;
+        // 【排查用】把查询到的关键特性打印出来，和实际请求值对照即可定位 -8 的来源
+        HE_CORE_INFO("[Vulkan] 能力查询: multiDrawIndirect={} independentBlend={} "
+                     "shaderDrawParameters={} descriptorIndexing={} bufferDeviceAddress={} "
+                     "timelineSemaphore={} shaderInt8={} drawIndirectCount={} dynamicRendering={}",
+                     supCore.multiDrawIndirect, supCore.independentBlend,
+                     sup11.shaderDrawParameters, sup12.descriptorIndexing,
+                     sup12.bufferDeviceAddress, sup12.timelineSemaphore, sup12.shaderInt8,
+                     sup12.drawIndirectCount, sup13.dynamicRendering);
     }
     // ── Vulkan 1.2 特性集合 ──
     // 【为什么合并】校验规则 VUID-VkDeviceCreateInfo-pNext-02830 明确禁止 pNext 链里同时出现
@@ -690,7 +722,7 @@ void VulkanDevice::CreateLogicalDevice() {
 
     // ① descriptorIndexing（bindless）：主开关必须为 TRUE（启用 VK_EXT_descriptor_indexing
     //    且链含 Vulkan12Features 时，见 VUID-VkDeviceCreateInfo-ppEnabledExtensionNames-02833）
-    vulkan12Features.descriptorIndexing = VK_TRUE;
+    vulkan12Features.descriptorIndexing = sup12.descriptorIndexing;
     vulkan12Features.shaderSampledImageArrayNonUniformIndexing = supDescIdx.shaderSampledImageArrayNonUniformIndexing;
     vulkan12Features.runtimeDescriptorArray = supDescIdx.runtimeDescriptorArray;
     vulkan12Features.descriptorBindingVariableDescriptorCount = supDescIdx.descriptorBindingVariableDescriptorCount;
@@ -706,13 +738,19 @@ void VulkanDevice::CreateLogicalDevice() {
         HE_CORE_WARN("设备不支持 descriptorBindingUniformBufferUpdateAfterBind，已跳过（bindless UBO update-after-bind 停用）");
 
     // ② bufferDeviceAddress（GPU 地址：DGC / 光追 SBT）
-    vulkan12Features.bufferDeviceAddress = VK_TRUE;
-
     // ③ timelineSemaphore（跨队列同步）
-    vulkan12Features.timelineSemaphore = VK_TRUE;
-
-    // ④ shaderInt8（SPIR-V Int8 能力，见上面的说明）
-    vulkan12Features.shaderInt8 = VK_TRUE;
+    // ④ shaderInt8（SPIR-V Int8 能力）
+    // 全部按上面统一查询到的能力请求；不支持就置 FALSE 并告警，避免设备创建失败。
+    auto requestFeature = [](VkBool32& target, VkBool32 supported, const char* name) {
+        target = supported;
+        if (!supported) {
+            HE_CORE_WARN("[Vulkan] 设备不支持 {}，已跳过该特性", name);
+        }
+    };
+    requestFeature(vulkan12Features.bufferDeviceAddress, sup12.bufferDeviceAddress, "bufferDeviceAddress");
+    requestFeature(vulkan12Features.timelineSemaphore,   sup12.timelineSemaphore,   "timelineSemaphore");
+    requestFeature(vulkan12Features.shaderInt8,          sup12.shaderInt8,          "shaderInt8");
+    m_SupportsDrawIndirectCount = (sup12.drawIndirectCount == VK_TRUE);
 
     // ⑤ drawIndirectCount（`vkCmdDrawIndexedIndirectCount` 的前置特性）
     //
@@ -740,13 +778,13 @@ void VulkanDevice::CreateLogicalDevice() {
     // Vulkan 1.1: shaderDrawParameters（SPIR-V gl_DrawID 需要）
     VkPhysicalDeviceVulkan11Features vulkan11Features{};
     vulkan11Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
-    vulkan11Features.shaderDrawParameters = VK_TRUE;
+    vulkan11Features.shaderDrawParameters = sup11.shaderDrawParameters;
 
     // Vulkan 1.3: dynamicRendering（GPL 库段在 renderPass=NULL 下创建需要该特性；
     // 仅启用特性，实际渲染仍走传统 render pass）
     VkPhysicalDeviceVulkan13Features vulkan13Features{};
     vulkan13Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
-    vulkan13Features.dynamicRendering = VK_TRUE;
+    vulkan13Features.dynamicRendering = sup13.dynamicRendering;
 
     // pNext 链: vulkan11 → vulkan12 → vulkan13 → [RT] → [Mesh] → [DGC] → [maint7] → [GPL] → [derivatives]
     // （Vulkan12 的别名结构体已合并进 vulkan12Features，不能再出现在链里）
@@ -802,11 +840,11 @@ void VulkanDevice::CreateLogicalDevice() {
     *ppNext = nullptr;
 
     VkPhysicalDeviceFeatures features{};
-    features.multiDrawIndirect = VK_TRUE;
+    features.multiDrawIndirect = supCore.multiDrawIndirect;
     // GBuffer 等 MRT 管线各附件的混合状态不同，必须启用 independentBlend，
     // 否则 vkCreateGraphicsPipelines 报
     // VUID-VkPipelineColorBlendStateCreateInfo-pAttachments-00605（04/06 各 2 条）
-    features.independentBlend = VK_TRUE;  // GPU Driven 需要多绘制间接
+    features.independentBlend = supCore.independentBlend;  // GPU Driven 需要多绘制间接
 
     // fragmentStoresAndAtomics（§14.8 任务 3）：
     //   Nanite 绘制端的片元着色器对 SSBO 做原子加。未启用该特性时校验层报
@@ -852,6 +890,22 @@ void VulkanDevice::CreateLogicalDevice() {
     deviceInfo.pEnabledFeatures = &features;
 
     VkResult result = vkCreateDevice(m_Physical, &deviceInfo, nullptr, &m_Device);
+    if (result != VK_SUCCESS) {
+        // 【为何显式打印】只靠断言看不到 VkResult，移动/模拟器驱动上排查很费劲
+        HE_CORE_ERROR("[Vulkan] vkCreateDevice 失败: VkResult={} 扩展数={} 队列数={} "
+                      "geometry={} tessellation={} fillModeNonSolid={} multiDrawIndirect={}",
+                      static_cast<int>(result),
+                      deviceInfo.enabledExtensionCount,
+                      deviceInfo.queueCreateInfoCount,
+                      features.geometryShader ? 1 : 0,
+                      features.tessellationShader ? 1 : 0,
+                      features.fillModeNonSolid ? 1 : 0,
+                      features.multiDrawIndirect ? 1 : 0);
+        // 把请求的扩展名逐个打出来：VK_ERROR_EXTENSION_NOT_PRESENT 时一眼能看出是哪一个
+        for (u32 i = 0; i < deviceInfo.enabledExtensionCount; ++i) {
+            HE_CORE_ERROR("[Vulkan]   请求的扩展[{}] = {}", i, deviceInfo.ppEnabledExtensionNames[i]);
+        }
+    }
     HE_ASSERT(result == VK_SUCCESS, "Failed to create logical device");
 
     // 加载扩展函数指针（必须在 vkCreateDevice 之后）
