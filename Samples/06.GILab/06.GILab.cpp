@@ -1189,6 +1189,8 @@ int main() {
     rhi::DeviceInitDesc rhiDesc;
     rhiDesc.backend          = rhi::ResolveBackendFromEnv();
     rhiDesc.enableValidation = true;
+    // 诊断开关：HE_VALIDATION=0 可关掉校验层做性能对照（默认保持开启）
+    if (const char* v = std::getenv("HE_VALIDATION")) rhiDesc.enableValidation = (std::atoi(v) != 0);
     rhiDesc.windowHandle     = engine.GetWindow()->GetNativeWindow();
 
     auto device = rhi::CreateDevice(rhiDesc.backend);
@@ -1477,6 +1479,32 @@ int main() {
         }
 
         HE_CORE_INFO("管道设置已从配置文件恢复");
+    }
+
+    // ---- 启动时默认关闭 Lumen ----
+    // 【为什么】Lumen 首次运行要烘 101 个 128³ mesh SDF（约 45 秒、每帧 ~1.8 s），
+    // 表现就是"启动后 FPS 1"，实际预热结束后稳定在 ~100 FPS（见 2026-11 的实测记录）。
+    // 这里在配置/预设应用完之后把它从漫反射与镜面两个通道里摘掉：
+    //   · 开局即正常帧率，不再有 45 秒的假死外观；
+    //   · 面板里重新勾选 Lumen 仍会立刻开始烘焙（功能不丢）；
+    //   · HE_GILAB_LUMEN=1 保留"启动即开 Lumen"的旧行为（做 A/B 或录制预热用）。
+    {
+        const bool keepLumen = (std::getenv("HE_GILAB_LUMEN") != nullptr);
+        auto disableLumen = [](render::GIConfig& gc) {
+            gc.diffuse.Set(render::GISourceId::Lumen, 0.0f);
+            gc.specular.Set(render::GISourceId::Lumen, 0.0f);
+        };
+        if (!keepLumen) {
+            disableLumen(*deferredPipeline.GetGIConfig());
+            disableLumen(*forwardPipeline.GetGIConfig());
+            HE_CORE_INFO("06.GILab: 启动时默认关闭 Lumen（避免 45 秒 SDF 烘焙预热；"
+                         "面板可开启，HE_GILAB_LUMEN=1 可恢复默认开启）");
+        } else {
+            // 配置里已把 Lumen 权重写成 0，这里显式放回 1（漫反射），否则这个开关不起作用
+            deferredPipeline.GetGIConfig()->diffuse.Set(render::GISourceId::Lumen, 1.0f);
+            forwardPipeline.GetGIConfig()->diffuse.Set(render::GISourceId::Lumen, 1.0f);
+            HE_CORE_INFO("06.GILab: HE_GILAB_LUMEN=1，启动时保持 Lumen 开启（会先经历 SDF 烘焙预热）");
+        }
     }
 
     HE_CORE_INFO("DeferredPipeline 初始化完成");
