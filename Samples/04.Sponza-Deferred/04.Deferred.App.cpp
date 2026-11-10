@@ -17,11 +17,14 @@
 #include "RHI/FramePresenter.h"
 #include "Pipeline/DeferredPipeline.h"
 #include "Pipeline/CameraController.h"
+#include "Pipeline/PhysicalCamera.h"   // 面板「物理相机」分组
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
 #include "Scene/LightComponent.h"
 #include "Scene/Transform.h"
 #include "Scene/SkyboxComponent.h"
+#include "Scene/AnimationComponent.h"   // 相机平移动画（面板可播放/调速）
+#include "Scene/SphereComponent.h"   // 点光源/聚光灯位置上的可视化小球
 #include "Asset/glTFLoader.h"
 #include "Editor/ImGuiIntegration.h"
 #include "imgui.h"
@@ -110,12 +113,23 @@ struct App::Impl {
 
     // ---- 管线开关（面板 + 配置）----
     bool clustered = true;
-    bool gpuCull   = false;
+    bool gpuCull   = true;    // 与旧完整版一致：默认开启 GPU 视锥剔除
     bool skyboxOn  = true;
     bool ssgi = false, ddgi = false, ssr = false, ssao = false;
 
     Entity mainLightEntity{};
     Entity fillLightEntity{};
+
+    // ---- 点光源 / 聚光灯（旧完整版面板要能调它们，故一并建出来）----
+    Entity pointLightEntity{};        // 点光源（面板可调位置/颜色/强度/范围/阴影）
+    Entity pointLightSphereEntity{};  // 点光源位置上的可视化小球
+    Entity spotLightEntity{};         // 聚光灯
+    Entity spotLightConeEntity{};     // 聚光灯位置上的可视化小球
+
+    // ---- 相机平移动画（AnimationComponent 演示；面板可播放/调速，T 键切换模式）----
+    Entity               camAnimEntity{};
+    AnimationComponent*  camAnim = nullptr;
+    bool                 animCameraMode = true;
 
     /// HDR 全景图 → 6 面立方体贴图（与 03 同一套算法）
     
@@ -230,6 +244,98 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
         g.sceneGraph->SetParent(e, Entity{kInvalidEntity});
     }
 
+    // ---- 点光源 + 可视化球体（旧完整版面板可调位置/颜色/强度/范围/阴影）----
+    {
+        Entity e = g.world.CreateEntity("PointLight");
+        g.pointLightEntity = e;
+        g.world.AddComponent<TransformComponent>(e);
+        auto* pl = g.world.AddComponent<PointLight>(e);
+        pl->color      = float3(1.0f, 0.85f, 0.6f);   // 暖色
+        pl->intensity  = 20.0f;
+        pl->range      = 600.0f;
+        pl->castShadow = true;
+        pl->shadowBias = 0.005f;
+        if (auto* tf = g.world.GetComponent<TransformComponent>(e)) {
+            tf->position = float3(-300.0f, 100.0f, 0.0f);
+        }
+        g.sceneGraph->SetParent(e, Entity{kInvalidEntity});
+
+        // 可视化小球：跟着点光源走，便于在 Sponza 大场景里定位
+        Entity s = g.world.CreateEntity("PointLightSphere");
+        g.pointLightSphereEntity = s;
+        g.world.AddComponent<TransformComponent>(s);
+        auto* sphere = g.world.AddComponent<SphereComponent>(s);
+        sphere->radius       = 15.0f;
+        sphere->segmentCount = 16;
+        sphere->ringCount    = 8;
+        sphere->OnCreate();
+        if (auto* tf = g.world.GetComponent<TransformComponent>(s)) {
+            tf->position = float3(-300.0f, 100.0f, 0.0f);
+        }
+        g.sceneGraph->SetParent(s, Entity{kInvalidEntity});
+    }
+
+    // ---- 聚光灯 + 可视化球体（面板同样可调）----
+    {
+        Entity e = g.world.CreateEntity("SpotLight");
+        g.spotLightEntity = e;
+        g.world.AddComponent<TransformComponent>(e);
+        auto* sl = g.world.AddComponent<SpotLight>(e);
+        sl->color          = float3(1.0f, 0.9f, 0.7f);
+        sl->intensity      = 80.0f;
+        sl->range          = 1200.0f;
+        sl->innerConeAngle = 0.25f;
+        sl->outerConeAngle = 0.50f;
+        sl->direction      = float3(0.0f, -1.0f, 0.3f);
+        sl->castShadow     = true;
+        sl->shadowBias     = 0.005f;
+        if (auto* tf = g.world.GetComponent<TransformComponent>(e)) {
+            tf->position = float3(0.0f, 200.0f, -200.0f);
+        }
+        g.sceneGraph->SetParent(e, Entity{kInvalidEntity});
+
+        Entity s = g.world.CreateEntity("SpotLightCone");
+        g.spotLightConeEntity = s;
+        g.world.AddComponent<TransformComponent>(s);
+        auto* cone = g.world.AddComponent<SphereComponent>(s);
+        cone->radius       = 10.0f;
+        cone->segmentCount = 8;
+        cone->ringCount    = 4;
+        cone->OnCreate();
+        if (auto* tf = g.world.GetComponent<TransformComponent>(s)) {
+            tf->position = float3(0.0f, 200.0f, -200.0f);
+        }
+        g.sceneGraph->SetParent(s, Entity{kInvalidEntity});
+    }
+
+    // ---- 相机平移动画（AnimationComponent 演示：绕 Y 轴 6 秒一圈，默认不播放）----
+    {
+        Entity e = g.world.CreateEntity("CameraAnimation");
+        g.camAnimEntity = e;
+        g.world.AddComponent<TransformComponent>(e);
+        g.camAnim = g.world.AddComponent<AnimationComponent>(e);
+        auto& clips = g.camAnim->clips;
+        clips.push_back({});
+        g.camAnim->currentClip = 0;
+        auto& clip = clips.back();
+        clip.name    = "CameraOrbit";
+        clip.looping = true;
+        const f32 radius   = 600.0f;
+        const f32 height   = 200.0f;
+        const int steps    = 60;
+        const f32 duration = 6.0f;
+        for (int i = 0; i <= steps; ++i) {
+            const f32 t     = static_cast<f32>(i) / steps * duration;
+            const f32 angle = (static_cast<f32>(i) / steps) * glm::radians(360.0f);
+            g.camAnim->AddTranslationKey(t, float3(std::cos(angle) * radius, height,
+                                                   std::sin(angle) * radius));
+        }
+        g.camAnim->FinalizeClip();
+        g.camAnim->playing = false;   // 默认关闭，面板里勾"播放动画"或在面板里勾
+        g.sceneGraph->SetParent(e, Entity{kInvalidEntity});
+        HE_CORE_INFO("04.App: 相机动画已创建（6 秒圆形路径，默认不播放）");
+    }
+
     CreateSkyboxFromHdr(g.world, *g.sceneGraph, g.device.get());
     g.world.ForEach<SkyboxComponent>([&](Entity, SkyboxComponent& sky) { g.skybox = &sky; });
     HE_CORE_INFO("04.App: 场景就绪: {} 实体", g.world.GetEntityCount());
@@ -312,7 +418,7 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
         g.camera.GetCamera().farPlane  = GetFloat(cfg, "cam_far", 2000.0f);
 
         g.clustered = GetBool(cfg, "clustered", true);
-        g.gpuCull   = GetBool(cfg, "gpu_cull", false);
+        g.gpuCull   = GetBool(cfg, "gpu_cull", true);
         g.skyboxOn  = GetBool(cfg, "skybox", true);
         g.ssgi      = GetBool(cfg, "ssgi_enabled", false);
         g.ddgi      = GetBool(cfg, "ddgi_enabled", false);
@@ -338,6 +444,38 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
             dl->castShadow = GetBool(cfg, "shadow_enabled", true);
             dl->shadowBias = GetFloat(cfg, "shadow_bias", 0.003f);
         }
+
+        // 点光源 / 聚光灯：与旧完整版面板同一批配置键（面板改动可跨启动保留）
+        if (auto* pl = g.world.GetComponent<PointLight>(g.pointLightEntity)) {
+            pl->color      = float3(GetFloat(cfg, "point_color_r", 1.0f),
+                                   GetFloat(cfg, "point_color_g", 0.85f),
+                                   GetFloat(cfg, "point_color_b", 0.6f));
+            pl->intensity  = GetFloat(cfg, "point_intensity", 20.0f);
+            pl->range      = GetFloat(cfg, "point_range", 600.0f);
+            pl->castShadow = GetBool(cfg, "point_shadow", true);
+            pl->shadowBias = GetFloat(cfg, "point_bias", 0.005f);
+            if (auto* tf = g.world.GetComponent<TransformComponent>(g.pointLightEntity)) {
+                tf->position = float3(GetFloat(cfg, "point_pos_x", -300.0f),
+                                      GetFloat(cfg, "point_pos_y", 100.0f),
+                                      GetFloat(cfg, "point_pos_z", 0.0f));
+            }
+        }
+        if (auto* sl = g.world.GetComponent<SpotLight>(g.spotLightEntity)) {
+            sl->color          = float3(GetFloat(cfg, "spot_color_r", 1.0f),
+                                       GetFloat(cfg, "spot_color_g", 0.9f),
+                                       GetFloat(cfg, "spot_color_b", 0.7f));
+            sl->intensity      = GetFloat(cfg, "spot_intensity", 80.0f);
+            sl->range          = GetFloat(cfg, "spot_range", 1200.0f);
+            sl->innerConeAngle = GetFloat(cfg, "spot_inner_angle", 0.25f);
+            sl->outerConeAngle = GetFloat(cfg, "spot_outer_angle", 0.50f);
+            sl->castShadow     = GetBool(cfg, "spot_shadow", true);
+            sl->shadowBias     = GetFloat(cfg, "spot_bias", 0.005f);
+            if (auto* tf = g.world.GetComponent<TransformComponent>(g.spotLightEntity)) {
+                tf->position = float3(GetFloat(cfg, "spot_pos_x", 0.0f),
+                                      GetFloat(cfg, "spot_pos_y", 200.0f),
+                                      GetFloat(cfg, "spot_pos_z", -200.0f));
+            }
+        }
     }
 
     if (opt.enableImGui) {
@@ -360,7 +498,21 @@ bool App::Frame(f32 deltaTime, const InputState& input) {
 bool App::BeginFrame(f32 deltaTime, const InputState& input) {
     Impl& g = *m_Impl;
     if (!g.ready || !g.presenter) return false;
-    g.camInput.Update(input, g.camera, deltaTime);
+    // 动画相机模式：先按 AnimationComponent 的位姿覆盖相机，再让输入叠加（与旧 main 顺序一致）
+    if (g.animCameraMode && g.camAnim && g.camAnim->playing) {
+        if (auto* tf = g.world.GetComponent<TransformComponent>(g.camAnimEntity)) {
+            g.camera.SetPosition(tf->position);
+            const float3 toOrigin = glm::normalize(float3(0.0f, 200.0f, 0.0f) - tf->position);
+            g.camera.SetOrientationFromForward(toOrigin);
+        }
+    }
+
+    // 相机输入（桌面：右键拖拽 + WASD；鸿蒙：单指拖动映射成右键拖拽）
+    // T 键切换"动画相机 / 手动相机"（与旧 04 main 一致）
+    if (g.camInput.Update(input, g.camera, deltaTime, {.toggleKey = Key::T})) {
+        g.animCameraMode = !g.animCameraMode;
+        g.camInput.Reset();   // 切换时丢弃过期光标坐标，避免视角跳一帧
+    }
     g.frameDt = deltaTime;
     return true;
 }
@@ -376,6 +528,15 @@ bool App::RecordScene() {
     // 延迟管线自己负责阴影资源的逐帧绑定与 pass 顺序，样例侧只需：
     // NextFrame → AssembleScene → Render
     g.pipeline->NextFrame();
+
+    // Transform 动画更新（驱动 AnimationComponent → TransformComponent）
+    // 必须在装配快照之前推进，相机动画才会当帧生效（与旧 04 main 一致）。
+    g.world.ForEach<AnimationComponent>([&](Entity e, AnimationComponent& anim) {
+        if (auto* tf = g.world.GetComponent<TransformComponent>(e)) {
+            anim.Update(g.frameDt, tf);
+        }
+    });
+
     g.pipeline->GetFrameAssembler().AssembleScene(g.world, *g.sceneGraph, g.camera.GetCamera());
     g.pipeline->Render(g.cmdList.get(), g.pipeline->GetFrameSnapshot(), g.camera.GetCamera());
 
@@ -389,30 +550,447 @@ void App::RecordUIAndPresent() {
     Impl& g = *m_Impl;
     if (g.imgui && g.imgui->IsInitialized()) {
         g.imgui->BeginFrame();
-        const float ui = ImGui::GetFontSize() / 16.0f;
-        ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_Once);
-        ImGui::SetNextWindowSize(ImVec2(300.0f * ui, 140.0f * ui), ImGuiCond_Once);
+        ImGui::SetNextWindowPos({10, 10}, ImGuiCond_Once);
         ImGui::SetNextWindowBgAlpha(0.55f);
-        ImGui::Begin("04.Sponza-Deferred (App)");
-        ImGui::Text("FPS: %.0f", 1.0f / (g.frameDt > 0.0f ? g.frameDt : 0.016f));
-        ImGui::Text("GBuffer + Lighting");
+        ImGui::Begin("04.Sponza-Deferred");
+        {
+            float fps = 1.0f / (g.frameDt > 0.001f ? g.frameDt : 0.016f);
+            ImGui::TextColored({0.3f, 1.0f, 0.3f, 1.0f}, "FPS: %.0f", fps);
+            ImGui::SameLine(120);
+            ImGui::TextColored({0.6f, 0.6f, 0.6f, 1.0f}, "(%.2f ms)", g.frameDt * 1000.0f);
 
-        ImGui::SeparatorText("延迟渲染管线");
-        if (ImGui::Checkbox("Clustered Shading", &g.clustered))
-            g.pipeline->GetClusteredShading().enabled = g.clustered;
-        if (ImGui::Checkbox("GPU 视锥剔除", &g.gpuCull))
-            g.pipeline->GetGPUCulling().enabled = g.gpuCull;
-        if (g.skybox && ImGui::Checkbox("天空盒", &g.skyboxOn))
-            g.skybox->enabled = g.skyboxOn;
+            ImGui::SeparatorText("延迟渲染管线");
+            ImGui::Text("GBuffer + Lighting Pass (全屏 PBR)");
+            ImGui::Text("3×MRT (albedo+metallic | normal+roughness | emissive+ao) + D32");
+            bool clustered = g.pipeline->GetClusteredShading().enabled;
+            if (ImGui::Checkbox("Clustered Shading", &clustered))
+                g.pipeline->GetClusteredShading().enabled = clustered;
+            if (clustered) {
+                ImGui::SameLine();
+                ImGui::TextColored({0.5f, 1.0f, 0.5f, 1.0f}, "%u clusters",
+                    g.pipeline->GetClusteredShading().GetClusterCount());
+            }
+            bool gpuCull = g.pipeline->GetGPUCulling().enabled;
+            if (ImGui::Checkbox("GPU 视锥剔除", &gpuCull))
+                g.pipeline->GetGPUCulling().enabled = gpuCull;
+            if (gpuCull) {
+                ImGui::SameLine();
+                ImGui::TextColored({0.5f, 1.0f, 0.5f, 1.0f}, "%u 可见",
+                    g.pipeline->GetGPUCulling().GetLastVisibleCount());
+            }
 
-        ImGui::SeparatorText("GI");
-        if (ImGui::Checkbox("SSGI", &g.ssgi) && g.pipeline->GetSSGI()) g.pipeline->GetSSGI()->SetEnabled(g.ssgi);
-        if (ImGui::Checkbox("DDGI", &g.ddgi) && g.pipeline->GetDDGI()) g.pipeline->GetDDGI()->SetEnabled(g.ddgi);
-        if (ImGui::Checkbox("SSR",  &g.ssr)  && g.pipeline->GetSSR())  g.pipeline->GetSSR()->SetEnabled(g.ssr);
+            // 相机
+            ImGui::SeparatorText("相机");
+            if (g.animCameraMode) {
+                ImGui::TextColored({0.3f, 1.0f, 0.5f, 1.0f}, "动画相机 (按 T 切换手动)");
+                bool playing = g.camAnim->playing;
+                if (ImGui::Checkbox("播放动画", &playing))
+                    g.camAnim->playing = playing;
+                ImGui::SameLine();
+                float s = g.camAnim->speed;
+                if (ImGui::SliderFloat("动画速度", &s, 0.1f, 3.0f, "%.1f"))
+                    g.camAnim->speed = s;
+            } else {
+                ImGui::TextColored({1.0f, 1.0f, 0.3f, 1.0f}, "手动相机 (按 T 切换动画)");
+            }
+            ImGui::DragFloat3("位置##Camera", &g.camera.GetCamera().position[0], 5.0f);
+            float yawDeg   = glm::degrees(g.camera.GetYaw());
+            float pitchDeg = glm::degrees(g.camera.GetPitch());
+            if (ImGui::SliderFloat("Yaw", &yawDeg, -180.0f, 180.0f, "%.1f°"))
+                g.camera.SetOrientation(glm::radians(yawDeg), g.camera.GetPitch());
+            if (ImGui::SliderFloat("Pitch", &pitchDeg, -85.0f, 85.0f, "%.1f°"))
+                g.camera.SetOrientation(g.camera.GetYaw(), glm::radians(pitchDeg));
+            float moveSpeed = g.camera.GetMoveSpeed();
+            if (ImGui::DragFloat("移动速度", &moveSpeed, 1.0f, 1.0f, 500.0f, "%.0f"))
+                g.camera.SetMoveSpeed(moveSpeed);
+            float nearP = g.camera.GetCamera().nearPlane;
+            float farP  = g.camera.GetCamera().farPlane;
+            if (ImGui::DragFloat("近裁剪面", &nearP, 0.01f, 0.001f, 10.0f, "%.3f"))
+                g.camera.GetCamera().nearPlane = nearP;
+            if (ImGui::DragFloat("远裁剪面", &farP, 10.0f, 10.0f, 50000.0f, "%.0f"))
+                g.camera.GetCamera().farPlane = farP;
 
-        ImGui::SeparatorText("后处理");
-        if (ImGui::Checkbox("SSAO", &g.ssao)) g.pipeline->GetSSAO().enabled = g.ssao;
+            // ── 物理相机参数 ──
+            ImGui::SeparatorText("物理相机");
+            static render::PhysicalCameraParams physCam;
+            static bool usePhysicalCamera = false;
+            ImGui::Checkbox("启用物理相机", &usePhysicalCamera);
+            if (usePhysicalCamera) {
+                ImGui::Indent(12.0f);
+                // 镜头
+                ImGui::DragFloat("焦距 (mm)", &physCam.focalLength, 1.0f, 10.0f, 200.0f, "%.0f");
+                ImGui::DragFloat("光圈 f/", &physCam.fStop, 0.1f, 1.0f, 22.0f, "%.1f");
+                // 快门 + ISO
+                float shutterRecip = 1.0f / physCam.shutterSpeed;
+                ImGui::DragFloat("快门 1/", &shutterRecip, 1.0f, 1.0f, 8000.0f, "%.0f");
+                physCam.shutterSpeed = 1.0f / std::max(shutterRecip, 1.0f);
+                ImGui::DragFloat("ISO", &physCam.iso, 10.0f, 50.0f, 25600.0f, "%.0f");
+                // 传感器预设
+                static int sensorPreset = 0;
+                const char* sensorNames[] = {"全画幅 36×24", "APS-C 23.6×15.6", "M4/3 17.3×13.0"};
+                if (ImGui::Combo("传感器", &sensorPreset, sensorNames, 3)) {
+                    if (sensorPreset == 0) physCam.sensor = render::SensorSize::FullFrame();
+                    else if (sensorPreset == 1) physCam.sensor = render::SensorSize::APSC();
+                    else physCam.sensor = render::SensorSize::Micro43();
+                }
+                // 对焦距离
+                ImGui::DragFloat("对焦距离 (m)", &physCam.focusDistance, 0.1f, 0.1f, 500.0f, "%.1f");
+
+                // 应用物理相机参数到 CameraData
+                auto derived = render::DerivePhysicalCamera(physCam,
+                    g.camera.GetCamera().aspectRatio);
+                g.camera.GetCamera().fov               = derived.fov;
+                g.camera.GetCamera().apertureDiameter   = derived.apertureDiameter;
+                g.camera.GetCamera().exposureBias       = derived.exposureBias;
+                g.camera.GetCamera().motionBlurIntensity = derived.motionBlurIntensity;
+                g.camera.GetCamera().focusDistance      = derived.focusDistance;
+                g.camera.GetCamera().maxCoC             = derived.maxCoC;
+                g.camera.GetCamera().nearPlane          = physCam.nearPlane;
+                g.camera.GetCamera().farPlane           = physCam.farPlane;
+
+                // 显示推导值
+                ImGui::Text("推导 FOV: %.1f°  |  光圈孔径: %.2f mm", derived.fov, derived.apertureDiameter);
+                ImGui::Text("EV 偏置: %+.2f  |  运动模糊: %.2f×", derived.exposureBias, derived.motionBlurIntensity);
+                ImGui::Text("弥散圆 max: %.3f", derived.maxCoC);
+                ImGui::Unindent(12.0f);
+            }
+
+            // GI — IBL
+            auto* gi = g.pipeline->GetGI();
+            if (gi) {
+                ImGui::SeparatorText("GI — IBL");
+                auto settings = gi->GetSettings();
+                float intensity = settings.intensity;
+                if (ImGui::SliderFloat("IBL 强度", &intensity, 0.0f, 3.0f, "%.2f")) {
+                    settings.intensity = intensity;
+                    gi->SetSettings(settings);
+                }
+            }
+
+            // GI — SSGI（屏幕空间间接漫反射）
+            if (auto* ssgi = g.pipeline->GetSSGI()) {
+                ImGui::SeparatorText("GI — SSGI");
+                bool ssgiOn = ssgi->IsEnabled();
+                if (ImGui::Checkbox("启用 SSGI", &ssgiOn))
+                    ssgi->SetEnabled(ssgiOn);
+                if (ssgiOn) {
+                    ImGui::Indent(12.0f);
+                    ImGui::DragFloat("采样半径##ssgi", &ssgi->radius, 0.1f, 0.1f, 5.0f, "%.1f");
+                    ImGui::SliderInt("采样数##ssgi", &ssgi->sampleCount, 4, 64);
+                    auto ssgiSettings = ssgi->GetSettings();
+                    if (ImGui::SliderFloat("强度##ssgi", &ssgiSettings.intensity, 0.0f, 2.0f, "%.2f"))
+                        ssgi->SetSettings(ssgiSettings);
+                    ImGui::Unindent(12.0f);
+                }
+            }
+
+            // GI — DDGI（探针网格动态 GI）
+            if (auto* ddgi = g.pipeline->GetDDGI()) {
+                ImGui::SeparatorText("GI — DDGI");
+                bool ddgiOn = ddgi->IsEnabled();
+                if (ImGui::Checkbox("启用 DDGI", &ddgiOn))
+                    ddgi->SetEnabled(ddgiOn);
+                if (ddgiOn) {
+                    ImGui::Indent(12.0f);
+                    ImGui::SliderFloat("时间混合##ddgi", &ddgi->blendAlpha, 0.0f, 0.98f, "%.2f");
+                    ImGui::SliderFloat("贡献缩放##ddgi", &ddgi->debugScale, 0.0f, 2.0f, "%.2f");
+                    auto ddgiSettings = ddgi->GetSettings();
+                    if (ImGui::SliderFloat("强度##ddgi", &ddgiSettings.intensity, 0.0f, 2.0f, "%.2f"))
+                        ddgi->SetSettings(ddgiSettings);
+                    if (ImGui::Button("重建探针网格##ddgi")) {
+                        // 重新创建探针缓冲以响应参数变化
+                    }
+                    u32 pc = ddgi->gridX * ddgi->gridY * ddgi->gridZ;
+                    ImGui::Text("%u 探针 (%u×%u×%u)", pc, ddgi->gridX, ddgi->gridY, ddgi->gridZ);
+                    ImGui::Unindent(12.0f);
+                }
+            }
+
+            // GI — SSR（屏幕空间反射）
+            if (auto* ssr = g.pipeline->GetSSR()) {
+                ImGui::SeparatorText("GI — SSR");
+                bool ssrOn = ssr->IsEnabled();
+                if (ImGui::Checkbox("启用 SSR", &ssrOn))
+                    ssr->SetEnabled(ssrOn);
+                if (ssrOn) {
+                    ImGui::Indent(12.0f);
+                    ImGui::SliderFloat("最大步数##ssr", &ssr->maxSteps, 16.0f, 256.0f, "%.0f");
+                    ImGui::SliderFloat("步长##ssr", &ssr->stepSize, 0.1f, 2.0f, "%.1f");
+                    ImGui::Unindent(12.0f);
+                }
+            }
+
+            // ── GBuffer 模式 ──
+            ImGui::SeparatorText("GBuffer 渲染模式");
+            int gbMode = (int)g.pipeline->GetGBufferMode();
+            ImGui::RadioButton("CPU Driven", &gbMode, 0);
+            ImGui::SameLine();
+            ImGui::RadioButton("GPU Driven (ExecuteIndirect)", &gbMode, 1);
+            if (gbMode != (int)g.pipeline->GetGBufferMode())
+                g.pipeline->SetGBufferMode((render::GBufferRenderer::Mode)gbMode);
+
+            // ── AutoExposure ──
+            ImGui::SeparatorText("AutoExposure");
+            {
+                auto& ae = g.pipeline->GetAutoExposure();
+                bool aeOn = ae.IsEnabled();
+                if (ImGui::Checkbox("启用自动曝光", &aeOn)) ae.SetEnabled(aeOn);
+                if (aeOn) {
+                    ImGui::Indent(12.0f);
+                    float s = ae.GetAdaptSpeed();
+                    if (ImGui::SliderFloat("适应速度", &s, 0.1f, 10.0f, "%.1f")) ae.SetAdaptSpeed(s);
+                    float t = ae.GetTargetLum();
+                    if (ImGui::SliderFloat("目标亮度", &t, 0.01f, 1.0f, "%.2f")) ae.SetTargetLum(t);
+                    ImGui::Text("当前曝光: %.2f", ae.GetExposure());
+                    ImGui::Unindent(12.0f);
+                }
+            }
+
+            // ── ColorGrading ──
+            ImGui::SeparatorText("色彩分级");
+            {
+                auto& cg = g.pipeline->GetColorGrading();
+                bool cgOn = cg.IsEnabled();
+                if (ImGui::Checkbox("启用色彩分级", &cgOn)) cg.SetEnabled(cgOn);
+                if (cgOn) {
+                    ImGui::Indent(12.0f);
+                    float s = cg.GetSaturation();
+                    if (ImGui::SliderFloat("饱和度", &s, 0.0f, 2.0f, "%.2f")) cg.SetSaturation(s);
+                    float c = cg.GetContrast();
+                    if (ImGui::SliderFloat("对比度", &c, 0.5f, 2.0f, "%.2f")) cg.SetContrast(c);
+                    float v = cg.GetVibrance();
+                    if (ImGui::SliderFloat("Vibrance", &v, 0.0f, 2.0f, "%.2f")) cg.SetVibrance(v);
+                    ImGui::Unindent(12.0f);
+                }
+            }
+
+            // ── 后处理 ──
+            ImGui::SeparatorText("后处理");
+            {
+                // SSAO
+                bool ssaoOn = g.pipeline->GetSSAO().enabled;
+                if (ImGui::Checkbox("SSAO", &ssaoOn))
+                    g.pipeline->GetSSAO().enabled = ssaoOn;
+
+                // Bloom
+                auto& bloom = g.pipeline->GetBloom();
+                bool bloomOn = bloom.IsEnabled();
+                if (ImGui::Checkbox("Bloom", &bloomOn)) bloom.SetEnabled(bloomOn);
+                if (bloomOn) {
+                    ImGui::Indent(12.0f);
+                    float t = bloom.GetThreshold();
+                    if (ImGui::SliderFloat("阈值##bloom", &t, 0.1f, 10.0f, "%.1f")) bloom.SetThreshold(t);
+                    float i = bloom.GetIntensity();
+                    if (ImGui::SliderFloat("强度##bloom", &i, 0.0f, 2.0f, "%.2f")) bloom.SetIntensity(i);
+                    ImGui::Unindent(12.0f);
+                }
+
+                // DOF
+                auto& dof = g.pipeline->GetDOF();
+                bool dofOn = dof.IsEnabled();
+                if (ImGui::Checkbox("景深 (DOF)", &dofOn)) dof.SetEnabled(dofOn);
+                if (dofOn) {
+                    ImGui::Indent(12.0f);
+                    float fd = dof.GetFocusDepth();
+                    if (ImGui::SliderFloat("对焦深度##dof", &fd, 0.0f, 1.0f, "%.3f")) dof.SetFocusDepth(fd);
+                    float fr = dof.GetFocusRange();
+                    if (ImGui::SliderFloat("过渡范围##dof", &fr, 0.001f, 0.5f, "%.3f")) dof.SetFocusRange(fr);
+                    float di = dof.GetIntensity();
+                    if (ImGui::SliderFloat("强度##dof", &di, 0.0f, 2.0f, "%.2f")) dof.SetIntensity(di);
+                    ImGui::Unindent(12.0f);
+                }
+
+                // MotionBlur
+                auto& mb = g.pipeline->GetMotionBlur();
+                bool mbOn = mb.IsEnabled();
+                if (ImGui::Checkbox("运动模糊 (MB)", &mbOn)) mb.SetEnabled(mbOn);
+                if (mbOn) {
+                    ImGui::Indent(12.0f);
+                    float mi = mb.GetIntensity();
+                    if (ImGui::SliderFloat("强度##mb", &mi, 0.0f, 2.0f, "%.2f")) mb.SetIntensity(mi);
+                    ImGui::Unindent(12.0f);
+                }
+
+                // 硬件 MSAA（HDR 目标多采样，需重启应用生效）
+                ImGui::Spacing();
+                bool msaaOn = g.pipeline->IsMSAAEnabled();
+                if (ImGui::Checkbox("MSAA 4x (硬件)", &msaaOn)) {
+                    g.pipeline->EnableMSAA(msaaOn);
+                }
+                if (msaaOn) {
+                    ImGui::SameLine();
+                    ImGui::TextColored({0.5f, 1.0f, 0.5f, 1.0f}, "(重启生效)");
+                }
+
+                // LDR 抗锯齿（SMAA 与 FXAA 互斥二选一，与 MSAA 可叠加）
+                bool smaaOn = g.pipeline->IsSMAAEnabled();
+                bool fxaaOn = g.pipeline->IsFXAAEnabled();
+                int ldrAA = smaaOn ? 1 : (fxaaOn ? 2 : 0);
+                if (ImGui::Combo("LDR 抗锯齿", &ldrAA, "关闭\0SMAA\0FXAA\0")) {
+                    g.pipeline->EnableSMAA(ldrAA == 1);
+                    g.pipeline->EnableFXAA(ldrAA == 2);
+                }
+                if (ldrAA == 1) {
+                    ImGui::SameLine();
+                    ImGui::TextColored({0.5f, 0.8f, 1.0f, 1.0f}, "(形态学)");
+                } else if (ldrAA == 2) {
+                    ImGui::SameLine();
+                    ImGui::TextColored({1.0f, 0.8f, 0.5f, 1.0f}, "(快速近似)");
+                }
+            }
+
+            // 光源
+            g.world.ForEach<he::DirectionalLight>([&](he::Entity e, he::DirectionalLight& dl) {
+                bool isMain = (e == g.mainLightEntity);
+                ImGui::SeparatorText(isMain ? "主方向光" : "补光");
+                ImGui::Checkbox(isMain ? "启用##MainDL" : "启用##FillDL", &dl.enabled);
+
+                float3 dir = dl.direction;
+                if (ImGui::SliderFloat3(isMain ? "方向##MainDL" : "方向##FillDL", &dir[0], -1.0f, 1.0f, "%.2f")) {
+                    if (glm::dot(dir, dir) > 0.0001f)
+                        dl.direction = glm::normalize(dir);
+                }
+                ImGui::ColorEdit3(isMain ? "颜色##MainDL" : "颜色##FillDL", &dl.color[0]);
+                ImGui::DragFloat(isMain ? "强度##MainDL" : "强度##FillDL", &dl.intensity, 0.1f, 0.0f, 100.0f, "%.1f");
+
+                // 物理光源参数（方向光）
+                static bool physDirLight = false;
+                ImGui::Checkbox(isMain ? "物理模式##PhysDL" : "物理模式##PhysFillDL", &physDirLight);
+                if (physDirLight) {
+                    ImGui::Indent(12.0f);
+                    ImGui::DragFloat(isMain ? "照度 lux##MainDL" : "照度 lux##FillDL",
+                        &dl.illuminance, 1000.0f, 0.0f, 200000.0f, "%.0f");
+                    if (dl.illuminance > 0.0f) {
+                        ImGui::TextDisabled(isMain ? "(!) 强度将被忽略，使用物理模式" : "(!) intensity ignored, using physical");
+                    }
+                    ImGui::DragFloat(isMain ? "色温 K##MainDL" : "色温 K##FillDL",
+                        &dl.colorTemperature, 50.0f, 0.0f, 12000.0f, "%.0f");
+                    ImGui::Unindent(12.0f);
+                }
+
+                if (isMain) {
+                    bool shadowOn = dl.castShadow;
+                    if (ImGui::Checkbox("投射阴影", &shadowOn))
+                        dl.castShadow = shadowOn;
+                    if (dl.castShadow) {
+                        ImGui::Indent(12.0f);
+                        ImGui::DragFloat("深度偏移", &dl.shadowBias, 0.0001f, 0.0f, 0.1f, "%.4f",
+                            ImGuiSliderFlags_Logarithmic);
+                        ImGui::DragFloat("法线偏移", &dl.shadowNormalBias, 0.001f, 0.0f, 0.5f, "%.3f");
+                        ImGui::SliderFloat("阴影强度", &dl.shadowStrength, 0.0f, 1.0f, "%.2f");
+                        ImGui::Unindent(12.0f);
+                    }
+                }
+            });
+
+            // 点光源
+            g.world.ForEach<he::PointLight>([&](he::Entity e, he::PointLight& pl) {
+                ImGui::SeparatorText("点光源");
+                ImGui::Checkbox("启用##PointEnable", &pl.enabled);
+                auto* plTransform = g.world.GetComponent<TransformComponent>(e);
+                if (plTransform) {
+                    if (ImGui::DragFloat3("位置##PointLight", &plTransform->position[0], 5.0f)) {
+                        auto* sphereTransform = g.world.GetComponent<TransformComponent>(g.pointLightSphereEntity);
+                        if (sphereTransform)
+                            sphereTransform->position = plTransform->position;
+                    }
+                }
+                ImGui::ColorEdit3("颜色", &pl.color[0]);
+                ImGui::DragFloat("强度", &pl.intensity, 0.1f, 0.0f, 200.0f, "%.1f");
+                ImGui::DragFloat("范围", &pl.range, 10.0f, 10.0f, 5000.0f, "%.0f");
+
+                // 物理光源参数（点光源）
+                static bool physPointLight = false;
+                ImGui::Checkbox("物理模式##PhysPoint", &physPointLight);
+                if (physPointLight) {
+                    ImGui::Indent(12.0f);
+                    ImGui::DragFloat("发光强度 cd##Point", &pl.luminousIntensity, 1.0f, 0.0f, 100000.0f, "%.0f");
+                    if (pl.luminousIntensity > 0.0f) {
+                        ImGui::TextDisabled("(!) 强度将被忽略，使用物理模式");
+                    }
+                    ImGui::DragFloat("色温 K##Point", &pl.colorTemperature, 50.0f, 0.0f, 12000.0f, "%.0f");
+                    ImGui::Unindent(12.0f);
+                }
+
+                bool shadowOn = pl.castShadow;
+                if (ImGui::Checkbox("投射阴影##PointShadow", &shadowOn))
+                    pl.castShadow = shadowOn;
+                if (pl.castShadow) {
+                    ImGui::Indent(12.0f);
+                    ImGui::DragFloat("深度偏移##PointBias", &pl.shadowBias, 0.0001f, 0.0f, 0.1f, "%.4f",
+                        ImGuiSliderFlags_Logarithmic);
+                    ImGui::Unindent(12.0f);
+                }
+            });
+
+            // 聚光灯
+            g.world.ForEach<he::SpotLight>([&](he::Entity e, he::SpotLight& sl) {
+                ImGui::SeparatorText("聚光灯");
+                ImGui::Checkbox("启用##SpotEnable", &sl.enabled);
+                auto* slTransform = g.world.GetComponent<TransformComponent>(e);
+                if (slTransform) {
+                    if (ImGui::DragFloat3("位置##SpotLight", &slTransform->position[0], 5.0f)) {
+                        auto* coneTransform = g.world.GetComponent<TransformComponent>(g.spotLightConeEntity);
+                        if (coneTransform)
+                            coneTransform->position = slTransform->position;
+                    }
+                }
+                float3 dir = sl.direction;
+                if (ImGui::SliderFloat3("方向##SpotDir", &dir[0], -1.0f, 1.0f, "%.2f")) {
+                    if (glm::dot(dir, dir) > 0.0001f)
+                        sl.direction = glm::normalize(dir);
+                }
+                ImGui::ColorEdit3("颜色##SpotColor", &sl.color[0]);
+                ImGui::DragFloat("强度##SpotIntensity", &sl.intensity, 0.1f, 0.0f, 200.0f, "%.1f");
+                ImGui::DragFloat("范围##SpotRange", &sl.range, 10.0f, 10.0f, 5000.0f, "%.0f");
+                ImGui::SliderFloat("内锥角##SpotInner", &sl.innerConeAngle, 0.01f, 1.5f, "%.2f rad");
+                ImGui::SliderFloat("外锥角##SpotOuter", &sl.outerConeAngle, 0.01f, 1.5f, "%.2f rad");
+                bool shadowOn = sl.castShadow;
+                if (ImGui::Checkbox("投射阴影##SpotShadow", &shadowOn))
+                    sl.castShadow = shadowOn;
+                if (sl.castShadow) {
+                    ImGui::Indent(12.0f);
+                    ImGui::DragFloat("深度偏移##SpotBias", &sl.shadowBias, 0.0001f, 0.0f, 0.1f, "%.4f",
+                        ImGuiSliderFlags_Logarithmic);
+                    ImGui::Unindent(12.0f);
+                }
+            });
+
+            // 同步球体位置
+            {
+                auto* plTransform = g.world.GetComponent<TransformComponent>(g.pointLightEntity);
+                auto* sphereTransform = g.world.GetComponent<TransformComponent>(g.pointLightSphereEntity);
+                if (plTransform && sphereTransform)
+                    sphereTransform->position = plTransform->position;
+            }
+
+            // ── GPU Profiler ──
+            ImGui::SeparatorText("GPU Profiler");
+            auto& pdata = g.pipeline->GetProfiler().GetLastFrameData();
+            float totalMs = 0;
+            for (auto& p : pdata) {
+                if (p.gpuMs < 0) continue;  // 未使用
+                totalMs += p.gpuMs;
+                ImGui::Text("%-20s %6.2fms", p.name.c_str(), p.gpuMs);
+            }
+            ImGui::Separator();
+            ImGui::Text("Total GPU: %.2fms (%.0f FPS)", totalMs, totalMs > 0 ? 1000.0f / totalMs : 0);
+
+            // 场景统计
+            ImGui::SeparatorText("场景");
+            u32 meshCount = 0, dirLightCount = 0, spotCount = 0;
+            g.world.ForEach<he::MeshComponent>([&](he::Entity, he::MeshComponent&) { meshCount++; });
+            g.world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight&) { dirLightCount++; });
+            g.world.ForEach<he::SpotLight>([&](he::Entity, he::SpotLight&) { spotCount++; });
+            ImGui::Text("%u 网格  |  %u 方向光  |  %u 点光  |  %u 聚光", meshCount, dirLightCount, 1, spotCount);
+        }
         ImGui::End();
+
+        // GPU Profiler 面板（按 F1 切换；与旧完整版一致）
+        if (ImGui::IsKeyPressed(ImGuiKey_F1))
+            g.pipeline->GetProfilerPanel().Toggle();
+        g.pipeline->GetProfilerPanel().Draw();
+
         g.imgui->EndFrame(g.cmdList.get());
     }
 
@@ -471,6 +1049,40 @@ void App::Shutdown() {
             out["shadow_enabled"]  = std::to_string(dl->castShadow ? 1 : 0);
             out["shadow_bias"]     = std::to_string(dl->shadowBias);
         }
+
+        // 点光源 / 聚光灯的配置写回（与旧完整版一致：面板改动跨启动保留）
+        if (auto* pl = g.world.GetComponent<PointLight>(g.pointLightEntity)) {
+            out["point_color_r"] = std::to_string(pl->color.x);
+            out["point_color_g"] = std::to_string(pl->color.y);
+            out["point_color_b"] = std::to_string(pl->color.z);
+            out["point_intensity"] = std::to_string(pl->intensity);
+            out["point_range"]     = std::to_string(pl->range);
+            out["point_shadow"]    = std::to_string(pl->castShadow ? 1 : 0);
+            out["point_bias"]      = std::to_string(pl->shadowBias);
+            out["point_enabled"]   = std::to_string(pl->enabled ? 1 : 0);
+            if (auto* tf = g.world.GetComponent<TransformComponent>(g.pointLightEntity)) {
+                out["point_pos_x"] = std::to_string(tf->position.x);
+                out["point_pos_y"] = std::to_string(tf->position.y);
+                out["point_pos_z"] = std::to_string(tf->position.z);
+            }
+        }
+        if (auto* sl = g.world.GetComponent<SpotLight>(g.spotLightEntity)) {
+            out["spot_color_r"] = std::to_string(sl->color.x);
+            out["spot_color_g"] = std::to_string(sl->color.y);
+            out["spot_color_b"] = std::to_string(sl->color.z);
+            out["spot_intensity"]    = std::to_string(sl->intensity);
+            out["spot_range"]        = std::to_string(sl->range);
+            out["spot_inner_angle"]  = std::to_string(sl->innerConeAngle);
+            out["spot_outer_angle"]  = std::to_string(sl->outerConeAngle);
+            out["spot_shadow"]       = std::to_string(sl->castShadow ? 1 : 0);
+            out["spot_bias"]         = std::to_string(sl->shadowBias);
+            out["spot_enabled"]      = std::to_string(sl->enabled ? 1 : 0);
+            if (auto* tf = g.world.GetComponent<TransformComponent>(g.spotLightEntity)) {
+                out["spot_pos_x"] = std::to_string(tf->position.x);
+                out["spot_pos_y"] = std::to_string(tf->position.y);
+                out["spot_pos_z"] = std::to_string(tf->position.z);
+            }
+        }
         SaveConfigFile(ConfigPath(), out);
         HE_CORE_INFO("04.App: 配置已保存 {}", ConfigPath());
     }
@@ -489,6 +1101,12 @@ void App::Shutdown() {
     g.world.ForEach<MeshComponent>([](Entity, MeshComponent& mesh) {
         mesh.GetVertexBuffer().reset();
         mesh.GetIndexBuffer().reset();
+    });
+    // 【派生类型要单独清】ECS 的 ForEach<MeshComponent> 不命中派生组件（SphereComponent 等），
+    // 点光源/聚光灯的可视化小球正是 SphereComponent，漏掉会在设备销毁时触发 VMA 断言。
+    g.world.ForEach<SphereComponent>([](Entity, SphereComponent& sphere) {
+        sphere.GetVertexBuffer().reset();
+        sphere.GetIndexBuffer().reset();
     });
     g.texCache.clear();
     g.sceneGraph.reset();
