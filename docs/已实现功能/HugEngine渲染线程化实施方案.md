@@ -373,7 +373,7 @@ private:
 | **T2.1** | `RenderThread` 实现（线程主体、命令循环、帧节奏、休眠策略：空闲时条件变量等待 + 可配的自旋窗口） | `Engine/Render/Threading/RenderThread.cpp` | 空闲帧 CPU 占用 < 1%（不得自旋烧核） |
 | **T2.2** | 设备与交换链**改由渲染线程创建/持有**；`AcquireNextImage` / `Present` 迁入渲染线程 | `VulkanDevice.cpp`、`VulkanSwapChain.*`、样例循环 | 样例里不再出现交换链调用；`HE_ASSERT_RENDER_THREAD` 无触发 ✅ 已完成（2026-10-09）：整帧 RHI（Acquire/录制/Submit/读回/Present）归渲染线程；模式 0/1 转储逐位一致、归属断言 0 |
 | **T2.3** | 管线 `Initialize/Shutdown`、`OnResize`、资源创建走 `ResourceCreationService`（步 1 同步转发） | 三条管线、`Engine/Render/Threading/ResourceCreationService.*` | 加载期与 resize 正常；帧循环内无同步创建（grep 断言） |
-| **T2.4** | 样例循环改造：`PollEvents` + tick + `SubmitFrame` + ImGui CPU 侧；删除主线程的渲染与提交代码 | `Samples/01~07` | 全部样例可运行；帧时间不退化 ✅ 已完成（2026-10-09）：7/7 样例（02/03/04/05/06.GILab/07.Nanite/07.AISamples），按值载荷 |
+| **T2.4** | 样例循环改造：`PollEvents` + tick + `SubmitFrame` + ImGui CPU 侧；删除主线程的渲染与提交代码 | `Samples/01~07` | 全部样例可运行；帧时间不退化 ✅ 已完成（2026-10-09）：7/7 样例（02/03/04/05/06.GILab/07.Nanite/08.AISamples），按值载荷 |
 | **T2.5** | 编辑器改造：`EditorApp` 主循环同样改为投递；ImGui 后端录制先保持"渲染线程内录制" | `Samples/Editor/EditorApp.cpp` | 编辑器可用；UI 与场景仍在同一 RenderPass（阶段 4 再解） |
 | **T2.6** | 关键：**渲染线程的 RHI 调用改用"记录 → 执行"两段式**（为将来加 RHI 线程留口）——至少把 `Submit` 与资源创建收口到 `RenderThreadContext` 的两个方法 | `Engine/Render/Threading/RenderThreadContext.h` | 记录/执行边界在代码上可见（`RenderThreadContext` 是唯一 RHI 出口） |
 
@@ -487,7 +487,7 @@ private:
 >
 > | 项 | 数字 | 说明 / 复现 |
 > |---|---|---|
-> | 构建 | 7 个目标全绿（`HugEngineTests` / `02.Cube` / `03.Sponza-Forward` / `04.Sponza-Deferred` / `05.Sponza-PathTracing` / `06.GILab` / `07.Nanite`）+ `07.AISamples` | 无 `error C` / `error LNK` |
+> | 构建 | 7 个目标全绿（`HugEngineTests` / `02.Cube` / `03.Sponza-Forward` / `04.Sponza-Deferred` / `05.Sponza-PathTracing` / `06.GILab` / `07.Nanite`）+ `08.AISamples` | 无 `error C` / `error LNK` |
 > | 单测规模 | **397 例 / 71829 断言全通过** | `build\bin\Release\HugEngineTests.exe` |
 > | `06.GILab` 冒烟 | 同二进制双跑 **0 像素**（逐位一致） | `HE_LUMEN_PROBE_FILTER=off`；告警行 42 → 42 |
 > | `02.Cube` 实例化实跑（Forward + Deferred） | GPU 剔除读回与 CPU 复算**逐帧相等**（4820/4820、4839/4839）；SSBO 只建一次后原地复用（退役恒 0）；`VUID=0` | 唯一含实例化网格的样例；见 §9 T1.5 第①段 |
@@ -1149,7 +1149,7 @@ Submit → Present`，渲染线程只 append。由此推出一个硬约束：
       > 必须**成对**给出（同批二进制双跑 + 改动前后对比），并允许"改动前后"落在同一次底噪之内。
     - **第 2 批设计（已查清，零决策）**：阴影系统 + **样例→管线的快照交接**（二者必须同批做）。
       - **为什么必须同批**：Forward 路径的阴影收集由**样例**发起 —— `02.Cube:1252`、`03.Sponza-Forward:689`、
-        `06.GILab:983`、`07.Nanite:1077`、`07.AISamples:190` 各自构造 `shadowCtx` 调
+        `06.GILab:983`、`07.Nanite:1077`、`08.AISamples:190` 各自构造 `shadowCtx` 调
         `shadowSys->Update(shadowCtx)`，**都在 `pipeline.Render(...)` 之前**；而当前快照是管线在
         `Render` 内部建的 ⇒ 样例拿不到。故必须让样例在渲染前**先建快照**（这正是 T2.4 的形态）。
       - **接口形态（建议）**：`ForwardPipeline::BuildFrameSnapshot(world, sg, camera)` +
@@ -1237,7 +1237,7 @@ Submit → Present`，渲染线程只 append。由此推出一个硬约束：
         const TransformComponent*, fallback)`：它本是**场景查询**（`GetPrimaryCamera()` +
         `GetComponent<TransformComponent>()`），查询交回调用方（样例），渲染模块只做
         "组件 → CameraData"的纯映射 ⇒ `Engine/Render/` 里少一处渲染期读世界。
-        两个调用点（`02.Cube`、`07.AISamples`）改为自己查主相机与 Transform。
+        两个调用点（`02.Cube`、`08.AISamples`）改为自己查主相机与 Transform。
       ⇒ **B1 47 → 43**。判据：单测 398 例 / 71840 断言；冒烟同批双跑 **4554 像素**、
       与第 3 批二进制对比 **hdr 719 px / maxULP 21 / meanAbs 5.91e-08、
       lumen_irradiance 与 prov6_* 764 px / maxULP 552 / meanAbs 2.56e-07** ——
@@ -1445,7 +1445,7 @@ Submit → Present`，渲染线程只 append。由此推出一个硬约束：
     单测 399 例 / 71850 断言；四项闸门：帧内 RHI 378、B1 0/0、组件指针 0/0、持有者 277。
   · **已完成**：其余 6 个样例与编辑器的同源改造（T2.4 收尾，`abeb859`）；模式 2（三线程/RHI 线程）已落地并默认启用。
 
-- **T2.4 扩展到 `07.AISamples`（已提交）**：同一"两条命令 + 真渲染线程"形状（帧前准备留在游戏线程；
+- **T2.4 扩展到 `08.AISamples`（已提交）**：同一"两条命令 + 真渲染线程"形状（帧前准备留在游戏线程；
   ① `[Acquire + cmdList->Begin + 管线 Render + BackBuffer pass 开始]`；② `[imgui.EndFrame + EndDebugLabel
   + EndRenderPass + End + Submit + Present]`；控件仍在两条命令之间）。
   · **踩到并修掉一处搬迁遗漏**：样例在 `PollEvents()` 之后还有一句**独立**的 `AcquireNextImage`
@@ -1453,7 +1453,7 @@ Submit → Present`，渲染线程只 append。由此推出一个硬约束：
     `VulkanSwapChain.cpp:232` 的归属断言。**教训**：搬迁前先枚举该样例**全部**同类调用点
     （`Acquire/Present/Submit/Begin/End/WaitIdle`），不要只处理"结构最像参照样例"的那一段。
   · **判据**：模式 0 与模式 1 各跑 45 秒，**断言 0、VUID 0**；日志显示 `ForwardPipeline::RenderScene`
-    出现在"已起真渲染线程"之后 ⇒ 帧确实由渲染线程执行。（07.AISamples 无转储机制，故以"无归属违规 +
+    出现在"已起真渲染线程"之后 ⇒ 帧确实由渲染线程执行。（08.AISamples 无转储机制，故以"无归属违规 +
     与 06.GILab 同形（后者有转储逐位一致证据）"作为本样例的证据。）
   · **T2.4 剩余**：`02.Cube` / `03.Sponza-Forward` / `04.Sponza-Deferred` / `05.Sponza-PathTracing` /
 
@@ -1604,12 +1604,12 @@ Submit → Present`，渲染线程只 append。由此推出一个硬约束：
     第 10 轮试过、因跨帧快照指针缓存而回退 —— 该缓存已被本轮的 `SetFrameSnapshot` 消除，可再试）；
     (c) 去掉命令 1 的每帧等待，改成"只在队列满时等待"（背压）+ 帧票据对账。
   · **已 git 回退**（回退后重建通过）。迁移配方（显式锚点 + 两条命令 + 只发布）本身已验证可用。
-  · **⚠ 开放风险（必须记住）**：`03`/`04`/`05`/`07.AISamples` 在提交时把"模式 ≥1 起真线程"设为**默认**，
+  · **⚠ 开放风险（必须记住）**：`03`/`04`/`05`/`08.AISamples` 在提交时把"模式 ≥1 起真线程"设为**默认**，
     但当时只验证了**正确性**（0 断言/0 VUID），**没有测过帧时间**。按本轮的实测（轻帧样例上
     当前流水线深度会显著变慢），这些样例在模式 1 下很可能**不满足 >3%** 判据 ⇒
     **下一步要么补测（03/05 可复用其日志行数做代理），要么把默认起线程改为按样例开关**。
 
-  · **已按后者处理（已提交）**：`03`/`04`/`05`/`07.AISamples` 的起线程改为**显式 opt-in**
+  · **已按后者处理（已提交）**：`03`/`04`/`05`/`08.AISamples` 的起线程改为**显式 opt-in**
     （`HE_RENDER_THREAD_STRICT=1`，且仍需模式 ≥1）；`06.GILab` 保持默认（唯一实测达标者：
     转储 0 像素、帧时间 +1.22%）。**实测三种配置**（04）：默认/模式 1 单独 ⇒ 不起线程（新默认语义）、
     模式 1 + opt-in ⇒ 起线程；三者断言 0、VUID 0，日志行数同量级 ⇒ 默认路径回到与改动前一致，
@@ -1672,7 +1672,7 @@ Submit → Present`，渲染线程只 append。由此推出一个硬约束：
     模式 1 与模式 0 为 4539（= 已知间歇底噪）、模式 1 断言 0。
   · **教训**：读数前必须先确认渲染线程模式 —— 模式 0（SingleThreaded）时队列不参与、渲染线程空转，
     第一次测量因此"什么都没测到"。
-- [x] T2.4 样例循环改造（7 个样例）—— ✅ 完成（2026-10-09）：02.Cube / 03.Sponza-Forward / 04.Sponza-Deferred / 05.Sponza-PathTracing / 06.GILab / 07.Nanite / 07.AISamples；按值载荷（修掉 06.GILab 按引用捕获）；实现细节与完整时序见 15 文档 §13–§21。**注**：06.GILab 的 `NextFrame`/装配/阴影驱动仍在命令 1 内（未搬迁），搬迁后方可去掉每帧握手 ⇒ 见 §15"下一步"第 0 项
+- [x] T2.4 样例循环改造（7 个样例）—— ✅ 完成（2026-10-09）：02.Cube / 03.Sponza-Forward / 04.Sponza-Deferred / 05.Sponza-PathTracing / 06.GILab / 07.Nanite / 08.AISamples；按值载荷（修掉 06.GILab 按引用捕获）；实现细节与完整时序见 15 文档 §13–§21。**注**：06.GILab 的 `NextFrame`/装配/阴影驱动仍在命令 1 内（未搬迁），搬迁后方可去掉每帧握手 ⇒ 见 §15"下一步"第 0 项
 - [x] T2.5 编辑器主循环改造 —— ✅ **完成**（`abeb859`）：`HugEditor` 帧外壳改用 `rhi::FramePresenter`，9 个可执行目标统一（附录 I §20.1）
 - [x] T2.6前置 **A-2 RHI 线程（唯一提交者）** —— ✅ 完成（2026-10）：`Render/Threading/RHIThread` +
   `RHI/SubmitRouter.h` + `ThreadAffinity` 第三角色；06.GILab 默认模式 2
@@ -2234,7 +2234,7 @@ pass 指纹（`1C15AB72E688B530` / `750CC247BF8B9C3D`）未变；`06.GILab` 冒�
 去世界、`SubsystemContext`/`GIProviderContext` 收口 ⇒ **附录 B1 渲染期 0 / 加载期 0**；
 **T2.2**（一帧两条渲染命令：Acquire/录制/ImGui 录制/Submit/探测读回/Present 全在渲染线程；
 窗口回调与 GUI 里的 RHI 改为置标志、由命令落地）；**T2.4**（**7/7 样例**：`02.Cube`、`03`、`04`、`05`、
-`06.GILab`、`07.Nanite`、`07.AISamples`；按值载荷 + 帧号/转储判定按值携带，修掉 `06.GILab` 按引用捕获）；
+`06.GILab`、`07.Nanite`、`08.AISamples`；按值载荷 + 帧号/转储判定按值携带，修掉 `06.GILab` 按引用捕获）；
 **多槽快照 + 装配器复位缺陷修复**（Deferred/PT 曾只在第一帧装配）；**帧槽位随命令冻结**（`RenderFrameSlot()`）；
 **命令 2 只发布**（去掉每帧第二次握手）；**相机控制回归修复**（06/03/04/05 四处，帧体拆分时被误删）；
 **`06.GILab` 渲染线程模式下拉**（运行时切换，帧首生效）+ **默认模式 1**；**文档合并与 T5.4**。
