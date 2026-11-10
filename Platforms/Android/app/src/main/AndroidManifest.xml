@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  HugEngine Android 入口清单。
+  · hardwareAccelerated 关闭：渲染全部走 native Vulkan，不需要 Java 侧的 GL 合成
+  · 屏幕方向固定 landscape？—— 不固定：01/02 都按竖屏也能跑，交给设备自由旋转
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application
+        android:allowBackup="false"
+        android:hardwareAccelerated="false"
+        android:label="@string/app_name"
+        android:supportsRtl="true">
+
+        <activity
+            android:name=".MainActivity"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
+            android:exported="true"
+            android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+
+    <!-- Vulkan 1.1 是硬性要求（minSdk 26 起可选，故显式声明以便安装时筛选） -->
+    <uses-feature android:name="android.hardware.vulkan.version" android:version="0x00401000" android:required="true" />
+
+</manifest>

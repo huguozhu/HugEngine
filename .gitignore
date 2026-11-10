@@ -68,3 +68,12 @@ oh_modules/
 # ---- 鸿蒙 rawfile：由 deploy.ps1 从 Content/ 拷入，不入库（Sponza 约 56 MB）----
 Platforms/OHOS/entry/src/main/resources/rawfile/content/gltf/
 Platforms/OHOS/entry/src/main/resources/rawfile/content/Textures/skybox.hdr
+# ---- Android：构建产物 / 本地配置 / 由 sync-assets.ps1 同步的大资产 ----
+Platforms/Android/.gradle/
+Platforms/Android/build/
+Platforms/Android/app/build/
+Platforms/Android/app/.cxx/
+Platforms/Android/local.properties
+Platforms/Android/.idea/
+*.apk
+*.aab
