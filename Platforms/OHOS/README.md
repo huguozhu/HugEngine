@@ -243,4 +243,7 @@ cmake --build build --config Debug --target OhosStubCheck   # 鸿蒙分支语法
 - 鸿蒙 entry 不定义该宏 ⇒ 同一个 .cpp 编进 `libentry.so` 但不含 `main`，入口仍是 `AppMain.cpp`。
 
 所以样例目录里只有一个 `.cpp`（App 与桌面入口同文件），没有单独的 `Main.Win32.cpp`。
-02-04 仍走 `Samples/HMOS_App` + `0X.*.Subset` 的旧布局，后续按同一模式迁移。
+03/04 已按同一模式完成（App 只有一个文件、桌面入口用 `HE_DESKTOP_ENTRY`、完整版 main 已删除）；
+02 的结构也已迁移（`Samples/02.Cube/02.Cube.App.cpp` + 桌面目标 `02.Cube.App`），
+但它的完整版 `02.Cube.cpp`（多管线 / 动画 / 物理 / 粒子 / 整套面板）仍保留在桌面上，
+作为 02 的可选「展示版」；`Samples/HMOS_App` 目录已删除。

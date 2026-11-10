@@ -30,7 +30,7 @@
 #include "imgui.h"
 
 #include "CameraInput.h"   // Samples/Common：消费 InputState 的相机控制
-#include "SkyboxLoader.h"  // HMOS_App/Common：6 面 PNG 与 HDR 两套天空盒加载
+#include "SkyboxLoader.h"  // Samples/Common：6 面 PNG 与 HDR 两套天空盒加载
 
 #include <vector>
 

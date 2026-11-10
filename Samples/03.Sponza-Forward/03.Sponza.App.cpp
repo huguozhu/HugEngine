@@ -37,7 +37,7 @@
 #include "RT_Sponza.rchit.dxil.h"
 #include "RT_Bindless.rcall.spv.h"
 #include "RT_Bindless.rcall.dxil.h"
-#include "SkyboxLoader.h"  // HMOS_App/Common：HDR 全景 → 6 面 Cubemap
+#include "SkyboxLoader.h"  // Samples/Common：HDR 全景 → 6 面 Cubemap
 
 // STB_IMAGE_STATIC：让实现留在本 TU 内部，避免与 02.App 等其它 TU 的实现重复定义
 #include <stb_image.h>

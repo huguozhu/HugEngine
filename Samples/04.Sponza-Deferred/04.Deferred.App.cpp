@@ -27,7 +27,7 @@
 #include "imgui.h"
 
 #include "CameraInput.h"
-#include "SkyboxLoader.h"  // HMOS_App/Common：HDR 全景 → 6 面 Cubemap
+#include "SkyboxLoader.h"  // Samples/Common：HDR 全景 → 6 面 Cubemap
 
 // STB_IMAGE_STATIC：实现留在本 TU，避免与其它 App 的 stb 实现重复定义
 #include <stb_image.h>
