@@ -30,11 +30,10 @@
 #include "imgui.h"
 
 #include "CameraInput.h"   // Samples/Common：消费 InputState 的相机控制
+#include "SkyboxLoader.h"  // HMOS_App/Common：6 面 PNG 与 HDR 两套天空盒加载
 
 #include <vector>
 
-#define STB_IMAGE_IMPLEMENTATION
-#include <stb_image.h>
 
 namespace he::samples::cube02 {
 namespace {
@@ -65,52 +64,6 @@ Entity CreateShape(World& world, SceneGraph& sg, const char* name,
     return e;
 }
 
-/// 天空盒：读 6 张面 → Cubemap（与 02 相同的资源布局）
-void CreateSkybox(World& world, SceneGraph& sg, rhi::IRHIDevice* device) {
-    String skyDir = vfs::Resolve("Textures/skybox/");
-    const char* faces[6] = {
-        "daylight0.png", "daylight1.png", "daylight2.png",
-        "daylight3.png", "daylight4.png", "daylight5.png",
-    };
-    std::vector<u8> all;
-    u32 faceW = 0, faceH = 0;
-    for (u32 f = 0; f < 6; ++f) {
-        const String path = skyDir + faces[f];
-        int w = 0, h = 0, ch = 0;
-        u8* pixels = stbi_load(path.c_str(), &w, &h, &ch, 4);
-        if (!pixels) {
-            HE_CORE_WARN("[02.App] 天空盒面 {} 加载失败: {}", f, path);
-            return;
-        }
-        if (f == 0) { faceW = static_cast<u32>(w); faceH = static_cast<u32>(h); }
-        all.insert(all.end(), pixels, pixels + static_cast<usize>(faceW) * faceH * 4);
-        stbi_image_free(pixels);
-    }
-    if (all.empty()) return;
-
-    rhi::TextureDesc td;
-    td.format      = rhi::Format::RGBA8_UNORM;
-    td.width       = faceW;
-    td.height      = faceH;
-    td.mipLevels   = 1;
-    td.arrayLayers = 6;
-    td.usage       = rhi::TextureUsage::ShaderResource
-                   | rhi::TextureUsage::Cubemap
-                   | rhi::TextureUsage::TransferDst;
-    td.initialData = all.data();
-    auto cubemap = device->CreateTexture(td);
-
-    rhi::SamplerDesc sd;
-    sd.minFilter = sd.magFilter = rhi::FilterMode::Linear;
-    sd.addressU = sd.addressV = sd.addressW = rhi::AddressMode::ClampToEdge;
-    auto sampler = device->CreateSampler(sd);
-
-    Entity e = world.CreateEntity("Skybox");
-    world.AddComponent<TransformComponent>(e);
-    auto* sc = world.AddComponent<SkyboxComponent>(e);
-    sc->SetCubemap(std::move(cubemap), std::move(sampler));
-    sg.SetParent(e, Entity{ kInvalidEntity });
-}
 
 } // namespace
 
@@ -157,7 +110,7 @@ struct App::Impl {
         dl->shadowNormalBias   = 0.05f;
         sceneGraph->SetParent(lightEntity, Entity{ kInvalidEntity });
 
-        CreateSkybox(world, *sceneGraph, device.get());
+        CreateSkyboxFromPngFaces(world, *sceneGraph, device.get());
         HE_CORE_INFO("[02.App] 场景就绪: {} 实体", world.GetEntityCount());
     }
 

@@ -31,6 +31,8 @@ add_library(entry SHARED
     ${SPONZA03_APP_DIR}/03.Sponza.App.h
     ${SPONZA04_APP_DIR}/04.Deferred.App.cpp
     ${SPONZA04_APP_DIR}/04.Deferred.App.h
+    ${CMAKE_SOURCE_DIR}/Samples/HMOS_App/Common/SkyboxLoader.cpp
+    ${CMAKE_SOURCE_DIR}/Samples/HMOS_App/Common/SkyboxLoader.h
 )
 
 target_include_directories(entry PRIVATE
@@ -39,6 +41,7 @@ target_include_directories(entry PRIVATE
     ${TRIANGLE01_APP_DIR}
     ${SPONZA03_APP_DIR}
     ${SPONZA04_APP_DIR}
+    ${CMAKE_SOURCE_DIR}/Samples/HMOS_App/Common
     ${CMAKE_SOURCE_DIR}/Samples/Common
 )
 

@@ -26,10 +26,9 @@
 #include "imgui.h"
 
 #include "CameraInput.h"
+#include "SkyboxLoader.h"  // HMOS_App/Common：HDR 全景 → 6 面 Cubemap
 
 // STB_IMAGE_STATIC：让实现留在本 TU 内部，避免与 02.App 等其它 TU 的实现重复定义
-#define STB_IMAGE_IMPLEMENTATION
-#define STB_IMAGE_STATIC
 #include <stb_image.h>
 
 #include <algorithm>
@@ -63,83 +62,7 @@ struct App::Impl {
     bool         ready   = false;
 
     /// 天空盒：HDR 全景图 → 6 面立方体贴图（与桌面 03 同一套算法）
-    void CreateSkybox() {
-        const String hdrPath = vfs::Resolve("Textures/skybox.hdr");
-        int hdrW = 0, hdrH = 0, hdrCh = 0;
-        float* hdrData = stbi_loadf(hdrPath.c_str(), &hdrW, &hdrH, &hdrCh, 4);
-        if (!hdrData) {
-            HE_CORE_WARN("03.App: skybox.hdr 加载失败: {}", hdrPath);
-            return;
-        }
-        HE_CORE_INFO("03.App: skybox.hdr {}x{}（{} 通道）", hdrW, hdrH, hdrCh);
-
-        const u32 faceSize  = 512;
-        const u32 faceBytes = faceSize * faceSize * 4;
-        std::vector<u8> allFaces(faceBytes * 6);
-
-        struct Face { float3 dir, up, right; };
-        const Face faces[6] = {
-            {{ 1, 0, 0}, {0,-1, 0}, {0, 0,-1}},
-            {{-1, 0, 0}, {0,-1, 0}, {0, 0, 1}},
-            {{ 0, 1, 0}, {0, 0, 1}, {1, 0, 0}},
-            {{ 0,-1, 0}, {0, 0,-1}, {1, 0, 0}},
-            {{ 0, 0, 1}, {0,-1, 0}, {1, 0, 0}},
-            {{ 0, 0,-1}, {0,-1, 0}, {-1,0, 0}},
-        };
-
-        for (u32 f = 0; f < 6; ++f) {
-            u8* faceData = allFaces.data() + f * faceBytes;
-            for (u32 y = 0; y < faceSize; ++y) {
-                for (u32 x = 0; x < faceSize; ++x) {
-                    const float u = (2.0f * x / faceSize) - 1.0f;
-                    const float v = (2.0f * y / faceSize) - 1.0f;
-                    const float3 dir = glm::normalize(faces[f].dir + faces[f].right * u + faces[f].up * v);
-                    const float eqU = (std::atan2(dir.z, dir.x) / (2.0f * 3.14159265f)) + 0.5f;
-                    const float eqV = (std::asin(glm::clamp(dir.y, -1.0f, 1.0f)) / 3.14159265f) + 0.5f;
-                    int px = static_cast<int>(eqU * hdrW) % hdrW;
-                    int py = static_cast<int>(eqV * hdrH) % hdrH;
-                    if (px < 0) px += hdrW;
-                    if (py < 0) py += hdrH;
-                    const float* src = hdrData + (py * hdrW + px) * 4;
-                    auto tonemap = [](float c) {
-                        c = c / (1.0f + c);   // Reinhard
-                        return static_cast<u8>(glm::clamp(c, 0.0f, 1.0f) * 255.0f);
-                    };
-                    const usize idx = (y * faceSize + x) * 4;
-                    faceData[idx + 0] = tonemap(src[0]);
-                    faceData[idx + 1] = tonemap(src[1]);
-                    faceData[idx + 2] = tonemap(src[2]);
-                    faceData[idx + 3] = 255;
-                }
-            }
-        }
-        stbi_image_free(hdrData);
-
-        rhi::TextureDesc cmDesc;
-        cmDesc.format      = rhi::Format::RGBA8_UNORM;
-        cmDesc.width       = faceSize;
-        cmDesc.height      = faceSize;
-        cmDesc.mipLevels   = 1;
-        cmDesc.arrayLayers = 6;
-        cmDesc.usage       = rhi::TextureUsage::ShaderResource
-                           | rhi::TextureUsage::Cubemap
-                           | rhi::TextureUsage::TransferDst;
-        cmDesc.initialData = allFaces.data();
-        auto cubemap = device->CreateTexture(cmDesc);
-
-        rhi::SamplerDesc cmSamp;
-        cmSamp.minFilter = rhi::FilterMode::Linear;
-        cmSamp.magFilter = rhi::FilterMode::Linear;
-        cmSamp.addressU = cmSamp.addressV = cmSamp.addressW = rhi::AddressMode::ClampToEdge;
-        auto cmSampler = device->CreateSampler(cmSamp);
-
-        Entity skyEntity = world.CreateEntity("Skybox");
-        world.AddComponent<TransformComponent>(skyEntity);
-        auto* skyComp = world.AddComponent<SkyboxComponent>(skyEntity);
-        skyComp->SetCubemap(std::move(cubemap), std::move(cmSampler));
-        sceneGraph->SetParent(skyEntity, Entity{kInvalidEntity});
-    }
-
+    
     /// 加载一张 glTF 纹理并缓存（同路径只加载一次）
     std::pair<rhi::IRHITexture*, rhi::IRHISampler*> LoadTexture(const String& uri,
                                                                 const String& gltfPath) {
@@ -251,7 +174,7 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
     }
 
     // ---- 天空盒 ----
-    g.CreateSkybox();
+    CreateSkyboxFromHdr(g.world, *g.sceneGraph, g.device.get());
     HE_CORE_INFO("03.App: 场景就绪: {} 实体", g.world.GetEntityCount());
 
     // ---- 纹理 → bindless（4 个连续槽位构成一个材质）----
