@@ -35,11 +35,54 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
 namespace he::samples::sponza04 {
+
+namespace {
+
+/// 配置文件：相机 + 两盏方向光 + 管线开关（key=value；路径走 vfs 的可写目录）
+String ConfigPath() {
+    return vfs::ResolveWritable("Config/04_Sponza-Deferred.cfg");
+}
+
+std::unordered_map<String, String> LoadConfigFile(const String& path) {
+    std::unordered_map<String, String> map;
+    std::ifstream f(path);
+    if (!f.is_open()) return map;
+    String line;
+    while (std::getline(f, line)) {
+        const auto eq = line.find('=');
+        if (eq == String::npos) continue;
+        String key = line.substr(0, eq);
+        String val = line.substr(eq + 1);
+        if (!val.empty() && val.back() == '\r') val.pop_back();
+        map[key] = val;
+    }
+    return map;
+}
+
+void SaveConfigFile(const String& path, const std::unordered_map<String, String>& map) {
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
+    std::ofstream f(path);
+    if (!f.is_open()) return;
+    for (const auto& [k, v] : map) f << k << "=" << v << "\n";
+}
+
+f32 GetFloat(const std::unordered_map<String, String>& m, const String& key, f32 def) {
+    const auto it = m.find(key);
+    return it != m.end() ? std::stof(it->second) : def;
+}
+
+bool GetBool(const std::unordered_map<String, String>& m, const String& key, bool def) {
+    return GetFloat(m, key, def ? 1.0f : 0.0f) != 0.0f;
+}
+
+} // namespace
 
 struct App::Impl {
     World           world;
@@ -60,9 +103,19 @@ struct App::Impl {
 
     rhi::Backend backend = rhi::Backend::Vulkan;
     bool         ready   = false;
+    f32          frameDt = 0.016f;   // 本帧 deltaTime（面板 FPS 用）
 
     /// 天空盒组件（面板里可开关；鸿蒙上默认关，用于排查过曝）
     SkyboxComponent* skybox = nullptr;
+
+    // ---- 管线开关（面板 + 配置）----
+    bool clustered = true;
+    bool gpuCull   = false;
+    bool skyboxOn  = true;
+    bool ssgi = false, ddgi = false, ssr = false, ssao = false;
+
+    Entity mainLightEntity{};
+    Entity fillLightEntity{};
 
     /// HDR 全景图 → 6 面立方体贴图（与 03 同一套算法）
     
@@ -156,6 +209,7 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
     // ---- 灯光 ----
     {
         Entity e = g.world.CreateEntity("DirectionalLight");
+        g.mainLightEntity = e;
         g.world.AddComponent<TransformComponent>(e);
         auto* dl = g.world.AddComponent<DirectionalLight>(e);
         dl->direction  = float3(0.4f, -1.0f, 0.6f);
@@ -167,6 +221,7 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
     }
     {
         Entity e = g.world.CreateEntity("FillLight");
+        g.fillLightEntity = e;
         g.world.AddComponent<TransformComponent>(e);
         auto* dl = g.world.AddComponent<DirectionalLight>(e);
         dl->direction = float3(-0.3f, -0.4f, -0.5f);
@@ -176,6 +231,7 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
     }
 
     CreateSkyboxFromHdr(g.world, *g.sceneGraph, g.device.get());
+    g.world.ForEach<SkyboxComponent>([&](Entity, SkyboxComponent& sky) { g.skybox = &sky; });
     HE_CORE_INFO("04.App: 场景就绪: {} 实体", g.world.GetEntityCount());
 
     // ---- 纹理 → bindless ----
@@ -243,6 +299,47 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
     g.camera.GetCamera().nearPlane = 0.1f;
     g.camera.GetCamera().farPlane  = 2000.0f;
 
+    // ---- 配置：相机 / 灯光 / 管线开关（没有配置文件就用默认值）----
+    const String cfgPath = ConfigPath();
+    const auto cfg = LoadConfigFile(cfgPath);
+    if (!cfg.empty()) {
+        HE_CORE_INFO("04.App: 加载配置文件 {}", cfgPath);
+        g.camera.SetPosition(float3(GetFloat(cfg, "cam_pos_x", 0.0f),
+                                    GetFloat(cfg, "cam_pos_y", 2.5f),
+                                    GetFloat(cfg, "cam_pos_z", -10.0f)));
+        g.camera.SetOrientation(GetFloat(cfg, "cam_yaw", 0.0f), GetFloat(cfg, "cam_pitch", 0.0f));
+        g.camera.GetCamera().nearPlane = GetFloat(cfg, "cam_near", 0.1f);
+        g.camera.GetCamera().farPlane  = GetFloat(cfg, "cam_far", 2000.0f);
+
+        g.clustered = GetBool(cfg, "clustered", true);
+        g.gpuCull   = GetBool(cfg, "gpu_cull", false);
+        g.skyboxOn  = GetBool(cfg, "skybox", true);
+        g.ssgi      = GetBool(cfg, "ssgi_enabled", false);
+        g.ddgi      = GetBool(cfg, "ddgi_enabled", false);
+        g.ssr       = GetBool(cfg, "ssr_enabled", false);
+        g.ssao      = GetBool(cfg, "ssao_enabled", false);
+
+        g.pipeline->GetClusteredShading().enabled = g.clustered;
+        g.pipeline->GetGPUCulling().enabled       = g.gpuCull;
+        if (g.pipeline->GetSSGI()) g.pipeline->GetSSGI()->SetEnabled(g.ssgi);
+        if (g.pipeline->GetDDGI()) g.pipeline->GetDDGI()->SetEnabled(g.ddgi);
+        if (g.pipeline->GetSSR())  g.pipeline->GetSSR()->SetEnabled(g.ssr);
+        g.pipeline->GetSSAO().enabled = g.ssao;
+        if (g.skybox) g.skybox->enabled = g.skyboxOn;
+
+        if (auto* dl = g.world.GetComponent<DirectionalLight>(g.mainLightEntity)) {
+            dl->direction = float3(GetFloat(cfg, "light_dir_x", 0.4f),
+                                   GetFloat(cfg, "light_dir_y", -1.0f),
+                                   GetFloat(cfg, "light_dir_z", 0.6f));
+            dl->color     = float3(GetFloat(cfg, "light_color_r", 1.0f),
+                                   GetFloat(cfg, "light_color_g", 0.95f),
+                                   GetFloat(cfg, "light_color_b", 0.85f));
+            dl->intensity = GetFloat(cfg, "light_intensity", 15.0f);
+            dl->castShadow = GetBool(cfg, "shadow_enabled", true);
+            dl->shadowBias = GetFloat(cfg, "shadow_bias", 0.003f);
+        }
+    }
+
     if (opt.enableImGui) {
         g.imgui = std::make_unique<editor::ImGuiIntegration>();
         g.imgui->Initialize(engine.GetWindow(), g.device.get(), g.swapchain.get());
@@ -254,26 +351,42 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
 }
 
 bool App::Frame(f32 deltaTime, const InputState& input) {
+    if (!BeginFrame(deltaTime, input)) return false;
+    if (!RecordScene()) return false;
+    RecordUIAndPresent();
+    return true;
+}
+
+bool App::BeginFrame(f32 deltaTime, const InputState& input) {
+    Impl& g = *m_Impl;
+    if (!g.ready || !g.presenter) return false;
+    g.camInput.Update(input, g.camera, deltaTime);
+    g.frameDt = deltaTime;
+    return true;
+}
+
+bool App::RecordScene() {
     Impl& g = *m_Impl;
     if (!g.ready || !g.presenter) return false;
 
-    g.camInput.Update(input, g.camera, deltaTime);
-
+    // Acquire 失败时返回 false，宿主会跳过本帧的第二条命令（UI + Present）
     if (!g.presenter->BeginFrame()) return false;
     g.presenter->BeginRecording(g.device.get(), g.cmdList.get());
 
-    // 【与 04 完整样例一致】延迟管线自己负责阴影资源的逐帧绑定与 pass 顺序，
-    // 样例侧只需要：NextFrame → AssembleScene → Render
+    // 延迟管线自己负责阴影资源的逐帧绑定与 pass 顺序，样例侧只需：
+    // NextFrame → AssembleScene → Render
     g.pipeline->NextFrame();
     g.pipeline->GetFrameAssembler().AssembleScene(g.world, *g.sceneGraph, g.camera.GetCamera());
-
-    // GBuffer → Lighting → ToneMap（ToneMap 写后缓冲）
     g.pipeline->Render(g.cmdList.get(), g.pipeline->GetFrameSnapshot(), g.camera.GetCamera());
 
     // ImGui：LOAD 保留 ToneMap 输出；颜色格式取交换链实际格式（手机上是 RGBA8）
     g.cmdList->BeginRenderPass(1, g.swapchain->GetColorFormat(),
                                rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
+    return true;
+}
 
+void App::RecordUIAndPresent() {
+    Impl& g = *m_Impl;
     if (g.imgui && g.imgui->IsInitialized()) {
         g.imgui->BeginFrame();
         const float ui = ImGui::GetFontSize() / 16.0f;
@@ -281,8 +394,24 @@ bool App::Frame(f32 deltaTime, const InputState& input) {
         ImGui::SetNextWindowSize(ImVec2(300.0f * ui, 140.0f * ui), ImGuiCond_Once);
         ImGui::SetNextWindowBgAlpha(0.55f);
         ImGui::Begin("04.Sponza-Deferred (App)");
-        ImGui::Text("FPS: %.0f", 1.0f / (deltaTime > 0.0f ? deltaTime : 0.016f));
+        ImGui::Text("FPS: %.0f", 1.0f / (g.frameDt > 0.0f ? g.frameDt : 0.016f));
         ImGui::Text("GBuffer + Lighting");
+
+        ImGui::SeparatorText("延迟渲染管线");
+        if (ImGui::Checkbox("Clustered Shading", &g.clustered))
+            g.pipeline->GetClusteredShading().enabled = g.clustered;
+        if (ImGui::Checkbox("GPU 视锥剔除", &g.gpuCull))
+            g.pipeline->GetGPUCulling().enabled = g.gpuCull;
+        if (g.skybox && ImGui::Checkbox("天空盒", &g.skyboxOn))
+            g.skybox->enabled = g.skyboxOn;
+
+        ImGui::SeparatorText("GI");
+        if (ImGui::Checkbox("SSGI", &g.ssgi) && g.pipeline->GetSSGI()) g.pipeline->GetSSGI()->SetEnabled(g.ssgi);
+        if (ImGui::Checkbox("DDGI", &g.ddgi) && g.pipeline->GetDDGI()) g.pipeline->GetDDGI()->SetEnabled(g.ddgi);
+        if (ImGui::Checkbox("SSR",  &g.ssr)  && g.pipeline->GetSSR())  g.pipeline->GetSSR()->SetEnabled(g.ssr);
+
+        ImGui::SeparatorText("后处理");
+        if (ImGui::Checkbox("SSAO", &g.ssao)) g.pipeline->GetSSAO().enabled = g.ssao;
         ImGui::End();
         g.imgui->EndFrame(g.cmdList.get());
     }
@@ -290,7 +419,6 @@ bool App::Frame(f32 deltaTime, const InputState& input) {
     g.cmdList->EndRenderPass();
     g.presenter->EndRecording();
     g.presenter->EndFrame(true);
-    return true;
 }
 
 void App::Resize(u32 width, u32 height) {
@@ -314,6 +442,38 @@ void App::Shutdown() {
         return;
     }
     g.device->WaitIdle();
+
+    // ---- 保存配置（相机 + 灯光 + 管线开关）----
+    {
+        std::unordered_map<String, String> out;
+        out["cam_pos_x"] = std::to_string(g.camera.GetCamera().position.x);
+        out["cam_pos_y"] = std::to_string(g.camera.GetCamera().position.y);
+        out["cam_pos_z"] = std::to_string(g.camera.GetCamera().position.z);
+        out["cam_yaw"]   = std::to_string(g.camera.GetYaw());
+        out["cam_pitch"] = std::to_string(g.camera.GetPitch());
+        out["cam_near"]  = std::to_string(g.camera.GetCamera().nearPlane);
+        out["cam_far"]   = std::to_string(g.camera.GetCamera().farPlane);
+        out["clustered"] = std::to_string(g.clustered ? 1 : 0);
+        out["gpu_cull"]  = std::to_string(g.gpuCull ? 1 : 0);
+        out["skybox"]    = std::to_string(g.skyboxOn ? 1 : 0);
+        out["ssgi_enabled"] = std::to_string(g.ssgi ? 1 : 0);
+        out["ddgi_enabled"] = std::to_string(g.ddgi ? 1 : 0);
+        out["ssr_enabled"]  = std::to_string(g.ssr ? 1 : 0);
+        out["ssao_enabled"] = std::to_string(g.ssao ? 1 : 0);
+        if (auto* dl = g.world.GetComponent<DirectionalLight>(g.mainLightEntity)) {
+            out["light_dir_x"]     = std::to_string(dl->direction.x);
+            out["light_dir_y"]     = std::to_string(dl->direction.y);
+            out["light_dir_z"]     = std::to_string(dl->direction.z);
+            out["light_color_r"]   = std::to_string(dl->color.x);
+            out["light_color_g"]   = std::to_string(dl->color.y);
+            out["light_color_b"]   = std::to_string(dl->color.z);
+            out["light_intensity"] = std::to_string(dl->intensity);
+            out["shadow_enabled"]  = std::to_string(dl->castShadow ? 1 : 0);
+            out["shadow_bias"]     = std::to_string(dl->shadowBias);
+        }
+        SaveConfigFile(ConfigPath(), out);
+        HE_CORE_INFO("04.App: 配置已保存 {}", ConfigPath());
+    }
 
     if (g.imgui) { g.imgui->Shutdown(); g.imgui.reset(); }
     g.presenter.reset();
@@ -340,3 +500,22 @@ void App::Shutdown() {
 }
 
 } // namespace he::samples::sponza04
+
+
+// ============================================================
+// 桌面入口
+//
+// 桌面 target 定义 HE_DESKTOP_ENTRY ⇒ 这里产出 main；鸿蒙 entry 编同一份 .cpp
+// 但没有该宏，入口在 Platforms/OHOS/entry/src/main/cpp/AppMain.cpp。
+// ============================================================
+#if defined(HE_DESKTOP_ENTRY)
+#include "DesktopHost.h"
+
+int main() {
+    he::samples::desktop::HostConfig cfg;
+    cfg.title  = "HugEngine — 04.Sponza-Deferred";
+    cfg.width  = 960;
+    cfg.height = 540;
+    return he::samples::desktop::RunApp<he::samples::sponza04::App>(cfg);
+}
+#endif // HE_DESKTOP_ENTRY

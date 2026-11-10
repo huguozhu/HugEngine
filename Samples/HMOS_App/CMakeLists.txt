@@ -49,25 +49,4 @@ target_include_directories(02.Cube.Subset PRIVATE
     ${CMAKE_SOURCE_DIR}/Samples/Common)
 add_dependencies(02.Cube.Subset CompileShaders)
 
-# ---- 04.Sponza-Deferred ----
-add_executable(04.Deferred.Subset
-    04.Sponza-Deferred/Main_Subset.cpp
-    04.Sponza-Deferred/04.Deferred.App.cpp
-    04.Sponza-Deferred/04.Deferred.App.h
-    ${CMAKE_SOURCE_DIR}/Samples/Common/SkyboxLoader.cpp
-    ${CMAKE_SOURCE_DIR}/Samples/Common/SkyboxLoader.h
-)
-target_link_libraries(04.Deferred.Subset PRIVATE
-    ${HMOS_APP_COMMON_LIBS}
-    HugEngineScene
-    HugEngineRender
-    HugEngineAsset
-    stb
-)
-target_include_directories(04.Deferred.Subset PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/04.Sponza-Deferred
-    ${CMAKE_SOURCE_DIR}/Samples/Common)
-target_compile_definitions(04.Deferred.Subset PRIVATE
-    HUGE_CONTENT_DIR="${CMAKE_SOURCE_DIR}/Content/"
-)
-add_dependencies(04.Deferred.Subset CompileShaders)
+
