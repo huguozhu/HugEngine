@@ -8,8 +8,8 @@ set(EDITOR_SOURCES
     Editor/SceneSerializer.h
     Editor/Command.cpp
     Editor/ImGuiIntegration.cpp
-    Editor/imgui_impl_ohos.h
-    Editor/imgui_impl_ohos.cpp
+    Editor/imgui_impl_mobile.h
+    Editor/imgui_impl_mobile.cpp
     Editor/EditorContext.cpp
     Editor/SceneSerializer.cpp
 )

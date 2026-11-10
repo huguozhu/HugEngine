@@ -1,7 +1,7 @@
 // ============================================================
 
 #include "Core/Platform.h"   // HE_PLATFORM_*：必须在使用 #if 之前可见
-// imgui_impl_ohos.cpp —— ImGui 的鸿蒙输入后端
+// imgui_impl_mobile.cpp —— ImGui 的移动端输入后端
 
 //
 
@@ -18,9 +18,9 @@
 // ============================================================
 
 
-#include "imgui_impl_ohos.h"
+#include "imgui_impl_mobile.h"
 
-#if HE_PLATFORM_OHOS
+#if HE_PLATFORM_OHOS || HE_PLATFORM_ANDROID
 
 #include "imgui.h"
 
@@ -36,7 +36,7 @@ he::f64      g_LastTime = 0.0;
 
 } // namespace
 
-bool ImGui_ImplOhos_Init(he::IWindow* window) {
+bool ImGui_ImplMobile_Init(he::IWindow* window) {
     g_Window = window;
     g_LastTime = he::Time::Now();
     if (window) {
@@ -45,15 +45,15 @@ bool ImGui_ImplOhos_Init(he::IWindow* window) {
                                 static_cast<float>(window->GetHeight()));
         io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
     }
-    HE_CORE_INFO("[OHOS] ImGui 输入后端已初始化（触摸 → 鼠标）");
+    HE_CORE_INFO("[移动] ImGui 输入后端已初始化（触摸 → 鼠标）");
     return true;
 }
 
-void ImGui_ImplOhos_Shutdown() {
+void ImGui_ImplMobile_Shutdown() {
     g_Window = nullptr;
 }
 
-void ImGui_ImplOhos_NewFrame(he::IWindow* window) {
+void ImGui_ImplMobile_NewFrame(he::IWindow* window) {
     if (!window) return;
     ImGuiIO& io = ImGui::GetIO();
 
@@ -79,4 +79,4 @@ void ImGui_ImplOhos_NewFrame(he::IWindow* window) {
     }
 }
 
-#endif // HE_PLATFORM_OHOS
+#endif // HE_PLATFORM_OHOS || HE_PLATFORM_ANDROID

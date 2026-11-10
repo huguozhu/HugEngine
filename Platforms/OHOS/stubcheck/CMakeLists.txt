@@ -14,7 +14,7 @@ set(OHOS_STUB_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/include")
 add_library(OhosStubCheck OBJECT
     ${CMAKE_SOURCE_DIR}/Engine/Core/Platform/WindowOHOS.cpp
     ${CMAKE_SOURCE_DIR}/Engine/Core/Platform/InputOHOS.cpp
-    ${CMAKE_SOURCE_DIR}/Engine/Editor/Editor/imgui_impl_ohos.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Editor/Editor/imgui_impl_mobile.cpp
     ${CMAKE_SOURCE_DIR}/Engine/RHI/Vulkan/VulkanPlatform.cpp
     ${CMAKE_SOURCE_DIR}/Platforms/OHOS/entry/src/main/cpp/NativeEntry.cpp
     ${CMAKE_SOURCE_DIR}/Platforms/OHOS/entry/src/main/cpp/RawfileUnpack.cpp

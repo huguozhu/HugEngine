@@ -5,7 +5,7 @@
 > 当前状态：**P3 代码完成（立方体 + 球体 + 地面 + 天空盒 + Forward 管线 + 触摸相机 + ImGui）**。
 > `Samples/02.Cube/App/02.Cube.App.cpp` 与 ImGui 字体/后端改动都已在 Windows 侧
 > （`02.Cube.Subset`）实跑验证；鸿蒙侧（XComponent + rawfile 解压 + napi 生命周期 +
-> imgui_impl_ohos）已接线，**待真机验证**。
+> imgui_impl_mobile）已接线，**待真机验证**。
 > 本机的验证范围只到 Windows：引擎侧平台层（IWindow / IInput / IVfs / VulkanPlatform）已在 Windows 上全量构建 + 实跑通过；
 > 鸿蒙侧代码（`entry/src/main/cpp/*`、ArkTS）需要在 DevEco + NDK 环境里编译与真机验证。
 
@@ -127,7 +127,7 @@ $env:HE_RHI_BACKEND='vulkan'; $env:HE_CAPTURE_FRAME='150'
 
 ## 7. 鸿蒙侧代码的编译自检（不装 NDK 也能做）
 
-鸿蒙分支的源码（`WindowOHOS` / `InputOHOS` / `imgui_impl_ohos` / `VulkanPlatform` 的 OHOS 分支 /
+鸿蒙分支的源码（`WindowOHOS` / `InputOHOS` / `imgui_impl_mobile` / `VulkanPlatform` 的 OHOS 分支 /
 `NativeEntry` / `RawfileUnpack` / `AppMain`）平时在 Windows 构建里是**整段跳过**的，写错了也不会被发现。
 `Platforms/OHOS/stubcheck` 用最小 stub 头 + `HE_PLATFORM_OHOS_STUBCHECK` 把这些文件在桌面编译器上真编一遍：
 

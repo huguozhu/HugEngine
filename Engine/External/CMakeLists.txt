@@ -54,7 +54,7 @@ add_library(imgui STATIC
 target_include_directories(imgui PUBLIC ${IMGUI_DIR} ${IMGUI_DIR}/backends)
 target_link_libraries(imgui PUBLIC Vulkan::Vulkan)
 
-# GLFW 输入后端只在 Windows 上编译；鸿蒙用 imgui_impl_ohos（Platforms/OHOS，P3）
+# GLFW 输入后端只在 Windows 上编译；鸿蒙用 imgui_impl_mobile（Platforms/OHOS，P3）
 if(WIN32)
     target_sources(imgui PRIVATE ${IMGUI_DIR}/backends/imgui_impl_glfw.cpp)
     target_link_libraries(imgui PUBLIC glfw)

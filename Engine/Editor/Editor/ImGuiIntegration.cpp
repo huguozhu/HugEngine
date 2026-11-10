@@ -19,8 +19,8 @@
 #include "Platform/WindowWin32.h"   // GetGlfwWindow(IWindow*)
 #include "imgui_impl_glfw.h"
 #endif
-#if HE_PLATFORM_OHOS
-#include "imgui_impl_ohos.h"   // 触摸输入后端
+#if HE_PLATFORM_OHOS || HE_PLATFORM_ANDROID
+#include "imgui_impl_mobile.h"   // 触摸输入后端
 #endif
 #include "imgui_impl_vulkan.h"
 #if defined(HE_RHI_D3D12)
@@ -42,7 +42,7 @@ void ImGuiIntegration::Initialize(IWindow* window, rhi::IRHIDevice* device,
                                    rhi::IRHISwapChain* swapchain) {
     m_Window = window;
 #if HE_PLATFORM_WINDOWS
-    // Windows：ImGui 的 GLFW 后端需要 GLFWwindow*（鸿蒙走 imgui_impl_ohos，见 P3）
+    // Windows：ImGui 的 GLFW 后端需要 GLFWwindow*（移动端走 imgui_impl_mobile（触摸））
     GLFWwindow* glfwWindow = GetGlfwWindow(window);
 #else
     void* glfwWindow = nullptr;
@@ -105,7 +105,9 @@ void ImGuiIntegration::Initialize(IWindow* window, rhi::IRHIDevice* device,
         static const String s_fontCjk   = vfs::Resolve("font/NotoSansSC-Regular.otf");
         static const String s_fontLatin = vfs::Resolve("font/Roboto-Regular.ttf");
         const char* fontCandidates[] = {
-            "/system/fonts/HarmonyOS_Sans_SC.ttf",   // 设备系统字体（HarmonyOS Sans 简体中文）
+            "/system/fonts/HarmonyOS_Sans_SC.ttf",   // 鸿蒙设备系统字体（HarmonyOS Sans 简体中文）
+            "/system/fonts/NotoSansCJK-Regular.ttc", // Android 设备系统字体（思源黑体合集）
+            "/system/fonts/NotoSansSC-Regular.otf",  // 部分 Android 机型
             s_fontCjk.c_str(),
             s_fontLatin.c_str(),
         };
@@ -115,7 +117,7 @@ void ImGuiIntegration::Initialize(IWindow* window, rhi::IRHIDevice* device,
         // 烘焙，图集会超过纹理上限 ⇒ 字体纹理创建失败、ImGui 整块不绘制（真机实测）。
         // 放大时改用 ImGui 内置的**常用汉字表**（约 2500 字 + 标点），图集装得下。
         const ImWchar* glyphRanges = chineseRanges;
-#if HE_PLATFORM_OHOS
+#if HE_PLATFORM_OHOS || HE_PLATFORM_ANDROID
         // 常用字表（约 2500 字）不含"渲/栅"等界面用字，单独把它们补进去：
         // 用 GlyphRangesBuilder 拼一份"常用字 + 本工程面板文案用字"的区间表。
         static ImVector<ImWchar> s_ohosRanges;
@@ -144,8 +146,8 @@ void ImGuiIntegration::Initialize(IWindow* window, rhi::IRHIDevice* device,
         }
     }
 
-#if HE_PLATFORM_OHOS
-    ImGui_ImplOhos_Init(window);          // 鸿蒙：触摸后端（Vulkan 渲染后端两端共用）
+#if HE_PLATFORM_OHOS || HE_PLATFORM_ANDROID
+    ImGui_ImplMobile_Init(window);          // 鸿蒙：触摸后端（Vulkan 渲染后端两端共用）
 #else
     if (m_IsD3D12 || m_IsD3D11) ImGui_ImplGlfw_InitForOther(glfwWindow, true);
     else           ImGui_ImplGlfw_InitForVulkan(glfwWindow, true);
@@ -250,8 +252,8 @@ void ImGuiIntegration::Shutdown() {
     } else
 #endif
     ImGui_ImplVulkan_Shutdown();
-#if HE_PLATFORM_OHOS
-    ImGui_ImplOhos_Shutdown();
+#if HE_PLATFORM_OHOS || HE_PLATFORM_ANDROID
+    ImGui_ImplMobile_Shutdown();
 #else
     ImGui_ImplGlfw_Shutdown();
 #endif
@@ -273,8 +275,8 @@ void ImGuiIntegration::BeginFrame() {
     else
 #endif
     ImGui_ImplVulkan_NewFrame();
-#if HE_PLATFORM_OHOS
-    ImGui_ImplOhos_NewFrame(m_Window);
+#if HE_PLATFORM_OHOS || HE_PLATFORM_ANDROID
+    ImGui_ImplMobile_NewFrame(m_Window);
 #else
     ImGui_ImplGlfw_NewFrame();
 #endif
