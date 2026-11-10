@@ -21,6 +21,9 @@
 #elif HE_PLATFORM_OHOS
     // 鸿蒙的原生窗口类型（XComponent 的 surface 由 OHNativeWindow 表示）
     #include <native_window/external_window.h>
+#elif HE_PLATFORM_ANDROID
+    // Android 的原生窗口类型（SurfaceView 的 Surface 由 ANativeWindow 表示）
+    #include <android/native_window.h>
 #endif
 
 namespace he::rhi::vkplat {
@@ -30,6 +33,8 @@ void AppendSurfaceInstanceExtensions(std::vector<const char*>& extensions) {
     extensions.push_back(VK_KHR_WIN32_SURFACE_EXTENSION_NAME);
 #elif HE_PLATFORM_OHOS
     extensions.push_back(VK_OHOS_SURFACE_EXTENSION_NAME);
+#elif HE_PLATFORM_ANDROID
+    extensions.push_back(VK_KHR_ANDROID_SURFACE_EXTENSION_NAME);
 #else
     (void)extensions;
     HE_CORE_ERROR("当前平台没有可用的 Vulkan WSI 表面实现");
@@ -65,6 +70,19 @@ bool CreateSurface(VkInstance instance, void* nativeWindow, VkSurfaceKHR* outSur
         return false;
     }
     HE_CORE_INFO("Vulkan 表面已创建（OHOS）");
+    return true;
+
+#elif HE_PLATFORM_ANDROID
+    VkAndroidSurfaceCreateInfoKHR info{};
+    info.sType  = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR;
+    info.window = static_cast<ANativeWindow*>(nativeWindow);
+
+    const VkResult r = vkCreateAndroidSurfaceKHR(instance, &info, nullptr, outSurface);
+    if (r != VK_SUCCESS) {
+        HE_CORE_ERROR("vkCreateAndroidSurfaceKHR 失败: VkResult={}", static_cast<int>(r));
+        return false;
+    }
+    HE_CORE_INFO("Vulkan 表面已创建（Android）");
     return true;
 
 #else

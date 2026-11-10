@@ -16,6 +16,26 @@ project(HugEngine
     LANGUAGES CXX
 )
 
+# ============================================================
+# Android 判定：NDK 工具链会把 CMAKE_SYSTEM_NAME 设为 Android；
+# 也允许显式 -DHUGENGINE_PLATFORM_ANDROID=ON（例如在 Windows 上做语法自检）。
+# 放在 project() 之后 —— ANDROID 变量由工具链在 project() 阶段注入。
+# ============================================================
+if(NOT DEFINED HUGENGINE_PLATFORM_ANDROID)
+    if(ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "Android")
+        set(HUGENGINE_PLATFORM_ANDROID ON)
+    else()
+        set(HUGENGINE_PLATFORM_ANDROID OFF)
+    endif()
+endif()
+# 移动平台公共标志：鸿蒙与 Android 都要裁掉 D3D/DXC/GLFW/桌面宿主/物理/AI
+if(HUGENGINE_PLATFORM_OHOS OR HUGENGINE_PLATFORM_ANDROID)
+    set(HUGENGINE_PLATFORM_MOBILE ON)
+else()
+    set(HUGENGINE_PLATFORM_MOBILE OFF)
+endif()
+message(STATUS "HugEngine: HUGENGINE_PLATFORM_ANDROID=${HUGENGINE_PLATFORM_ANDROID} MOBILE=${HUGENGINE_PLATFORM_MOBILE}")
+
 # VS 解决方案目录分组
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
@@ -44,7 +64,9 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 option(HUGENGINE_BUILD_SAMPLES   "Build sample projects" ON)
 # 鸿蒙：构建 native 入口模块（libentry.so）；由 Platforms/OHOS 的 hvigor 工程传入 ON
 option(HUGENGINE_BUILD_OHOS_ENTRY "Build HarmonyOS native entry (libentry.so)" OFF)
-if(HUGENGINE_PLATFORM_OHOS)
+# Android：构建 native 入口模块（libhgengine.so）；由 Platforms/Android 的 Gradle 工程传入 ON
+option(HUGENGINE_BUILD_ANDROID_ENTRY "Build Android native entry (libhgengine.so)" OFF)
+if(HUGENGINE_PLATFORM_MOBILE)
     option(HUGENGINE_BUILD_EDITOR "Build editor" OFF)
 else()
     option(HUGENGINE_BUILD_EDITOR "Build editor" ON)
@@ -52,7 +74,7 @@ endif()
 option(HUGENGINE_BUILD_TESTS     "Build tests"           OFF)
 option(HUGENGINE_RHI_VULKAN      "Enable Vulkan backend" ON)
 # D3D 后端只在 Windows 上可用；非 Windows 平台即使打开也会被忽略
-if(HUGENGINE_PLATFORM_OHOS)
+if(HUGENGINE_PLATFORM_MOBILE)
     option(HUGENGINE_RHI_D3D12   "Enable D3D12 backend (Windows only)" OFF)
     option(HUGENGINE_RHI_D3D11   "Enable D3D11 backend (Windows only)" OFF)
 else()
@@ -62,7 +84,7 @@ endif()
 
 # Vulkan：Windows 用本机 SDK；鸿蒙用 NDK sysroot 里的 libvulkan + 头文件
 if(HUGENGINE_RHI_VULKAN)
-    if(HUGENGINE_PLATFORM_OHOS)
+    if(HUGENGINE_PLATFORM_MOBILE)
         find_library(HUGENGINE_VULKAN_LIB NAMES vulkan REQUIRED)
         find_path(HUGENGINE_VULKAN_INCLUDE_DIR NAMES vulkan/vulkan.h REQUIRED)
         add_library(Vulkan::Vulkan UNKNOWN IMPORTED)
@@ -77,14 +99,14 @@ if(HUGENGINE_RHI_VULKAN)
 endif()
 
 # Git（下载测试资源 + 子模块管理）；鸿蒙不下载资产（随 rawfile 打包）
-if(NOT HUGENGINE_PLATFORM_OHOS)
+if(NOT HUGENGINE_PLATFORM_MOBILE)
     find_package(Git REQUIRED)
 endif()
 
 # ============================================================
 # 下载测试资源（Sponza glTF 等）
 # ============================================================
-if(NOT HUGENGINE_PLATFORM_OHOS)
+if(NOT HUGENGINE_PLATFORM_MOBILE)
     include(cmake/DownloadAssets.cmake)
 endif()
 
@@ -195,6 +217,6 @@ endif()
 #   cmake --build build --target OhosStubCheck
 # 用 stub 头 + HE_PLATFORM_OHOS_STUBCHECK 把鸿蒙分支真正编译一遍。
 # ============================================================
-if(NOT HUGENGINE_PLATFORM_OHOS)
+if(NOT HUGENGINE_PLATFORM_MOBILE)
     add_subdirectory(Platforms/OHOS/stubcheck)
 endif()

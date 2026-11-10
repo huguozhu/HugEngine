@@ -27,6 +27,9 @@
     // 【顺序】必须排在 __linux__ 之前——鸿蒙 NDK 同时会定义 __linux__，
     // 若先命中 Linux 分支，后面的 WSI / 文件系统 / 线程实现会全部走错分支。
     #define HE_PLATFORM_OHOS 1
+#elif defined(__ANDROID__)
+    // Android 的 __linux__ 宏同样成立，必须排在 LINUX 分支之前
+    #define HE_PLATFORM_ANDROID 1
 #elif defined(__linux__)
     #define HE_PLATFORM_LINUX 1
 #endif

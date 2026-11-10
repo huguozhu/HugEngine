@@ -34,13 +34,13 @@ endif()
 # Physics — Jolt 物理集成（C2，依赖 Scene；Scene 不依赖 Physics）
 # 放在 AI 之前：AI（SceneBuilder 解析 RigidBodyComponent）PUBLIC 链 HugEnginePhysics
 # 物理（Jolt）只在桌面构建：鸿蒙首版不含物理
-if(NOT HUGENGINE_PLATFORM_OHOS)
+if(NOT HUGENGINE_PLATFORM_MOBILE)
     add_subdirectory(Physics)
 endif()
 
 # AI — LLM 场景生成与推理运行时 (L2.5)
 # 注意：放在 Editor 之后 —— AIGC 复用 Editor 的 Command 系统（GenerateSceneCommand）
 # AI（DeepSeek 客户端用 Windows HTTP 栈）只在桌面构建
-if(NOT HUGENGINE_PLATFORM_OHOS)
+if(NOT HUGENGINE_PLATFORM_MOBILE)
     add_subdirectory(AI)
 endif()

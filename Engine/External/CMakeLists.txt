@@ -83,7 +83,7 @@ set(JPH_USE_DX12 OFF CACHE BOOL "" FORCE)                      # 不需要 Jolt 
 set(JPH_USE_VK   OFF CACHE BOOL "" FORCE)
 set(JPH_USE_MTL  OFF CACHE BOOL "" FORCE)
 # Jolt 只在桌面构建：鸿蒙首版只移植"立方体+球体+天空盒+触摸相机"，不含物理
-if(NOT HUGENGINE_PLATFORM_OHOS)
+if(NOT HUGENGINE_PLATFORM_MOBILE)
     add_subdirectory(JoltPhysics/Build)
 endif()
 # Jolt 库目标名固定为 "Jolt"（Build/Jolt/CMakeLists.txt）

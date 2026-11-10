@@ -10,6 +10,10 @@
     // 这样 `hdc shell hilog` 能直接看到引擎日志（tag = HugEngine / App）。
     #include <hilog/log.h>
     #include <spdlog/sinks/base_sink.h>
+#elif HE_PLATFORM_ANDROID
+    // Android：同理挂一个 logcat sink（`adb logcat -s HugEngine`）
+    #include <android/log.h>
+    #include <spdlog/sinks/base_sink.h>
 #endif
 
 namespace he {
@@ -65,6 +69,38 @@ private:
 } // namespace
 #endif // HE_PLATFORM_OHOS
 
+#if HE_PLATFORM_ANDROID
+namespace {
+
+/// 把 spdlog 的每条日志转发到 Android logcat（tag 用于 `adb logcat -s <tag>` 过滤）
+class LogcatSink final : public spdlog::sinks::base_sink<std::mutex> {
+public:
+    explicit LogcatSink(const char* tag) : m_Tag(tag) {}
+
+protected:
+    void sink_it_(const spdlog::details::log_msg& msg) override {
+        const std::string text(msg.payload.data(), msg.payload.size());
+        int prio = ANDROID_LOG_INFO;
+        switch (msg.level) {
+            case spdlog::level::trace:
+            case spdlog::level::debug:    prio = ANDROID_LOG_DEBUG; break;
+            case spdlog::level::info:     prio = ANDROID_LOG_INFO;  break;
+            case spdlog::level::warn:     prio = ANDROID_LOG_WARN;  break;
+            case spdlog::level::err:
+            case spdlog::level::critical: prio = ANDROID_LOG_ERROR; break;
+            default:                      prio = ANDROID_LOG_INFO;  break;
+        }
+        __android_log_print(prio, m_Tag, "%s", text.c_str());
+    }
+    void flush_() override {}
+
+private:
+    const char* m_Tag;
+};
+
+} // namespace
+#endif // HE_PLATFORM_ANDROID
+
 void Logger::Initialize(LogLevel level) {
     // 幂等：鸿蒙 NativeEntry 可能先初始化一次，Engine 构造时又会调用一次
     if (s_CoreLogger && s_ClientLogger) {
@@ -79,6 +115,8 @@ void Logger::Initialize(LogLevel level) {
         sinks.push_back(std::make_shared<spdlog::sinks::stdout_color_sink_mt>());
 #if HE_PLATFORM_OHOS
         sinks.push_back(std::make_shared<HilogSink>("HugEngine"));
+#elif HE_PLATFORM_ANDROID
+        sinks.push_back(std::make_shared<LogcatSink>("HugEngine"));
 #endif
         s_CoreLogger = std::make_shared<spdlog::logger>("HugEngine", sinks.begin(), sinks.end());
         s_CoreLogger->set_level(spdLevel);
@@ -92,6 +130,8 @@ void Logger::Initialize(LogLevel level) {
         sinks.push_back(std::make_shared<spdlog::sinks::stdout_color_sink_mt>());
 #if HE_PLATFORM_OHOS
         sinks.push_back(std::make_shared<HilogSink>("App"));
+#elif HE_PLATFORM_ANDROID
+        sinks.push_back(std::make_shared<LogcatSink>("App"));
 #endif
         s_ClientLogger = std::make_shared<spdlog::logger>("App", sinks.begin(), sinks.end());
         s_ClientLogger->set_level(spdLevel);

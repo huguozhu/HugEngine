@@ -52,6 +52,16 @@ if(HUGENGINE_PLATFORM_OHOS)
         Platform/InputOHOS.cpp
         Platform/InputOHOS.h)
 endif()
+
+# Android：窗口来自 SurfaceView 的 ANativeWindow，输入来自 JNI 转发的触摸事件
+# （触摸语义与鸿蒙一致，二者共用 he::PushTouchPoint，见 Platform/IInput.h）
+if(HUGENGINE_PLATFORM_ANDROID)
+    target_sources(HugEngineCore PRIVATE
+        Platform/WindowAndroid.cpp
+        Platform/WindowAndroid.h
+        Platform/InputAndroid.cpp
+        Platform/InputAndroid.h)
+endif()
 # Windows 专属：GLFW 窗口/输入实现 + 崩溃处理器（DbgHelp）
 if(WIN32)
     target_sources(HugEngineCore PRIVATE
@@ -76,4 +86,10 @@ endif()
 if(HUGENGINE_PLATFORM_OHOS)
     find_library(OHOS_LIB_hilog_ndk NAMES hilog_ndk.z REQUIRED)
     target_link_libraries(HugEngineCore PUBLIC ${OHOS_LIB_hilog_ndk})
+endif()
+
+# Android：Log.cpp 的 logcat sink 需要 liblog（NDK sysroot 自带）
+if(HUGENGINE_PLATFORM_ANDROID)
+    find_library(ANDROID_LIB_log NAMES log REQUIRED)
+    target_link_libraries(HugEngineCore PUBLIC ${ANDROID_LIB_log})
 endif()

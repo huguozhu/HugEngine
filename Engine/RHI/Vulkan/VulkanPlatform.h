@@ -36,7 +36,7 @@
 namespace he::rhi::vkplat {
 
 // 平台是否具备可用的 WSI 表面（两端都应有；留作编译期断言用）
-#if HE_PLATFORM_WINDOWS || HE_PLATFORM_OHOS
+#if HE_PLATFORM_WINDOWS || HE_PLATFORM_OHOS || HE_PLATFORM_ANDROID
 constexpr bool kHasPlatformSurface = true;
 #else
 constexpr bool kHasPlatformSurface = false;
