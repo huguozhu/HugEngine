@@ -62,4 +62,14 @@ struct InputState {
 /// 同一帧内重复调用返回同一份状态（内部按时间戳去重）。
 InputState& PollInput(IWindow* window);
 
+/// 触摸阶段（平台入口 → 引擎）。取值与 Android MotionEvent / 鸿蒙 TouchType 对齐，
+/// 平台条目（JNI / napi）只需按 0..3 转换后调用 PushTouchPoint。
+enum class TouchPhase : u8 { Began = 0, Moved = 1, Ended = 2, Cancelled = 3 };
+
+/// 注入一个触摸点（**归一化**坐标 [0,1]）。
+/// 【契约】由平台入口在 UI 线程调用；只跟踪 id==0 的第一根手指；
+/// 单指按下/拖动会被映射成"右键拖动"（mouseDown[1] / mouseDelta），
+/// 这样桌面版的 CameraInput 在手机上无需改动即可旋转相机。
+void PushTouchPoint(u32 id, TouchPhase phase, f32 xNorm, f32 yNorm);
+
 } // namespace he

@@ -19,6 +19,8 @@ add_library(OhosStubCheck OBJECT
     ${CMAKE_SOURCE_DIR}/Platforms/OHOS/entry/src/main/cpp/NativeEntry.cpp
     ${CMAKE_SOURCE_DIR}/Platforms/OHOS/entry/src/main/cpp/RawfileUnpack.cpp
     ${CMAKE_SOURCE_DIR}/Platforms/OHOS/entry/src/main/cpp/AppMain.cpp
+    # 移动端共享宿主（鸿蒙/Android 共用）：一并纳入编译自检
+    ${CMAKE_SOURCE_DIR}/Samples/Common/App/MobileHost.cpp
 )
 
 target_compile_definitions(OhosStubCheck PRIVATE

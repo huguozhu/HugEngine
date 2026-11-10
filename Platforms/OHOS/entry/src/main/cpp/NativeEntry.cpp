@@ -40,6 +40,7 @@
 
 #include "Core/Log.h"
 #include "Platform/IVfs.h"
+#include "Platform/IWindow.h"     // SetContentScale（UI 密度）
 #include "Platform/WindowOHOS.h"
 
 #include "RawfileUnpack.h"

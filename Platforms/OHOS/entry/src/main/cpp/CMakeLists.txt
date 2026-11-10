@@ -23,6 +23,9 @@ add_library(entry SHARED
     RawfileUnpack.h
     AppMain.cpp
     AppMain.h
+    # 移动端共享宿主（Android 入口复用同一份实现）
+    ${CMAKE_SOURCE_DIR}/Samples/Common/App/MobileHost.cpp
+    ${CMAKE_SOURCE_DIR}/Samples/Common/App/MobileHost.h
     ${CUBE02_APP_DIR}/02.Cube.App.cpp
     ${CUBE02_APP_DIR}/02.Cube.App.h
     ${TRIANGLE01_APP_DIR}/01.Triangle.App.cpp

@@ -25,9 +25,6 @@ void AttachNativeWindow(OHNativeWindow* window, u32 width, u32 height);
 /// surfaceDestroyed 时调用：置空窗口，渲染循环会自行暂停
 void DetachNativeWindow();
 
-/// 设置内容缩放（ArkTS 侧用 display.densityPixels 传进来；ImGui 按此放大字体与间距）
-void SetContentScale(f32 scale);
-
 } // namespace he
 
 #endif // HE_PLATFORM_OHOS

@@ -16,7 +16,7 @@
 
 namespace he::ohos {
 
-/// 起渲染线程（调用前必须已 AttachNativeWindow）
+/// 起渲染线程（调用前必须已 AttachNativeWindow；实现在 Samples/Common/App/MobileHost.cpp）
 /// mode：1 = 01.Triangle，2 = 02.Cube（其余值按 1 处理）
 void AppStart(u32 width, u32 height, int mode);
 
@@ -35,7 +35,7 @@ bool AppIsRunning();
 /// 画布尺寸变化（旋转/分屏）
 void AppResize(u32 width, u32 height);
 
-/// 触摸事件（坐标是像素，内部换算成归一化坐标）
+/// 触摸事件（坐标是**归一化** [0,1]；契约见 Platform/IInput.h 的 PushTouchPoint）
 void AppTouch(u32 id, int phase, float xPixels, float yPixels);
 
 } // namespace he::ohos

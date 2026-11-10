@@ -50,12 +50,12 @@ public:
     /// 原生显示/实例句柄：Windows = HINSTANCE；鸿蒙 = nullptr
     virtual void* GetDisplayHandle() const = 0;
 
+    /// 内容缩放（UI/字体密度）：Windows 恒为 1，移动端返回屏幕 density
+    virtual f32 GetContentScale() const { return 1.0f; }
+
     /// 重建原生窗口（同尺寸/同位置）。
     /// 用途见历史说明：Windows 上先创建过 DXGI 交换链的 HWND 再让 Vulkan 呈现会冻结，
     /// 切到 Vulkan 前换一个干净的 HWND 即可。
-    /// 内容缩放（UI/字体密度）：Windows 恒为 1，鸿蒙返回屏幕 densityPixels
-    virtual f32 GetContentScale() const { return 1.0f; }
-
     virtual bool Recreate() = 0;
 
     virtual void SetResizeCallback(ResizeCallback cb) = 0;
@@ -66,6 +66,10 @@ public:
     /// 桌面端：隐藏/显示鼠标（相对鼠标模式）；移动端为空实现
     virtual void SetCursorVisible(bool visible) = 0;
 };
+
+/// 设置内容缩放（UI 密度）。移动端由平台条目在启动时调用（鸿蒙 display.densityPixels /
+/// Android displayMetrics.density）；桌面端无实现（不调用）。
+void SetContentScale(f32 scale);
 
 /// 平台工厂：Windows 实现在 WindowWin32.cpp，鸿蒙实现在 WindowOHOS.cpp
 std::unique_ptr<IWindow> CreatePlatformWindow(const WindowDesc& desc);
