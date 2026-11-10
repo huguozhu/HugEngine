@@ -693,12 +693,22 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
         pipeInfo.renderPass          = renderPass;
         pipeInfo.subpass             = 0;
 
-        VkPipeline pipeline;
-        vkCreateGraphicsPipelines(device, pipelineCache, 1, &pipeInfo, nullptr, &pipeline);
+        // 【必须检查返回值】VkPipeline 未初始化时失败会留下垃圾句柄，
+        // 上层只判断"对象非空"就会去绑定它 —— 实测 Vulkan + Mesh Shader 直接崩溃。
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        const VkResult meshResult = vkCreateGraphicsPipelines(device, pipelineCache, 1,
+                                                              &pipeInfo, nullptr, &pipeline);
 
         vkDestroyShaderModule(device, mesh, nullptr);
         if (task) vkDestroyShaderModule(device, task, nullptr);
         if (frag) vkDestroyShaderModule(device, frag, nullptr);
+
+        if (meshResult != VK_SUCCESS || pipeline == VK_NULL_HANDLE) {
+            HE_CORE_ERROR("[Vulkan] mesh 管线创建失败: VkResult={}（着色器阶段/入口点不匹配？）",
+                          static_cast<int>(meshResult));
+            vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+            return nullptr;
+        }
 
         HE_CORE_INFO("Vulkan mesh shader pipeline created (task={}, mesh, frag={})",
                      task != VK_NULL_HANDLE, frag != VK_NULL_HANDLE);
@@ -799,11 +809,18 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
     pipeInfo.renderPass          = parts.renderPass;
     pipeInfo.subpass             = 0;
 
-    VkPipeline pipeline;
-    vkCreateGraphicsPipelines(device, pipelineCache, 1, &pipeInfo, nullptr, &pipeline);
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    const VkResult pipeResult = vkCreateGraphicsPipelines(device, pipelineCache, 1,
+                                                          &pipeInfo, nullptr, &pipeline);
 
     vkDestroyShaderModule(device, parts.vs, nullptr);
     vkDestroyShaderModule(device, parts.fs, nullptr);
+
+    if (pipeResult != VK_SUCCESS || pipeline == VK_NULL_HANDLE) {
+        HE_CORE_ERROR("[Vulkan] 图形管线创建失败: VkResult={}", static_cast<int>(pipeResult));
+        vkDestroyPipelineLayout(device, parts.layout, nullptr);
+        return nullptr;
+    }
 
     HE_CORE_INFO("Vulkan graphics pipeline created");
     // ── 插入 PSO 缓存 ──

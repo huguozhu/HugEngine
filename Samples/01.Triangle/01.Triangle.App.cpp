@@ -351,8 +351,13 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
         rhi::ShaderBytecode msFrag = rhi::MakeShaderBytecode(
             rhi::ShaderStage::Pixel, k_TriangleMesh_frag_spv, k_TriangleMesh_frag_dxil,
             k_TriangleMesh_frag_dxbc, "main");
+        // 【必须用 .meshShader，不能塞进 .vertexShader】RHI 的 mesh 管线分支按
+        // `desc.meshShader` 判定；塞进 vertexShader 会走传统 IA 管线，
+        // vkCreateGraphicsPipelines 报 "pName not found for VK_SHADER_STAGE_VERTEX_BIT"，
+        // 得到一个空管线句柄，随后绑定即崩（实测：Vulkan + Mesh Shader 直接 crash）。
         g.meshPSO = g.device->CreatePipelineState({
-            .vertexShader = &msShader, .pixelShader = &msFrag,
+            .pixelShader = &msFrag,
+            .meshShader = &msShader,
             .vertexLayout = {},
             .depthTest = false, .depthWrite = false,
             .colorFormats = { g.swapchain->GetColorFormat() },
