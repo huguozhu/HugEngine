@@ -18,7 +18,8 @@ target_include_directories(HugEngineDesktopHost PUBLIC
 
 target_link_libraries(HugEngineDesktopHost PUBLIC
     HugEngineCore
-    HugEngineRHI)
+    HugEngineRHI
+    HugEngineRender)   # RenderThread / FrameScheduler
 
 set_target_properties(HugEngineDesktopHost PROPERTIES
     FOLDER "Platforms/Win32")

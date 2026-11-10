@@ -2,8 +2,11 @@
 //  DesktopHost.cpp —— Windows 样例宿主
 //
 //  从原 Samples/01.Triangle/01.Triangle.cpp 的 main 抽出来：建 Engine/窗口、
-//  主循环、输入、后端热切换、退出。之后所有桌面样例都只写 Main.Win32.cpp
-//  （配置 + RunApp<TApp>），不再各写一份循环。
+//  主循环、输入、后端热切换、退出。之后所有桌面样例都只写一个 App，
+//  宿主按能力选择两种循环：
+//    · 单线程：IApp::Frame（默认，01/02/04 这类）
+//    · 渲染线程：IRenderThreadApp 的 BeginFrame / RecordScene / RecordUIAndPresent
+//      （整帧 RHI 交给 RenderCommandQueue + RenderThread，游戏线程只做输入/UI）
 // ============================================================
 
 #include "DesktopHost.h"
@@ -13,7 +16,10 @@
 #include "Platform/IWindow.h"
 #include "Platform/Time.h"
 #include "Platform/IInput.h"
+#include "RHI/ThreadAffinity.h"
+#include "Threading/RenderThread.h"
 
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
 
@@ -43,28 +49,11 @@ rhi::Backend BackendFromName(const char* name) {
     return rhi::Backend::Count;
 }
 
-} // namespace
-
-int Run(const HostConfig& cfg, IApp& app, IBackendSwitchApp* switchable) {
-    EngineConfig engineCfg;
-    engineCfg.appName      = cfg.title;
-    engineCfg.windowWidth  = cfg.width;
-    engineCfg.windowHeight = cfg.height;
-
-    Engine engine(engineCfg);
-    engine.Initialize();
-
-    if (!app.Initialize(engine, rhi::ResolveBackendFromEnv(), IApp::Options{})) {
-        HE_CORE_ERROR("{}: 初始后端初始化失败", cfg.title);
-        return 1;
-    }
-
-    // 窗口缩放：交换链与离屏 RT 目标都要跟着换
-    engine.GetWindow()->SetResizeCallback([&](u32 w, u32 h) { app.Resize(w, h); });
-
-    HE_CORE_INFO("{} started（{}）", cfg.title,
-                 BackendName(switchable ? switchable->CurrentBackend() : rhi::Backend::Vulkan));
-
+// ---------------------------------------------------------------------------
+//  单线程循环：App 自己在 Frame 里 acquire/record/present
+// ---------------------------------------------------------------------------
+u64 RunSingleThreaded(Engine& engine, IApp& app, IBackendSwitchApp* switchable,
+                      const HostConfig& cfg) {
     f64 lastTime   = he::Time::Now();
     u64 frameIndex = 0;
 
@@ -105,9 +94,99 @@ int Run(const HostConfig& cfg, IApp& app, IBackendSwitchApp* switchable) {
             }
         }
     }
+    return frameIndex;
+}
+
+// ---------------------------------------------------------------------------
+//  渲染线程循环：一帧两条命令
+//    ① Acquire + 场景录制（含 UI 的 render pass 开始）
+//    ② UI 录制 + End + Submit + Present
+//  控件/相机等 CPU 侧逻辑留在游戏线程、位于两条命令之间（与完整版样例一致）。
+// ---------------------------------------------------------------------------
+u64 RunWithRenderThread(Engine& engine, IRenderThreadApp& app, const HostConfig& cfg) {
+    render::RenderCommandQueue queue(rhi::kMaxFramesInFlight);
+    render::RenderThread       renderThread(queue);
+    render::FrameScheduler     frameScheduler(queue, renderThread);
+
+    renderThread.SetSpinWaitUs(50);
+    renderThread.SetThreadStartHook([] { he::rhi::GetThreadAffinity().Claim(); });
+    renderThread.SetThreadStopHook([] { he::rhi::GetThreadAffinity().Release(); });
+    renderThread.Start();
+    HE_CORE_INFO("{}: 已启动渲染线程（整帧 RHI 归它，游戏线程按帧握手）", cfg.title);
+
+    auto submit = [&](auto&& fn) {
+        queue.BeginFrame();
+        queue.Enqueue([&](render::RenderThreadContext&) { fn(); });
+        bool timedOut = false;
+        frameScheduler.SubmitAndWait(timedOut);
+        if (timedOut) HE_CORE_WARN("{}: 等待本帧渲染命令超时", cfg.title);
+    };
+
+    f64 lastTime   = he::Time::Now();
+    u64 frameIndex = 0;
+
+    while (!engine.GetWindow()->ShouldClose()) {
+        engine.GetWindow()->PollEvents();
+        const InputState& in = he::PollInput(engine.GetWindow());
+
+        const f64 now = he::Time::Now();
+        const f32 dt  = static_cast<f32>(now - lastTime);
+        lastTime      = now;
+
+        // 游戏线程：输入/相机/UI 状态；返回 false 表示本帧不渲染
+        if (!app.BeginFrame(dt, in)) continue;
+
+        bool acquireFailed = false;
+        submit([&] { acquireFailed = !app.RecordScene(); });
+        if (acquireFailed) continue;
+
+        submit([&] { app.RecordUIAndPresent(); });
+        ++frameIndex;
+    }
+
+    renderThread.Stop();
+    rhi::GetThreadAffinity().Release();
+    return frameIndex;
+}
+
+} // namespace
+
+int Run(const HostConfig& cfg, IApp& app, IBackendSwitchApp* switchable) {
+    EngineConfig engineCfg;
+    engineCfg.appName      = cfg.title;
+    engineCfg.windowWidth  = cfg.width;
+    engineCfg.windowHeight = cfg.height;
+
+    Engine engine(engineCfg);
+    engine.Initialize();
+
+    if (!app.Initialize(engine, rhi::ResolveBackendFromEnv(), IApp::Options{})) {
+        HE_CORE_ERROR("{}: 初始后端初始化失败", cfg.title);
+        return 1;
+    }
+
+    // 窗口缩放：交换链与离屏 RT 目标都要跟着换
+    engine.GetWindow()->SetResizeCallback([&](u32 w, u32 h) { app.Resize(w, h); });
+
+    HE_CORE_INFO("{} started（{}）", cfg.title,
+                 BackendName(switchable ? switchable->CurrentBackend() : rhi::Backend::Vulkan));
+
+    // 渲染线程需要 App 实现 IRenderThreadApp；没有实现就退回单线程（行为与以前一致）
+    const bool wantThread = cfg.renderThread || std::getenv("HE_RENDER_THREAD_STRICT") != nullptr;
+    auto* rtApp = dynamic_cast<IRenderThreadApp*>(&app);
+
+    u64 frames = 0;
+    if (wantThread && rtApp) {
+        frames = RunWithRenderThread(engine, *rtApp, cfg);
+    } else {
+        if (wantThread && !rtApp) {
+            HE_CORE_WARN("{}: 请求了渲染线程，但该 App 没实现 IRenderThreadApp，退回单线程", cfg.title);
+        }
+        frames = RunSingleThreaded(engine, app, switchable, cfg);
+    }
 
     app.Shutdown();
-    HE_CORE_INFO("Exiting after {} frames", frameIndex);
+    HE_CORE_INFO("Exiting after {} frames", frames);
     return 0;
 }
 

@@ -23,7 +23,7 @@ struct InputState;
 
 namespace he::samples::sponza03 {
 
-class App : public IApp {
+class App : public IApp, public IRenderThreadApp {
 public:
     using Options = IApp::Options;
 
@@ -38,8 +38,13 @@ public:
     }
     bool Initialize(Engine& engine, rhi::Backend backend, const Options& opt) override;
 
-    /// 每帧：相机 + 场景装配 + 前向渲染 + ToneMap + ImGui
+    /// 单线程路径：BeginFrame + RecordScene + RecordUIAndPresent（鸿蒙宿主用）
     bool Frame(f32 deltaTime, const InputState& input) override;
+
+    // ---- IRenderThreadApp：桌面宿主把后两段派发到渲染线程 ----
+    bool BeginFrame(f32 deltaTime, const InputState& input) override;
+    bool RecordScene() override;
+    void RecordUIAndPresent() override;
 
     void Resize(u32 width, u32 height) override;
 

@@ -60,6 +60,7 @@ struct App::Impl {
 
     rhi::Backend backend = rhi::Backend::Vulkan;
     bool         ready   = false;
+    f32          frameDt = 0.016f;   // 本帧 deltaTime（面板 FPS 用）
 
     /// 天空盒：HDR 全景图 → 6 面立方体贴图（与桌面 03 同一套算法）
     
@@ -243,12 +244,27 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
 }
 
 bool App::Frame(f32 deltaTime, const InputState& input) {
+    if (!BeginFrame(deltaTime, input)) return false;
+    if (!RecordScene()) return false;
+    RecordUIAndPresent();
+    return true;
+}
+
+bool App::BeginFrame(f32 deltaTime, const InputState& input) {
     Impl& g = *m_Impl;
     if (!g.ready || !g.presenter) return false;
 
     // 相机输入（桌面：右键拖拽 + WASD；鸿蒙：单指拖动映射成右键拖拽）
     g.camInput.Update(input, g.camera, deltaTime);
+    g.frameDt = deltaTime;   // 面板 FPS 用
+    return true;
+}
 
+bool App::RecordScene() {
+    Impl& g = *m_Impl;
+    if (!g.ready || !g.presenter) return false;
+
+    // Acquire 失败时返回 false，宿主会跳过本帧的第二条命令（UI + Present）
     if (!g.presenter->BeginFrame()) return false;
     g.presenter->BeginRecording(g.device.get(), g.cmdList.get());
 
@@ -276,11 +292,15 @@ bool App::Frame(f32 deltaTime, const InputState& input) {
 
     g.pipeline->Render(g.cmdList.get(), g.pipeline->GetFrameSnapshot(), g.camera.GetCamera());
 
-    // BackBuffer 合成：ToneMap + ImGui
+    // BackBuffer 合成：ToneMap + ImGui（ImGui 的录制在 RecordUIAndPresent 里）
     g.cmdList->BeginDebugLabel("ToneMap + ImGui (BackBuffer)");
     g.cmdList->BeginRenderPass(1, g.swapchain->GetColorFormat());
     g.pipeline->RenderToneMapPass(g.cmdList.get());
+    return true;
+}
 
+void App::RecordUIAndPresent() {
+    Impl& g = *m_Impl;
     if (g.imgui && g.imgui->IsInitialized()) {
         g.imgui->BeginFrame();
         const float ui = ImGui::GetFontSize() / 16.0f;   // 高 DPI 缩放
@@ -288,7 +308,7 @@ bool App::Frame(f32 deltaTime, const InputState& input) {
         ImGui::SetNextWindowSize(ImVec2(300.0f * ui, 140.0f * ui), ImGuiCond_Once);
         ImGui::SetNextWindowBgAlpha(0.5f);
         ImGui::Begin("03.Sponza (App)");
-        ImGui::Text("FPS: %.0f", 1.0f / (deltaTime > 0.0f ? deltaTime : 0.016f));
+        ImGui::Text("FPS: %.0f", 1.0f / (g.frameDt > 0.0f ? g.frameDt : 0.016f));
         ImGui::Text("后端: %d", static_cast<int>(g.backend));
         ImGui::End();
         g.imgui->EndFrame(g.cmdList.get());
@@ -297,7 +317,6 @@ bool App::Frame(f32 deltaTime, const InputState& input) {
     g.cmdList->EndRenderPass();
     g.presenter->EndRecording();
     g.presenter->EndFrame(true);
-    return true;
 }
 
 void App::Resize(u32 width, u32 height) {

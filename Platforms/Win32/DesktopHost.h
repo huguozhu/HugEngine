@@ -24,6 +24,10 @@ struct HostConfig {
     /// 是否启用后端热切换（App 需实现 IBackendSwitchApp，否则此开关无效）
     bool backendSwitch = false;
 
+    /// 整帧渲染交给渲染线程（App 需实现 IRenderThreadApp，否则忽略此开关）。
+    /// 环境变量 HE_RENDER_THREAD_STRICT 也会打开它，便于在命令行临时验证。
+    bool renderThread = false;
+
     /// 无人值守验证热切换用的环境变量名（帧 60 切走、帧 90 切回）；
     /// 传 nullptr 表示不启用。例如 01.Triangle 用 "HE_TRIANGLE_SWITCH_TO"。
     const char* switchToEnv   = nullptr;

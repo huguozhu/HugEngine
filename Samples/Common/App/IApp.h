@@ -54,5 +54,25 @@ public:
     virtual bool TakeBackendRequest(rhi::Backend& out) = 0;
 };
 
+/// 可选能力：把一帧拆成「游戏线程准备 → 命令 1（场景录制）→ 命令 2（UI + Present）」，
+/// 宿主据此把两条命令派发到渲染线程（`HostConfig::renderThread`）。不实现它的样例
+/// 仍走单线程的 `IApp::Frame`。
+///
+/// 这样渲染线程只属于宿主一份实现，样例不必各自重复线程/队列代码。
+class IRenderThreadApp {
+public:
+    virtual ~IRenderThreadApp() = default;
+
+    /// 游戏线程：输入/相机/UI 状态更新；返回 false 表示本帧不渲染（Acquire 前就放弃）
+    virtual bool BeginFrame(f32 deltaTime, const InputState& input) = 0;
+
+    /// 命令 1（渲染线程）：Acquire + 场景录制 + 打开 UI 的 render pass；
+    /// 返回 false 表示 Acquire 失败（宿主会跳过命令 2）
+    virtual bool RecordScene() = 0;
+
+    /// 命令 2（渲染线程）：录制 UI + End + Submit + Present
+    virtual void RecordUIAndPresent() = 0;
+};
+
 } // namespace samples
 } // namespace he
