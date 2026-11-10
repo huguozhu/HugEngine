@@ -207,14 +207,28 @@ endforeach()
 # Engine 模块（含 Engine/Physics 编译出的 HugEnginePhysics）
 foreach(_eng HugEngineCore HugEngineRHI HugEngineReflect HugEngineShader HugEngineSerialize
             HugEngineScene HugEngineRender HugEngineAsset HugEngineEditor HugEngineAI
-            HugEnginePhysics CompileShaders)
+            HugEnginePhysics)
     if(TARGET ${_eng})
         set_target_properties(${_eng} PROPERTIES FOLDER "Engine")
     endif()
 endforeach()
 
-# Samples（含 06.GILab 与编辑器；编辑器目标名是 HugEditor）
-foreach(_sample 01.Triangle 02.Cube 03.Sponza-Forward 04.Sponza-Deferred 05.Sponza-PathTracing 06.GILab 08.AISamples HugEditor)
+# Shader 编译相关目标统一收进 "CompileShader" 目录
+#   CompileShaders*      ：slangc 批量编译（SPIR-V / DXIL / DXBC）
+#   AuditShaderBindings  ：着色器绑定对账
+#   ShaderToDxil*        ：HLSL 补丁工具与其单测（Tools/ShaderToDxil）
+# 放在 Engine 循环之后，确保这里的归属覆盖前面可能设置过的 FOLDER。
+foreach(_shader_target CompileShaders CompileShadersDxil CompileShadersDxbc AuditShaderBindings
+                       ShaderToDxil ShaderToDxilTests)
+    if(TARGET ${_shader_target})
+        set_target_properties(${_shader_target} PROPERTIES FOLDER "CompileShader")
+    endif()
+endforeach()
+
+# Samples（含 06.GILab / 07.Nanite 与编辑器；编辑器目标名是 HugEditor）
+# 注意：这里必须列全，漏掉的目标会散落在解决方案根目录（07.Nanite 之前就漏了）
+foreach(_sample 01.Triangle 02.Cube 03.Sponza-Forward 04.Sponza-Deferred 05.Sponza-PathTracing
+                06.GILab 07.Nanite 08.AISamples HugEditor)
     if(TARGET ${_sample})
         set_target_properties(${_sample} PROPERTIES FOLDER "Samples")
     endif()
