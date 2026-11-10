@@ -12,7 +12,7 @@
 #  本目录，所有源码/头文件路径全部错位（实测：VMA 头找不到）。
 # ============================================================
 
-set(CUBE02_APP_DIR     "${CMAKE_SOURCE_DIR}/Samples/HMOS_App/02.Cube")
+set(CUBE02_APP_DIR     "${CMAKE_SOURCE_DIR}/Samples/02.Cube")
 set(TRIANGLE01_APP_DIR "${CMAKE_SOURCE_DIR}/Samples/01.Triangle")
 set(SPONZA03_APP_DIR   "${CMAKE_SOURCE_DIR}/Samples/03.Sponza-Forward")
 set(SPONZA04_APP_DIR   "${CMAKE_SOURCE_DIR}/Samples/04.Sponza-Deferred")

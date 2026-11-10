@@ -14,7 +14,6 @@ else()
     add_subdirectory(07.Nanite)
     add_subdirectory(Editor)
     # 鸿蒙共享样例子集 + 桌面验证目标（0X.*.Subset）
-    add_subdirectory(HMOS_App)
 endif()
 # D3D12 Agility SDK：每个可执行文件导出 D3D12SDKVersion / D3D12SDKPath 并带上运行时 DLL
 # （见 cmake/AgilitySDK.cmake；未下载到 SDK 时为空操作，D3D12 退回系统运行时）

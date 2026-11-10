@@ -85,6 +85,7 @@ struct App::Impl {
     samples::CameraInput           camInput;
 
     bool ready = false;
+    f32  frameDt = 0.016f;   // 本帧 deltaTime（面板 FPS 用）
 
     void BuildScene() {
         sceneGraph = std::make_unique<SceneGraph>(world);
@@ -191,12 +192,25 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
 }
 
 bool App::Frame(f32 deltaTime, const InputState& input) {
+    if (!BeginFrame(deltaTime, input)) return false;
+    if (!RecordScene()) return false;
+    RecordUIAndPresent();
+    return true;
+}
+
+bool App::BeginFrame(f32 deltaTime, const InputState& input) {
     Impl& g = *m_Impl;
-    if (!g.ready) return false;
-
-    // 相机输入（桌面：右键拖动 + WASD；鸿蒙：单指拖动映射为右键拖动）
+    if (!g.ready || !g.presenter) return false;
+    g.frameDt = deltaTime;
     g.camInput.Update(input, g.camera, deltaTime);
+    return true;
+}
 
+bool App::RecordScene() {
+    Impl& g = *m_Impl;
+    if (!g.ready || !g.presenter) return false;
+
+    // Acquire 失败时返回 false，宿主会跳过本帧的第二条命令（UI + Present）
     if (!g.presenter->BeginFrame()) return false;
     g.presenter->BeginRecording(g.device.get(), g.cmdList.get());
 
@@ -208,9 +222,9 @@ bool App::Frame(f32 deltaTime, const InputState& input) {
         g.pipeline->GetCurrentDescSet());
 
     render::SubsystemContext ctx;
-    ctx.world        = &g.world;
-    ctx.sceneGraph   = g.sceneGraph.get();
-    ctx.camera       = &g.camera.GetCamera();
+    ctx.world          = &g.world;
+    ctx.sceneGraph     = g.sceneGraph.get();
+    ctx.camera         = &g.camera.GetCamera();
     ctx.viewportWidth  = g.swapchain->GetWidth();
     ctx.viewportHeight = g.swapchain->GetHeight();
 
@@ -224,23 +238,25 @@ bool App::Frame(f32 deltaTime, const InputState& input) {
 
     g.pipeline->Render(g.cmdList.get(), g.pipeline->GetFrameSnapshot(), g.camera.GetCamera());
 
-    // BackBuffer 合成（ToneMap + ImGui）
+    // BackBuffer 合成：ToneMap + ImGui（ImGui 的录制在 RecordUIAndPresent 里）
     g.cmdList->BeginDebugLabel("ToneMap + ImGui (BackBuffer)");
     g.cmdList->BeginRenderPass(1, g.swapchain->GetColorFormat());
     g.pipeline->RenderToneMapPass(g.cmdList.get());
+    return true;
+}
 
+void App::RecordUIAndPresent() {
+    Impl& g = *m_Impl;
     if (g.imgui && g.imgui->IsInitialized()) {
         g.imgui->BeginFrame();
         ImGui::SetNextWindowPos({ 10, 10 }, ImGuiCond_Once);
-        // 【高 DPI】自动尺寸不含标题栏宽度，手机上标题会被裁掉；按字号比例给初始尺寸
-        //（基础字号 16，鸿蒙上被 uiScale 放大到 ~52，比例即屏幕密度）。
         {
             const float ui = ImGui::GetFontSize() / 16.0f;
             ImGui::SetNextWindowSize(ImVec2(300.0f * ui, 140.0f * ui), ImGuiCond_Once);
         }
         ImGui::SetNextWindowBgAlpha(0.5f);
         ImGui::Begin("02.Cube (App)");
-        ImGui::Text("FPS: %.0f", 1.0f / (deltaTime > 0.0f ? deltaTime : 0.016f));
+        ImGui::Text("FPS: %.0f", 1.0f / (g.frameDt > 0.0f ? g.frameDt : 0.016f));
         ImGui::Text("后端: %d", static_cast<int>(g.backend));
         ImGui::End();
         g.imgui->EndFrame(g.cmdList.get());
@@ -249,7 +265,6 @@ bool App::Frame(f32 deltaTime, const InputState& input) {
     g.cmdList->EndRenderPass();
     g.presenter->EndRecording();
     g.presenter->EndFrame(true);
-    return true;
 }
 
 void App::Resize(u32 width, u32 height) {
@@ -291,3 +306,22 @@ void App::Shutdown() {
 bool App::IsReady() const { return m_Impl->ready; }
 
 } // namespace he::samples::cube02
+
+
+// ============================================================
+// 桌面入口
+//
+// 桌面 target 定义 HE_DESKTOP_ENTRY ⇒ 这里产出 main；鸿蒙 entry 编同一份 .cpp
+// 但没有该宏，入口在 Platforms/OHOS/entry/src/main/cpp/AppMain.cpp。
+// ============================================================
+#if defined(HE_DESKTOP_ENTRY)
+#include "DesktopHost.h"
+
+int main() {
+    he::samples::desktop::HostConfig cfg;
+    cfg.title  = "HugEngine — 02.Cube";
+    cfg.width  = 960;
+    cfg.height = 540;
+    return he::samples::desktop::RunApp<he::samples::cube02::App>(cfg);
+}
+#endif // HE_DESKTOP_ENTRY

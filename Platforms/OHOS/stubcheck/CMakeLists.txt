@@ -37,7 +37,7 @@ target_include_directories(OhosStubCheck PRIVATE
     ${CMAKE_SOURCE_DIR}/Engine/Editor
     # 可移植 App 头：Entry 的 AppMain.cpp 同时引用四个样例
     ${CMAKE_SOURCE_DIR}/Samples/01.Triangle
-    ${CMAKE_SOURCE_DIR}/Samples/HMOS_App/02.Cube
+    ${CMAKE_SOURCE_DIR}/Samples/02.Cube
     ${CMAKE_SOURCE_DIR}/Samples/03.Sponza-Forward
     ${CMAKE_SOURCE_DIR}/Samples/04.Sponza-Deferred
     ${CMAKE_SOURCE_DIR}/Samples/Common
