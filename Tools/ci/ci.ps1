@@ -8,6 +8,7 @@
         pwsh Tools/ci/ci.ps1                  # Debug，全流程
         pwsh Tools/ci/ci.ps1 -Config Release  # Release（含被 Debug 断言跳过的用例）
         pwsh Tools/ci/ci.ps1 -SkipAudit       # 只构建 + 单测
+        pwsh Tools/ci/ci.ps1 -SkipStubcheck   # 跳过鸿蒙分支的编译自检
 
     任一步失败即非 0 退出。
 
@@ -27,7 +28,8 @@ param(
     [switch]$SkipConfigure,
     [switch]$SkipBuild,
     [switch]$SkipAudit,
-    [switch]$SkipTests
+    [switch]$SkipTests,
+    [switch]$SkipStubcheck
 )
 
 $ErrorActionPreference = "Stop"
@@ -56,6 +58,14 @@ try {
     if (-not $SkipBuild) {
         Invoke-Step "构建（$Config）" {
             cmake --build $BuildDir --config $Config -- /m
+        }
+    }
+
+    # 鸿蒙分支的编译自检：用 stub 头把 Platforms/OHOS 下的 .cpp 在 Windows 上编一遍。
+    # 真正的 HAP 构建仍走 DevEco + NDK；这一步只防"改坏了鸿蒙侧代码而不自知"。
+    if (-not $SkipStubcheck -and $env:OS -eq "Windows_NT") {
+        Invoke-Step "鸿蒙编译自检（OhosStubCheck）" {
+            cmake --build $BuildDir --config $Config --target OhosStubCheck
         }
     }
 

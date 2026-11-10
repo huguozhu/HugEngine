@@ -52,6 +52,12 @@ jobs:
       - name: Build
         run: cmake --build Build --config ${{ matrix.config }} -- /m
 
+      # 鸿蒙分支的编译自检：stub 头 + HE_PLATFORM_OHOS_STUBCHECK，把 Platforms/OHOS 与
+      # Engine/Core/Platform/WindowOHOS.cpp 等鸿蒙专用代码在 Windows 上编一遍。
+      - name: OHOS 编译自检（stub 头）
+        if: matrix.config == 'Debug'
+        run: cmake --build Build --config Debug --target OhosStubCheck
+
       # 契约对账：146 个入口 × 3 后端（Vulkan / DX12 / DX11）各跑一次 slangc 反射，
       # 与 ShaderTypes/GPUBindings.slang 的 kGPUBinding_* 以及 RHI/Types.h 的镜像比对。
       # 只在 Debug 下跑一次（与配置无关，省一半时间）。
