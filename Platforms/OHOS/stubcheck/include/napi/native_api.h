@@ -59,3 +59,5 @@ extern "C" napi_status napi_get_value_string_utf8(napi_env env, napi_value value
 extern "C" napi_status napi_get_value_uint32(napi_env env, napi_value value, uint32_t* result);
 extern "C" napi_status napi_get_value_double(napi_env env, napi_value value, double* result);
 extern "C" napi_status napi_get_undefined(napi_env env, napi_value* result);
+// 把 C 的 bool 包成 JS boolean：NativeEntry 的 init 返回值与 start/touch 的 ok 都用它
+extern "C" napi_status napi_get_boolean(napi_env env, bool value, napi_value* result);

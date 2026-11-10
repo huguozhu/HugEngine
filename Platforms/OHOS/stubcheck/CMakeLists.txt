@@ -35,7 +35,12 @@ target_include_directories(OhosStubCheck PRIVATE
     ${CMAKE_SOURCE_DIR}/Engine/Asset
     ${CMAKE_SOURCE_DIR}/Engine/Render
     ${CMAKE_SOURCE_DIR}/Engine/Editor
-    ${CMAKE_SOURCE_DIR}/Samples/02.Cube/App
+    # 可移植 App 头：Entry 的 AppMain.cpp 同时引用四个样例
+    ${CMAKE_SOURCE_DIR}/Samples/HMOS_App/01.Triangle
+    ${CMAKE_SOURCE_DIR}/Samples/HMOS_App/02.Cube
+    ${CMAKE_SOURCE_DIR}/Samples/HMOS_App/03.Sponza-Forward
+    ${CMAKE_SOURCE_DIR}/Samples/HMOS_App/04.Sponza-Deferred
+    ${CMAKE_SOURCE_DIR}/Samples/HMOS_App/Common
     ${CMAKE_SOURCE_DIR}/Samples/Common
 )
 
