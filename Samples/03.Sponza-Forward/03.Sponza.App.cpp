@@ -350,3 +350,22 @@ void App::Shutdown() {
 }
 
 } // namespace he::samples::sponza03
+
+
+// ============================================================
+// 桌面入口
+//
+// 桌面 target 定义 HE_DESKTOP_ENTRY ⇒ 这里产出 main；鸿蒙 entry 编同一份 .cpp
+// 但没有该宏，入口在 Platforms/OHOS/entry/src/main/cpp/AppMain.cpp。
+// ============================================================
+#if defined(HE_DESKTOP_ENTRY)
+#include "DesktopHost.h"
+
+int main() {
+    he::samples::desktop::HostConfig cfg;
+    cfg.title  = "HugEngine — 03.Sponza-Forward";
+    cfg.width  = 960;
+    cfg.height = 540;
+    return he::samples::desktop::RunApp<he::samples::sponza03::App>(cfg);
+}
+#endif // HE_DESKTOP_ENTRY

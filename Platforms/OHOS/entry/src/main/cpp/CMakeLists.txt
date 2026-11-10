@@ -14,7 +14,7 @@
 
 set(CUBE02_APP_DIR     "${CMAKE_SOURCE_DIR}/Samples/HMOS_App/02.Cube")
 set(TRIANGLE01_APP_DIR "${CMAKE_SOURCE_DIR}/Samples/01.Triangle")
-set(SPONZA03_APP_DIR   "${CMAKE_SOURCE_DIR}/Samples/HMOS_App/03.Sponza-Forward")
+set(SPONZA03_APP_DIR   "${CMAKE_SOURCE_DIR}/Samples/03.Sponza-Forward")
 set(SPONZA04_APP_DIR   "${CMAKE_SOURCE_DIR}/Samples/HMOS_App/04.Sponza-Deferred")
 
 add_library(entry SHARED
@@ -31,8 +31,8 @@ add_library(entry SHARED
     ${SPONZA03_APP_DIR}/03.Sponza.App.h
     ${SPONZA04_APP_DIR}/04.Deferred.App.cpp
     ${SPONZA04_APP_DIR}/04.Deferred.App.h
-    ${CMAKE_SOURCE_DIR}/Samples/HMOS_App/Common/SkyboxLoader.cpp
-    ${CMAKE_SOURCE_DIR}/Samples/HMOS_App/Common/SkyboxLoader.h
+    ${CMAKE_SOURCE_DIR}/Samples/Common/SkyboxLoader.cpp
+    ${CMAKE_SOURCE_DIR}/Samples/Common/SkyboxLoader.h
 )
 
 target_include_directories(entry PRIVATE
@@ -41,7 +41,6 @@ target_include_directories(entry PRIVATE
     ${TRIANGLE01_APP_DIR}
     ${SPONZA03_APP_DIR}
     ${SPONZA04_APP_DIR}
-    ${CMAKE_SOURCE_DIR}/Samples/HMOS_App/Common
     ${CMAKE_SOURCE_DIR}/Samples/Common
 )
 

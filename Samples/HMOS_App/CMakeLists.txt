@@ -35,8 +35,8 @@ add_executable(02.Cube.Subset
     02.Cube/Main_Subset.cpp
     02.Cube/02.Cube.App.cpp
     02.Cube/02.Cube.App.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/Common/SkyboxLoader.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/Common/SkyboxLoader.h
+    ${CMAKE_SOURCE_DIR}/Samples/Common/SkyboxLoader.cpp
+    ${CMAKE_SOURCE_DIR}/Samples/Common/SkyboxLoader.h
 )
 target_link_libraries(02.Cube.Subset PRIVATE
     ${HMOS_APP_COMMON_LIBS}
@@ -46,41 +46,16 @@ target_link_libraries(02.Cube.Subset PRIVATE
 )
 target_include_directories(02.Cube.Subset PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/02.Cube
-    ${CMAKE_CURRENT_SOURCE_DIR}/Common
     ${CMAKE_SOURCE_DIR}/Samples/Common)
 add_dependencies(02.Cube.Subset CompileShaders)
-
-# ---- 03.Sponza-Forward ----
-add_executable(03.Sponza.Subset
-    03.Sponza-Forward/Main_Subset.cpp
-    03.Sponza-Forward/03.Sponza.App.cpp
-    03.Sponza-Forward/03.Sponza.App.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/Common/SkyboxLoader.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/Common/SkyboxLoader.h
-)
-target_link_libraries(03.Sponza.Subset PRIVATE
-    ${HMOS_APP_COMMON_LIBS}
-    HugEngineScene
-    HugEngineRender
-    HugEngineAsset
-    stb
-)
-target_include_directories(03.Sponza.Subset PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/03.Sponza-Forward
-    ${CMAKE_CURRENT_SOURCE_DIR}/Common
-    ${CMAKE_SOURCE_DIR}/Samples/Common)
-target_compile_definitions(03.Sponza.Subset PRIVATE
-    HUGE_CONTENT_DIR="${CMAKE_SOURCE_DIR}/Content/"
-)
-add_dependencies(03.Sponza.Subset CompileShaders)
 
 # ---- 04.Sponza-Deferred ----
 add_executable(04.Deferred.Subset
     04.Sponza-Deferred/Main_Subset.cpp
     04.Sponza-Deferred/04.Deferred.App.cpp
     04.Sponza-Deferred/04.Deferred.App.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/Common/SkyboxLoader.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/Common/SkyboxLoader.h
+    ${CMAKE_SOURCE_DIR}/Samples/Common/SkyboxLoader.cpp
+    ${CMAKE_SOURCE_DIR}/Samples/Common/SkyboxLoader.h
 )
 target_link_libraries(04.Deferred.Subset PRIVATE
     ${HMOS_APP_COMMON_LIBS}
@@ -91,7 +66,6 @@ target_link_libraries(04.Deferred.Subset PRIVATE
 )
 target_include_directories(04.Deferred.Subset PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/04.Sponza-Deferred
-    ${CMAKE_CURRENT_SOURCE_DIR}/Common
     ${CMAKE_SOURCE_DIR}/Samples/Common)
 target_compile_definitions(04.Deferred.Subset PRIVATE
     HUGE_CONTENT_DIR="${CMAKE_SOURCE_DIR}/Content/"
