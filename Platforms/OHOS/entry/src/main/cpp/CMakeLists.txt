@@ -13,7 +13,7 @@
 # ============================================================
 
 set(CUBE02_APP_DIR     "${CMAKE_SOURCE_DIR}/Samples/HMOS_App/02.Cube")
-set(TRIANGLE01_APP_DIR "${CMAKE_SOURCE_DIR}/Samples/HMOS_App/01.Triangle")
+set(TRIANGLE01_APP_DIR "${CMAKE_SOURCE_DIR}/Samples/01.Triangle")
 set(SPONZA03_APP_DIR   "${CMAKE_SOURCE_DIR}/Samples/HMOS_App/03.Sponza-Forward")
 set(SPONZA04_APP_DIR   "${CMAKE_SOURCE_DIR}/Samples/HMOS_App/04.Sponza-Deferred")
 

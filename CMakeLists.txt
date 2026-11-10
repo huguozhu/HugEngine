@@ -133,6 +133,11 @@ endif()
 
 add_subdirectory(Engine)
 
+# 桌面样例宿主：样例的 main 只做配置，主循环在 Platforms/Win32
+if(WIN32 AND HUGENGINE_BUILD_SAMPLES)
+    add_subdirectory(Platforms/Win32)
+endif()
+
 # ============================================================
 # Tests（doctest 单元测试，默认关闭）
 # ============================================================

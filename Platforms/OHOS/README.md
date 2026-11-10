@@ -212,8 +212,10 @@ cmake --build build --config Debug --target OhosStubCheck   # 鸿蒙分支语法
 对比前后截图可见视角变化；日志 `[OHOS] 首次收到触摸: id=0 phase=0 (0.238, 0.589)`。
 ### 8.4 01.Triangle 迁移与两个真机专属坑（2026-11-09 第三轮）
 
-- 把 `01.Triangle` 的渲染部分抽成 `Samples/01.Triangle/App/01.Triangle.App.{h,cpp}`
-  （与 `02.Cube.App` 同接口），桌面 `01.Triangle` 与鸿蒙入口共用；新增 Windows 验证目标 `01.Triangle.Subset`。
+- 把 `01.Triangle` 的渲染部分抽成 `Samples/01.Triangle/01.Triangle.App.{h,cpp}`
+  （与 `02.Cube.App` 同接口），桌面 `01.Triangle` 与鸿蒙入口共用。
+- 2026-11-10 调整：桌面入口改成 `Main.Win32.cpp`（~15 行配置）+ 通用宿主
+  `Platforms/Win32/DesktopHost.cpp`；`01.Triangle.Subset` 目标删除（`01.Triangle` 本身就用这份 App）。
 - 页面顶部加了两个按钮切换样例：`native.start(1|2)` → 停旧实例、起新实例（XComponent 窗口不变）。
 
 | 现象 | 根因 | 修法 |
@@ -224,3 +226,17 @@ cmake --build build --config Debug --target OhosStubCheck   # 鸿蒙分支语法
 
 真机结果：`01.Triangle` 红色三角形 + 旋转 + 面板（FPS ~118），`02.Cube` 金色球 + 红色立方体 + 天空盒（FPS ~21），
 顶部按钮可来回切换。
+### 8.6 样例平台代码收口（2026-11-10，以 01 为试点）
+
+样例层只保留「场景与渲染」，平台相关的生命周期进独立模块：
+
+| 层 | 位置 | 职责 |
+|---|---|---|
+| 样例（跨平台） | `Samples/<样例>/<样例>.App.{h,cpp}` | 场景、管线、面板，实现 `Samples/Common/App/IApp.h` |
+| 桌面宿主 | `Platforms/Win32/DesktopHost.{h,cpp}` | Engine/窗口、主循环、输入、后端热切换、退出 |
+| 鸿蒙宿主 | `Platforms/OHOS/entry/src/main/cpp/` | XComponent + napi + 生命周期（代码未变） |
+
+`01.Triangle` 已按此迁移：桌面入口 `Samples/01.Triangle/Main.Win32.cpp` 只做配置并调用
+`he::samples::desktop::RunApp<App>(cfg)`；鸿蒙入口的 `TRIANGLE01_APP_DIR` 指向
+`Samples/01.Triangle`，编的是同一份 App。02-04 仍走 `Samples/HMOS_App` + `0X.*.Subset` 的旧布局，
+后续按同一模式迁移。

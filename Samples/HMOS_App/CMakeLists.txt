@@ -2,15 +2,20 @@
 #  Samples/HMOS_App —— 鸿蒙侧共享的「可移植样例 App」目录
 #
 #  每个子目录里既有 App（与鸿蒙入口共用），也有 Main_Subset.cpp（桌面验证入口）：
-#      01.Triangle        三角形 + 旋转 + ImGui
 #      02.Cube            立方体 + 球体 + 天空盒 + 触摸相机
 #      03.Sponza-Forward  Sponza + 前向管线 + 天空盒
 #      04.Sponza-Deferred Sponza + 延迟管线（GBuffer → Lighting → ToneMap）
 #
 #  为什么单独放一个目录：
-#    · 桌面完整样例（Samples/01.Triangle 等）保留各自的全功能 main；
+#    · 桌面完整样例（Samples/02.Cube 等）保留各自的全功能 main；
 #    · 鸿蒙只跑子集，代码集中在这里，入口（Platforms/OHOS）与桌面回归目标共用同一份；
 #    · 桌面构建时这里额外产出 0X.*.Subset 目标，用于验证"鸿蒙将要跑的那份代码"。
+#
+#  01.Triangle 已经迁到新布局（2026-11-10）：
+#    · 场景/渲染：Samples/01.Triangle/01.Triangle.App.{h,cpp}（实现 IApp）
+#    · 桌面入口：Samples/01.Triangle/Main.Win32.cpp + Platforms/Win32/DesktopHost
+#    · 鸿蒙入口：Platforms/OHOS/entry 直接编同一份 App
+#  其余样例后续按同一模式迁移。
 # ============================================================
 
 # 桌面才会产出验证目标：鸿蒙构建里这些 App 由 Platforms/OHOS 的 entry 直接编译
@@ -24,18 +29,6 @@ set(HMOS_APP_COMMON_LIBS
     HugEngineShader
     HugEngineEditor
 )
-
-# ---- 01.Triangle ----
-add_executable(01.Triangle.Subset
-    01.Triangle/Main_Subset.cpp
-    01.Triangle/01.Triangle.App.cpp
-    01.Triangle/01.Triangle.App.h
-)
-target_link_libraries(01.Triangle.Subset PRIVATE ${HMOS_APP_COMMON_LIBS})
-target_include_directories(01.Triangle.Subset PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/01.Triangle
-    ${CMAKE_SOURCE_DIR}/Samples/Common)
-add_dependencies(01.Triangle.Subset CompileShaders)
 
 # ---- 02.Cube ----
 add_executable(02.Cube.Subset

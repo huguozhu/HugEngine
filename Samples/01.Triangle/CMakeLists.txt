@@ -1,18 +1,21 @@
-# 01.Triangle —— 使用 HugEngine RHI 渲染三角形
+# ============================================================
+# 01.Triangle —— 场景与渲染在 01.Triangle.App.cpp（与鸿蒙共用同一份）
 #
-# 桌面入口只负责引擎循环与后端热切换；渲染代码与鸿蒙共用
-# （Samples/HMOS_App/01.Triangle/01.Triangle.App.cpp）。
-set(HMOS_APP_DIR "${CMAKE_SOURCE_DIR}/Samples/HMOS_App/01.Triangle")
+# 桌面入口 Main.Win32.cpp 只做配置 + 调用 Platforms/Win32 的 DesktopHost；
+# 主循环、输入、后端热切换都在宿主里。鸿蒙侧由 Platforms/OHOS/entry 编同一个 App。
+# ============================================================
+if(HUGENGINE_PLATFORM_OHOS)
+    return()
+endif()
 
 add_executable(01.Triangle
-    01.Triangle.cpp
-    ${HMOS_APP_DIR}/01.Triangle.App.cpp
-    ${HMOS_APP_DIR}/01.Triangle.App.h
+    Main.Win32.cpp
+    01.Triangle.App.cpp
+    01.Triangle.App.h
 )
 
-target_include_directories(01.Triangle PRIVATE ${HMOS_APP_DIR})
-
 target_link_libraries(01.Triangle PRIVATE
+    HugEngineDesktopHost
     HugEngineCore
     HugEngineRHI
     HugEngineShader
