@@ -556,3 +556,31 @@ void App::Shutdown() {
 }
 
 } // namespace he::samples::triangle01
+
+
+// ============================================================
+// 桌面入口
+//
+// 只有桌面 target 定义 HE_DESKTOP_ENTRY 时才编这一段：
+//   · 桌面 exe（01.Triangle）→ CMake 定义 HE_DESKTOP_ENTRY=1，这里产出 main；
+//   · 鸿蒙 entry（libentry.so）→ 同一份 App.cpp，但没有这个宏 ⇒ 不含 main，
+//     入口在 Platforms/OHOS/entry/src/main/cpp/AppMain.cpp。
+// 这样样例目录里只剩 App 一个 .cpp，不需要单独的 Main.Win32.cpp。
+// ============================================================
+#if defined(HE_DESKTOP_ENTRY)
+#include "DesktopHost.h"
+
+int main() {
+    he::samples::desktop::HostConfig cfg;
+    cfg.title  = "HugEngine — 01.Triangle";
+    cfg.width  = 960;
+    cfg.height = 540;
+
+    // 01 是唯一支持面板/环境变量热切换后端的样例
+    cfg.backendSwitch = true;
+    cfg.switchToEnv   = "HE_TRIANGLE_SWITCH_TO";
+    cfg.switchBackEnv = "HE_TRIANGLE_SWITCH_BACK";
+
+    return he::samples::desktop::RunApp<he::samples::triangle01::App>(cfg);
+}
+#endif // HE_DESKTOP_ENTRY

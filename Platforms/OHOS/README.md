@@ -236,7 +236,11 @@ cmake --build build --config Debug --target OhosStubCheck   # 鸿蒙分支语法
 | 桌面宿主 | `Platforms/Win32/DesktopHost.{h,cpp}` | Engine/窗口、主循环、输入、后端热切换、退出 |
 | 鸿蒙宿主 | `Platforms/OHOS/entry/src/main/cpp/` | XComponent + napi + 生命周期（代码未变） |
 
-`01.Triangle` 已按此迁移：桌面入口 `Samples/01.Triangle/Main.Win32.cpp` 只做配置并调用
-`he::samples::desktop::RunApp<App>(cfg)`；鸿蒙入口的 `TRIANGLE01_APP_DIR` 指向
-`Samples/01.Triangle`，编的是同一份 App。02-04 仍走 `Samples/HMOS_App` + `0X.*.Subset` 的旧布局，
-后续按同一模式迁移。
+`01.Triangle` 已按此迁移：桌面入口就在 `Samples/01.Triangle/01.Triangle.App.cpp` 末尾的
+`HE_DESKTOP_ENTRY` 段里（只做配置 + `RunApp<App>(cfg)`）——
+
+- 桌面 target 定义 `HE_DESKTOP_ENTRY=1` ⇒ 该 .cpp 编出 `main`；
+- 鸿蒙 entry 不定义该宏 ⇒ 同一个 .cpp 编进 `libentry.so` 但不含 `main`，入口仍是 `AppMain.cpp`。
+
+所以样例目录里只有一个 `.cpp`（App 与桌面入口同文件），没有单独的 `Main.Win32.cpp`。
+02-04 仍走 `Samples/HMOS_App` + `0X.*.Subset` 的旧布局，后续按同一模式迁移。
