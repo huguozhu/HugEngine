@@ -16,6 +16,7 @@
 #include "RHI/FramePresenter.h"
 #include "Pipeline/ForwardPipeline.h"
 #include "Pipeline/CameraController.h"
+#include "Pipeline/RTPass.h"
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
 #include "Scene/LightComponent.h"
@@ -25,7 +26,17 @@
 #include "Editor/ImGuiIntegration.h"
 #include "imgui.h"
 
-#include "CameraInput.h"
+#include "CameraInput.h"     // Samples/Common：消费 InputState 的相机控制
+
+// RT 路径的着色器字节码（CompileShaders / CompileShadersDxil 生成）
+#include "RT_Sponza.rgen.spv.h"
+#include "RT_Sponza.rgen.dxil.h"
+#include "RT_Sponza.rmiss.spv.h"
+#include "RT_Sponza.rmiss.dxil.h"
+#include "RT_Sponza.rchit.spv.h"
+#include "RT_Sponza.rchit.dxil.h"
+#include "RT_Bindless.rcall.spv.h"
+#include "RT_Bindless.rcall.dxil.h"
 #include "SkyboxLoader.h"  // HMOS_App/Common：HDR 全景 → 6 面 Cubemap
 
 // STB_IMAGE_STATIC：让实现留在本 TU 内部，避免与 02.App 等其它 TU 的实现重复定义
@@ -34,11 +45,50 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
 namespace he::samples::sponza03 {
+
+namespace {
+
+/// 配置文件：相机与两盏方向光（key=value；路径走 vfs 的可写目录）
+String ConfigPath() {
+    return vfs::ResolveWritable("Config/03_Sponza-Forward.cfg");
+}
+
+std::unordered_map<String, String> LoadConfigFile(const String& path) {
+    std::unordered_map<String, String> map;
+    std::ifstream f(path);
+    if (!f.is_open()) return map;
+    String line;
+    while (std::getline(f, line)) {
+        const auto eq = line.find('=');
+        if (eq == String::npos) continue;
+        String key = line.substr(0, eq);
+        String val = line.substr(eq + 1);
+        if (!val.empty() && val.back() == '\r') val.pop_back();
+        map[key] = val;
+    }
+    return map;
+}
+
+void SaveConfigFile(const String& path, const std::unordered_map<String, String>& map) {
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
+    std::ofstream f(path);
+    if (!f.is_open()) return;
+    for (const auto& [k, v] : map) f << k << "=" << v << "\n";
+}
+
+f32 GetFloat(const std::unordered_map<String, String>& m, const String& key, f32 def) {
+    const auto it = m.find(key);
+    return it != m.end() ? std::stof(it->second) : def;
+}
+
+} // namespace
 
 struct App::Impl {
     World           world;
@@ -61,6 +111,19 @@ struct App::Impl {
     rhi::Backend backend = rhi::Backend::Vulkan;
     bool         ready   = false;
     f32          frameDt = 0.016f;   // 本帧 deltaTime（面板 FPS 用）
+
+    // ---- RT 路径 ----
+    bool    rtSupported = false;
+    int     renderMode  = 0;          // 0=光栅化 1=RT
+    int     rtSampleCount = 1;        // RT 每像素采样数 1..16
+    u64     frameIndex    = 0;
+    render::RTPass rtPass;
+    rhi::DescriptorSetLayoutHandle rtLayout0 = rhi::kInvalidLayout;
+    rhi::DescriptorSetLayoutHandle rtLayout1 = rhi::kInvalidLayout;
+
+    // ---- 配置保存要用的句柄 ----
+    Entity mainLightEntity{};
+    Entity fillLightEntity{};
 
     /// 天空盒：HDR 全景图 → 6 面立方体贴图（与桌面 03 同一套算法）
     
@@ -155,6 +218,7 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
     // ---- 灯光 ----
     {
         Entity e = g.world.CreateEntity("DirectionalLight");
+        g.mainLightEntity = e;
         g.world.AddComponent<TransformComponent>(e);
         auto* dl = g.world.AddComponent<DirectionalLight>(e);
         dl->direction      = float3(0.4f, -1.0f, 0.6f);
@@ -166,6 +230,7 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
     }
     {
         Entity e = g.world.CreateEntity("FillLight");
+        g.fillLightEntity = e;
         g.world.AddComponent<TransformComponent>(e);
         auto* dl = g.world.AddComponent<DirectionalLight>(e);
         dl->direction = float3(-0.3f, -0.4f, -0.5f);
@@ -218,6 +283,56 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
     g.pipeline->SetSwapChain(g.swapchain.get());
     g.pipeline->OnResize(g.swapchain->GetWidth(), g.swapchain->GetHeight());
 
+    // ---- RT 路径初始化（仅设备支持时）----
+    g.rtSupported = g.device->GetCaps().supportsRayTracing;
+    if (g.rtSupported) {
+        // set=0：TLAS + BackBuffer + Callable 用的 bindless 纹理/采样器
+        rhi::DescriptorSetLayoutDesc rtSet0Desc;
+        rtSet0Desc.bindings = {
+            { 0, rhi::DescriptorType::AccelerationStructure, 1,    0x100 },
+            { 1, rhi::DescriptorType::StorageImage,          1,    0x100 },
+            { 5, rhi::DescriptorType::SampledImage,          4096, 0x2000, true },
+            { 6, rhi::DescriptorType::Sampler,               4096, 0x2000, true },
+        };
+        g.rtLayout0 = g.device->CreateDescriptorSetLayout(rtSet0Desc);
+
+        // set=1：材质纹理 + 光源 UB（ClosestHit 使用）
+        rhi::DescriptorSetLayoutDesc rtSet1Desc;
+        rtSet1Desc.bindings = {
+            { 0, rhi::DescriptorType::SampledImage,  1, rhi::kStageMaskClosestHit },
+            { 1, rhi::DescriptorType::UniformBuffer, 1, rhi::kStageMaskClosestHit },
+        };
+        g.rtLayout1 = g.device->CreateDescriptorSetLayout(rtSet1Desc);
+
+        rhi::ShaderBytecode rgen  = he::rhi::MakeShaderBytecode(rhi::ShaderStage::RayGen,     k_RT_Sponza_rgen_spv,  k_RT_Sponza_rgen_dxil,  "main");
+        rhi::ShaderBytecode rmiss = he::rhi::MakeShaderBytecode(rhi::ShaderStage::Miss,       k_RT_Sponza_rmiss_spv, k_RT_Sponza_rmiss_dxil, "main");
+        rhi::ShaderBytecode rchit = he::rhi::MakeShaderBytecode(rhi::ShaderStage::ClosestHit, k_RT_Sponza_rchit_spv, k_RT_Sponza_rchit_dxil, "main");
+        rhi::ShaderBytecode rcall = he::rhi::MakeShaderBytecode(rhi::ShaderStage::Callable,   k_RT_Bindless_rcall_spv, k_RT_Bindless_rcall_dxil, "main");
+
+        std::vector<rhi::RTShaderGroup> rtGroups = {
+            { rhi::RTShaderGroupType::RayGen,   0, ~0u, ~0u, ~0u, "RayGen" },
+            { rhi::RTShaderGroupType::Miss,     1, ~0u, ~0u, ~0u, "Miss"   },
+            { rhi::RTShaderGroupType::Hit,     ~0u, 2,   ~0u, ~0u, "Hit"    },
+            { rhi::RTShaderGroupType::Callable, 3, ~0u, ~0u, ~0u, "BindlessCall" },
+        };
+
+        rhi::PushConstantRange pcRange;
+        pcRange.stageMask = 0x100;
+        pcRange.offset    = 0;
+        pcRange.size      = 96;   // float4x4(64) + float4(16) + uint4(16)
+
+        std::vector<rhi::DescriptorSetLayoutHandle> rtLayouts = { g.rtLayout0, g.rtLayout1 };
+        g.rtPass.Initialize(g.device.get(), { rgen, rmiss, rchit, rcall }, rtGroups, rtLayouts, pcRange);
+        g.rtPass.CreateMaterialTexture(g.device.get(), 256, g.pipeline->GetFrameSnapshot());
+        g.rtPass.CreateLightBuffer(g.device.get(), 8);
+        g.device->GetBindlessHeap()->RegisterDescriptorSet(
+            g.rtPass.GetDescriptorSet0(), rhi::kBindingBindlessTextures,
+            rhi::kBindingBindlessSamplers, 0);
+        HE_CORE_INFO("03.App: RT 路径初始化完成（{}）", g.rtPass.IsValid() ? "就绪" : "不可用");
+    } else {
+        HE_CORE_WARN("03.App: 设备不支持 Ray Tracing，RT 模式不可用");
+    }
+
     g.cmdList = g.device->CreateCommandList();
     g.cmdList->SetSwapChain(g.swapchain.get());
     g.cmdList->SetPipeline(g.pipeline->GetPipelineState());
@@ -232,6 +347,33 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
     g.camera.SetOrientationFromForward(float3(0.0f, 0.0f, 1.0f));
     g.camera.GetCamera().nearPlane = 0.1f;
     g.camera.GetCamera().farPlane  = 2000.0f;
+
+    // ---- 配置：相机与灯光（没有配置文件就用上面的默认值）----
+    const String cfgPath = ConfigPath();
+    const auto cfg = LoadConfigFile(cfgPath);
+    if (!cfg.empty()) {
+        HE_CORE_INFO("03.App: 加载配置文件 {}", cfgPath);
+        g.camera.SetPosition(float3(GetFloat(cfg, "cam_pos_x", 0.0f),
+                                    GetFloat(cfg, "cam_pos_y", 2.5f),
+                                    GetFloat(cfg, "cam_pos_z", -10.0f)));
+        g.camera.SetOrientation(GetFloat(cfg, "cam_yaw", 0.0f), GetFloat(cfg, "cam_pitch", 0.0f));
+        g.camera.GetCamera().nearPlane = GetFloat(cfg, "cam_near", 0.1f);
+        g.camera.GetCamera().farPlane  = GetFloat(cfg, "cam_far", 2000.0f);
+        g.renderMode = static_cast<int>(GetFloat(cfg, "render_mode", 0.0f));
+        g.rtSampleCount = static_cast<int>(GetFloat(cfg, "rt_spp", 1.0f));
+
+        if (auto* dl = g.world.GetComponent<DirectionalLight>(g.mainLightEntity)) {
+            dl->direction = float3(GetFloat(cfg, "light_dir_x", 0.4f),
+                                   GetFloat(cfg, "light_dir_y", -1.0f),
+                                   GetFloat(cfg, "light_dir_z", 0.6f));
+            dl->color     = float3(GetFloat(cfg, "light_color_r", 1.0f),
+                                   GetFloat(cfg, "light_color_g", 0.95f),
+                                   GetFloat(cfg, "light_color_b", 0.85f));
+            dl->intensity = GetFloat(cfg, "light_intensity", 15.0f);
+            dl->castShadow = GetFloat(cfg, "shadow_enabled", 1.0f) != 0.0f;
+            dl->shadowBias = GetFloat(cfg, "shadow_bias", 0.003f);
+        }
+    }
 
     if (opt.enableImGui) {
         g.imgui = std::make_unique<editor::ImGuiIntegration>();
@@ -292,10 +434,52 @@ bool App::RecordScene() {
 
     g.pipeline->Render(g.cmdList.get(), g.pipeline->GetFrameSnapshot(), g.camera.GetCamera());
 
-    // BackBuffer 合成：ToneMap + ImGui（ImGui 的录制在 RecordUIAndPresent 里）
-    g.cmdList->BeginDebugLabel("ToneMap + ImGui (BackBuffer)");
-    g.cmdList->BeginRenderPass(1, g.swapchain->GetColorFormat());
-    g.pipeline->RenderToneMapPass(g.cmdList.get());
+    if (g.renderMode == 1 && g.rtPass.IsValid()) {
+        // ---- RT 路径：光追直接写后缓冲，覆盖上面光栅化的输出 ----
+        g.rtPass.BuildAS(g.cmdList.get(), g.pipeline->GetFrameSnapshot(), g.pipeline->GetMeshRegistry());
+        g.rtPass.UpdateLightBuffer(g.pipeline->GetCurrentLightBuffer());
+        g.rtPass.UpdateRTDescriptorSet(g.device.get(),
+            g.swapchain->GetCurrentBackBufferView(),
+            g.pipeline->GetCurrentObjectBuffer());
+
+        struct RTPushConstant {
+            float4x4 invViewProj;
+            float4   camPosNearFar;
+            u32      sampleCount;
+            u32      frameIndex;
+            u32      _pad0;
+            u32      _pad1;
+        };
+        RTPushConstant rtPC;
+        const auto& camData = g.camera.GetCamera();
+        rtPC.invViewProj   = glm::inverse(camData.GetViewProjMatrix());
+        rtPC.camPosNearFar = float4(camData.position.x, camData.position.y,
+                                    camData.position.z, camData.nearPlane);
+        rtPC.sampleCount   = static_cast<u32>(g.rtSampleCount);
+        rtPC.frameIndex    = static_cast<u32>(g.frameIndex % 1000000);
+
+        g.cmdList->PipelineBarrier(rhi::PipelineStage::BottomOfPipe,
+                                   rhi::PipelineStage::RayTracingShader,
+                                   rhi::ResourceState::Undefined,
+                                   rhi::ResourceState::UnorderedAccess);
+        g.rtPass.BindPipeline(g.cmdList.get());
+        g.rtPass.BindDescriptorSets(g.cmdList.get());
+        g.cmdList->SetPushConstants(0, sizeof(RTPushConstant), &rtPC);
+        g.rtPass.TraceRays(g.cmdList.get(), g.swapchain->GetWidth(), g.swapchain->GetHeight());
+        g.cmdList->PipelineBarrier(rhi::PipelineStage::RayTracingShader,
+                                   rhi::PipelineStage::ColorAttachmentOutput,
+                                   rhi::ResourceState::UnorderedAccess,
+                                   rhi::ResourceState::RenderTarget);
+        g.cmdList->SetPipeline(g.pipeline->GetPipelineState());
+        g.cmdList->BeginRenderPass(1, g.swapchain->GetColorFormat(),
+                                   rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
+    } else {
+        // BackBuffer 合成：ToneMap + ImGui（ImGui 的录制在 RecordUIAndPresent 里）
+        g.cmdList->BeginDebugLabel("ToneMap + ImGui (BackBuffer)");
+        g.cmdList->BeginRenderPass(1, g.swapchain->GetColorFormat());
+        g.pipeline->RenderToneMapPass(g.cmdList.get());
+    }
+    ++g.frameIndex;
     return true;
 }
 
@@ -310,6 +494,17 @@ void App::RecordUIAndPresent() {
         ImGui::Begin("03.Sponza (App)");
         ImGui::Text("FPS: %.0f", 1.0f / (g.frameDt > 0.0f ? g.frameDt : 0.016f));
         ImGui::Text("后端: %d", static_cast<int>(g.backend));
+        ImGui::SeparatorText("渲染模式");
+        if (g.rtSupported) {
+            ImGui::RadioButton("光栅化 (ForwardPipeline)", &g.renderMode, 0);
+            ImGui::SameLine();
+            ImGui::RadioButton("Ray Tracing", &g.renderMode, 1);
+        } else {
+            ImGui::TextColored({0.5f, 0.5f, 0.5f, 1.0f}, "RT 不可用（设备不支持）");
+        }
+        if (g.renderMode == 1) {
+            ImGui::SliderInt("SPP", &g.rtSampleCount, 1, 16);
+        }
         ImGui::End();
         g.imgui->EndFrame(g.cmdList.get());
     }
@@ -340,6 +535,33 @@ void App::Shutdown() {
         return;
     }
     g.device->WaitIdle();
+
+    // ---- 保存配置（相机 + 灯光；退出前保存，崩溃时最多丢最后一次改动）----
+    {
+        std::unordered_map<String, String> out;
+        out["cam_pos_x"] = std::to_string(g.camera.GetCamera().position.x);
+        out["cam_pos_y"] = std::to_string(g.camera.GetCamera().position.y);
+        out["cam_pos_z"] = std::to_string(g.camera.GetCamera().position.z);
+        out["cam_yaw"]   = std::to_string(g.camera.GetYaw());
+        out["cam_pitch"] = std::to_string(g.camera.GetPitch());
+        out["cam_near"]  = std::to_string(g.camera.GetCamera().nearPlane);
+        out["cam_far"]   = std::to_string(g.camera.GetCamera().farPlane);
+        out["render_mode"] = std::to_string(g.renderMode);
+        out["rt_spp"]      = std::to_string(g.rtSampleCount);
+        if (auto* dl = g.world.GetComponent<DirectionalLight>(g.mainLightEntity)) {
+            out["light_dir_x"]     = std::to_string(dl->direction.x);
+            out["light_dir_y"]     = std::to_string(dl->direction.y);
+            out["light_dir_z"]     = std::to_string(dl->direction.z);
+            out["light_color_r"]   = std::to_string(dl->color.x);
+            out["light_color_g"]   = std::to_string(dl->color.y);
+            out["light_color_b"]   = std::to_string(dl->color.z);
+            out["light_intensity"] = std::to_string(dl->intensity);
+            out["shadow_enabled"]  = std::to_string(dl->castShadow ? 1 : 0);
+            out["shadow_bias"]     = std::to_string(dl->shadowBias);
+        }
+        SaveConfigFile(ConfigPath(), out);
+        HE_CORE_INFO("03.App: 配置已保存 {}", ConfigPath());
+    }
 
     if (g.imgui) { g.imgui->Shutdown(); g.imgui.reset(); }
     g.presenter.reset();
