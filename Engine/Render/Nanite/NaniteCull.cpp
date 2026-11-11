@@ -942,6 +942,17 @@ u32 NaniteCull::SetInstancesFromSnapshot(const FrameSceneSnapshot& snapshot,
 
     m_RealInstanceCount = written;
     if (written > 0u) m_TestInstanceCount = written;   // 让既有上传/剔除路径直接消费这张表
+    // 【诊断】首次统计一次：快照条目有多少、注册表命中多少、最终实例多少
+    static bool s_Logged = false;
+    if (!s_Logged) {
+        s_Logged = true;
+        u32 withEntry = 0u;
+        for (const SnapshotDrawItem& item : snapshot.draws) {
+            if (registry.Find(item.meshIndex) != nullptr) ++withEntry;
+        }
+        HE_CORE_INFO("NaniteCull: 真实实例统计 —— 快照 {} 条，注册表命中 {} 条，绑定资产并成实例 {} 条",
+                     (u32)snapshot.draws.size(), withEntry, written);
+    }
     return written;
 }
 

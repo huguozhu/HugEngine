@@ -493,6 +493,11 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
                 ++bound;
             }
             HE_CORE_INFO("04.App: 多资产验收档启用 —— 已注册并绑定 {} 份 per-primitive 资产", bound);
+            u32 boundCheck = 0u;
+            g.world.ForEach<MeshComponent>([&](Entity, MeshComponent& mesh) {
+                if (mesh.GetNaniteAssetIndex() != 0xFFFFFFFFu) ++boundCheck;
+            });
+            HE_CORE_INFO("04.App: 多资产绑定自检 —— 已写入资产槽位的网格 {} 个", boundCheck);
         }
 
         // ── T9：Nanite 开关（cfg → 真值）──
