@@ -99,12 +99,15 @@ add_executable(HugEngineTests
     # 以及与真实 `BuildNaniteClusterBVH` 报出的 `depth` 的交叉核对。
     # 单独一文件：与上面三个 Nanite 测试文件同一个理由（避免单文件无限膨胀）。
     TestNaniteBvhDepth.cpp
-    # §14.8 任务 8：离线簇切分的实现落在 Engine/Render/Nanite/NaniteUpload.cpp。
-    # 该翻译单元（连同 NaniteUpload.h）是 RHI-free 的（只前置声明 rhi::IRHIDevice），
-    # 所以单测可以**直接编译它**，而不必链接 HugEngineRender（后者会拉入 RHI/Vulkan/SPV）。
-    # 这同时是一条纪律钉子：任何 RHI 依赖闯进 NaniteUpload.cpp 都会让单测目标编译失败。
-    ${CMAKE_SOURCE_DIR}/Engine/Render/Nanite/NaniteUpload.cpp
+    # T2（Nanite 离线预处理方案）：`.nanite` v2 读写、扩展段往返、v1 兼容与构建器确定性。
+    # 单独一文件：与前四个 Nanite 测试文件同一个理由（避免单文件无限膨胀）。
+    TestNaniteFileV2.cpp
 )
+
+# T1（Nanite 离线预处理方案）：离线簇切分已包成静态库 `HugEngineNaniteBuild`，
+# 单测改为**链接该库**，不再直接编译 NaniteUpload.cpp（工具与测试共用同一份实现）。
+# 纪律钉子依然成立且更强：该库不链接任何 RHI 目标，RHI 头一旦闯入就会编译失败。
+target_link_libraries(HugEngineTests PRIVATE HugEngineNaniteBuild)
 
 target_include_directories(HugEngineTests PRIVATE
     ${CMAKE_SOURCE_DIR}/Engine/External/doctest

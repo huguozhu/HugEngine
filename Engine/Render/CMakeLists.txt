@@ -1,5 +1,9 @@
 # Render — RenderGraph, Pipelines, Lighting, PostProcess, GI (L4)
 # 头文件列入 target_sources 方便 IDE 浏览，不参与编译
+# T1：离线几何构建（NaniteUpload.*）已包成独立静态库 HugEngineNaniteBuild。
+# 【为什么放在 HugEngineRender 之前】Render 的运行时回退路径要链接它；目标必须先存在。
+include(${CMAKE_CURRENT_LIST_DIR}/Nanite/NaniteBuild.cmake)
+
 add_library(HugEngineRender STATIC)
 
 set(RENDER_SOURCES
@@ -207,8 +211,6 @@ set(RENDER_SOURCES
     Nanite/NaniteSettings.h     # 开关与档位（唯一真值的类型）
     Nanite/NaniteScene.h
     Nanite/NaniteScene.cpp
-    Nanite/NaniteUpload.h
-    Nanite/NaniteUpload.cpp
     Nanite/NaniteCull.h
     Nanite/NaniteCull.cpp
     Nanite/NaniteRaster.h
@@ -263,7 +265,7 @@ target_include_directories(HugEngineRender
 # ImGui 头文件路径（供 ProfilerPanel 使用）
 target_include_directories(HugEngineRender PRIVATE ${CMAKE_SOURCE_DIR}/Engine/External/imgui)
 target_link_libraries(HugEngineRender PUBLIC HugEngineRHI HugEngineShader HugEngineScene HugEngineAsset)
-# §14.8 任务 8：离线簇切分（Nanite/NaniteUpload.cpp）调用 meshoptimizer v0.22 的
-# meshopt_buildMeshlets / optimizeMeshlet / computeMeshletBounds。用 PRIVATE：
-# meshoptimizer.h 只出现在 .cpp 里（NaniteUpload.h 保持 RHI-free 且不含第三方头）。
-target_link_libraries(HugEngineRender PRIVATE meshoptimizer)
+# T1：离线簇切分（NaniteUpload.cpp）连同 meshoptimizer 依赖一起搬到了
+# HugEngineNaniteBuild 静态库；Render 只作为使用方链接它（运行时回退路径用）。
+# 这样 HugEngineRender 不再直接依赖 meshoptimizer。
+target_link_libraries(HugEngineRender PRIVATE HugEngineNaniteBuild)
