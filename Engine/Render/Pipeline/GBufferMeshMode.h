@@ -1,31 +1,36 @@
 #pragma once
 
-#include <cstdlib>
+// ============================================================
+//  GBufferMeshMode.h — 【P9】GBuffer 网格着色器路径开关（**T9 起废弃**）
+//
+//  【为什么废弃】引擎里曾有两条 mesh 版 GBuffer 路线：
+//    ① Nanite 硬光栅（`Nanite_HardRaster.mesh`，由 `NaniteRenderer` 驱动）；
+//    ② 本文件对应的 `HE_GBUFFER_MESH=1`（整网格按 64 三角形分组、从合并 VB/IB SSBO 读几何）。
+//  两者都写 GBuffer、都在 `supportsMeshShaders` 为真时创建，但互不相通，导致：
+//    · 同一份代码有两个 mesh 几何入口，质量与覆盖率口径不一致；
+//    · 调试时要记住"这次开的是哪条"，转储基线随环境变量漂移。
+//  T9 决定收敛为一条：GBuffer 的 mesh 路线只保留 Nanite 硬光栅；
+//  本开关恒为 false（保留符号只为减少调用点的机械改动），后续清理可整体删除。
+//
+//  【Nanite 硬光栅在哪】`Engine/Render/Nanite/NaniteRaster.cpp` 的硬光栅分流
+//  （`NaniteSettings::hardRaster`，T9 起默认开启）。
+// ============================================================
 
-// ============================================================
-// GBufferMeshMode.h — 【P9】GBuffer 网格着色器路径开关
-//
-// 环境变量 `HE_GBUFFER_MESH=1` 打开：GPU 驱动的 GBuffer 绘制改用
-// `GBuffer.mesh.slang`（网格着色器从合并顶点/索引 SSBO 读几何）+ `DrawMeshTasks`，
-// 片元着色器仍是 `GBuffer.frag`。默认关闭 ⇒ 所有既有路径逐字节不变。
-//
-// 【为什么只读一次】开关在建 PSO / 建合批缓冲 / 录制绘制三处都要问，必须给同一个答案
-//（若三处各读一次环境变量，程序中途改环境就可能在"有 PSO 没几何"的状态下绘制）。
-// ============================================================
 namespace he::render {
 
-/// 网格着色器 GBuffer 路径是否开启（`HE_GBUFFER_MESH` 非零即开启，默认关闭）
+/// 网格着色器 GBuffer 路径是否开启 —— **T9 起恒为 false（已废弃）**。
+///
+/// 保留函数签名而不删调用点：调用点散落在"建 PSO / 建合批缓冲 / 录制绘制"三处，
+/// 一次删除会牵动三个文件的缩进与分支结构；恒 false 后那三处自然退化为 IA 路径，
+/// 与"从未打开"完全一致（默认档的既有测试因此逐字节不变）。
 inline bool GBufferMeshPathEnabled() {
-    static const bool s_Enabled = [] {
-        const char* v = std::getenv("HE_GBUFFER_MESH");
-        return v != nullptr && std::atoi(v) != 0;
-    }();
-    return s_Enabled;
+    return false;
 }
 
-/// 每个网格工作组负责的三角形数（= `GBuffer.mesh.slang` 的 kMeshGroupMaxTriangles）
-/// 【必须与 shader 一致】shader 里 192 输出顶点 / 64 图元的容量按它算；CPU 侧的
-/// `DrawMeshTasks` 组数 = ceil(三角形数 / 本值)，改了这里而没改 shader 会漏画三角形。
+/// 每个网格工作组负责的三角形数（`GBuffer.mesh.slang` 的容量口径）
+///
+/// 【为什么留着】该 shader 仍参与编译与绑定对账（`AuditShaderBindings`），常量必须与它同源；
+/// 只是本引擎不再创建这条 PSO。
 constexpr unsigned kGBufferMeshTrianglesPerGroup = 64u;
 
 } // namespace he::render

@@ -302,47 +302,10 @@ void GBufferRenderer::CreatePSO(rhi::IRHIDevice* device) {
     HE_ASSERT(m_PSO.IsValid(), "GBufferRenderer: PSO 句柄创建失败");
 
     // ============================================================
-    // 【P9】网格着色器版 GBuffer 管线（`HE_GBUFFER_MESH=1`）
-    //
-    // 与上面那条 PSO 的**唯一区别**是几何段：`meshShader` 非空 ⇒ 走网格管线
-    //（无输入装配、无顶点缓冲）；片元着色器仍是同一个 `GBuffer.frag`，8 个颜色附件 /
-    // 深度 / push constant / 描述符集布局全部沿用，所以两条路径的像素结果可以直接对比。
-    //
-    // 【后端范围】只看设备能力，不再按后端白名单：
-    //   `supportsMeshShaders` 本身就是后端无关的能力位 —— D3D11 永远为 false
-    //   （`Types.h` 默认值 + D3D11 从不设置），D3D12 按 mesh tier、Vulkan 按
-    //   `VK_EXT_mesh_shader` 设置。因此"有 mesh 能力"等价于"能建这条 PSO"，
-    //   D3D11 之类自然被下面这一处判断挡掉，不需要再按后端重复排除。
+    // T9：GBuffer 的 mesh 版路线已收敛到 Nanite 硬光栅（`Nanite_HardRaster.mesh`）。
+    // 此处不再创建 `GBufferMesh` PSO —— 引擎里只剩一条 mesh 几何入口，
+    // 避免"两条路线都写 GBuffer、覆盖率口径却不同"的历史问题（详见 GBufferMeshMode.h）。
     // ============================================================
-    const bool wantMesh = GBufferMeshPathEnabled();
-    if (!wantMesh) return;
-    if (!device->GetCaps().supportsMeshShaders) {
-        HE_CORE_WARN("GBufferRenderer: HE_GBUFFER_MESH=1 但设备不支持网格着色器，跳过网格版 GBuffer 管线");
-        return;
-    }
-
-    rhi::ShaderBytecode gbMS;
-    gbMS.stage      = rhi::ShaderStage::Mesh;
-    gbMS.spirv      = k_GBuffer_mesh_spv;   // Vulkan 侧不使用，但字节码字段必须合法（空指针会崩）
-    gbMS.dxil.assign(std::begin(k_GBuffer_mesh_dxil), std::end(k_GBuffer_mesh_dxil));
-    gbMS.entryPoint = "main";
-
-    rhi::PipelineStateDesc meshDesc = gbDesc;   // 深度/混合/目标格式/描述符布局逐项继承
-    meshDesc.vertexShader   = nullptr;          // 网格管线没有 VS
-    meshDesc.meshShader     = &gbMS;            // ← 走 InitializeMeshPso（管线状态流）
-    meshDesc.vertexLayout   = {};               // 无输入装配
-    // push constant 必须覆盖 **Mesh** 阶段：D3D12 的根签名可见性是 ALL（不区分阶段），
-    // Vulkan 侧 PipelinePipeline 会自动补 Mesh|Task 位（见 VulkanPipeline.cpp 的 mesh 分支）。
-    meshDesc.pushConstantRanges = {pc};
-    meshDesc.debugName      = "GBufferMesh";
-
-    m_MeshPSO = device->CreatePipelineStateHandle(meshDesc);   // A-3
-    if (!m_MeshPSO.IsValid()) {
-        HE_CORE_ERROR("GBufferRenderer: 网格版 GBuffer 管线创建失败（HE_GBUFFER_MESH=1），本帧回退 IA 路径");
-        return;
-    }
-    HE_CORE_INFO("GBufferRenderer: 网格版 GBuffer 管线就绪 name=GBufferMesh（{} 三角形/工作组）",
-                 kGBufferMeshTrianglesPerGroup);
 }
 
 void GBufferRenderer::CreateDescriptorSet(rhi::IRHIDevice* device) {

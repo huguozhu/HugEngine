@@ -85,6 +85,13 @@ bool GetBool(const std::unordered_map<String, String>& m, const String& key, boo
     return GetFloat(m, key, def ? 1.0f : 0.0f) != 0.0f;
 }
 
+// T9：字符串型 cfg 值（Nanite 离线资产路径）
+static String GetString(const std::unordered_map<String, String>& m,
+                        const String& key, const String& def = String{}) {
+    auto it = m.find(key);
+    return (it != m.end()) ? it->second : def;
+}
+
 } // namespace
 
 struct App::Impl {
@@ -431,6 +438,25 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
         if (g.pipeline->GetDDGI()) g.pipeline->GetDDGI()->SetEnabled(g.ddgi);
         if (g.pipeline->GetSSR())  g.pipeline->GetSSR()->SetEnabled(g.ssr);
         g.pipeline->GetSSAO().enabled = g.ssao;
+
+        // ── T9：Nanite 开关（cfg → 真值）──
+        // 验收要求能在 04 里用 nanite_enable=1 验证「GBuffer 让位给 Nanite」，
+        // 因此这三个键与 07 同口径（硬件不支持 / 资产缺失时模块自己回退，见 NaniteRenderer）。
+        {
+            auto naniteSettings = g.pipeline->GetNaniteSettings();
+            naniteSettings.enabled = GetBool(cfg, "nanite_enable", naniteSettings.enabled);
+            naniteSettings.offline = GetBool(cfg, "nanite_offline", naniteSettings.offline);
+            if (const String nanitePath = GetString(cfg, "nanite_offline_path", naniteSettings.offlinePath);
+                !nanitePath.empty()) {
+                naniteSettings.offlinePath = nanitePath;
+            }
+            g.pipeline->SetNaniteSettings(naniteSettings);
+            if (naniteSettings.enabled) {
+                HE_CORE_INFO("04.App: Nanite 已启用（hardRaster={} offline={} path={}）",
+                             naniteSettings.hardRaster ? 1 : 0, naniteSettings.offline ? 1 : 0,
+                             naniteSettings.offlinePath);
+            }
+        }
         if (g.skybox) g.skybox->enabled = g.skyboxOn;
 
         if (auto* dl = g.world.GetComponent<DirectionalLight>(g.mainLightEntity)) {

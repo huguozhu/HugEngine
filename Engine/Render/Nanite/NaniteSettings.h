@@ -170,7 +170,7 @@ struct NaniteSettings {
     ///       `enabled=1 + hardRaster=1`      ⇒ 任务 22 的新路径（软硬分流真正发生）。
     ///
     /// 配置层 = cfg 键 `nanite_hard_raster`（默认 0），样例负责解析/序列化 + 面板勾选框。
-    bool hardRaster = false;
+    bool hardRaster = true;    // T9：大簇默认改走 mesh 硬光栅（此前默认 0，仅软光栅清屏）
 
     // ============================================================
     // 【§14.8 任务 24】LOD 流式（反馈 + 页池）—— 阶段一
