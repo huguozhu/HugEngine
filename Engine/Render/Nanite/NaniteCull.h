@@ -355,6 +355,28 @@ public:
 
     /// 本 pass 是否可用（BVH 已入库 + PSO/描述符集就绪）
     [[nodiscard]] bool IsClusterBVHReady() const { return m_BVHReady; }
+    // ── T8：多资产剔除数据（共享缓冲 + 每资产基址表）──
+    /// 一份资产在"共享剔除缓冲"里的区间（全部是**元素下标**，不是字节偏移）
+    struct NaniteAssetCullRange {
+        u32 nodeBase      = 0;   ///< `Nanite.BVHNodes` 起始下标
+        u32 nodeCount     = 0;
+        u32 leafBase      = 0;   ///< `Nanite.BVHLeafClusters` 起始下标
+        u32 leafCount     = 0;
+        u32 clusterBase   = 0;   ///< 簇球 / LOD / 绘制参数三张表的统一起始下标
+        u32 clusterCount  = 0;
+        u32 lodInfoBase   = 0;   ///< 与 `clusterBase` 同值（保留独立字段便于将来拆分）
+        u32 drawRangeBase = 0;
+    };
+
+    /// 追加一份资产的剔除数据（建 BVH + LOD 元数据 + 绘制参数，写进共享缓冲的尾部）
+    /// @return 资产槽位下标；容量不足 / 构建失败返回 `0xFFFFFFFF`
+    u32 AppendAssetBVH(std::span<const NaniteClusterRecord> clusters,
+                       std::span<const u32>                 lodOffsets);
+
+    /// 已注册资产的剔除区间表（`SetClusterBVH` / `AppendAssetBVH` 之后有效）
+    [[nodiscard]] const std::vector<NaniteAssetCullRange>& GetAssetCullRanges() const {
+        return m_AssetCullRanges;
+    }
 
     /// 【§14.8 任务 15】把 Phase 1 与 Phase 2/3 录制进**同一个命令缓冲**（同一个帧图 pass 体内）：
     ///   ① Phase 1：`RecordInstanceCullPass`（清零 → 上传 → 派发 → 屏障；含可见性掩码）；
@@ -660,6 +682,8 @@ private:
     /// CPU 侧 BVH 镜像（节点/叶子簇表/簇球/读数）——GPU 侧三个只读缓冲由它上传；
     /// 同时是 CPU 参考遍历的输入 ⇒ **GPU 与 CPU 读的是同一份比特**。
     NaniteClusterBVH m_BVHData;
+    /// T8：多资产剔除区间表（与 `m_BVHData` 的聚合视图一一对应）
+    std::vector<NaniteAssetCullRange> m_AssetCullRanges;
 
     /// 【任务 15】CPU 侧 LOD 元数据镜像（与 `m_BVHData.clusterSpheres` 同序、同长度）
     std::vector<NaniteClusterLODInfo> m_LODInfo;

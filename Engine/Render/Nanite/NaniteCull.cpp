@@ -1064,130 +1064,149 @@ void NaniteCull::RecordInstanceCullPass(rhi::IRHICommandList* cmd) {
 //           → GPU 读回（实例数 / 三阶段读数 / 可见簇集合）vs CPU 参考，逐项比较 + 差异解释
 // ============================================================
 
+
 bool NaniteCull::SetClusterBVH(std::span<const NaniteClusterRecord> clusters,
                                std::span<const u32>                 lodOffsets) {
-    if (!m_Device || !m_BVHNodeBuf.IsValid() || !m_BVHLeafBuf.IsValid() || !m_BVHSphereBuf.IsValid() || !m_LODInfoBuf.IsValid()) {
-        HE_CORE_ERROR("NaniteCull: cluster BVH 入库失败（设备或自持缓冲未就绪）");
-        return false;
+    // T8：单资产入口 = 清空多资产区间表后追加一份（既有调用方行为不变）
+    m_AssetCullRanges.clear();
+    m_BVHData = NaniteClusterBVH{};
+    m_LODInfo.clear();
+    m_ClusterDrawRanges.clear();
+    m_BVHReady = false;
+    const u32 slot = AppendAssetBVH(clusters, lodOffsets);
+    m_BVHReady = (slot != 0xFFFFFFFFu) && !m_BVHData.Empty();
+    m_BVHInstanceDomain = 0u;
+    m_BVHClusterDepths.clear();
+    m_BVHDepthsComputed = false;
+    return m_BVHReady;
+}
+
+// ============================================================
+//  T8：追加一份资产的剔除数据到共享缓冲尾部
+//
+//  【为什么是"追加 + 基址表"而不是"每资产一组缓冲"】
+//  剔除 shader 的描述符布局是固定的（一组 BVH 节点 / 簇球 / LOD / 绘制参数），
+//  每资产建一套就要改成描述符数组（受 maxPerStageDescriptor 限制且要改审计表）；
+//  把各资产的表首尾相接、只额外传一张"资产 → 基址"的小表，shader 用
+//  `nodes[nodeBase + i]` 即可遍历，描述符数量不变。这也是方案 §9 开放问题 5 的倾向方案。
+//
+//  【容量】共享缓冲按编译期常量一次分配（`kNaniteMaxBVH*`）；追加时先算尾部区间，
+//  越界就**拒绝并告警**（不静默截断 —— 截断会让某个资产的簇下标错位，画面会莫名其妙缺块）。
+// ============================================================
+u32 NaniteCull::AppendAssetBVH(std::span<const NaniteClusterRecord> clusters,
+                               std::span<const u32>                 lodOffsets) {
+    if (!m_Device || !m_BVHNodeBuf.IsValid() || !m_BVHLeafBuf.IsValid() ||
+        !m_BVHSphereBuf.IsValid() || !m_LODInfoBuf.IsValid() || !m_ClusterDrawRangeBuf.IsValid()) {
+        HE_CORE_ERROR("NaniteCull: 资产剔除数据追加失败（设备或自持缓冲未就绪）");
+        return 0xFFFFFFFFu;
     }
 
-    // ── ① 簇数钳制（超出容量时**如实告警**，不静默截断）──
     u32 clusterCount = (u32)clusters.size();
-    if (clusterCount > kNaniteMaxBVHClusters) {
-        HE_CORE_WARN("NaniteCull: 簇数 {} 超出 cluster BVH 容量 {}，只对前 {} 个簇建 BVH"
-                     "（可见簇引用表按容量分配，超出的簇本轮不参与遍历）",
-                     clusterCount, kNaniteMaxBVHClusters, kNaniteMaxBVHClusters);
-        clusterCount = kNaniteMaxBVHClusters;
-    }
-    // LOD 段与簇表同源（`.nanite` 的同一份镜像）；被截断时同步裁掉越出部分，避免元数据错位。
-    if (!lodOffsets.empty() && lodOffsets.back() > clusterCount) {
-        HE_CORE_WARN("NaniteCull: LOD 段末尾偏移 {} 超出参与剔除的簇数 {} ⇒ 按簇数截断",
-                     lodOffsets.back(), clusterCount);
+    if (clusterCount == 0u) {
+        HE_CORE_WARN("NaniteCull: 追加空资产（0 簇），已跳过");
+        return 0xFFFFFFFFu;
     }
 
-    // ── ② CPU 构建（RHI-free 的构建器；失败不改写出参）──
+    // ── ① 尾部基址（元素下标）与容量检查 ──
+    const u32 nodeBase    = (u32)m_BVHData.nodes.size();
+    const u32 leafBase    = (u32)m_BVHData.leafClusterIndices.size();
+    const u32 clusterBase = (u32)m_BVHData.clusterSpheres.size();
+    const u32 lodBase     = (u32)m_LODInfo.size();
+    const u32 drawBase    = (u32)m_ClusterDrawRanges.size();
+
+    if ((u64)clusterBase + clusterCount > kNaniteMaxBVHClusters) {
+        HE_CORE_ERROR("NaniteCull: 多资产剔除容量不足（簇 {}+{} > 上限 {}）⇒ 拒绝注册该资产",
+                      clusterBase, clusterCount, kNaniteMaxBVHClusters);
+        return 0xFFFFFFFFu;
+    }
+
+    // ── ② CPU 构建（RHI-free 构建器；单资产口径与旧实现完全一致）──
     NaniteClusterBVH built;
     if (!BuildNaniteClusterBVH(clusters.first(clusterCount), built)) {
         HE_CORE_ERROR("NaniteCull: cluster BVH 构建失败（簇数 {}）", clusterCount);
-        return false;
+        return 0xFFFFFFFFu;
     }
-    // 【任务 15】LOD 元数据：簇记录 + LOD 段 → own/parent 误差 + LOD 级 + 根标志
+    if ((u64)nodeBase + built.nodes.size() > kNaniteMaxBVHNodes) {
+        HE_CORE_ERROR("NaniteCull: BVH 节点容量不足（{}+{} > {}）⇒ 拒绝注册该资产",
+                      nodeBase, built.nodes.size(), kNaniteMaxBVHNodes);
+        return 0xFFFFFFFFu;
+    }
+
     std::vector<NaniteClusterLODInfo> lodInfo;
     if (!BuildNaniteClusterLODInfo(clusters.first(clusterCount), lodOffsets, lodInfo)) {
-        HE_CORE_ERROR("NaniteCull: LOD 元数据构建失败（簇数 {}，LOD 段 {} 级）",
-                      clusterCount, (u32)lodOffsets.size());
-        return false;
+        HE_CORE_ERROR("NaniteCull: LOD 元数据构建失败（簇数 {}）", clusterCount);
+        return 0xFFFFFFFFu;
     }
 
-    // ── ③ 一次性上传四个只读缓冲 ──
-    // 【为什么这里是安全的主机写】本函数只在任务 12 的一次性启动路径上被调用，这些缓冲还从未
-    //   被任何已提交的 GPU 工作引用 ⇒ 不存在"主机写 vs 派发"的竞争（与任务 13 的计数清零不同）。
-    if (!built.nodes.empty()) {
-        if (void* p = ResB(m_BVHNodeBuf)->Map()) {
-            std::memcpy(p, built.nodes.data(), sizeof(NaniteBVHNode) * built.nodes.size());
-            if (auto* ub = ResB(m_BVHNodeBuf)) ub->Unmap();
-        }
-    }
-    if (!built.leafClusterIndices.empty()) {
-        if (void* p = ResB(m_BVHLeafBuf)->Map()) {
-            std::memcpy(p, built.leafClusterIndices.data(),
-                        sizeof(u32) * built.leafClusterIndices.size());
-            if (auto* ub = ResB(m_BVHLeafBuf)) ub->Unmap();
-        }
-    }
-    if (!built.clusterSpheres.empty()) {
-        if (void* p = ResB(m_BVHSphereBuf)->Map()) {
-            std::memcpy(p, built.clusterSpheres.data(),
-                        sizeof(NaniteClusterSphere) * built.clusterSpheres.size());
-            if (auto* ub = ResB(m_BVHSphereBuf)) ub->Unmap();
-        }
-    }
-    if (!lodInfo.empty()) {
-        if (void* p = ResB(m_LODInfoBuf)->Map()) {
-            std::memcpy(p, lodInfo.data(), sizeof(NaniteClusterLODInfo) * lodInfo.size());
-            if (auto* ub = ResB(m_LODInfoBuf)) ub->Unmap();
-        }
-    }
-
-    // ── ③b.【任务 16】每簇绘制参数（`triangleOffset/triangleCount/vertexOffset` → 间接命令字段）
-    // 【为什么在 CPU 侧建表】与簇球表/ LOD 元数据同一个理由：GPU 只需三个 u32，紧凑表让访存
-    //   步长小 4 倍；而且表由纯函数 `NaniteMakeClusterDrawRange` 从簇记录**逐位搬运** ⇒
-    //   CPU 参考打包与 GPU 打包读的是**同一份比特**（不一致就一定是 bug，不是舍入差异）。
     std::vector<NaniteClusterDrawRange> drawRanges(clusterCount);
-    for (u32 i = 0u; i < clusterCount; ++i) {
-        drawRanges[i] = NaniteMakeClusterDrawRange(clusters[i]);
-    }
-    if (!drawRanges.empty()) {
-        if (void* p = ResB(m_ClusterDrawRangeBuf)->Map()) {
-            std::memcpy(p, drawRanges.data(), sizeof(NaniteClusterDrawRange) * drawRanges.size());
-            if (auto* ub = ResB(m_ClusterDrawRangeBuf)) ub->Unmap();
+    for (u32 i = 0u; i < clusterCount; ++i) drawRanges[i] = NaniteMakeClusterDrawRange(clusters[i]);
+
+    // ── ③ 写入共享缓冲的尾部（主机写；一次性路径，无在飞的 GPU 引用）──
+    auto uploadAt = [&](rhi::IRHIBuffer* buf, usize elementBytes, u32 baseIndex,
+                        const void* src, usize count) {
+        if (buf == nullptr || count == 0u) return;
+        if (void* p = buf->Map()) {
+            std::memcpy(static_cast<u8*>(p) + (usize)baseIndex * elementBytes, src,
+                        elementBytes * count);
+            buf->Unmap();
+        }
+    };
+    uploadAt(m_Device->ResolveBuffer(m_BVHNodeBuf), sizeof(NaniteBVHNode), nodeBase,
+             built.nodes.data(), built.nodes.size());
+    uploadAt(m_Device->ResolveBuffer(m_BVHLeafBuf), sizeof(u32), leafBase,
+             built.leafClusterIndices.data(), built.leafClusterIndices.size());
+    uploadAt(m_Device->ResolveBuffer(m_BVHSphereBuf), sizeof(NaniteClusterSphere), clusterBase,
+             built.clusterSpheres.data(), built.clusterSpheres.size());
+    uploadAt(m_Device->ResolveBuffer(m_LODInfoBuf), sizeof(NaniteClusterLODInfo), lodBase,
+             lodInfo.data(), lodInfo.size());
+    uploadAt(m_Device->ResolveBuffer(m_ClusterDrawRangeBuf), sizeof(NaniteClusterDrawRange), drawBase,
+             drawRanges.data(), drawRanges.size());
+
+    // ── ④ 聚合视图（既有深度/统计/单资产查询继续复用 `m_BVHData`）──
+    const u32 levelBase = (u32)m_BVHData.nodes.size();
+    m_BVHData.nodes.insert(m_BVHData.nodes.end(), built.nodes.begin(), built.nodes.end());
+    // BVH 内部的节点下标是**资产局部**的；聚合后要整体平移，否则叶子簇/子节点会指错
+    for (u32 i = levelBase; i < (u32)m_BVHData.nodes.size(); ++i) {
+        NaniteBVHNode& n = m_BVHData.nodes[i];
+        if (NaniteBVHNodeIsLeaf(n)) {
+            n.left += leafBase;    // 叶子：`left` 是**叶子簇表**下标 ⇒ 加 leafBase
+        } else {
+            n.left += levelBase;   // 内部节点：左右孩子是**节点表**下标 ⇒ 加 levelBase
+            n.right += levelBase;
         }
     }
+    // 叶子簇表里存的是**资产局部**簇下标 ⇒ 追加时要整体加上本资产的 `clusterBase`，
+    // 否则第 2 份资产的叶子会指到第 1 份资产的簇（画面会缺块且难以定位）。
+    for (u32 local : built.leafClusterIndices) m_BVHData.leafClusterIndices.push_back(clusterBase + local);
+    m_BVHData.clusterSpheres.insert(m_BVHData.clusterSpheres.end(), built.clusterSpheres.begin(),
+                                    built.clusterSpheres.end());
+    m_BVHData.clusterCount += built.clusterCount;
+    m_BVHData.leafCount    += built.leafCount;
+    m_BVHData.depth         = std::max(m_BVHData.depth, built.depth);
+    m_BVHData.maxLeafClusterCount = std::max(m_BVHData.maxLeafClusterCount, built.maxLeafClusterCount);
+    m_BVHData.maxStackDepthUpperBound =
+        std::max(m_BVHData.maxStackDepthUpperBound, built.maxStackDepthUpperBound);
+    m_LODInfo.insert(m_LODInfo.end(), lodInfo.begin(), lodInfo.end());
+    m_ClusterDrawRanges.insert(m_ClusterDrawRanges.end(), drawRanges.begin(), drawRanges.end());
 
-    m_BVHData   = std::move(built);
-    m_LODInfo   = std::move(lodInfo);
-    m_ClusterDrawRanges = std::move(drawRanges);
-    m_BVHReady  = !m_BVHData.Empty();
-    m_BVHInstanceDomain = 0u;   // 每帧在 RecordCullChainPass 里按本帧实例数重算
-    // 【任务 26】换了 BVH ⇒ 之前的深度镜像作废（懒计算，等可视化档位真要它时再算）
-    m_BVHClusterDepths.clear();
-    m_BVHDepthsComputed = false;
+    NaniteAssetCullRange range;
+    range.nodeBase      = nodeBase;
+    range.nodeCount     = (u32)built.nodes.size();
+    range.leafBase      = leafBase;
+    range.leafCount     = (u32)built.leafClusterIndices.size();
+    range.clusterBase   = clusterBase;
+    range.clusterCount  = clusterCount;
+    range.lodInfoBase   = lodBase;
+    range.drawRangeBase = drawBase;
+    m_AssetCullRanges.push_back(range);
 
-    // 【任务 15】级分布读数（入库时打一次，人工可核对；每帧的分布由 cull3 行给出）
-    u32 levelCounts[kNaniteLODHistogramLevels] = { 0u };
-    for (const NaniteClusterLODInfo& info : m_LODInfo) {
-        const u32 level = (info.lodLevel < kNaniteLODHistogramLevels)
-                        ? info.lodLevel : (kNaniteLODHistogramLevels - 1u);
-        ++levelCounts[level];
-    }
-    HE_CORE_INFO("NaniteCull: cluster BVH 入库完成（簇 {} → 节点 {} / 叶子 {} / 深度 {} / "
-                 "最大叶子簇数 {} / 栈上界 {}；叶子容量 {}，深度上限 {}）",
-                 m_BVHData.clusterCount, (u32)m_BVHData.nodes.size(), m_BVHData.leafCount,
-                 m_BVHData.depth, m_BVHData.maxLeafClusterCount, m_BVHData.maxStackDepthUpperBound,
-                 kNaniteBVHLeafCapacity, kNaniteBVHMaxDepth);
-    HE_CORE_INFO("NaniteCull: LOD 元数据入库完成（每簇 {}B；级分布 0..7 = {},{},{},{},{},{},{},{}；"
-                 "LOD 段 {} 级）",
-                 (u32)sizeof(NaniteClusterLODInfo),
-                 levelCounts[0], levelCounts[1], levelCounts[2], levelCounts[3],
-                 levelCounts[4], levelCounts[5], levelCounts[6], levelCounts[7],
-                 (u32)lodOffsets.size());
-    // 【任务 16】绘制参数的规模读数：`indexEnd` = 全部簇里最大的 `firstIndex + indexCount`
-    //   ⇒ 光栅端的占位索引缓冲必须覆盖它（否则 IA 会越界读索引）。
-    {
-        u64 indexEnd = 0u;
-        u64 maxIndexCount = 0u;
-        for (const NaniteClusterDrawRange& r : m_ClusterDrawRanges) {
-            const u64 end = (u64)r.firstIndex + (u64)r.indexCount;
-            if (end > indexEnd) indexEnd = end;
-            if (r.indexCount > maxIndexCount) maxIndexCount = r.indexCount;
-        }
-        HE_CORE_INFO("NaniteCull: 每簇绘制参数入库完成（{} 条 × {}B；最大 indexCount={}，"
-                     "索引位置上界={}；光栅端占位索引缓冲必须覆盖该上界）",
-                     (u32)m_ClusterDrawRanges.size(), (u32)sizeof(NaniteClusterDrawRange),
-                     maxIndexCount, indexEnd);
-    }
-    return true;
+    HE_CORE_INFO("NaniteCull: 追加资产剔除数据（槽位 {}：簇 {} / 节点 {} / 叶子 {}；"
+                 "基址 node={} cluster={}）",
+                 (u32)m_AssetCullRanges.size() - 1u, clusterCount, (u32)built.nodes.size(),
+                 built.leafCount, nodeBase, clusterBase);
+    return (u32)m_AssetCullRanges.size() - 1u;
 }
+
 
 // ============================================================
 // 【§14.8 任务 26】每簇 BVH 节点深度的 CPU 镜像（懒计算；调试可视化模式 4 的唯一数据源）

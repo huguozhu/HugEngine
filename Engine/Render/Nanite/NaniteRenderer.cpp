@@ -571,6 +571,21 @@ void NaniteRenderer::EnsureAssetUploaded(const MeshBatcher& batcher) {
         if (m_Scene.UploadPackedAsset(asset)) {
             m_MaterialCount     = (u32)asset.materials.size();
             m_MultiMeshClusters = asset.stats.multiMeshClusters;
+            // 【T8 修复】离线路径也必须走完"上传之后"的接线，否则：
+            //   · 簇 BVH / LOD 元数据不注册 ⇒ 剔除 Phase 2/3 永远跳过（画面只剩 Phase 1）；
+            //   · 占位索引容量与量化尺度缺失 ⇒ 硬光栅/软光栅解码口径不对；
+            //   · 资产 CPU 副本不保留 ⇒ 流式（若开启）退化为 no_asset。
+            // 这段与下面运行时构建分支的 ⑤⑥⑦⑧ 逐项对应（T5 引入离线分支时漏掉了）。
+            if (!m_Cull.SetClusterBVH(asset.clusters, asset.lodOffsets)) {
+                HE_CORE_ERROR("NaniteRenderer: 离线资产的 cluster BVH / LOD 元数据注册失败");
+            }
+            m_Raster.SetPlaceholderIndexCapacity(asset.header.indexCount);
+            m_MeshMaxExtent     = asset.stats.meshMaxExtent;
+            m_AssetClusterCount = (u32)asset.clusters.size();
+            NanitePackedAsset cpuCopy = asset;   // 离线资产是 const&，留存需要一份可移动的副本
+            if (!m_Scene.StoreAssetCPUCopy(std::move(cpuCopy), m_Settings.materialBin)) {
+                HE_CORE_WARN("NaniteRenderer: 离线资产 CPU 留存为空 ⇒ 流式（若开启）会退化为 no_asset");
+            }
             return;
         }
         // 【失败也回退】离线资产上传/读回校验失败时继续走运行时构建，
