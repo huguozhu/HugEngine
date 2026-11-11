@@ -308,18 +308,16 @@ void GBufferRenderer::CreatePSO(rhi::IRHIDevice* device) {
     //（无输入装配、无顶点缓冲）；片元着色器仍是同一个 `GBuffer.frag`，8 个颜色附件 /
     // 深度 / push constant / 描述符集布局全部沿用，所以两条路径的像素结果可以直接对比。
     //
-    // 【为什么门控在 D3D12】本项验收以 D3D12（DXIL / 调试层）为准；Vulkan 侧的
-    // `GBuffer.mesh` SPIR-V 仍会编译，但驱动差异不在本次范围内 ⇒ 不在 Vulkan 上建这条 PSO
-    //（避免在既有 Vulkan 路径上引入一条未验证的管线）。
+    // 【后端范围】只看设备能力，不再按后端白名单：
+    //   `supportsMeshShaders` 本身就是后端无关的能力位 —— D3D11 永远为 false
+    //   （`Types.h` 默认值 + D3D11 从不设置），D3D12 按 mesh tier、Vulkan 按
+    //   `VK_EXT_mesh_shader` 设置。因此"有 mesh 能力"等价于"能建这条 PSO"，
+    //   D3D11 之类自然被下面这一处判断挡掉，不需要再按后端重复排除。
     // ============================================================
     const bool wantMesh = GBufferMeshPathEnabled();
     if (!wantMesh) return;
-    if (device->GetBackend() != rhi::Backend::D3D12) {
-        HE_CORE_WARN("GBufferRenderer: HE_GBUFFER_MESH=1 但当前后端不是 D3D12，跳过网格版 GBuffer 管线");
-        return;
-    }
     if (!device->GetCaps().supportsMeshShaders) {
-        HE_CORE_WARN("GBufferRenderer: 设备不支持网格着色器，跳过网格版 GBuffer 管线");
+        HE_CORE_WARN("GBufferRenderer: HE_GBUFFER_MESH=1 但设备不支持网格着色器，跳过网格版 GBuffer 管线");
         return;
     }
 
