@@ -9,6 +9,8 @@
 
 set(TRIANGLE01_APP_DIR "${CMAKE_SOURCE_DIR}/Samples/01.Triangle")
 set(CUBE02_APP_DIR     "${CMAKE_SOURCE_DIR}/Samples/02.Cube")
+set(SPONZA03_APP_DIR   "${CMAKE_SOURCE_DIR}/Samples/03.Sponza-Forward")
+set(SPONZA04_APP_DIR   "${CMAKE_SOURCE_DIR}/Samples/04.Sponza-Deferred")
 
 add_library(hgengine SHARED
     NativeEntry.cpp
@@ -17,24 +19,30 @@ add_library(hgengine SHARED
     # 移动端共享宿主（鸿蒙入口用的是同一份实现）
     ${CMAKE_SOURCE_DIR}/Samples/Common/App/MobileHost.cpp
     ${CMAKE_SOURCE_DIR}/Samples/Common/App/MobileHost.h
-    # 首版只带 01/02（Sponza 资产约 56MB，暂不随 APK 分发）
+    # 01/02/03/04 全部编入（03/04 的 Sponza 资产由 sync-assets.ps1 同步到 assets）
     ${TRIANGLE01_APP_DIR}/01.Triangle.App.cpp
     ${TRIANGLE01_APP_DIR}/01.Triangle.App.h
     ${CUBE02_APP_DIR}/02.Cube.App.cpp
     ${CUBE02_APP_DIR}/02.Cube.App.h
+    ${SPONZA03_APP_DIR}/03.Sponza.App.cpp
+    ${SPONZA03_APP_DIR}/03.Sponza.App.h
+    ${SPONZA04_APP_DIR}/04.Deferred.App.cpp
+    ${SPONZA04_APP_DIR}/04.Deferred.App.h
     ${CMAKE_SOURCE_DIR}/Samples/Common/SkyboxLoader.cpp
     ${CMAKE_SOURCE_DIR}/Samples/Common/SkyboxLoader.h
 )
 
-# HE_MOBILE_MAX_MODE=2：MobileHost 里裁掉 03/04 的分发分支（对应源码也没编进来）
+# HE_MOBILE_MAX_MODE=4：MobileHost 分发 01~04 四个样例
 target_compile_definitions(hgengine PRIVATE
-    HE_MOBILE_MAX_MODE=2
+    HE_MOBILE_MAX_MODE=4
 )
 
 target_include_directories(hgengine PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${TRIANGLE01_APP_DIR}
     ${CUBE02_APP_DIR}
+    ${SPONZA03_APP_DIR}
+    ${SPONZA04_APP_DIR}
     ${CMAKE_SOURCE_DIR}/Samples/Common
 )
 

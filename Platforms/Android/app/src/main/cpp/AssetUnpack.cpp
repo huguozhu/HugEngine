@@ -99,4 +99,79 @@ bool UnpackAssetsToSandbox(AAssetManager* assets, const char* assetDir,
     return true;
 }
 
+
+// ============================================================
+// 按清单解包（移动端主路径）
+//
+// AAssetManager 的目录枚举（AAssetDir_getNextFileName）只列文件、不列子目录，
+// 逐目录递归在深层结构上会静默漏文件。清单由构建期脚本生成，内容是相对
+// assets 根的路径（content/...），这里逐行打开并写到 destRoot 下同名位置。
+// ============================================================
+bool UnpackAssetsFromManifest(AAssetManager* assets, const char* manifestAssetPath,
+                              const std::string& destRoot) {
+    if (!assets || !manifestAssetPath) {
+        HE_CORE_ERROR("[Android] 清单解包参数非法");
+        return false;
+    }
+
+    AAsset* manifest = AAssetManager_open(assets, manifestAssetPath, AASSET_MODE_BUFFER);
+    if (!manifest) {
+        HE_CORE_ERROR("[Android] 资产清单不存在: {}", manifestAssetPath);
+        return false;
+    }
+    const off64_t size = AAsset_getLength64(manifest);
+    std::string text(static_cast<size_t>(size), '\0');
+    const int read = AAsset_read(manifest, text.data(), text.size());
+    AAsset_close(manifest);
+    if (read != static_cast<int>(size)) {
+        HE_CORE_ERROR("[Android] 读取资产清单失败: {}/{}", read, size);
+        return false;
+    }
+
+    int copied  = 0;
+    int failures = 0;
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t end = text.find('\n', pos);
+        if (end == std::string::npos) end = text.size();
+        std::string rel = text.substr(pos, end - pos);
+        pos = end + 1;
+        if (!rel.empty() && rel.back() == '\r') rel.pop_back();
+        if (rel.empty()) continue;
+
+        AAsset* file = AAssetManager_open(assets, rel.c_str(), AASSET_MODE_BUFFER);
+        if (!file) {
+            HE_CORE_ERROR("[Android] 清单里的资产打不开: {}", rel);
+            ++failures;
+            continue;
+        }
+
+        const off64_t fileSize = AAsset_getLength64(file);
+        std::vector<char> buffer(static_cast<size_t>(fileSize));
+        const int fileRead = AAsset_read(file, buffer.data(), buffer.size());
+        AAsset_close(file);
+        if (fileRead != static_cast<int>(fileSize)) {
+            HE_CORE_ERROR("[Android] 读取资产失败: {}（{}/{}）", rel, fileRead, fileSize);
+            ++failures;
+            continue;
+        }
+
+        const std::string dest = destRoot + "/" + rel;
+        std::error_code ec;
+        std::filesystem::create_directories(std::filesystem::path(dest).parent_path(), ec);
+        std::ofstream out(dest, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            HE_CORE_ERROR("[Android] 写入沙箱失败: {}", dest);
+            ++failures;
+            continue;
+        }
+        out.write(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+        ++copied;
+    }
+
+    HE_CORE_INFO("[Android] 按清单解包完成: {} 个文件{}", copied,
+                 failures ? "（有失败）" : "");
+    return failures == 0;
+}
+
 } // namespace he::android

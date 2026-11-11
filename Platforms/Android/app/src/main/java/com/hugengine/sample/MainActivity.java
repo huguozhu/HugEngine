@@ -25,6 +25,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Vi
 
     private static final int SAMPLE_TRIANGLE = 1;
     private static final int SAMPLE_CUBE     = 2;
+    private static final int SAMPLE_SPONZA   = 3;   // 03.Sponza-Forward
+    private static final int SAMPLE_DEFERRED = 4;   // 04.Sponza-Deferred
 
     private SurfaceView mSurfaceView;
     private View        mButtons;
@@ -61,6 +63,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Vi
 
         bar.addView(makeButton("01 三角形", () -> switchTo(SAMPLE_TRIANGLE)));
         bar.addView(makeButton("02 立方体", () -> switchTo(SAMPLE_CUBE)));
+        bar.addView(makeButton("03 Sponza", () -> switchTo(SAMPLE_SPONZA)));
+        bar.addView(makeButton("04 延迟",   () -> switchTo(SAMPLE_DEFERRED)));
 
         mSurfaceView = new SurfaceView(this);
         mSurfaceView.getHolder().addCallback(this);

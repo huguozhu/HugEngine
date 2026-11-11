@@ -77,3 +77,6 @@ Platforms/Android/local.properties
 Platforms/Android/.idea/
 *.apk
 *.aab
+# ---- Android assets：由 sync-assets.ps1 同步的大资产，不入库 ----
+Platforms/Android/app/src/main/assets/content/gltf/
+Platforms/Android/app/src/main/assets/content/Textures/skybox.hdr

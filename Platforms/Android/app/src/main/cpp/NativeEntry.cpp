@@ -34,7 +34,7 @@ he::u32 g_Width  = 1280;
 he::u32 g_Height = 720;
 
 /// 资产版本：Content/ 有变化时 +1（与鸿蒙的 kContentVersion 同义）
-constexpr const char* kContentVersion = "1";
+constexpr const char* kContentVersion = "2";   // 3/4 需要 Sponza + skybox.hdr
 
 /// jstring → std::string（UTF-8）
 std::string ToString(JNIEnv* env, jstring value) {
@@ -74,7 +74,13 @@ Java_com_hugengine_sample_MainActivity_nativeInit(JNIEnv* env, jclass, jobject s
     }
     if (needUnpack) {
         AAssetManager* mgr = AAssetManager_fromJava(env, assetManager);
-        he::android::UnpackAssetsToSandbox(mgr, "content", contentDir, kContentVersion);
+        // 【优先按清单解包】AAssetManager 的目录枚举不返回子目录，递归解包在
+        // gltf/Sponza/glTF/... 这类嵌套结构上会静默漏文件（真机实测解出空目录）。
+        // 清单由 sync-assets.ps1 在构建期生成；没有清单时才回退到递归枚举。
+        if (!he::android::UnpackAssetsFromManifest(mgr, "asset_manifest.txt", dir)) {
+            HE_CORE_WARN("[Android] 按清单解包失败，回退到目录递归解包");
+            he::android::UnpackAssetsToSandbox(mgr, "content", contentDir, kContentVersion);
+        }
     } else {
         HE_CORE_INFO("[Android] 沙箱资产已是版本 {}，跳过解压", kContentVersion);
     }
