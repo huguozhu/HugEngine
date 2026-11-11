@@ -1043,4 +1043,38 @@ struct NaniteFallbackMeshData {
 
 /// 序列化成扩展段载荷字节（头 16B + 位置 + 法线 + 索引，索引起点 4B 对齐）
 void SerializeNaniteFallbackMesh(const NaniteFallbackMeshData& data, std::vector<u8>& outBytes);
+// ============================================================
+// T5：把 `.nanite` 字节镜像解析回强类型资产（运行时加载用）
+//
+// 【与 `ReadNaniteFile` 的分工】后者只做"格式校验 + 段表 + 原始字节"；
+//   本函数把五段解析成 `NanitePackedAsset` 的强类型向量，并取出 v2 元数据与扩展段，
+//   供 `NaniteRenderer` 直接交给 `NaniteScene::UploadPackedAsset`。
+// ============================================================
+
+/// 加载结果元数据（v1 文件里哈希/构建器版本为 0 = 无效）
+struct NaniteAssetLoadInfo {
+    u32  formatVersion    = 0;
+    u32  builderVersion   = 0;
+    u64  settingsHash     = 0;
+    u64  sourceHash       = 0;
+    bool hasHashes        = false;   ///< v2 且哈希非零时为 true
+    u32  extSectionCount  = 0;
+    std::vector<NaniteExtSectionEntry>  extEntries;
+    std::vector<NaniteMaterialDesc>     materialDescs;   ///< `MaterialDesc` 扩展段（若存在）
+};
+
+/// 解析状态（`VersionMismatch` / `BuilderMismatch` 都属于"过期 ⇒ 回退运行时构建"）
+enum class NaniteAssetLoadStatus : u32 {
+    Ok = 0,
+    BadFile          = 1,   ///< 魔数/段表/越界等格式错误
+    VersionMismatch  = 2,   ///< 格式版本超出可读范围
+    BuilderMismatch  = 3,   ///< `builderVersion` 与当前构建器不一致（旧缓存）
+};
+
+/// 解析 `.nanite` 字节为强类型资产。
+/// @param expectedBuilderVersion 0 = 不校验构建器版本
+[[nodiscard]] NaniteAssetLoadStatus ParseNaniteAsset(const void* data, usize size,
+                                                     u32 expectedBuilderVersion,
+                                                     NanitePackedAsset& out,
+                                                     NaniteAssetLoadInfo* info = nullptr);
 } // namespace he::render

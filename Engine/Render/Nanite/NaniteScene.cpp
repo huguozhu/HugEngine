@@ -213,7 +213,11 @@ bool NaniteScene::UploadPackedAsset(const NanitePackedAsset& asset) {
     if (void* p = readback->Map()) {
         mapped = true;
         const u8* gpu = static_cast<const u8*>(p);
-        for (usize i = 0; i < asset.bytes.size(); ++i) {
+        // 【只比较已上传的固定五段】v2 文件在五段之后还有扩展段（材质描述/低模/归属），
+        // 它们不参与 GPU 上传，拿它们去和读回缓冲比会必然错（实测 mismatch=755890）。
+        const usize fiveSectionBytes = asset.layout.lodOffset + asset.layout.lodBytes;
+        const usize compareBytes = std::min(asset.bytes.size(), fiveSectionBytes);
+        for (usize i = 0; i < compareBytes; ++i) {
             if (gpu[i] != asset.bytes[i]) ++mismatch;
         }
         readback->Unmap();
@@ -225,7 +229,7 @@ bool NaniteScene::UploadPackedAsset(const NanitePackedAsset& asset) {
         return false;
     }
 
-    m_Asset.totalBytes    = asset.bytes.size();
+    m_Asset.totalBytes    = asset.layout.lodOffset + asset.layout.lodBytes;   // 只算已上传的固定五段
     m_Asset.mismatchBytes = mismatch;
     m_Asset.verified      = (mismatch == 0u);
 

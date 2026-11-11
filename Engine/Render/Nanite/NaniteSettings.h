@@ -259,6 +259,14 @@ struct NaniteSettings {
     //   配置层 = cfg 键 `nanite_debug_view`（默认 0，钳到 [0, kNaniteDebugViewMaxMode]），
     //   样例负责解析/序列化 + 面板勾选框。
     u32 debugView = 0u;
+
+    // ── T5：离线资产（方案 §5.2）──
+    /// 优先读离线 `.nanite`（cfg 键 `nanite_offline`，默认 1 = 优先离线）。
+    /// 文件缺失 / 校验失败 / 版本或构建器过期 ⇒ 自动回退运行时构建并告警。
+    bool offline = true;
+    /// 离线资产路径（相对 Content/，如 `Processed/Sponza_0.nanite`；空 = 不做离线加载）。
+    /// 配置层 = cfg 键 `nanite_offline_path`。
+    String offlinePath;
 };
 
 } // namespace he::render

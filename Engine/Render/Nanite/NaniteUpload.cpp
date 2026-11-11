@@ -2198,4 +2198,78 @@ void SerializeNaniteFallbackMesh(const NaniteFallbackMeshData& data, std::vector
         std::memcpy(outBytes.data() + indexOffset, data.indices.data(), indexBytes);
     }
 }
+// ============================================================
+// T5：`.nanite` 字节 → 强类型资产
+// ============================================================
+
+NaniteAssetLoadStatus ParseNaniteAsset(const void* data, usize size, u32 expectedBuilderVersion,
+                                       NanitePackedAsset& out, NaniteAssetLoadInfo* info) {
+    NaniteFileImage image;
+    const NaniteFileError error = ReadNaniteFile(data, size, image);
+    if (error != NaniteFileError::None) {
+        // 版本超范围单独区分：上层据此打"过期"而不是"损坏"
+        return error == NaniteFileError::BadVersion ? NaniteAssetLoadStatus::VersionMismatch
+                                                    : NaniteAssetLoadStatus::BadFile;
+    }
+
+    const u32 builderVersion = NaniteHeaderBuilderVersion(image.header);
+    if (expectedBuilderVersion != 0u && builderVersion != 0u &&
+        builderVersion != expectedBuilderVersion) {
+        return NaniteAssetLoadStatus::BuilderMismatch;
+    }
+
+    // 段表 → 强类型向量（按偏移 memcpy；文件已通过 16B 对齐与越界校验）
+    NanitePackedAsset asset;
+    asset.header = image.header;
+    asset.layout = image.layout;
+    asset.bytes  = std::move(image.bytes);
+
+    const u8* raw = asset.bytes.data();
+    auto copySection = [&](usize offset, usize bytes, auto& target) {
+        using Element = typename std::decay_t<decltype(target)>::value_type;
+        const usize count = bytes / sizeof(Element);
+        target.resize(count);
+        if (count > 0u) std::memcpy(target.data(), raw + offset, count * sizeof(Element));
+    };
+    copySection(asset.layout.clusterOffset,  asset.layout.clusterBytes,  asset.clusters);
+    copySection(asset.layout.vertexOffset,   asset.layout.vertexBytes,   asset.vertices);
+    copySection(asset.layout.indexOffset,    asset.layout.indexBytes,    asset.triangles);
+    copySection(asset.layout.materialOffset, asset.layout.materialBytes, asset.materials);
+    copySection(asset.layout.lodOffset,      asset.layout.lodBytes,      asset.lodOffsets);
+
+    // 段长按 16B 向上取整：末尾的填充字节不能被当成真实记录
+    asset.clusters.resize(asset.header.clusterCount);
+    asset.vertices.resize(asset.header.vertexCount);
+    asset.triangles.resize(asset.header.indexCount / kNaniteIndicesPerTriangle);
+    asset.materials.resize(asset.header.materialCount);
+    asset.lodOffsets.resize(asset.header.lodLevelCount);
+
+    // 扩展段：材质描述（其它类型由调用方按需解释）
+    if (info != nullptr) {
+        info->formatVersion   = image.header.version;
+        info->builderVersion  = builderVersion;
+        bool hashValid = false;
+        info->settingsHash    = NaniteHeaderSettingsHash(image.header, &hashValid);
+        info->sourceHash      = NaniteHeaderSourceHash(image.header, &hashValid);
+        info->hasHashes       = image.header.version >= 2u &&
+                                (info->settingsHash != 0u || info->sourceHash != 0u);
+        info->extSectionCount = image.layout.extSectionCount;
+        info->extEntries      = image.extEntries;
+        info->materialDescs.clear();
+
+        for (const NaniteExtSectionEntry& entry : image.extEntries) {
+            if (entry.type != (u32)NaniteExtSectionType::MaterialDesc) continue;
+            const usize count = entry.size / sizeof(NaniteMaterialDesc);
+            info->materialDescs.resize(count);
+            if (count > 0u) {
+                std::memcpy(info->materialDescs.data(), asset.bytes.data() + entry.offset,
+                            count * sizeof(NaniteMaterialDesc));
+            }
+            break;
+        }
+    }
+
+    out = std::move(asset);
+    return NaniteAssetLoadStatus::Ok;
+}
 } // namespace he::render

@@ -363,3 +363,84 @@ TEST_CASE("NaniteFileV2: 同一输入两次构建 + 两次写文件逐字节相�
     CHECK(firstBytes.size() == secondBytes.size());
     CHECK(std::memcmp(firstBytes.data(), secondBytes.data(), firstBytes.size()) == 0);
 }
+
+// ============================================================
+// 6. T5：字节 → 强类型资产（运行时离线加载的解析层）
+// ============================================================
+
+TEST_CASE("NaniteFileV2: ParseNaniteAsset 往返五段向量并取出元数据/材质描述") {
+    NanitePackedAsset asset;
+    REQUIRE(BuildAsset(MakeGrid(4), asset));
+
+    NaniteFileWriteOptions options;
+    options.builderVersion = kNaniteBuilderVersion;
+    options.settingsHash   = 0xABCDEF01ull;
+    options.sourceHash     = 0x11223344ull;
+    options.extSections.push_back({ NaniteExtSectionType::MaterialDesc, MakeMaterialDescPayload(2) });
+
+    std::vector<u8> bytes;
+    REQUIRE(WriteNaniteFile(asset, options, bytes));
+
+    NanitePackedAsset parsed;
+    NaniteAssetLoadInfo info;
+    REQUIRE(ParseNaniteAsset(bytes.data(), bytes.size(), kNaniteBuilderVersion, parsed, &info) ==
+            NaniteAssetLoadStatus::Ok);
+
+    // 五段向量逐元素相等（这是"离线读入 == 运行时构建"的解析层保证）
+    REQUIRE(parsed.clusters.size()   == asset.clusters.size());
+    REQUIRE(parsed.vertices.size()   == asset.vertices.size());
+    REQUIRE(parsed.triangles.size()  == asset.triangles.size());
+    REQUIRE(parsed.lodOffsets.size() == asset.lodOffsets.size());
+    CHECK(std::memcmp(parsed.clusters.data(), asset.clusters.data(),
+                      asset.clusters.size() * sizeof(NaniteClusterRecord)) == 0);
+    CHECK(std::memcmp(parsed.vertices.data(), asset.vertices.data(),
+                      asset.vertices.size() * sizeof(NaniteVertex)) == 0);
+    CHECK(std::memcmp(parsed.triangles.data(), asset.triangles.data(),
+                      asset.triangles.size() * sizeof(NanitePackedTriangle)) == 0);
+    CHECK(std::memcmp(parsed.lodOffsets.data(), asset.lodOffsets.data(),
+                      asset.lodOffsets.size() * sizeof(u32)) == 0);
+
+    // 元数据与扩展段
+    CHECK(info.formatVersion == kNaniteFileVersion);
+    CHECK(info.builderVersion == kNaniteBuilderVersion);
+    CHECK(info.settingsHash == options.settingsHash);
+    CHECK(info.sourceHash == options.sourceHash);
+    CHECK(info.hasHashes);
+    REQUIRE(info.materialDescs.size() == 2u);
+    CHECK(info.materialDescs[0].materialIndex == 0u);
+    CHECK(info.materialDescs[1].materialIndex == 1u);
+}
+
+TEST_CASE("NaniteFileV2: ParseNaniteAsset 区分损坏 / 版本过期 / 构建器过期") {
+    NanitePackedAsset asset;
+    REQUIRE(BuildAsset(MakeGrid(2), asset));
+    NaniteFileWriteOptions options;
+    std::vector<u8> bytes;
+    REQUIRE(WriteNaniteFile(asset, options, bytes));
+
+    NanitePackedAsset parsed;
+
+    SUBCASE("魔数损坏 ⇒ BadFile") {
+        std::vector<u8> broken = bytes;
+        broken[0] = 'X';
+        CHECK(ParseNaniteAsset(broken.data(), broken.size(), 0u, parsed) ==
+              NaniteAssetLoadStatus::BadFile);
+    }
+
+    SUBCASE("格式版本超范围 ⇒ VersionMismatch") {
+        std::vector<u8> broken = bytes;
+        NaniteFileHeader header{};
+        std::memcpy(&header, broken.data(), sizeof(header));
+        header.version = kNaniteFileVersion + 1u;
+        std::memcpy(broken.data(), &header, sizeof(header));
+        CHECK(ParseNaniteAsset(broken.data(), broken.size(), 0u, parsed) ==
+              NaniteAssetLoadStatus::VersionMismatch);
+    }
+
+    SUBCASE("构建器版本不一致 ⇒ BuilderMismatch") {
+        CHECK(ParseNaniteAsset(bytes.data(), bytes.size(), kNaniteBuilderVersion + 1u, parsed) ==
+              NaniteAssetLoadStatus::BuilderMismatch);
+        // expectedBuilderVersion = 0 ⇒ 不校验
+        CHECK(ParseNaniteAsset(bytes.data(), bytes.size(), 0u, parsed) == NaniteAssetLoadStatus::Ok);
+    }
+}

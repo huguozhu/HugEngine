@@ -46,6 +46,9 @@
 #include <cstdio>      // std::snprintf（实例剔除读回的 first= 样本串）
 #include <cstdlib>     // 【任务 23】std::getenv（perf 行复用既有的 HE_CPU_PASSES 开关）
 #include <cstring>     // 【任务 15】std::memcpy（三阶段读数整块读回）
+#include <fstream>    // T5：读离线 `.nanite`（路径经 IVfs 解析）
+
+#include "Platform/IVfs.h"   // T5：`vfs::Resolve` 把相对路径解析到资产根
 #include <vector>      // 任务 12：SoA 转换的临时数组（positions / normals / uvs）
 
 // CVar: Nanite 独立开关（§14.4 的"配置"层，默认 0）。
@@ -524,6 +527,57 @@ void NaniteRenderer::EnsureAssetUploaded(const MeshBatcher& batcher) {
     if (m_AssetUploaded) return;
     m_AssetUploaded = true;
 
+    // ── T5：优先加载离线 `.nanite`（方案 §5.2）──
+    // 命中条件：`offline` 打开、路径非空、文件可读、格式/构建器校验通过。
+    // 任何一种失败都**回退运行时构建**（不是放弃渲染）：打一行告警说明原因。
+    NanitePackedAsset offlineAsset;
+    if (m_Settings.offline && !m_Settings.offlinePath.empty()) {
+        const String resolved = vfs::Resolve(m_Settings.offlinePath);
+        std::ifstream file(resolved, std::ios::binary | std::ios::ate);
+        if (!file) {
+            HE_CORE_WARN("NaniteRenderer: 离线资产不存在（{}），回退运行时构建", resolved);
+        } else {
+            const std::streamsize size = file.tellg();
+            file.seekg(0, std::ios::beg);
+            std::vector<u8> bytes((size_t)size);
+            if (!file.read(reinterpret_cast<char*>(bytes.data()), size)) {
+                HE_CORE_WARN("NaniteRenderer: 离线资产读取失败（{}），回退运行时构建", resolved);
+            } else {
+                NaniteAssetLoadInfo info;
+                const NaniteAssetLoadStatus status =
+                    ParseNaniteAsset(bytes.data(), bytes.size(), kNaniteBuilderVersion,
+                                     offlineAsset, &info);
+                if (status == NaniteAssetLoadStatus::Ok) {
+                    HE_CORE_INFO("NaniteRenderer: 离线资产加载成功（{}，格式 v{}，构建器 v{}，{} 簇 / {} 三角形，扩展段 {}）",
+                                 m_Settings.offlinePath, info.formatVersion, info.builderVersion,
+                                 offlineAsset.clusters.size(), offlineAsset.triangles.size(),
+                                 info.extSectionCount);
+                } else {
+                    const char* reason = status == NaniteAssetLoadStatus::VersionMismatch
+                                             ? "格式版本不匹配"
+                                             : (status == NaniteAssetLoadStatus::BuilderMismatch
+                                                    ? "构建器版本过期" : "文件损坏");
+                    HE_CORE_WARN("NaniteRenderer: 离线资产不可用（{}，{}），回退运行时构建",
+                                 m_Settings.offlinePath, reason);
+                    offlineAsset = NanitePackedAsset{};
+                }
+            }
+        }
+    }
+
+    // 离线命中时跳过"合并几何 → 构建"，直接把资产交给上传（读回校验照常做）。
+    if (!offlineAsset.clusters.empty()) {
+        const NanitePackedAsset& asset = offlineAsset;
+        if (m_Scene.UploadPackedAsset(asset)) {
+            m_MaterialCount     = (u32)asset.materials.size();
+            m_MultiMeshClusters = asset.stats.multiMeshClusters;
+            return;
+        }
+        // 【失败也回退】离线资产上传/读回校验失败时继续走运行时构建，
+        // 保证"离线通路出问题不导致几何消失"（方案 §5.2 的回退语义）。
+        HE_CORE_WARN("NaniteRenderer: 离线资产上传失败 ⇒ 回退运行时构建");
+        offlineAsset = NanitePackedAsset{};
+    }
     // ── ① 合并几何只读一次（§14.3：MeshBatcher 只当一次性输入）──
     // 两个 getter 都是 `MeshBatcher.h:60-61` 上**已有**的 const 访问器 ⇒ 本任务没有为几何来源
     // 改过 `MeshBatcher` 一行。索引在合批时已经加过 baseVertex（`MeshBatcher.cpp:53`），
