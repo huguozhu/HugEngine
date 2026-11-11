@@ -131,3 +131,88 @@ TEST_CASE("NaniteFallback: Sponza 的大 primitive 都能生成低模（索引/�
     }
     CHECK(checked > 0u);
 }
+
+// ============================================================
+// T6：入库测试资产上的离线通路（CI 无需 Content/gltf）
+//   glTF → 读取器 → 构建器 → 写 v2 文件 → 读回 → 解析 → 逐字节比对
+// ============================================================
+
+TEST_CASE("NaniteOffline(入库资产): MiniTriangle 的离线通路逐字节一致") {
+    const std::string path = std::string(HUGE_TEST_ASSETS_DIR) + "MiniTriangle.gltf";
+    std::error_code ec;
+    REQUIRE_MESSAGE(std::filesystem::exists(path, ec), "入库测试资产缺失：" << path);
+
+    // ① 读取器
+    NaniteGltfScene scene;
+    std::string error;
+    REQUIRE(LoadNaniteGltfFile(path.c_str(), scene, &error));
+    REQUIRE(scene.primitives.size() == 1u);
+    const NaniteGltfPrimitive& primitive = scene.primitives.front();
+    CHECK(primitive.TriangleCount() == 1u);
+    CHECK(primitive.VertexCount() == 3u);
+    CHECK(primitive.hasNormals);
+    CHECK(primitive.hasUvs);
+    CHECK(primitive.materialIndex == 0u);
+    REQUIRE(scene.materials.size() == 1u);
+
+    // ② 构建（与运行时同一个 RHI-free 入口）
+    const std::vector<NaniteMaterialRecord> materials;
+    NanitePackedAsset asset;
+    REQUIRE(BuildNaniteAssetFromGeometry(primitive.positions, primitive.normals, primitive.uvs,
+                                        primitive.indices, materials, asset));
+    CHECK(asset.clusters.size() == 1u);
+    CHECK(asset.triangles.size() == 1u);
+
+    // ③ 写 v2 文件（材质描述 + 归属 + 低模三类扩展段）
+    NaniteFallbackMeshData fallback;
+    REQUIRE(BuildNaniteFallbackMesh(primitive.positions, primitive.normals, primitive.indices,
+                                    1.0f, fallback));
+    std::vector<u8> fallbackBytes;
+    SerializeNaniteFallbackMesh(fallback, fallbackBytes);
+
+    std::vector<u8> materialBytes(sizeof(NaniteMaterialDesc) * scene.materials.size());
+    std::memcpy(materialBytes.data(), &scene.materials[0].desc, sizeof(NaniteMaterialDesc));
+
+    NaniteSourceClusterRange range;
+    range.clusterCount   = (u32)asset.clusters.size();
+    range.primitiveIndex = 0u;
+    range.materialIndex  = 0u;
+    std::vector<u8> rangeBytes(sizeof(NaniteSourceClusterRange));
+    std::memcpy(rangeBytes.data(), &range, sizeof(range));
+
+    NaniteFileWriteOptions options;
+    options.settingsHash = 0x5A5A5A5Aull;
+    options.sourceHash   = scene.sourceHash;
+    options.extSections.push_back({ NaniteExtSectionType::MaterialDesc, materialBytes });
+    options.extSections.push_back({ NaniteExtSectionType::SourceMeshRange, rangeBytes });
+    options.extSections.push_back({ NaniteExtSectionType::FallbackMesh, fallbackBytes });
+
+    std::vector<u8> fileBytes;
+    REQUIRE(WriteNaniteFile(asset, options, fileBytes));
+
+    // ④ 读回 + 解析
+    NanitePackedAsset parsed;
+    NaniteAssetLoadInfo info;
+    REQUIRE(ParseNaniteAsset(fileBytes.data(), fileBytes.size(), kNaniteBuilderVersion, parsed,
+                             &info) == NaniteAssetLoadStatus::Ok);
+
+    // ⑤ 五段逐字节相等（"离线读入 == 运行时构建"）
+    CHECK(parsed.header.clusterCount == asset.header.clusterCount);
+    CHECK(std::memcmp(parsed.bytes.data() + parsed.layout.clusterOffset,
+                      asset.bytes.data() + asset.layout.clusterOffset,
+                      asset.layout.clusterBytes) == 0);
+    CHECK(std::memcmp(parsed.bytes.data() + parsed.layout.vertexOffset,
+                      asset.bytes.data() + asset.layout.vertexOffset,
+                      asset.layout.vertexBytes) == 0);
+    CHECK(std::memcmp(parsed.bytes.data() + parsed.layout.indexOffset,
+                      asset.bytes.data() + asset.layout.indexOffset,
+                      asset.layout.indexBytes) == 0);
+    CHECK(std::memcmp(parsed.bytes.data() + parsed.layout.lodOffset,
+                      asset.bytes.data() + asset.layout.lodOffset,
+                      asset.layout.lodBytes) == 0);
+
+    // ⑥ 扩展段齐备
+    CHECK(info.extSectionCount == 3u);
+    REQUIRE(info.materialDescs.size() == 1u);
+    CHECK(info.materialDescs[0].roughnessFactor == doctest::Approx(0.9f));
+}

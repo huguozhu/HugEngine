@@ -48,6 +48,7 @@ struct Options {
     bool        stats = false;
     bool        verbose = false;
     bool        verify = false;
+    bool        printSettingsHash = false;   ///< 只打印 settingsHash/builderVersion（构建期脚本用）
     bool        valid = false;
     std::string error;
 };
@@ -70,6 +71,7 @@ Options ParseArgs(int argc, char** argv) {
         if (arg == "--stats")   { options.stats = true; continue; }
         if (arg == "--verbose") { options.verbose = true; continue; }
         if (arg == "--verify")  { options.verify = true; continue; }
+        if (arg == "--print-settings-hash") { options.printSettingsHash = true; continue; }
         if (arg.rfind("--granularity=", 0) == 0) { options.granularity = arg.substr(14); continue; }
         if (arg.rfind("--fallback-ratio=", 0) == 0) {
             options.fallbackRatio = (float)std::atof(arg.substr(17).c_str());
@@ -79,12 +81,12 @@ Options ParseArgs(int argc, char** argv) {
         if (arg.rfind("--", 0) == 0) { options.error = "未知参数: " + arg; return options; }
         positional.push_back(arg);
     }
-    if (positional.size() != 2u) {
+    if (positional.size() != 2u && !options.printSettingsHash) {
         options.error = "需要两个位置参数：<in.gltf> <out-dir>";
         return options;
     }
-    options.inputPath = positional[0];
-    options.outputDir = positional[1];
+    if (positional.size() == 2u) { options.inputPath = positional[0]; }
+    if (positional.size() == 2u) { options.outputDir = positional[1]; }
     options.valid     = true;
     return options;
 }
@@ -178,6 +180,13 @@ void FinalizeRanges(BuildUnit& unit, u32 clusterCount) {
 
 int main(int argc, char** argv) {
     const Options options = ParseArgs(argc, argv);
+    if (options.printSettingsHash) {
+        // 构建期脚本用它判断"参数是否变过"：变了就要全量重建 Processed 缓存。
+        std::printf("builderVersion=%u settingsHash=%016llX\n", kNaniteBuilderVersion,
+                    (unsigned long long)ComputeSettingsHash(options));
+        return 0;
+    }
+
     if (!options.valid) {
         if (!options.error.empty()) std::fprintf(stderr, "错误: %s\n", options.error.c_str());
         PrintUsage();

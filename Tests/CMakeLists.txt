@@ -132,6 +132,8 @@ target_include_directories(HugEngineTests PRIVATE
 
 target_compile_definitions(HugEngineTests PRIVATE
     HUGE_CONTENT_DIR="${CMAKE_SOURCE_DIR}/Content/"
+    # T6：入库的小型测试 glTF（Content/gltf 不入库，CI 靠它验证离线通路）
+    HUGE_TEST_ASSETS_DIR="${CMAKE_SOURCE_DIR}/Tests/Assets/"
 )
 
 target_link_libraries(HugEngineTests PRIVATE
