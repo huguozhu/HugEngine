@@ -906,6 +906,14 @@ u32 NaniteCull::SetInstancesFromSnapshot(const FrameSceneSnapshot& snapshot,
     const u32 capacity = kNaniteMaxTestInstances;
     u32 written = 0u;
 
+    // 【T8 诊断】入口无条件打一次：确认帧图确实调到了这里（多资产档门控排查用）
+    static bool s_EntryLogged = false;
+    if (!s_EntryLogged) {
+        s_EntryLogged = true;
+        HE_CORE_INFO("NaniteCull: SetInstancesFromSnapshot 被调用（快照 {} 条）",
+                     (u32)snapshot.draws.size());
+    }
+
     for (const SnapshotDrawItem& item : snapshot.draws) {
         if (written >= capacity) break;
         // 【T8】资产槽位直接用快照条目里的值（收集侧已从组件带过来）；
@@ -962,7 +970,7 @@ u32 NaniteCull::SetInstancesFromSnapshot(const FrameSceneSnapshot& snapshot,
                 if (item.indexCount != 0u) ++withAssetAndIndex;
             }
         }
-        HE_CORE_INFO("NaniteCull: 真实实例统计 —— 快照 {} 条，带资产槽位 {} 条（其中 indexCount≠0 的 {} 条），"
+        HE_CORE_INFO("NaniteCull: 真实实例统计 —— 快照 {} 条，带资产槽位 {} 条（其中 indexCount 非 0 的 {} 条），"
                      "成实例 {} 条",
                      (u32)snapshot.draws.size(), withEntry, withAssetAndIndex, written);
     }
