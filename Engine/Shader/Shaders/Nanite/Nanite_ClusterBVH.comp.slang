@@ -360,8 +360,17 @@ void main(uint3 id : SV_DispatchThreadID) {
     //   可见簇引用表容量与缓冲容量；0/缺省时 = 容量上界）。绘制计数恒 ≤ 它 ⇒ 恒 ≤ maxDrawCount。
     uint  drawCapacity    = params.misc.z;
 
-    // ③ 实例变换的平移列（列主序的第 4 列）；本任务的合成实例是纯平移，半径不变
+    // ③ T8：实例变换用**完整** localToWorld（列主序；含旋转与非均匀缩放）
+    //   【为什么半径要乘最大轴缩放】球在非均匀缩放下是椭球；取最大轴缩放得到保守包围球
+    //   （宁可多留不可漏掉）。CPU 参考 `NaniteTraverseClusterBVHCPU` 用同一口径，
+    //   GPU/CPU 逐项对照因此仍然成立。纯平移实例（缩放=1）结果与旧实现逐位相同。
     float3 origin = instance.ltw3.xyz;
+    float3 colX   = instance.ltw0.xyz;
+    float3 colY   = instance.ltw1.xyz;
+    float3 colZ   = instance.ltw2.xyz;
+    float  maxScale = max(length(colX), max(length(colY), length(colZ)));
+    // 局部点 → 世界点（列主序：world = X*x + Y*y + Z*z + T）
+    #define HE_NANITE_LOCAL_TO_WORLD(p) (colX * (p).x + colY * (p).y + colZ * (p).z + origin)
 
     // ④ 每实例一次深度优先遍历（显式栈；先压右、再压左 ⇒ 左子树先访问）
     uint visited = 0u;
@@ -375,7 +384,7 @@ void main(uint3 id : SV_DispatchThreadID) {
         ++visited;                              // 先计数、后判可见（与 CPU 参考同位置）
 
         BVHNode node = u_Nodes[nodeIndex];
-        if (!sphereVisibleInFrustum(origin + node.centerRadius.xyz, node.centerRadius.w)) {
+        if (!sphereVisibleInFrustum(HE_NANITE_LOCAL_TO_WORLD(node.centerRadius), node.centerRadius.w * maxScale)) {
             continue;   // 节点球不可见 ⇒ 整棵子树跳过（节点球是后代簇球的保守并集）
         }
 
@@ -387,7 +396,7 @@ void main(uint3 id : SV_DispatchThreadID) {
                 uint cluster = u_LeafClusters[first + k];
                 if (cluster >= clusterCount) continue;   // 防御：越界簇下标不读球表
                 ClusterSphere sphere = u_ClusterSpheres[cluster];
-                float3 worldCenter = origin + sphere.centerRadius.xyz;
+                float3 worldCenter = HE_NANITE_LOCAL_TO_WORLD(sphere.centerRadius);
                 if (!sphereVisibleInFrustum(worldCenter, sphere.centerRadius.w)) {
                     continue;
                 }

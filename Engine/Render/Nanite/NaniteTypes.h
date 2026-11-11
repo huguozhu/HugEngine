@@ -2068,11 +2068,23 @@ struct NaniteClusterBVHTraversalStats {
         if (chain.visibleMask != nullptr && chain.visibleMask[instance] == 0u) continue;
         ++stats.traversedInstances;
 
-        // 实例变换的平移列（列主序：localToWorld[12..14]）；本任务的合成实例是纯平移。
-        const float origin[3] = {
-            instances[instance].localToWorld[12],
-            instances[instance].localToWorld[13],
-            instances[instance].localToWorld[14],
+        // ── T8：实例变换用**完整**局部→世界矩阵（列主序；含旋转与非均匀缩放）──
+        // 【为什么半径要乘最大轴缩放】球在非均匀缩放下会变成椭球；用最大轴缩放得到一个
+        //   保守的包围球（宁可多留不可漏掉），与 GPU 侧 `Nanite_ClusterBVH.comp.slang` 同口径。
+        const float* ltw = instances[instance].localToWorld;
+        const float colX[3] = { ltw[0], ltw[1], ltw[2] };
+        const float colY[3] = { ltw[4], ltw[5], ltw[6] };
+        const float colZ[3] = { ltw[8], ltw[9], ltw[10] };
+        const float origin[3] = { ltw[12], ltw[13], ltw[14] };
+        const float scaleX = std::sqrt(colX[0]*colX[0] + colX[1]*colX[1] + colX[2]*colX[2]);
+        const float scaleY = std::sqrt(colY[0]*colY[0] + colY[1]*colY[1] + colY[2]*colY[2]);
+        const float scaleZ = std::sqrt(colZ[0]*colZ[0] + colZ[1]*colZ[1] + colZ[2]*colZ[2]);
+        const float maxScale = std::max(scaleX, std::max(scaleY, scaleZ));
+        // 局部点 → 世界点（列主序：world = X*x + Y*y + Z*z + T）
+        auto toWorld = [&](const float local[3], float out[3]) {
+            out[0] = origin[0] + colX[0] * local[0] + colY[0] * local[1] + colZ[0] * local[2];
+            out[1] = origin[1] + colX[1] * local[0] + colY[1] * local[1] + colZ[1] * local[2];
+            out[2] = origin[2] + colX[2] * local[0] + colY[2] * local[1] + colZ[2] * local[2];
         };
 
         u32 stackSize = 0u;
@@ -2084,12 +2096,9 @@ struct NaniteClusterBVHTraversalStats {
             ++stats.visitedNodes;                       // ⑤ 先计数、后判可见
 
             const NaniteBVHNode& node = bvh.nodes[nodeIndex];
-            const float nodeCenter[3] = {
-                node.center[0] + origin[0],
-                node.center[1] + origin[1],
-                node.center[2] + origin[2],
-            };
-            if (!NaniteSphereVisibleInFrustum(frustum, nodeCenter, node.radius)) {
+            float nodeCenter[3] = { 0.0f, 0.0f, 0.0f };
+            toWorld(node.center, nodeCenter);
+            if (!NaniteSphereVisibleInFrustum(frustum, nodeCenter, node.radius * maxScale)) {
                 continue;   // ⑥ 节点球不可见 ⇒ 整棵子树跳过
             }
 
@@ -2100,19 +2109,17 @@ struct NaniteClusterBVHTraversalStats {
                     const u32 cluster = bvh.leafClusterIndices[first + k];
                     if (cluster >= bvh.clusterCount) continue;   // 防御：越界簇下标不读球表
                     const NaniteClusterSphere& sphere = bvh.clusterSpheres[cluster];
-                    const float clusterCenter[3] = {
-                        sphere.center[0] + origin[0],
-                        sphere.center[1] + origin[1],
-                        sphere.center[2] + origin[2],
-                    };
-                    if (!NaniteSphereVisibleInFrustum(frustum, clusterCenter, sphere.radius)) {
+                    float clusterCenter[3] = { 0.0f, 0.0f, 0.0f };
+                    toWorld(sphere.center, clusterCenter);
+                    const float clusterRadius = sphere.radius * maxScale;
+                    if (!NaniteSphereVisibleInFrustum(frustum, clusterCenter, clusterRadius)) {
                         continue;
                     }
                     // ── 【任务 15】Phase 2 前半：通过视锥（计数位置与 GPU 的 InterlockedAdd 同位）──
                     ++stats.frustumPassClusters;
 
                     // ── 【任务 15】Phase 2 后半：Hi-Z 遮挡（`hizMipCount < 2` ⇒ 关闭，恒不遮挡）──
-                    if (NaniteHiZOccluded(chain.vpRows, clusterCenter, sphere.radius,
+                    if (NaniteHiZOccluded(chain.vpRows, clusterCenter, clusterRadius,
                                           chain.screenW, chain.screenH,
                                           chain.hizMipCount, chain.hiz)) {
                         ++stats.occludedClusters;
