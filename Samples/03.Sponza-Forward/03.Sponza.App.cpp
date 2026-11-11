@@ -848,6 +848,10 @@ void App::Shutdown() {
     if (g.imgui) { g.imgui->Shutdown(); g.imgui.reset(); }
     g.presenter.reset();
     g.cmdList.reset();
+    // 【RT 资源也要在设备销毁前释放】RTPass 持有 BLAS/TLAS、SBT 与材质/光源缓冲；
+    // 设备上有光追时它们都在 VMA 里，漏掉会让 vkDestroyDevice 触发
+    // "Some allocations were not freed"（真机实测：从 03 切到 04 时崩溃）。
+    g.rtPass.Shutdown();
     if (g.pipeline) { g.pipeline->Shutdown(); g.pipeline.reset(); }
 
     // 天空盒 Cubemap 是设备资源：必须在设备销毁前释放
@@ -862,6 +866,13 @@ void App::Shutdown() {
     g.world.ForEach<MeshComponent>([](Entity, MeshComponent& mesh) {
         mesh.GetVertexBuffer().reset();
         mesh.GetIndexBuffer().reset();
+    });
+    // 【派生类型要单独清】SphereComponent 派生自 MeshComponent，ECS 的
+    // ForEach<MeshComponent> 不会命中派生类型；漏掉会让设备销毁时触发 VMA
+    // "Some allocations were not freed"（真机实测：从 03 切到 04 时崩溃）。
+    g.world.ForEach<SphereComponent>([](Entity, SphereComponent& sphere) {
+        sphere.GetVertexBuffer().reset();
+        sphere.GetIndexBuffer().reset();
     });
     g.texCache.clear();
     g.sceneGraph.reset();

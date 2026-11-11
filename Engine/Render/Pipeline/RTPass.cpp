@@ -250,21 +250,29 @@ RTPass::RTEffectPipeline RTPass::CreateEffectPipeline(
 }
 
 void RTPass::Shutdown() {
-    rhi::GetDevice()->DestroyBufferHandle(m_VertexPullBuffer); m_VertexPullBuffer = {};
-    rhi::GetDevice()->DestroyBufferHandle(m_IndexPullBuffer); m_IndexPullBuffer = {};
-    rhi::GetDevice()->DestroyTextureHandle(m_MaterialTex); m_MaterialTex = {};
-    rhi::GetDevice()->DestroyTextureHandle(m_SceneMaterialTex); m_SceneMaterialTex = {};
-    rhi::GetDevice()->DestroyTextureHandle(m_SceneTriangleNormals); m_SceneTriangleNormals = {};
-    rhi::GetDevice()->DestroyTextureHandle(m_SceneTriangleUVs); m_SceneTriangleUVs = {};
-    rhi::GetDevice()->DestroyBufferHandle(m_LightUB); m_LightUB = {};
-    rhi::GetDevice()->DestroySamplerHandle(m_BindlessSampler); m_BindlessSampler = {};
+    // 【幂等 + 空设备保护】Shutdown 可能被调用两次：一次由样例在销毁设备前显式调用，
+    // 一次来自 Impl 析构（那时 rhi::SetDevice(nullptr) 已执行）。此时 GetDevice() 为空，
+    // 直接解引用会 SIGSEGV（真机实测：03→04 切换时崩在 fault addr 0x0）。
+    rhi::IRHIDevice* dev = rhi::GetDevice();
+    if (!dev) {
+        m_Initialized = false;
+        return;
+    }
+    dev->DestroyBufferHandle(m_VertexPullBuffer); m_VertexPullBuffer = {};
+    dev->DestroyBufferHandle(m_IndexPullBuffer); m_IndexPullBuffer = {};
+    dev->DestroyTextureHandle(m_MaterialTex); m_MaterialTex = {};
+    dev->DestroyTextureHandle(m_SceneMaterialTex); m_SceneMaterialTex = {};
+    dev->DestroyTextureHandle(m_SceneTriangleNormals); m_SceneTriangleNormals = {};
+    dev->DestroyTextureHandle(m_SceneTriangleUVs); m_SceneTriangleUVs = {};
+    dev->DestroyBufferHandle(m_LightUB); m_LightUB = {};
+    dev->DestroySamplerHandle(m_BindlessSampler); m_BindlessSampler = {};
     m_BindlessTextures.clear();
     m_BindlessSamplers.clear();
-    rhi::GetDevice()->DestroyBufferHandle(m_TLASScratch); m_TLASScratch = {};
-    rhi::GetDevice()->DestroyBufferHandle(m_TLASInstanceBuffer); m_TLASInstanceBuffer = {};
+    dev->DestroyBufferHandle(m_TLASScratch); m_TLASScratch = {};
+    dev->DestroyBufferHandle(m_TLASInstanceBuffer); m_TLASInstanceBuffer = {};
     m_SBTBuffer.reset();
-    rhi::GetDevice()->DestroyRTPipelineStateHandle(m_RTPipeline); m_RTPipeline = {};
-    rhi::GetDevice()->DestroyAccelerationStructureHandle(m_TLAS); m_TLAS = {};
+    dev->DestroyRTPipelineStateHandle(m_RTPipeline); m_RTPipeline = {};
+    dev->DestroyAccelerationStructureHandle(m_TLAS); m_TLAS = {};
     m_BLASMap.clear();
     m_Initialized = false;
 }
