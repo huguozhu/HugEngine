@@ -1018,4 +1018,29 @@ struct NaniteFileImage {
 /// 解析并校验 `.nanite`（接受 v1 / v2），成功返回 `NaniteFileError::None`。
 /// 【v1 语义】无扩展段表、哈希与构建器版本为 0 ⇒ 调用方应视为"元数据无效、需回退或重建"。
 [[nodiscard]] NaniteFileError ReadNaniteFile(const void* data, usize size, NaniteFileImage& out);
+// ============================================================
+// T4：Fallback 低模（v2 扩展段的 `FallbackMesh` 载荷）
+//
+// 【用途】无网格着色器 / IA 回退路径与 RT 代理几何：不占簇流水线，直接给一低模。
+// 【比例】`ratio` 是"目标三角形数 / 原始三角形数"，默认 0.02（方案 §4.2）。
+// 【确定性】只依赖输入与 `ratio`，布局固定（头 + 位置 + 法线 + 索引）。
+// ============================================================
+
+/// Fallback 低模数据（序列化前进内存里的形态）
+struct NaniteFallbackMeshData {
+    NaniteFallbackMeshHeader header{};
+    std::vector<float> positions;   ///< 3 float / 顶点
+    std::vector<float> normals;     ///< 3 float / 顶点（缺失补 0）
+    std::vector<u32>   indices;     ///< 三角形列表
+};
+
+/// 用 meshopt_simplify 生成低模。`ratio` 越界会被夹到 [0,1]；退化输入返回 false。
+[[nodiscard]] bool BuildNaniteFallbackMesh(std::span<const float> positions,
+                                           std::span<const float> normals,
+                                           std::span<const u32>   indices,
+                                           float                  ratio,
+                                           NaniteFallbackMeshData& out);
+
+/// 序列化成扩展段载荷字节（头 16B + 位置 + 法线 + 索引，索引起点 4B 对齐）
+void SerializeNaniteFallbackMesh(const NaniteFallbackMeshData& data, std::vector<u8>& outBytes);
 } // namespace he::render

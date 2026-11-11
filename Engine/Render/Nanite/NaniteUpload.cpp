@@ -2099,4 +2099,103 @@ NaniteFileError ReadNaniteFile(const void* data, usize size, NaniteFileImage& ou
     out = std::move(image);
     return NaniteFileError::None;
 }
+// ============================================================
+// T4：Fallback 低模（v2 `FallbackMesh` 扩展段）
+// ============================================================
+
+bool BuildNaniteFallbackMesh(std::span<const float> positions, std::span<const float> normals,
+                             std::span<const u32> indices, float ratio,
+                             NaniteFallbackMeshData& out) {
+    const usize vertexCount = positions.size() / 3u;
+    const usize indexCount  = indices.size();
+    if (vertexCount == 0u || indexCount < 3u) return false;
+    if ((indexCount % 3u) != 0u) return false;
+
+    // ratio 夹到 [0,1]；至少保留一个三角形，否则低模没有意义
+    float clamped = ratio;
+    if (!(clamped > 0.0f)) clamped = 0.0f;
+    if (clamped > 1.0f) clamped = 1.0f;
+    const usize targetIndexCount = std::max<usize>(3u, (usize)((double)indexCount * (double)clamped / 3.0 * 3.0));
+
+    // 简化：目标索引数不足原始数时才做；否则原样保留
+    std::vector<u32> simplified(indexCount);
+    usize simplifiedCount = indexCount;
+    if (targetIndexCount < indexCount) {
+        float resultError = 0.0f;
+        // 【不锁边界】`meshopt_SimplifyLockBorder` 在 v0.22 上对本工程的 Sponza 网格会让
+        simplifiedCount = meshopt_simplify(simplified.data(), indices.data(), indexCount,
+                                           positions.data(), vertexCount, sizeof(float) * 3u,
+                                           targetIndexCount, 1.0f, 0u,   // 0 = 不锁边界（见上）
+                                           &resultError);
+        if (simplifiedCount < 3u || (simplifiedCount % 3u) != 0u) {
+            simplifiedCount = indexCount;
+            simplified.assign(indices.begin(), indices.end());
+        }
+    } else {
+        simplified.assign(indices.begin(), indices.end());
+    }
+    simplified.resize(simplifiedCount);
+
+    // 【remap 的语义】`meshopt_optimizeVertexFetchRemap` 写的是 **old → new** 映射
+    // （`remap[oldVertex] = newVertex`），并且**不改写**索引缓冲；方向搞反会读到越界顶点
+    // （真机表现为 MSVC span 断言 / 堆损坏）。下面按正确方向重建顶点并把索引映射到新下标。
+    std::vector<u32> remap(vertexCount, 0u);
+    const usize uniqueVertexCount = meshopt_optimizeVertexFetchRemap(
+        remap.data(), simplified.data(), simplified.size(), vertexCount);
+    if (uniqueVertexCount == 0u || uniqueVertexCount > vertexCount) { HE_CORE_WARN("[FB] remap 异常 unique={} vertex={}", uniqueVertexCount, vertexCount); return false; }
+
+    // 防御：简化后的下标必须落在原顶点范围内（否则 remap 取值越界）
+    for (usize i = 0; i < simplified.size(); ++i) {
+        if (simplified[i] >= vertexCount) { HE_CORE_WARN("[FB] 索引越界 i={} idx={} vertex={}", i, simplified[i], vertexCount); return false; }
+    }
+
+    NaniteFallbackMeshData result;
+    result.header.vertexCount = (u32)uniqueVertexCount;
+    result.header.indexCount  = (u32)simplified.size();
+    result.header.indexStride = 4u;
+    result.positions.assign(uniqueVertexCount * 3u, 0.0f);
+    result.normals.assign(uniqueVertexCount * 3u, 0.0f);
+
+    // 顶点：按 old → new 落位（未被引用的顶点自然丢失）
+    const bool hasNormals = normals.size() >= vertexCount * 3u;
+    for (usize oldVertex = 0; oldVertex < vertexCount; ++oldVertex) {
+        const u32 newVertex = remap[oldVertex];
+        if (newVertex >= uniqueVertexCount) continue;
+        for (u32 c = 0; c < 3u; ++c) {
+            result.positions[(usize)newVertex * 3u + c] = positions[oldVertex * 3u + c];
+            if (hasNormals) result.normals[(usize)newVertex * 3u + c] = normals[oldVertex * 3u + c];
+        }
+    }
+
+    // 索引：同样映射到新下标
+    std::vector<u32> newIndices(simplified.size());
+    for (usize i = 0; i < simplified.size(); ++i) newIndices[i] = remap[simplified[i]];
+    result.indices = std::move(newIndices);
+
+    out = std::move(result);
+
+    return true;
+}
+
+void SerializeNaniteFallbackMesh(const NaniteFallbackMeshData& data, std::vector<u8>& outBytes) {
+    // 布局：头 16B | 位置 12B/顶点 | 法线 12B/顶点 | 索引 4B/三角形顶点数
+    // 索引起点补到 4B 对齐（顶点数据都是 12B 步长，天然对齐；这里仍显式补齐防将来改布局）
+    const usize positionBytes = data.positions.size() * sizeof(float);
+    const usize normalBytes   = data.normals.size() * sizeof(float);
+    const usize indexBytes    = data.indices.size() * sizeof(u32);
+    const usize indexOffset   = NaniteAlignUpFile((u64)(sizeof(NaniteFallbackMeshHeader) + positionBytes + normalBytes));
+
+    outBytes.assign(indexOffset + indexBytes, 0u);
+    std::memcpy(outBytes.data(), &data.header, sizeof(NaniteFallbackMeshHeader));
+    if (positionBytes > 0u) {
+        std::memcpy(outBytes.data() + sizeof(NaniteFallbackMeshHeader), data.positions.data(), positionBytes);
+    }
+    if (normalBytes > 0u) {
+        std::memcpy(outBytes.data() + sizeof(NaniteFallbackMeshHeader) + positionBytes,
+                    data.normals.data(), normalBytes);
+    }
+    if (indexBytes > 0u) {
+        std::memcpy(outBytes.data() + indexOffset, data.indices.data(), indexBytes);
+    }
+}
 } // namespace he::render
