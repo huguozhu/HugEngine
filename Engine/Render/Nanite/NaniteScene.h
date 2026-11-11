@@ -109,6 +109,26 @@ public:
     /// 【同步约定】函数内部自己 `Submit` + `WaitIdle`（一次性，不在每帧路径上）。
     [[nodiscard]] bool UploadPackedAsset(const NanitePackedAsset& asset);
 
+    /// T8：资产注册表条目（每资产一组 GPU 段 + 一份 CPU 段副本，不含字节镜像）
+    struct NaniteAssetEntry {
+        AssetBuffers      buffers;
+        NanitePackedAsset cpu;      ///< 只留簇/顶点/三角形/材质/LOD 段（`bytes` 清空）
+    };
+    /// "无资产"哨兵（`MeshRegistryEntry::naniteAssetIndex` 用它表示走运行时构建/回退）
+    static constexpr u32 kInvalidAssetIndex = 0xFFFFFFFFu;
+
+    /// T8：把一份资产追加进注册表，返回其下标（失败返回 `kInvalidAssetIndex`）。
+    /// 【与 `UploadPackedAsset` 的关系】后者是"单资产"兼容入口（等价于替换 slot 0）；
+    /// 本函数是"多资产"入口，多份资产各自持有独立的 6 段缓冲，互不覆盖。
+    [[nodiscard]] u32 RegisterAsset(const NanitePackedAsset& asset);
+
+    /// T8：注册表读取（越界返回 nullptr）
+    [[nodiscard]] const NaniteAssetEntry* GetAssetEntry(u32 index) const {
+        return index < m_Assets.size() ? &m_Assets[index] : nullptr;
+    }
+    [[nodiscard]] u32 GetAssetCount() const { return (u32)m_Assets.size(); }
+    void ClearAssets() { m_Assets.clear(); }
+
     /// 已上传的资产缓冲组（任务 13+ 绑定用；本任务只创建 + 校验）
     [[nodiscard]] const AssetBuffers& GetAssetBuffers() const { return m_Asset; }
 
@@ -166,6 +186,9 @@ public:
     }
 
 private:
+    /// T8：把一份资产上传进调用方给的段组（`UploadPackedAsset` 与 `RegisterAsset` 共用）
+    [[nodiscard]] bool UploadAssetInto(const NanitePackedAsset& asset, AssetBuffers& outAsset);
+
     rhi::IRHIDevice* m_Device = nullptr;
 
     /// 【T2.6】本帧的渲染线程上下文（可空；空时解析回退 `m_Device`）
@@ -209,6 +232,9 @@ public:
 
     /// 【§14.8 任务 12】资产缓冲组（GPU 资源宿主；`Shutdown` 时随 unique_ptr 一起释放）
     AssetBuffers m_Asset;
+
+    /// T8：多资产注册表（每资产独立段组 + CPU 段副本；空表示还没注册过任何资产）
+    std::vector<NaniteAssetEntry> m_Assets;
 
     /// 【§14.8 任务 24】留存的资产 CPU 副本（页池的数据源；`bytes` 镜像被丢弃）
     NanitePackedAsset m_AssetCPU;

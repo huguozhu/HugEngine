@@ -114,7 +114,7 @@ bool NaniteScene::FreeInstanceSlot(u32 objectIndex) {
 // 一句话：按任务 10 的段表切 6 片 → 各建一个 Storage 缓冲（`initialData` 上传）→
 // 一条一次性命令表把每片 GPU 拷贝到读回缓冲的同偏移 → 等 GPU 完成后 Map → 逐字节比较。
 // ============================================================
-bool NaniteScene::UploadPackedAsset(const NanitePackedAsset& asset) {
+bool NaniteScene::UploadAssetInto(const NanitePackedAsset& asset, AssetBuffers& outAsset) {
     if (!m_Device) {
         HE_CORE_ERROR("NaniteScene: 资产上传失败 —— 设备为空（Initialize 未成功？）");
         return false;
@@ -128,7 +128,7 @@ bool NaniteScene::UploadPackedAsset(const NanitePackedAsset& asset) {
     }
 
     // 释放上一份（允许重复调用；正常路径由门面的"只做一次"门闩保证只调一次）
-    m_Asset = AssetBuffers{};
+    outAsset = AssetBuffers{};
 
     // ── 1. 段切片：偏移/长度全部取自打包器的 `layout`（本函数**不重算**任何偏移 ⇒ 单一真值），
     //      6 片恰好无缝覆盖 `[0, totalBytes)`：头[0,96) + 五段首尾相接 ──
@@ -136,15 +136,15 @@ bool NaniteScene::UploadPackedAsset(const NanitePackedAsset& asset) {
         const char*                        name;    ///< 诊断用段名
         usize                              offset;  ///< 在 `asset.bytes` 内的起点
         usize                              bytes;   ///< 段长（含 16B 对齐填充；0 = 空段）
-        std::unique_ptr<rhi::IRHIBuffer>*  slot;    ///< 落到 `m_Asset` 的哪个成员
+        std::unique_ptr<rhi::IRHIBuffer>*  slot;    ///< 落到 `outAsset` 的哪个成员
     };
     const Slice slices[6] = {
-        { "header",    0,                            kNaniteFileHeaderBytes,      &m_Asset.header     },
-        { "clusters",  asset.layout.clusterOffset,   asset.layout.clusterBytes,   &m_Asset.clusters   },
-        { "vertices",  asset.layout.vertexOffset,    asset.layout.vertexBytes,    &m_Asset.vertices   },
-        { "indices",   asset.layout.indexOffset,     asset.layout.indexBytes,     &m_Asset.indices    },
-        { "materials", asset.layout.materialOffset,  asset.layout.materialBytes,  &m_Asset.materials  },
-        { "lod",       asset.layout.lodOffset,       asset.layout.lodBytes,       &m_Asset.lodOffsets },
+        { "header",    0,                            kNaniteFileHeaderBytes,      &outAsset.header     },
+        { "clusters",  asset.layout.clusterOffset,   asset.layout.clusterBytes,   &outAsset.clusters   },
+        { "vertices",  asset.layout.vertexOffset,    asset.layout.vertexBytes,    &outAsset.vertices   },
+        { "indices",   asset.layout.indexOffset,     asset.layout.indexBytes,     &outAsset.indices    },
+        { "materials", asset.layout.materialOffset,  asset.layout.materialBytes,  &outAsset.materials  },
+        { "lod",       asset.layout.lodOffset,       asset.layout.lodBytes,       &outAsset.lodOffsets },
     };
 
     for (const Slice& s : slices) {
@@ -153,7 +153,7 @@ bool NaniteScene::UploadPackedAsset(const NanitePackedAsset& asset) {
             HE_CORE_ERROR("NaniteScene: 资产上传失败 —— 段 {} 越出镜像（{} + {} > {}）",
                           s.name, (unsigned long long)s.offset, (unsigned long long)s.bytes,
                           (unsigned long long)asset.bytes.size());
-            m_Asset = AssetBuffers{};
+            outAsset = AssetBuffers{};
             return false;
         }
         rhi::BufferDesc desc;
@@ -169,7 +169,7 @@ bool NaniteScene::UploadPackedAsset(const NanitePackedAsset& asset) {
         if (!*s.slot) {
             HE_CORE_ERROR("NaniteScene: 资产上传失败 —— 段 {} 的缓冲创建失败（{} B）",
                           s.name, (unsigned long long)s.bytes);
-            m_Asset = AssetBuffers{};
+            outAsset = AssetBuffers{};
             return false;
         }
     }
@@ -183,7 +183,7 @@ bool NaniteScene::UploadPackedAsset(const NanitePackedAsset& asset) {
     if (!readback) {
         HE_CORE_ERROR("NaniteScene: 资产上传失败 —— 读回缓冲创建失败（{} B）",
                       (unsigned long long)readbackDesc.size);
-        m_Asset = AssetBuffers{};
+        outAsset = AssetBuffers{};
         return false;
     }
 
@@ -195,7 +195,7 @@ bool NaniteScene::UploadPackedAsset(const NanitePackedAsset& asset) {
     auto cmd = m_Device->CreateCommandList();
     if (!cmd) {
         HE_CORE_ERROR("NaniteScene: 资产上传失败 —— 一次性命令表创建失败");
-        m_Asset = AssetBuffers{};
+        outAsset = AssetBuffers{};
         return false;
     }
     cmd->BeginLightweight();
@@ -225,24 +225,46 @@ bool NaniteScene::UploadPackedAsset(const NanitePackedAsset& asset) {
     if (!mapped) {
         HE_CORE_ERROR("NaniteScene: 资产读回失败 —— 读回缓冲不可映射（{} B）",
                       (unsigned long long)asset.bytes.size());
-        m_Asset = AssetBuffers{};
+        outAsset = AssetBuffers{};
         return false;
     }
 
-    m_Asset.totalBytes    = asset.layout.lodOffset + asset.layout.lodBytes;   // 只算已上传的固定五段
-    m_Asset.mismatchBytes = mismatch;
-    m_Asset.verified      = (mismatch == 0u);
+    outAsset.totalBytes    = asset.layout.lodOffset + asset.layout.lodBytes;   // 只算已上传的固定五段
+    outAsset.mismatchBytes = mismatch;
+    outAsset.verified      = (mismatch == 0u);
 
     // 【恰好一行】任务 12 的验收出口：`upload_bytes` = 镜像总字节（6 段之和），
     // `readback_match` = 1 表示逐字节一致；其余四个计数取自资产文件头。
     HE_CORE_INFO("[Nanite] upload_bytes={} readback_match={} mismatch_bytes={} "
                  "clusters={} vertices={} materials={} lod_levels={}",
-                 (unsigned long long)m_Asset.totalBytes,
-                 m_Asset.verified ? 1 : 0,
-                 (unsigned long long)m_Asset.mismatchBytes,
+                 (unsigned long long)outAsset.totalBytes,
+                 outAsset.verified ? 1 : 0,
+                 (unsigned long long)outAsset.mismatchBytes,
                  asset.header.clusterCount, asset.header.vertexCount,
                  asset.header.materialCount, asset.header.lodLevelCount);
-    return m_Asset.verified;
+    return outAsset.verified;
+}
+
+// T8：单资产兼容入口（等价于替换 slot 0；既有调用方行为不变）
+bool NaniteScene::UploadPackedAsset(const NanitePackedAsset& asset) {
+    m_Asset = AssetBuffers{};
+    return UploadAssetInto(asset, m_Asset);
+}
+
+// T8：多资产入口 —— 每份资产独立的 6 段缓冲，追加进注册表
+u32 NaniteScene::RegisterAsset(const NanitePackedAsset& asset) {
+    if (m_Assets.size() >= 4096u) {   // 防御：注册表不设上限会被坏数据拖爆
+        HE_CORE_ERROR("NaniteScene: 资产注册表已满（{}），拒绝注册", m_Assets.size());
+        return kInvalidAssetIndex;
+    }
+    NaniteAssetEntry entry;
+    if (!UploadAssetInto(asset, entry.buffers)) return kInvalidAssetIndex;
+    // CPU 副本只留页池要用的段：`bytes` 是五段的第二份拷贝，注册表不留
+    entry.cpu = asset;
+    entry.cpu.bytes.clear();
+    entry.cpu.bytes.shrink_to_fit();
+    m_Assets.push_back(std::move(entry));
+    return (u32)m_Assets.size() - 1u;
 }
 
 // ============================================================
