@@ -6,6 +6,7 @@
 
 #include <functional>
 #include <type_traits>   // if constexpr + is_base_of（E-3：只对真正的网格组件算材质）
+#include "Core/Log.h"   // T8 诊断日志
 
 namespace he {
 class World;
@@ -141,6 +142,19 @@ public:
         // T8：离线资产槽位随条目带走（只有网格组件有这个概念；其余类型保持无效）
         if constexpr (std::is_base_of_v<he::MeshComponent, TComponent>) {
             item.naniteAssetIndex = comp.GetNaniteAssetIndex();
+        }
+        // 【T8 诊断】首次统计"从组件带进快照的资产槽位"数量（确认这一跳是否真的发生）
+        if constexpr (std::is_base_of_v<he::MeshComponent, TComponent>) {
+            if (item.naniteAssetIndex != 0xFFFFFFFFu) {
+                static bool s_Logged = false;
+                static u32  s_Count  = 0u;
+                ++s_Count;
+                if (!s_Logged && s_Count > 0u) {
+                    s_Logged = true;
+                    HE_CORE_INFO("SceneSnapshotBuilder: 收集侧已带出资产槽位（{} 目前 {} 条）",
+                                 typeid(TComponent).name(), s_Count);
+                }
+            }
         }
 
         // 材质参数（E-3）：**在收集侧就算完** —— 复用 `MakePBRMaterial` + `FillObjectData`（纯计算），

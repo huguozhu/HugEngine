@@ -194,6 +194,15 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
         // 有网格绑定了离线资产（`MeshComponent::SetNaniteAssetIndex`）时，用快照里的
         // 真实实例（世界矩阵 + 世界 AABB）替换合成测试实例；没有绑定则保留合成档，
         // 既有验收（GPU/CPU 剔除逐项对照）因此逐位不变。
+        {
+            static bool s_Logged = false;
+            if (!s_Logged) {
+                s_Logged = true;
+                HE_CORE_INFO("FrameGraph: Nanite 实例表使用 MeshRegistry@{}（Count={}，带资产 {}）",
+                             (const void*)&m_MeshRegistry, m_MeshRegistry.Count(),
+                             m_MeshRegistry.CountWithNaniteAsset());
+            }
+        }
         const u32 realInstances = m_Nanite.GetCull().SetInstancesFromSnapshot(FrameSnap(), m_MeshRegistry);
         if (realInstances > 0u) {
             static bool s_RealInstanceLogged = false;

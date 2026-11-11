@@ -918,6 +918,18 @@ u32 NaniteCull::SetInstancesFromSnapshot(const FrameSceneSnapshot& snapshot,
         if (written >= capacity) break;
         // 【T8】资产槽位直接用快照条目里的值（收集侧已从组件带过来）；
         // 不再查 `MeshRegistry` —— 渲染侧可能持有另一个注册表实例，实测会查不到绑定。
+        // 【T8 诊断】首个"带资产槽位"的条目打印一次明细（确认到底卡在哪一步）
+        if (item.naniteAssetIndex != 0xFFFFFFFFu) {
+            static bool s_DetailLogged = false;
+            if (!s_DetailLogged) {
+                s_DetailLogged = true;
+                const MeshRegistryEntry* e = registry.Find(item.meshIndex);
+                HE_CORE_INFO("NaniteCull: 首条带资产条目 —— asset={} meshIndex={} indexCount={} "
+                             "注册表命中={} 条目indexCount={}",
+                             item.naniteAssetIndex, item.meshIndex, item.indexCount,
+                             e != nullptr ? 1 : 0, e != nullptr ? e->indexCount : 0u);
+            }
+        }
         if (item.naniteAssetIndex == 0xFFFFFFFFu) continue;   // 没有离线资产 ⇒ 不参与 Nanite 绘制
         // 【索引数来源】快照里的 `indexCount` 由 `MeshBatcher` 回填；多资产档下样例跳过了
         // 单资产上传路径，某些帧该字段可能仍是 0 ⇒ 退回注册表里组件登记的真实索引数。
