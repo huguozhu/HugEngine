@@ -32,7 +32,7 @@
 
 #include "Nanite/NaniteUpload.h"
 
-#include "cgltf.h"
+#include "Nanite/NaniteGltfReader.h"   // T3：统一的最小 glTF 几何读取器
 
 #include <algorithm>
 #include <string>
@@ -53,101 +53,21 @@ struct MergedGeometry {
     std::vector<NaniteSourceMeshRange> meshes;
 };
 
-void AppendPrimitive(const cgltf_primitive& prim, MergedGeometry& out) {
-    if (prim.type != cgltf_primitive_type_triangles) return;
-    const cgltf_attribute* posAttr = nullptr;
-    const cgltf_attribute* normalAttr = nullptr;
-    const cgltf_attribute* uvAttr = nullptr;
-    for (cgltf_size a = 0; a < prim.attributes_count; ++a) {
-        const cgltf_attribute& attr = prim.attributes[a];
-        if (attr.type == cgltf_attribute_type_position) posAttr = &attr;
-        else if (attr.type == cgltf_attribute_type_normal) normalAttr = &attr;
-        else if (attr.type == cgltf_attribute_type_texcoord) uvAttr = &attr;
-    }
-    if (!posAttr || !posAttr->data) return;
-
-    const cgltf_size vertexCount = posAttr->data->count;
-    const cgltf_size posComps = cgltf_num_components(posAttr->data->type);
-    std::vector<float> posFloats(posComps * vertexCount);
-    cgltf_accessor_unpack_floats(posAttr->data, posFloats.data(), posComps * vertexCount);
-
-    std::vector<float> normalFloats;
-    if (normalAttr && normalAttr->data) {
-        const cgltf_size n = cgltf_num_components(normalAttr->data->type);
-        normalFloats.resize(n * vertexCount);
-        cgltf_accessor_unpack_floats(normalAttr->data, normalFloats.data(), n * vertexCount);
-    }
-    std::vector<float> uvFloats;
-    bool hasUV = false;
-    if (uvAttr && uvAttr->data) {
-        const cgltf_size n = cgltf_num_components(uvAttr->data->type);
-        uvFloats.resize(n * vertexCount);
-        hasUV = cgltf_accessor_unpack_floats(uvAttr->data, uvFloats.data(), n * vertexCount) > 0;
-    }
-
-    const u32 baseVertex = (u32)(out.positions.size() / 3u);
-    for (cgltf_size i = 0; i < vertexCount; ++i) {
-        out.positions.push_back(posFloats[i * posComps + 0]);
-        out.positions.push_back(posFloats[i * posComps + 1]);
-        out.positions.push_back(posFloats[i * posComps + 2]);
-        if (!normalFloats.empty()) {
-            out.normals.push_back(normalFloats[i * 3 + 0]);
-            out.normals.push_back(normalFloats[i * 3 + 1]);
-            out.normals.push_back(normalFloats[i * 3 + 2]);
-        } else {
-            out.normals.push_back(0.0f);
-            out.normals.push_back(1.0f);
-            out.normals.push_back(0.0f);
-        }
-        if (hasUV) {
-            out.uvs.push_back(uvFloats[i * 2 + 0]);
-            out.uvs.push_back(uvFloats[i * 2 + 1]);
-        } else {
-            out.uvs.push_back(0.0f);
-            out.uvs.push_back(0.0f);
-        }
-    }
-
-    NaniteSourceMeshRange range;
-    range.firstTriangle = (u32)(out.indices.size() / 3u);
-    range.materialIndex = (u32)out.meshes.size();
-    range.triangleCount = 0u;
-    if (prim.indices) {
-        const cgltf_size indexCount = cgltf_accessor_unpack_indices(prim.indices, nullptr, sizeof(u32), 0);
-        if (indexCount > 0) {
-            std::vector<u32> indices(indexCount);
-            cgltf_accessor_unpack_indices(prim.indices, indices.data(), sizeof(u32), indexCount);
-            for (cgltf_size i = 0; i < indexCount; ++i) out.indices.push_back(indices[i] + baseVertex);
-            range.triangleCount = (u32)(indexCount / 3u);
-        }
-    }
-    if (range.triangleCount > 0u) out.meshes.push_back(range);
-}
-
-void ProcessNode(const cgltf_node* node, MergedGeometry& out) {
-    if (!node) return;
-    if (node->mesh && !node->skin) {
-        for (cgltf_size p = 0; p < node->mesh->primitives_count; ++p) {
-            AppendPrimitive(node->mesh->primitives[p], out);
-        }
-    }
-    for (cgltf_size c = 0; c < node->children_count; ++c) ProcessNode(node->children[c], out);
-}
-
+// T3：统一改用 `NaniteGltfReader`（不依赖 ECS 的最小读取器）——
+// 原先本文件自带一份 cgltf 遍历 + 合并代码，与工具/其它测试重复；现在只保留"合并"这一步，
+// 顶点/法线/UV/索引与源网格区间的口径由读取器与 `MergeNaniteGltfScene` 统一。
 bool LoadMerged(const char* path, MergedGeometry& out) {
-    cgltf_options options{};
-    cgltf_data* data = nullptr;
-    if (cgltf_parse_file(&options, path, &data) != cgltf_result_success) return false;
-    if (cgltf_load_buffers(&options, data, path) != cgltf_result_success) {
-        cgltf_free(data);
-        return false;
-    }
-    const cgltf_scene* scene = data->scene ? data->scene
-                                          : (data->scenes_count > 0 ? &data->scenes[0] : nullptr);
-    if (scene) {
-        for (cgltf_size i = 0; i < scene->nodes_count; ++i) ProcessNode(scene->nodes[i], out);
-    }
-    cgltf_free(data);
+    render::NaniteGltfScene scene;
+    if (!render::LoadNaniteGltfFile(path, scene)) return false;
+
+    render::NaniteGltfMergedGeometry merged;
+    render::MergeNaniteGltfScene(scene, merged);
+
+    out.positions = std::move(merged.positions);
+    out.normals   = std::move(merged.normals);
+    out.uvs       = std::move(merged.uvs);
+    out.indices   = std::move(merged.indices);
+    out.meshes    = std::move(merged.meshes);
     return !out.indices.empty();
 }
 

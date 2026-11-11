@@ -172,6 +172,9 @@ endif()
 
 add_subdirectory(Engine)
 
+# T3（Nanite 离线预处理方案）：离线网格预处理工具（glTF → .nanite v2）。
+# 【必须在 Engine 之后】它链接 HugEngineNaniteBuild，后者依赖 HugEngineCore 目标先存在。
+add_subdirectory(Tools/MeshPreprocess)
 # 桌面样例宿主：样例的 main 只做配置，主循环在 Platforms/Win32
 if(WIN32 AND HUGENGINE_BUILD_SAMPLES)
     add_subdirectory(Platforms/Win32)

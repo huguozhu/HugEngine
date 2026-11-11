@@ -18,7 +18,7 @@
 // ============================================================
 // cgltf 实现 — 单头文件库，仅在此翻译单元中展开
 // ============================================================
-#define CGLTF_IMPLEMENTATION
+// 实现体已抽到 Engine/External/cgltf/cgltf_impl.cpp（静态库 cgltf），这里只取声明
 #include "cgltf.h"
 
 namespace he::asset {

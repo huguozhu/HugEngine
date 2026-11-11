@@ -20,6 +20,9 @@ add_library(HugEngineNaniteBuild STATIC
     ${CMAKE_CURRENT_LIST_DIR}/NaniteUpload.cpp
     ${CMAKE_CURRENT_LIST_DIR}/NaniteUpload.h
     ${CMAKE_CURRENT_LIST_DIR}/NaniteTypes.h
+    # T3：最小 glTF 几何读取器（不依赖 ECS；离线工具与单测共用）
+    ${CMAKE_CURRENT_LIST_DIR}/NaniteGltfReader.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/NaniteGltfReader.h
 )
 
 # 公开包含路径：使用方按 `#include "Nanite/NaniteUpload.h"` 引用（与 Render 内部一致）
@@ -32,13 +35,18 @@ target_include_directories(HugEngineNaniteBuild
 # 类型，不产生对 RHI 的链接依赖 —— 这也是单测历来能"只编译 NaniteUpload.cpp、
 # 不链 HugEngineRender"的原因。此处保持同样的边界：包含路径给，链接不给。
 target_include_directories(HugEngineNaniteBuild
-    PRIVATE ${CMAKE_SOURCE_DIR}/Engine/RHI
+    # 【为什么是 PUBLIC】`NaniteUpload.h` 经 `Threading/RenderThreadContext.h` 间接 include
+    # `RHI/RHI.h`，所以任何包含 NaniteUpload.h 的目标（单测/离线工具/Render）都要能找到它。
+    # 这里只给包含路径，仍然不链接任何 RHI 目标（纪律不变）。
+    PUBLIC ${CMAKE_SOURCE_DIR}/Engine/RHI
 )
 
-# 只依赖 Core（类型/日志）与 meshoptimizer（簇切分算法）
+# 只依赖 Core（类型/日志）、meshoptimizer（簇切分算法）与 cgltf（glTF 解析）
 target_link_libraries(HugEngineNaniteBuild
     PUBLIC HugEngineCore
     PRIVATE meshoptimizer
+    # T3：cgltf 实现体在 Engine/External/cgltf/cgltf_impl.cpp，与 HugEngineAsset 共用同一份
+    PRIVATE cgltf
 )
 
 set_target_properties(HugEngineNaniteBuild PROPERTIES

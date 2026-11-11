@@ -102,6 +102,8 @@ add_executable(HugEngineTests
     # T2（Nanite 离线预处理方案）：`.nanite` v2 读写、扩展段往返、v1 兼容与构建器确定性。
     # 单独一文件：与前四个 Nanite 测试文件同一个理由（避免单文件无限膨胀）。
     TestNaniteFileV2.cpp
+    # T3（Nanite 离线预处理方案）：最小 glTF 几何读取器（与离线工具共用；资产缺失时跳过）。
+    TestNaniteGltfReader.cpp
 )
 
 # T1（Nanite 离线预处理方案）：离线簇切分已包成静态库 `HugEngineNaniteBuild`，

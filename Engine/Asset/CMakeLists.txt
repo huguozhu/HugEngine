@@ -19,3 +19,6 @@ target_include_directories(HugEngineAsset
 )
 
 target_link_libraries(HugEngineAsset PUBLIC HugEngineScene HugEngineReflect)
+
+# cgltf 实现体（Engine/External/cgltf/cgltf_impl.cpp，与 NaniteBuild 共用）
+target_link_libraries(HugEngineAsset PRIVATE cgltf)
