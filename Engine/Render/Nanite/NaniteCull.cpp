@@ -814,6 +814,10 @@ void NaniteCull::SetCullChainFrame(const float4x4& viewProj, const float3& camer
 }
 
 void NaniteCull::BuildTestInstances() {
+    // 【T8】本帧实例表来自真实场景（`SetInstancesFromSnapshot`）时，不能再被合成实例覆盖：
+    // 合成档会把 `m_TestInstanceCount` 写成设置值、并按该值 resize 两个 vector，
+    // 结果真实实例被清空（实测：实例域变 0、光栅派发上界 0、可见计数读回是垃圾）。
+    if (m_RealInstanceCount > 0u) return;
     m_TestInstances.clear();
     m_TestSpheres.clear();
     if (m_TestInstanceCount == 0u) return;
@@ -905,6 +909,14 @@ u32 NaniteCull::SetInstancesFromSnapshot(const FrameSceneSnapshot& snapshot,
                                          const MeshRegistry& registry) {
     const u32 capacity = kNaniteMaxTestInstances;
     u32 written = 0u;
+
+    // 【T8 修复：致命 bug】`m_TestInstances` / `m_TestSpheres` 是 **std::vector**，
+    // 平时由 `BuildTestInstances()` 按"合成实例数"resize；多资产档不走合成实例，
+    // 它们的 size 仍是 0 ⇒ 下面的 `m_TestInstances[written]` 越界（实测：访问违例后
+    // 崩溃处理器把进程挂住，日志停在第一行、无崩溃栈）。
+    // 这里按容量上界一次性扩容，写入才安全。
+    if (m_TestInstances.size() < capacity) m_TestInstances.resize(capacity);
+    if (m_TestSpheres.size() < capacity) m_TestSpheres.resize(capacity);
 
     // 【T8 诊断】入口无条件打一次：确认帧图确实调到了这里（多资产档门控排查用）
     static bool s_EntryLogged = false;
