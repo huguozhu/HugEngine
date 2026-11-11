@@ -22,7 +22,12 @@ void main(uint3 dtid : SV_DispatchThreadID, uint gi : SV_GroupIndex, uint3 gid :
     // 固定 16×16 组 × 16×16 线程 = 256×256 线程，映射到全屏 [0,1]²（跨像素降采样），
     // 而不是硬编码 1920×1080（否则只采样纹理左上角，曝光值错误）
     float2 uv = (float2(dtid.xy) + 0.5) / float2(256.0, 256.0);
-    float lum = Luminance(HE_SAMPLE_L0(u_HDR, u_HDRSampler, uv).rgb);   // 计算着色器：D3D11 不能用隐式导数采样
+    // 【必须用显式 LOD】compute 着色器里用隐式导数采样（tex.Sample）会让 SPIR-V 带上
+    // OpCapability ComputeDerivativeGroupQuadsKHR / ExecutionMode DerivativeGroupQuadsKHR，
+    // 而 Mali 真机并不支持 computeDerivativeGroupQuads 特性（设备创建时该特性组被降级掉），
+    // 于是 vkCreateComputePipelines 直接返回 VK_ERROR_INITIALIZATION_FAILED(-3)。
+    // SampleLevel(..., 0) 语义等价（HDR 只有 1 级 mip），且不需要导数能力。
+    float lum = Luminance(u_HDR.SampleLevel(u_HDRSampler, uv, 0).rgb);
     float logLum = log2(max(lum, 1e-5));
 
     // 组内 parallel reduction
