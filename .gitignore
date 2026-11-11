@@ -83,3 +83,4 @@ Platforms/Android/app/src/main/assets/content/Textures/skybox.hdr
 
 # ---- Nanite 离线产物：构建期生成，不入库 ----
 Content/Processed/
+Platforms/Android/app/src/main/assets/content/Processed/
