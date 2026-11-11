@@ -36,6 +36,12 @@ public:
     std::unique_ptr<rhi::IRHIBuffer>& GetIndexBuffer()  { return m_IndexBuffer; }
 
     u32 GetIndexCount()  const { return m_IndexCount; }
+    // ── T8：离线 Nanite 资产绑定（0xFFFFFFFF = 无）──
+    // 【为什么放在组件上】"这个网格用哪份离线资产"是资产级信息，与几何本体同源；
+    // 运行期由 `MeshRegistryEntry::naniteAssetIndex` 只读消费（SceneSnapshotBuilder 拷贝）。
+    u32  GetNaniteAssetIndex() const { return m_NaniteAssetIndex; }
+    void SetNaniteAssetIndex(u32 index) { m_NaniteAssetIndex = index; }
+
     u32 GetVertexCount() const { return m_VertexCount; }
 
     /// 包围盒
@@ -101,6 +107,7 @@ protected:
     std::unique_ptr<rhi::IRHIBuffer> m_VertexBuffer;
     std::unique_ptr<rhi::IRHIBuffer> m_IndexBuffer;
     u32 m_VertexCount = 0;
+    u32 m_NaniteAssetIndex = 0xFFFFFFFFu;   // T8：离线资产槽位（默认无）
     u32 m_IndexCount  = 0;
     AABB m_Bounds;
 };

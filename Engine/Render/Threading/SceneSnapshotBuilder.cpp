@@ -404,6 +404,8 @@ u32 SceneSnapshotBuilder::RegisterMeshes(he::World& world, MeshRegistry& registr
         entry.vertexCount      = comp.GetVertexCount();   // MeshBatcher 合批用（第③段第 4 批）
         entry.materialID       = comp.materialID;
         entry.instanced        = instanced;
+        // T8：把组件上的离线资产绑定带进 registry（Nanite 剔除/绘制据此选择资产）
+        entry.naniteAssetIndex = comp.GetNaniteAssetIndex();
         comp.meshIndex         = registry.Register(&comp, entry);
         ++count;
     };

@@ -34,6 +34,11 @@ struct MeshRegistryEntry {
     u32  vertexCount = 0;                      // 顶点数（MeshBatcher 合批要用：它按顶点数搬运与累加 baseVertex）
     u32  materialID = 0;                       // bindless 纹理基索引（与组件同源）
     bool instanced  = false;                   // 实例化网格：顶点由实例路径提供
+    // ── T8：离线 Nanite 资产绑定 ──
+    // 该网格对应的 `.nanite` 资产槽位（`NaniteScene` 注册表下标）；
+    // `0xFFFFFFFF` = 没有资产 ⇒ Nanite 走运行时构建/回退。绑定来自 `MeshComponent`，
+    // 由导入期（glTF loader / 样例）填写，运行期只读。
+    u32  naniteAssetIndex = 0xFFFFFFFFu;
 };
 
 class MeshRegistry {
