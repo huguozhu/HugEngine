@@ -85,6 +85,13 @@ bool GetBool(const std::unordered_map<String, String>& m, const String& key, boo
     return GetFloat(m, key, def ? 1.0f : 0.0f) != 0.0f;
 }
 
+// T8 ④-b：整数型 cfg 值（多资产份数）
+static int GetInt(const std::unordered_map<String, String>& m,
+                  const String& key, int def = 0) {
+    auto it = m.find(key);
+    return (it != m.end()) ? std::stoi(it->second) : def;
+}
+
 // T9：字符串型 cfg 值（Nanite 离线资产路径）
 static String GetString(const std::unordered_map<String, String>& m,
                         const String& key, const String& def = String{}) {
@@ -438,6 +445,55 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
         if (g.pipeline->GetDDGI()) g.pipeline->GetDDGI()->SetEnabled(g.ddgi);
         if (g.pipeline->GetSSR())  g.pipeline->GetSSR()->SetEnabled(g.ssr);
         g.pipeline->GetSSAO().enabled = g.ssao;
+
+        // ── T8 ④-b：多资产验收档（cfg `nanite_multi_asset=1`）──
+        // 把 `Content/Processed/primitives/*.nanite`（按 primitive 产出的离线资产）逐个注册进
+        // `NaniteScene` 的资产注册表，并按**网格创建顺序**把资产槽位绑到各网格上。
+        // 默认关闭 ⇒ 单资产路径与 T9 完全一致。
+        // 【只做前 N 份】注册会整体重建聚合缓冲（O(资产体积)），103 份全量在调试档下太慢；
+        //   `nanite_multi_asset_count` 控制份数（默认 8），够验证"多资产剔除/实例表"。
+        if (GetBool(cfg, "nanite_multi_asset", false)) {
+            const String dir = vfs::Resolve("Processed/primitives");
+            std::error_code listEc;
+            std::vector<String> files;
+            for (const auto& entry : std::filesystem::directory_iterator(dir, listEc)) {
+                if (entry.is_regular_file() && entry.path().extension() == ".nanite") {
+                    files.push_back(entry.path().string());
+                }
+            }
+            std::sort(files.begin(), files.end());
+            const int limit = std::max(1, GetInt(cfg, "nanite_multi_asset_count", 8));
+            if ((int)files.size() > limit) files.resize((usize)limit);
+
+            u32 bound = 0u;
+            for (const String& file : files) {
+                std::ifstream in(file, std::ios::binary | std::ios::ate);
+                if (!in) continue;
+                const std::streamsize size = in.tellg();
+                in.seekg(0, std::ios::beg);
+                std::vector<u8> bytes((usize)size);
+                if (!in.read(reinterpret_cast<char*>(bytes.data()), size)) continue;
+
+                render::NanitePackedAsset asset;
+                render::NaniteAssetLoadInfo info;
+                if (render::ParseNaniteAsset(bytes.data(), bytes.size(),
+                                             render::kNaniteBuilderVersion, asset, &info) !=
+                    render::NaniteAssetLoadStatus::Ok) {
+                    continue;
+                }
+                const u32 slot = g.pipeline->GetNanite().GetScene().RegisterAsset(asset);
+                if (slot == render::NaniteScene::kInvalidAssetIndex) continue;
+
+                // 按"网格创建顺序"绑定：第 bound 个 MeshComponent 用第 bound 个资产
+                u32 seen = 0u;
+                g.world.ForEach<MeshComponent>([&](Entity, MeshComponent& mesh) {
+                    if (seen++ != bound) return;
+                    mesh.SetNaniteAssetIndex(slot);
+                });
+                ++bound;
+            }
+            HE_CORE_INFO("04.App: 多资产验收档启用 —— 已注册并绑定 {} 份 per-primitive 资产", bound);
+        }
 
         // ── T9：Nanite 开关（cfg → 真值）──
         // 验收要求能在 04 里用 nanite_enable=1 验证「GBuffer 让位给 Nanite」，
