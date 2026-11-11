@@ -25,6 +25,7 @@
 #include "Nanite/NaniteTypes.h"
 #include "Nanite/NaniteUpload.h"
 
+#include <chrono>   // T7：基准测量
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -48,6 +49,7 @@ struct Options {
     bool        stats = false;
     bool        verbose = false;
     bool        verify = false;
+    bool        benchmark = false;          ///< T7：打印加载/构建/BVH 的耗时与内存表
     bool        printSettingsHash = false;   ///< 只打印 settingsHash/builderVersion（构建期脚本用）
     bool        valid = false;
     std::string error;
@@ -59,6 +61,7 @@ void PrintUsage() {
         "  --granularity=primitive|mesh   资产粒度（默认 primitive）\n"
         "  --fallback-ratio=0.02          Fallback 低模的三角形比例\n"
         "  --verify                       读回文件并与内存资产逐字节比对\n"
+        "  --benchmark                    T7：打印构建/加载/BVH 的耗时与内存表\n"
         "  --stats                        打印每份资产的统计\n"
         "  --verbose                      打印更多细节\n");
 }
@@ -71,6 +74,7 @@ Options ParseArgs(int argc, char** argv) {
         if (arg == "--stats")   { options.stats = true; continue; }
         if (arg == "--verbose") { options.verbose = true; continue; }
         if (arg == "--verify")  { options.verify = true; continue; }
+        if (arg == "--benchmark") { options.benchmark = true; continue; }
         if (arg == "--print-settings-hash") { options.printSettingsHash = true; continue; }
         if (arg.rfind("--granularity=", 0) == 0) { options.granularity = arg.substr(14); continue; }
         if (arg.rfind("--fallback-ratio=", 0) == 0) {
@@ -301,6 +305,70 @@ int main(int argc, char** argv) {
             continue;
         }
         ++written;
+
+        // ── T7：基准（同一进程内测"运行时构建" vs "离线加载"，并核对五段字节）──
+        if (options.benchmark) {
+            using Clock = std::chrono::steady_clock;
+            auto msSince = [](Clock::time_point a, Clock::time_point b) {
+                return std::chrono::duration<double, std::milli>(b - a).count();
+            };
+
+            // ① 运行时路径：几何 → 资产
+            const auto t0 = Clock::now();
+            NanitePackedAsset runtimeAsset;
+            const bool built = BuildNaniteAssetFromGeometry(unit.positions, unit.normals, unit.uvs,
+                                                           unit.indices, materials, runtimeAsset);
+            const auto t1 = Clock::now();
+
+            // ② 写文件
+            std::vector<u8> benchBytes;
+            const auto t2 = Clock::now();
+            const bool wrote = WriteNaniteFile(runtimeAsset, writeOptions, benchBytes);
+            const auto t3 = Clock::now();
+
+            // ③ 读文件 + 解析（离线路径的 CPU 部分）
+            NanitePackedAsset loadedAsset;
+            NaniteAssetLoadInfo loadedInfo;
+            const auto t4 = Clock::now();
+            const NaniteAssetLoadStatus loadStatus =
+                ParseNaniteAsset(benchBytes.data(), benchBytes.size(), kNaniteBuilderVersion,
+                                 loadedAsset, &loadedInfo);
+            const auto t5 = Clock::now();
+
+            // ④ 派生数据：簇 BVH（决定是否值得落盘的关键读数）
+            NaniteClusterBVH bvh;
+            const auto t6 = Clock::now();
+            const bool bvhOk = BuildNaniteClusterBVH(loadedAsset.clusters, bvh);
+            const auto t7 = Clock::now();
+
+            // ⑤ 五段字节一致性（"离线读入 == 运行时构建"）
+            bool sameBytes = built && wrote && loadStatus == NaniteAssetLoadStatus::Ok;
+            if (sameBytes) {
+                // 【跳过 96B 头部】v2 文件头写了扩展段数与两个哈希，运行时镜像里没有；
+                // 比较范围 = 头之后的固定五段内容（簇/顶点/索引/材质/LOD）。
+                const usize fiveSections = runtimeAsset.layout.lodOffset + runtimeAsset.layout.lodBytes;
+                sameBytes = loadedAsset.bytes.size() >= fiveSections &&
+                            std::memcmp(loadedAsset.bytes.data() + kNaniteFileHeaderBytes,
+                                        runtimeAsset.bytes.data() + kNaniteFileHeaderBytes,
+                                        fiveSections - kNaniteFileHeaderBytes) == 0;
+            }
+            const double buildMs = msSince(t0, t1);
+            const double writeMs = msSince(t2, t3);
+            const double loadMs  = msSince(t4, t5);
+            const double bvhMs   = msSince(t6, t7);
+            std::printf("[T7] 阶段                        耗时(ms)     字节\n");
+            std::printf("[T7] 运行时构建(几何→资产)     %9.1f   %9zu\n", buildMs,
+                        runtimeAsset.bytes.size());
+            std::printf("[T7] 写 .nanite v2             %9.1f   %9zu\n", writeMs, benchBytes.size());
+            std::printf("[T7] 读文件+解析(离线 CPU 部分) %8.1f   %9zu\n", loadMs,
+                        loadedAsset.bytes.size());
+            std::printf("[T7] 簇 BVH 构建                %9.1f   %s（占运行时构建 %.1f%%）\n", bvhMs,
+                        bvhOk ? "ok" : "failed",
+                        buildMs > 0.0 ? (bvhMs * 100.0 / buildMs) : 0.0);
+            std::printf("[T7] 加速比                    %9.2fx  （运行时构建 / 离线加载）\n",
+                        loadMs > 0.0 ? (buildMs / loadMs) : 0.0);
+            std::printf("[T7] 五段字节一致性            %s\n", sameBytes ? "PASS" : "FAIL");
+        }
 
         // ── --verify：读回并比对固定五段（T4 验收口径）──
         if (options.verify) {
