@@ -130,8 +130,12 @@ void ImGuiIntegration::Initialize(IWindow* window, rhi::IRHIDevice* device,
             if (s_ohosRanges.empty()) {
                 ImFontGlyphRangesBuilder builder;
                 builder.AddRanges(io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
+                // 常用字表（2500 字）之外的**面板实际用字**（43 个，从样例/编辑器源码里提取后
+                // 与常用表求差得到）。不补的话面板会显示成 "??"（真机上"视锥剔除"等）。
                 builder.AddText("渲染后端光栅化当前模式转速停转立方体球体相机阴影天空盒"
-                                "可调垂直同步分辨率帧率三角形支持不可用关闭开启");
+                                "可调垂直同步分辨率帧率三角形支持不可用关闭开启"
+                                "、。「」【】焙崩糙橙瓷迭兜俄骼函鸿辑拷溃棱敛裸霾弥频屏曝擎瞬剔"
+                                "晰渲萤阈噪栅栈帧滞轴拽锥");
                 builder.BuildRanges(&s_ohosRanges);
             }
             glyphRanges = s_ohosRanges.Data;
