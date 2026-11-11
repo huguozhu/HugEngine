@@ -669,6 +669,19 @@ void VulkanCommandList::Dispatch(u32 groupCountX, u32 groupCountY, u32 groupCoun
         return;
     }
     EmitDrawLabel();  // 自动插入 DrawCall 级调试 marker（若已设置）
+    // 【空缓冲保护】某些执行路径（例如帧图内部的 compute pass）拿到的命令列表可能
+    // 还没 Begin 过，此时 m_CmdBuffers[frameIndex] 是 VK_NULL_HANDLE。
+    // 直接 vkCmdDispatch(null) 会让驱动读 [0 + 0x3c] 崩溃（真机 Mali 实测 SIGSEGV）。
+    // 这里跳过并只告警一次：把"少一个 pass"降级成可见问题，而不是闪退。
+    if (m_CmdBuffers[m_FrameIndex] == VK_NULL_HANDLE) {
+        static bool s_warnedNullDispatch = false;
+        if (!s_warnedNullDispatch) {
+            s_warnedNullDispatch = true;
+            HE_CORE_WARN("[Vulkan] Dispatch 被跳过：命令缓冲为空（frameIndex={}, stream={}）",
+                         m_FrameIndex, m_StreamMode ? 1 : 0);
+        }
+        return;
+    }
     vkCmdDispatch(m_CmdBuffers[m_FrameIndex], groupCountX, groupCountY, groupCountZ);
 }
 

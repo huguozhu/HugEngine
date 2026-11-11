@@ -1,4 +1,4 @@
-﻿// PostProcess/AutoExposurePass.cpp — 自动曝光（Compute reduction + CPU 平均）
+// PostProcess/AutoExposurePass.cpp — 自动曝光（Compute reduction + CPU 平均）
 #include "AutoExposurePass.h"
 #include <iterator>
 #include "Core/Log.h"
@@ -107,7 +107,7 @@ void AutoExposurePass::Render(rhi::IRHICommandList* cmd) {
     cmd->SetPipeline(ResP(m_PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
-    cmd->Dispatch(16, rhi::kStageMaskFragment, 1);  // 256 组
+    cmd->Dispatch(16, 16, 1);  // 16×16 = 256 组（此处原先误把阶段掩码当 groupCountY）
 
     // CPU 读回并平均
     void* data = m_ResultBuf->Map();
