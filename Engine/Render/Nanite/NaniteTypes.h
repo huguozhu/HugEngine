@@ -425,8 +425,25 @@ inline constexpr u32 kNaniteMeshTestTargetSize = 1u;
 /// 魔数：恰好 8 字节、**不带 NUL 结尾**（比较必须按 8 字节，不能当 C 字符串用）
 inline constexpr char kNaniteFileMagic[8] = { 'N', 'A', 'N', 'I', 'T', 'E', '0', '1' };
 
-/// 文件格式版本（任务 7 第一次定稿，= 1）
-inline constexpr u32 kNaniteFileVersion = 1u;
+/// 文件格式版本（T2 升到 2：头部保留区启用 + 扩展段表；固定五段布局一字未变）
+inline constexpr u32 kNaniteFileVersion = 2u;
+
+/// 读取器能接受的**最低**格式版本（v1 文件结构上可解析：扩展段数视为 0、哈希视为无效）
+inline constexpr u32 kNaniteMinReadableFileVersion = 1u;
+
+/// 构建器版本：**算法/实现变化但字节布局不变时也必须 +1**，否则旧缓存不会失效。
+/// 与 `kNaniteFileVersion` 的分工：后者管"字节布局"，前者管"同样输入会不会产出同样字节"。
+inline constexpr u32 kNaniteBuilderVersion = 1u;
+
+// ── v2：`_reserved[8]` 的槽位分配 ──
+// 【为什么复用保留区而不是加长头部】v1 已把头部定稿为 96B，改大小会让所有段偏移推导失效。
+// 保留区 32B 本来就注明"留给将来扩展"，正好容纳 v2 的四个标量 + 两个 64 位哈希。
+inline constexpr u32 kNaniteReservedSlotBuilderVersion  = 0u;  ///< `_reserved[0]`：构建器版本
+inline constexpr u32 kNaniteReservedSlotSettingsHashLo  = 1u;  ///< `_reserved[1..2]`：settingsHash 低/高 32 位
+inline constexpr u32 kNaniteReservedSlotSettingsHashHi  = 2u;
+inline constexpr u32 kNaniteReservedSlotSourceHashLo    = 3u;  ///< `_reserved[3..4]`：sourceHash 低/高 32 位
+inline constexpr u32 kNaniteReservedSlotSourceHashHi    = 4u;
+inline constexpr u32 kNaniteReservedSlotExtSectionCount = 5u;  ///< `_reserved[5]`：扩展段数（0 = 与 v1 等价）
 
 /// 段对齐：每个段的起点都按它对齐，且每段长度向上取整到它
 inline constexpr usize kNaniteFileAlignment = 16u;
@@ -481,6 +498,145 @@ static_assert(offsetof(NaniteFileHeader, bboxMin)      == 36, "bboxMin 必须在
 static_assert(offsetof(NaniteFileHeader, bboxMax)      == 48, "bboxMax 必须在偏移 48");
 static_assert(offsetof(NaniteFileHeader, maxLODError)  == 60, "maxLODError 必须在偏移 60");
 static_assert(offsetof(NaniteFileHeader, _reserved)    == 64, "_reserved 必须在偏移 64");
+
+// ============================================================
+// v2：扩展段（T2）
+//
+// 【为什么需要】v1 只有固定五段，装不下"材质描述""簇→源 primitive 归属""Fallback 低模"
+// 这类**可选、数量可变**的数据。v2 在固定五段之后追加一张段表 + 各段载荷，
+// 段的 offset/size 由段表给出（固定五段仍由头部计数推导，不落盘）。
+//
+// 【布局】紧跟 LOD 段之后、16B 对齐：
+//   NaniteExtSectionEntry[extSectionCount]   // 段表，16B/条
+//   payload[0], payload[1], ...              // 各段载荷，每段起点 16B 对齐
+//
+// 【前向兼容】读取器**忽略不认识的段类型**（只按 offset/size 跳过），
+// 因此后续版本新增段类型不会打破旧读取器。
+// ============================================================
+
+/// 扩展段类型
+enum class NaniteExtSectionType : u32 {
+    None            = 0u,
+    MaterialDesc    = 1u,   ///< `NaniteMaterialDesc[]`：材质描述（bindless 字段运行时翻译）
+    SourceMeshRange = 2u,   ///< `NaniteSourceClusterRange[]`：簇 → 源 primitive 归属
+    FallbackMesh    = 3u,   ///< `NaniteFallbackMeshHeader` + 顶点/索引数据：低模（IA/RT 回退）
+};
+
+/// 段表条目（16B：type/offset/size/reserved）
+struct alignas(16) NaniteExtSectionEntry {
+    u32 type     = 0;   ///< `NaniteExtSectionType`
+    u32 offset   = 0;   ///< 相对文件起点的字节偏移（16B 对齐）
+    u32 size     = 0;   ///< 载荷字节数（不含对齐填充）
+    u32 reserved = 0;   ///< 写 0
+};
+inline constexpr usize kNaniteExtSectionEntryBytes = 16u;
+/// 扩展段数上限（防御性：段表长度 = 计数 × 16B，避免损坏头部要求巨大分配）
+inline constexpr u32 kNaniteMaxExtSections = 64u;
+static_assert(sizeof(NaniteExtSectionEntry) == kNaniteExtSectionEntryBytes,
+              "扩展段表条目必须是 16B");
+static_assert(alignof(NaniteExtSectionEntry) == 16u, "扩展段表条目必须 16B 对齐");
+
+/// 材质描述里的纹理槽下标（顺序固定；`0xFFFFFFFF` = 该槽无纹理）
+inline constexpr u32 kNaniteMaterialTextureSlotBaseColor        = 0u;
+inline constexpr u32 kNaniteMaterialTextureSlotNormal           = 1u;
+inline constexpr u32 kNaniteMaterialTextureSlotMetallicRoughness = 2u;
+inline constexpr u32 kNaniteMaterialTextureSlotEmissive         = 3u;
+inline constexpr u32 kNaniteMaterialTextureSlotCount            = 4u;
+/// "无纹理"哨兵（与 glTF 的 image 索引 0 区分）
+inline constexpr u32 kNaniteInvalidTextureIndex = 0xFFFFFFFFu;
+
+/// 材质描述（v2 扩展段载荷，64B/条）
+///
+/// 【与 `NaniteMaterialRecord` 的分工】
+///   · 本结构 = **离线可知**的信息：glTF 材质索引、PBR 因子、各槽的**源纹理引用**、alphaMode；
+///   · `NaniteMaterialRecord` = 运行时 GPU 记录，含 `bindlessTextureBase` 等**运行时**索引
+///     （v2 落盘时这些字段写 0，运行时按本结构回填，见方案 §3.3）。
+struct alignas(16) NaniteMaterialDesc {
+    u32    materialIndex    = 0;    ///< glTF 材质索引（诊断与排序用）
+    u32    alphaMode        = 0;    ///< 0=Opaque 1=Mask 2=Blend（与 glTF 一致）
+    float  baseColorFactor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+    float  metallicFactor   = 0.0f;
+    float  roughnessFactor  = 0.8f;
+    float  emissiveFactor[3] = { 0.0f, 0.0f, 0.0f };
+    u32    textureImageIndex[kNaniteMaterialTextureSlotCount] = {
+        kNaniteInvalidTextureIndex, kNaniteInvalidTextureIndex,
+        kNaniteInvalidTextureIndex, kNaniteInvalidTextureIndex };  ///< glTF image 索引
+    u32    _reserved = 0u;          ///< 写 0（补足 64B）
+};
+inline constexpr usize kNaniteMaterialDescBytes = 64u;
+static_assert(sizeof(NaniteMaterialDesc) == kNaniteMaterialDescBytes,
+              "材质描述必须是 64B（段表按固定步长索引）");
+
+/// 簇 → 源 primitive 归属（v2 扩展段载荷，16B/条）\n///\n/// 【名字与运行时的 `NaniteSourceMeshRange` 区分开】后者描述"合并三角形空间的区间"（运行时\n/// 材质映射用），本结构描述"簇区间 + primitive 归属"（离线产物用），别混用。
+///
+/// 【为什么必须落盘】构建时才持有"原始三角形空间"，运行时无法从去重后的共享三角形段复原
+/// 归属（详见 `NaniteUpload.h` 关于两种坐标系的说明）。
+struct alignas(16) NaniteSourceClusterRange {
+    u32 firstCluster   = 0;   ///< 该 primitive 的首个簇下标（含）
+    u32 clusterCount   = 0;   ///< 簇个数
+    u32 primitiveIndex = 0;   ///< glTF mesh 内的 primitive 序号
+    u32 materialIndex  = 0;   ///< 该 primitive 的材质索引（对应 `MaterialDesc` 数组下标）
+};
+inline constexpr usize kNaniteSourceClusterRangeBytes = 16u;
+static_assert(sizeof(NaniteSourceClusterRange) == kNaniteSourceClusterRangeBytes,
+              "源网格归属必须是 16B");
+
+/// Fallback 低模头（v2 扩展段载荷，16B）——后面紧跟 position(float3)/normal(float3)/index(u32)
+///
+/// 【用途】无网格着色器 / IA 回退路径与 RT 代理几何；`indexStride` 固定 4，保留以便将来换格式。
+struct alignas(16) NaniteFallbackMeshHeader {
+    u32 vertexCount = 0;
+    u32 indexCount  = 0;
+    u32 indexStride = 4u;
+    u32 _reserved   = 0u;
+};
+inline constexpr usize kNaniteFallbackMeshHeaderBytes = 16u;
+static_assert(sizeof(NaniteFallbackMeshHeader) == kNaniteFallbackMeshHeaderBytes,
+              "Fallback 低模头必须是 16B");
+
+// ── 头部保留区的读写helper（v2；v1 文件里这些槽位全 0，读取时按"无"处理）──
+
+/// 头部记录的扩展段数（v1 文件恒为 0）
+[[nodiscard]] inline u32 NaniteHeaderExtSectionCount(const NaniteFileHeader& header) {
+    if (header.version < 2u) return 0u;
+    return header._reserved[kNaniteReservedSlotExtSectionCount];
+}
+
+/// 头部记录的构建器版本（v1 文件返回 0 = 无效）
+[[nodiscard]] inline u32 NaniteHeaderBuilderVersion(const NaniteFileHeader& header) {
+    if (header.version < 2u) return 0u;
+    return header._reserved[kNaniteReservedSlotBuilderVersion];
+}
+
+/// 头部记录的 64 位 settingsHash（v1 返回 0 且 `valid=false`）
+[[nodiscard]] inline u64 NaniteHeaderSettingsHash(const NaniteFileHeader& header, bool* valid = nullptr) {
+    const bool ok = header.version >= 2u;
+    if (valid != nullptr) *valid = ok;
+    if (!ok) return 0u;
+    const u64 lo = header._reserved[kNaniteReservedSlotSettingsHashLo];
+    const u64 hi = header._reserved[kNaniteReservedSlotSettingsHashHi];
+    return lo | (hi << 32);
+}
+
+/// 头部记录的 64 位 sourceHash（v1 返回 0 且 `valid=false`）
+[[nodiscard]] inline u64 NaniteHeaderSourceHash(const NaniteFileHeader& header, bool* valid = nullptr) {
+    const bool ok = header.version >= 2u;
+    if (valid != nullptr) *valid = ok;
+    if (!ok) return 0u;
+    const u64 lo = header._reserved[kNaniteReservedSlotSourceHashLo];
+    const u64 hi = header._reserved[kNaniteReservedSlotSourceHashHi];
+    return lo | (hi << 32);
+}
+
+/// 把 v2 的三个元数据字段写进头部保留区（`extSectionCount` 由写入方另外设置）
+inline void NaniteHeaderSetBuildMetadata(NaniteFileHeader& header, u32 builderVersion,
+                                         u64 settingsHash, u64 sourceHash) {
+    header._reserved[kNaniteReservedSlotBuilderVersion]  = builderVersion;
+    header._reserved[kNaniteReservedSlotSettingsHashLo]  = (u32)(settingsHash & 0xFFFFFFFFull);
+    header._reserved[kNaniteReservedSlotSettingsHashHi]  = (u32)(settingsHash >> 32);
+    header._reserved[kNaniteReservedSlotSourceHashLo]    = (u32)(sourceHash & 0xFFFFFFFFull);
+    header._reserved[kNaniteReservedSlotSourceHashHi]    = (u32)(sourceHash >> 32);
+}
 
 // ── cone 轴角字段（§8.1 裁决 #1：`coneAxisAngle`，替代语义不明的 `coneData`）──
 //
@@ -997,8 +1153,12 @@ struct NaniteFileLayout {
     usize indexOffset = 0,    indexBytes = 0;     ///< 含 16B 对齐填充
     usize materialOffset = 0, materialBytes = 0;  ///< 含 16B 对齐填充
     usize lodOffset = 0,      lodBytes = 0;       ///< 含 16B 对齐填充
-    usize totalBytes = 0;     ///< 合法文件的**最小**长度（尾部允许有额外字节）
-    u32   triangleCount = 0;  ///< = indexCount / 3
+    // ── v2：扩展段表（v1 文件 extSectionCount = 0、extEntryBytes = 0）──
+    usize extEntryOffset = 0;      ///< 段表起点（紧随 LOD 段，16B 对齐）
+    usize extEntryBytes  = 0;      ///< 段表字节数（= alignUp(extSectionCount × 16)）
+    u32   extSectionCount = 0;     ///< 扩展段数
+    usize totalBytes = 0;          ///< 合法文件的**最小**长度（含段表；尾部允许额外字节）
+    u32   triangleCount = 0;       ///< = indexCount / 3
 };
 
 /// `.nanite` 校验/推导的失败原因（`None` 以外都是失败；名字见 `NaniteFileErrorName`）
@@ -1011,6 +1171,8 @@ enum class NaniteFileError : u32 {
     BadIndexCount = 5,   ///< indexCount 不是 3 的倍数（无法按 3×u16 打包）
     Misaligned    = 6,   ///< 某段起点不是 16B 对齐（防御性：改步长时才会触发）
     OutOfBounds   = 7,   ///< 某段偏移 + 长度超出 `size`（越界 / 截断）
+    BadExtSectionCount = 8,  ///< 扩展段数超上限 / 段表条目越界或不对齐
+    BadExtSection      = 9,  ///< 扩展段类型或载荷不合法（offset/size 越界、重叠）
 };
 
 /// 失败原因的可读名（单测断言与日志共用；返回的字符串是静态常量）
@@ -1024,6 +1186,8 @@ enum class NaniteFileError : u32 {
         case NaniteFileError::BadIndexCount: return "BadIndexCount";
         case NaniteFileError::Misaligned:    return "Misaligned";
         case NaniteFileError::OutOfBounds:   return "OutOfBounds";
+        case NaniteFileError::BadExtSectionCount: return "BadExtSectionCount";
+        case NaniteFileError::BadExtSection:      return "BadExtSection";
     }
     return "Unknown";
 }
@@ -1054,7 +1218,13 @@ enum class NaniteFileError : u32 {
     const u64 indexOffset    = vertexOffset + vertexBytes;
     const u64 materialOffset = indexOffset + indexBytes;
     const u64 lodOffset      = materialOffset + materialBytes;
-    const u64 totalBytes     = lodOffset + lodBytes;
+
+    // v2：固定五段之后是扩展段表（16B/条，整体 16B 对齐）。v1 文件该计数恒为 0。
+    const u32 extCount       = NaniteHeaderExtSectionCount(header);
+    if (extCount > kNaniteMaxExtSections) return NaniteFileError::BadExtSectionCount;
+    const u64 extEntryOffset = lodOffset + lodBytes;
+    const u64 extEntryBytes  = NaniteAlignUpFile((u64)extCount * (u64)kNaniteExtSectionEntryBytes);
+    const u64 totalBytes     = extEntryOffset + extEntryBytes;
 
     // 32 位宿主上的兜底：u32 计数 × 64B 的累加在 u64 内不会溢出，但收窄到 usize 可能
     if (totalBytes > (u64)std::numeric_limits<usize>::max()) {
@@ -1081,6 +1251,9 @@ enum class NaniteFileError : u32 {
     layout.materialBytes  = (usize)materialBytes;
     layout.lodOffset      = (usize)lodOffset;
     layout.lodBytes       = (usize)lodBytes;
+    layout.extEntryOffset  = (usize)extEntryOffset;
+    layout.extEntryBytes   = (usize)extEntryBytes;
+    layout.extSectionCount = extCount;
     layout.totalBytes     = (usize)totalBytes;
     layout.triangleCount  = (u32)triangleCount;
     outLayout = layout;
@@ -1105,13 +1278,30 @@ enum class NaniteFileError : u32 {
     for (u32 i = 0; i < 8u; ++i) {
         if (header.magic[i] != kNaniteFileMagic[i]) return NaniteFileError::BadMagic;
     }
-    if (header.version != kNaniteFileVersion) return NaniteFileError::BadVersion;
+    // v2 起接受 v1..v2：v1 没有扩展段表与哈希，读取后按"元数据无效、几何可用"处理
+    if (header.version < kNaniteMinReadableFileVersion || header.version > kNaniteFileVersion) {
+        return NaniteFileError::BadVersion;
+    }
 
     NaniteFileLayout layout;
     const NaniteFileError layoutError = TryBuildNaniteFileLayout(header, layout);
     if (layoutError != NaniteFileError::None) return layoutError;
 
     if (size < layout.totalBytes) return NaniteFileError::OutOfBounds;
+
+    // ── v2：扩展段表校验（v1 文件 extSectionCount = 0，整段跳过）──
+    // 段表在固定五段之后；每条载荷必须 16B 对齐、不越界、不落进固定五段区域。
+    // 【前向兼容】不认识的段类型**不算错**：读取器按 offset/size 跳过即可。
+    for (u32 s = 0; s < layout.extSectionCount; ++s) {
+        NaniteExtSectionEntry entry{};
+        const usize entryOffset = layout.extEntryOffset + (usize)s * kNaniteExtSectionEntryBytes;
+        if (entryOffset + kNaniteExtSectionEntryBytes > size) return NaniteFileError::BadExtSection;
+        std::memcpy(&entry, static_cast<const u8*>(data) + entryOffset, sizeof(entry));
+
+        if ((entry.offset % kNaniteFileAlignment) != 0u) return NaniteFileError::BadExtSection;
+        if (entry.offset < layout.totalBytes) return NaniteFileError::BadExtSection;  // 不能压住固定五段或段表
+        if ((u64)entry.offset + (u64)entry.size > (u64)size) return NaniteFileError::BadExtSection;
+    }
 
     if (outLayout != nullptr) *outLayout = layout;
     return NaniteFileError::None;

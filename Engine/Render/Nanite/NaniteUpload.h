@@ -976,4 +976,46 @@ public:
     u32 m_Height = 0;
 };
 
+// ============================================================
+// T2：`.nanite` v2 的读写（纯内存 ↔ 字节；文件 I/O 由调用方经 IVfs 完成）
+//
+// 【为什么放在这里】这两个函数和 `BuildNaniteAssetFromGeometry` 同属"字节镜像"的
+//   生产者/消费者，都必须是 RHI-free 的纯函数（工具、单测、运行时共用同一份实现）。
+//   于是 `Tools/MeshPreprocess` 与 `NaniteAssetLoader` 不会各写一份格式代码。
+//
+// 【与 `NanitePackedAsset::bytes` 的关系】那个字段是**固定五段**的镜像（头部计数推导）；
+//   落盘文件在它之后还要追加 v2 的扩展段表与载荷，所以写文件不能直接 `bytes` 存盘。
+// ============================================================
+
+/// 扩展段载荷（写入用）：类型 + 原始字节（结构体数组的内存镜像）
+struct NaniteExtSectionBlob {
+    NaniteExtSectionType type = NaniteExtSectionType::None;
+    std::vector<u8>      payload;   ///< 载荷字节（长度不必 16B 对齐，写入时自动补齐）
+};
+
+/// 写文件时填充的 v2 元数据
+struct NaniteFileWriteOptions {
+    u32 builderVersion = kNaniteBuilderVersion;  ///< 构建器版本（算法变更即 +1）
+    u64 settingsHash   = 0;                      ///< 构建参数哈希（0 = 未知，运行时按过期处理）
+    u64 sourceHash     = 0;                      ///< 源几何/材质哈希（0 = 未知）
+    std::vector<NaniteExtSectionBlob> extSections;  ///< 扩展段（可为空）
+};
+
+/// 读取产物：头部 + 段表 + 完整镜像 + 扩展段表条目
+struct NaniteFileImage {
+    NaniteFileHeader                  header{};      ///< 头部（v1 文件的 v2 字段为 0）
+    NaniteFileLayout                  layout{};      ///< 段表（含扩展段表位置）
+    std::vector<u8>                   bytes;         ///< 文件字节镜像（长度 = 输入 size）
+    std::vector<NaniteExtSectionEntry> extEntries;   ///< 扩展段表条目（v1 为空）
+};
+
+/// 把资产（固定五段）连同 v2 元数据与扩展段写成 `.nanite` 文件字节。
+/// @return 失败表示段表/载荷不自洽（此时 `outBytes` 不被修改）
+[[nodiscard]] bool WriteNaniteFile(const NanitePackedAsset& asset,
+                                   const NaniteFileWriteOptions& options,
+                                   std::vector<u8>& outBytes);
+
+/// 解析并校验 `.nanite`（接受 v1 / v2），成功返回 `NaniteFileError::None`。
+/// 【v1 语义】无扩展段表、哈希与构建器版本为 0 ⇒ 调用方应视为"元数据无效、需回退或重建"。
+[[nodiscard]] NaniteFileError ReadNaniteFile(const void* data, usize size, NaniteFileImage& out);
 } // namespace he::render

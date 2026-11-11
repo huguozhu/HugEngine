@@ -1345,7 +1345,12 @@ TEST_CASE("NanitePack: 段布局、总字节数与字节镜像（任务 7 契约
     CHECK(asset.header.bboxMin[0] == 0.0f);
     CHECK(asset.header.bboxMax[0] == 6.0f);
     CHECK(asset.header.maxLODError == dag.stats.maxLODError);
-    for (u32 i = 0; i < kNaniteFileHeaderReservedU32; ++i) CHECK(asset.header._reserved[i] == 0u);
+    // T2 起保留区不再全 0：`_reserved[0]` = 构建器版本（其余仍为 0，扩展段数在写入文件时才填）
+    CHECK(NaniteHeaderBuilderVersion(asset.header) == kNaniteBuilderVersion);
+    for (u32 i = 0; i < kNaniteFileHeaderReservedU32; ++i) {
+        if (i == kNaniteReservedSlotBuilderVersion) continue;
+        CHECK(asset.header._reserved[i] == 0u);
+    }
 
     // ── 各段条数与强类型分段一致 ──
     CHECK(asset.clusters.size() == asset.header.clusterCount);

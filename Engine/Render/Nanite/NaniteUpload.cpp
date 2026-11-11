@@ -1049,7 +1049,9 @@ bool PackNaniteClusters(std::span<const float>                positions,
     }
 
     // ── ⑨ 头部（计数/范围/误差/flags 全部有真值来源）──
-    NaniteFileHeader header{};   // magic / version 已是任务 7 的定稿值
+    NaniteFileHeader header{};   // magic / version 已是任务 7 定稿值（T2 起 = 2）
+    // T2：v2 头部写入构建器版本（算法变更即 +1）；哈希由离线工具在 T4 填入，运行时构建未知则写 0
+    NaniteHeaderSetBuildMetadata(header, kNaniteBuilderVersion, 0u, 0u);
     header.clusterCount  = (u32)result.clusters.size();
     header.vertexCount   = (u32)result.vertices.size();
     header.indexCount    = (u32)result.triangles.size() * kNaniteIndicesPerTriangle;
@@ -2015,4 +2017,86 @@ bool BuildNanitePagePlan(std::span<const NaniteClusterRecord> clusters,
     return true;
 }
 
+// ============================================================
+// T2：`.nanite` v2 读写
+// ============================================================
+
+bool WriteNaniteFile(const NanitePackedAsset& asset, const NaniteFileWriteOptions& options,
+                     std::vector<u8>& outBytes) {
+    // 固定五段（头部 + 簇/顶点/索引/材质/LOD，均已 16B 对齐）的尾部
+    const usize baseBytes = asset.layout.lodOffset + asset.layout.lodBytes;
+    if (asset.bytes.size() < baseBytes) return false;
+
+    const u32 extCount = (u32)options.extSections.size();
+    if (extCount > kNaniteMaxExtSections) return false;
+
+    // 段表位置：紧跟固定五段，整体 16B 对齐
+    const usize extEntryBytes = (usize)NaniteAlignUpFile((u64)extCount * (u64)kNaniteExtSectionEntryBytes);
+    std::vector<NaniteExtSectionEntry> entries(extCount);
+
+    // 载荷依次排布，每段起点 16B 对齐（对齐填充写 0，读回时不参与比对）
+    usize cursor = baseBytes + extEntryBytes;
+    for (u32 s = 0; s < extCount; ++s) {
+        const NaniteExtSectionBlob& blob = options.extSections[s];
+        entries[s].type     = (u32)blob.type;
+        entries[s].offset   = (u32)cursor;
+        entries[s].size     = (u32)blob.payload.size();
+        entries[s].reserved = 0u;
+        cursor += (usize)NaniteAlignUpFile((u64)blob.payload.size());
+    }
+    const usize totalBytes = cursor;
+
+    // 头部：版本升到 v2，写入构建器版本与两个哈希，并记录扩展段数
+    NaniteFileHeader header = asset.header;
+    header.version = kNaniteFileVersion;
+    NaniteHeaderSetBuildMetadata(header, options.builderVersion, options.settingsHash,
+                                 options.sourceHash);
+    header._reserved[kNaniteReservedSlotExtSectionCount] = extCount;
+
+    std::vector<u8> bytes(totalBytes, 0u);
+    std::memcpy(bytes.data(), asset.bytes.data(), baseBytes);          // 五段原样搬运（含旧头部）
+    std::memcpy(bytes.data(), &header, sizeof(header));                // 头部覆盖为 v2
+    if (extCount > 0) {
+        std::memcpy(bytes.data() + baseBytes, entries.data(),
+                    (usize)extCount * kNaniteExtSectionEntryBytes);
+        for (u32 s = 0; s < extCount; ++s) {
+            const NaniteExtSectionBlob& blob = options.extSections[s];
+            if (!blob.payload.empty()) {
+                std::memcpy(bytes.data() + entries[s].offset, blob.payload.data(),
+                            blob.payload.size());
+            }
+        }
+    }
+
+    // 自校验：写出来的东西必须能被读取器接受（防止段表/载荷算错却静默落盘）
+    if (ValidateNaniteFile(bytes.data(), bytes.size(), nullptr) != NaniteFileError::None) {
+        return false;
+    }
+
+    outBytes = std::move(bytes);
+    return true;
+}
+
+NaniteFileError ReadNaniteFile(const void* data, usize size, NaniteFileImage& out) {
+    NaniteFileLayout layout{};
+    const NaniteFileError error = ValidateNaniteFile(data, size, &layout);
+    if (error != NaniteFileError::None) return error;
+
+    NaniteFileImage image;
+    image.layout = layout;
+    std::memcpy(&image.header, data, sizeof(NaniteFileHeader));
+
+    const u8* raw = static_cast<const u8*>(data);
+    image.bytes.assign(raw, raw + size);
+
+    // 扩展段表：v1 文件 extSectionCount = 0（数组为空），调用方据此知道"元数据缺失"
+    image.extEntries.resize(layout.extSectionCount);
+    if (layout.extSectionCount > 0) {
+        std::memcpy(image.extEntries.data(), image.bytes.data() + layout.extEntryOffset,
+                    (usize)layout.extSectionCount * kNaniteExtSectionEntryBytes);
+    }
+
+    out = std::move(image);
+    return NaniteFileError::None;
+}
 } // namespace he::render

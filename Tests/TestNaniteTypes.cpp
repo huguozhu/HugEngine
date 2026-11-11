@@ -383,8 +383,10 @@ TEST_CASE("NaniteTypes: .nanite 文件头字段与尺寸（任务 7 定稿 96B�
 
     // 逐字段默认值
     const NaniteFileHeader header{};
-    CHECK(kNaniteFileVersion == 1u);
-    CHECK(header.version == 1u);
+    // T2：格式升到 v2（头部保留区启用 + 扩展段表），可读下限仍是 v1
+    CHECK(kNaniteFileVersion == 2u);
+    CHECK(kNaniteMinReadableFileVersion == 1u);
+    CHECK(header.version == 2u);
 
     // 魔数：恰好 8 字节 "NANITE01"，逐字节相等且**不带 NUL 结尾**
     const char expectedMagic[8] = { 'N', 'A', 'N', 'I', 'T', 'E', '0', '1' };
@@ -1109,7 +1111,8 @@ TEST_CASE("NaniteTypes: .nanite 校验函数的正例与反例") {
     {
         std::vector<u8> bad = buffer;
         NaniteFileHeader wrongVersion = header;
-        wrongVersion.version = 2u;
+        // T2 起 1..2 都可读，所以「版本错」要用超范围值
+        wrongVersion.version = kNaniteFileVersion + 1u;
         std::memcpy(bad.data(), &wrongVersion, sizeof(wrongVersion));
         CHECK(ValidateNaniteFile(bad.data(), bad.size()) == NaniteFileError::BadVersion);
     }
