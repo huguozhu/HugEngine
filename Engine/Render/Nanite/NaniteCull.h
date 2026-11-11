@@ -317,6 +317,10 @@ public:
     /// 本帧合成实例条数（= 最近一次 `SetInstanceCullFrame` 的钳制后入参）
     [[nodiscard]] u32 GetTestInstanceCount() const { return m_TestInstanceCount; }
     // ── T8：真实实例表（来自场景快照，取代合成测试实例）──
+    //
+    // 【字段复用契约】Nanite 实例表的 `meshIndex` 承载**资产槽位**（`assetIndex`）：
+    // Nanite 的 shader 不读 meshIndex / materialIndex / objectID（它们只是 128B 布局占位），
+    // 因此不需要新增绑定槽，也不动 `GPUSceneObject` 契约。
     /// 用快照里的真实实例覆盖合成测试实例：只收"网格绑定了离线资产"
     /// （`MeshRegistryEntry::naniteAssetIndex != 0xFFFFFFFF`）的条目，
     /// 每个条目写一条 `NaniteInstanceGpuObject`（`localToWorld` = 快照的世界矩阵，

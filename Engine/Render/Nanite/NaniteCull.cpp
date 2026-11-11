@@ -907,7 +907,10 @@ u32 NaniteCull::SetInstancesFromSnapshot(const FrameSceneSnapshot& snapshot,
         }
         instance.boundsMin[3]    = 0.0f;
         instance.boundsMax[3]    = 0.0f;
-        instance.meshIndex       = item.meshIndex;
+        // 【T8 第 5 步 ②】Nanite 自己的实例表里，`meshIndex` 字段承载**资产槽位**
+        // （`GPUSceneObject` 的 128B 契约不变；Nanite 的 shader 不读 meshIndex/materialIndex/objectID，
+        //  它们只作为布局占位）。剔除阶段用它选"这份资产在共享剔除缓冲里的基址"。
+        instance.meshIndex       = entry->naniteAssetIndex;
         instance.materialIndex   = item.materialIndex;
         instance.objectID        = item.objectID;
         instance.visibilityFlags = item.visibilityFlags;
