@@ -502,6 +502,7 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
             auto naniteSettings = g.pipeline->GetNaniteSettings();
             naniteSettings.enabled = GetBool(cfg, "nanite_enable", naniteSettings.enabled);
             naniteSettings.offline = GetBool(cfg, "nanite_offline", naniteSettings.offline);
+            naniteSettings.multiAsset = GetBool(cfg, "nanite_multi_asset", naniteSettings.multiAsset);
             if (const String nanitePath = GetString(cfg, "nanite_offline_path", naniteSettings.offlinePath);
                 !nanitePath.empty()) {
                 naniteSettings.offlinePath = nanitePath;

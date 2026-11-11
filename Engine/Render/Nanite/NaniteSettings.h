@@ -260,6 +260,12 @@ struct NaniteSettings {
     //   样例负责解析/序列化 + 面板勾选框。
     u32 debugView = 0u;
 
+    // ── T8：多资产模式（cfg 键 `nanite_multi_asset`，默认 0）──
+    // 1 ⇒ 场景资产由样例逐份 `NaniteScene::RegisterAsset` 注册，渲染器**不再**上传
+    // "整场景一份"的资产，而是逐资产注册剔除数据（`AppendAssetBVH`）。
+    // 0 ⇒ 旧口径（单资产；离线/运行时构建各一条路径）。
+    bool multiAsset = false;
+
     // ── T5：离线资产（方案 §5.2）──
     /// 优先读离线 `.nanite`（cfg 键 `nanite_offline`，默认 1 = 优先离线）。
     /// 文件缺失 / 校验失败 / 版本或构建器过期 ⇒ 自动回退运行时构建并告警。

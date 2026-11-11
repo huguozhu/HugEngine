@@ -527,6 +527,33 @@ void NaniteRenderer::EnsureAssetUploaded(const MeshBatcher& batcher) {
     if (m_AssetUploaded) return;
     m_AssetUploaded = true;
 
+    // ── T8：多资产模式 ──
+    // 样例已把各资产注册进 `NaniteScene`；这里只做"逐资产注册剔除数据 + 取最坏情况上界"，
+    // 不走单资产上传（`UploadPackedAsset` 会 `ClearAssets()`，会清掉多资产注册表）。
+    if (m_Settings.multiAsset && m_Scene.GetAssetCount() > 0u) {
+        u32 maxIndexCount = 0u;
+        f32 maxExtent     = 0.0f;
+        u32 cullAssets    = 0u;
+        for (u32 i = 0u; i < m_Scene.GetAssetCount(); ++i) {
+            const NaniteScene::NaniteAssetEntry* entry = m_Scene.GetAssetEntry(i);
+            if (entry == nullptr || entry->cpu.clusters.empty()) continue;
+            if (!m_Cull.AppendAssetBVH(entry->cpu.clusters, entry->cpu.lodOffsets)) {
+                HE_CORE_ERROR("NaniteRenderer: 多资产 —— 资产 {} 的剔除数据注册失败", i);
+                continue;
+            }
+            maxIndexCount = std::max(maxIndexCount, entry->cpu.header.indexCount);
+            maxExtent     = std::max(maxExtent, entry->cpu.stats.meshMaxExtent);
+            ++cullAssets;
+        }
+        m_Raster.SetPlaceholderIndexCapacity(maxIndexCount);
+        m_MeshMaxExtent     = maxExtent;
+        m_AssetClusterCount = m_Scene.GetMergedClusterCount();
+        HE_CORE_INFO("NaniteRenderer: 多资产模式就绪（{} 份资产 / 聚合 {} 簇；"
+                     "占位索引上界 {}，量化尺度 {:.3f}）",
+                     cullAssets, m_AssetClusterCount, maxIndexCount, maxExtent);
+        return;
+    }
+
     // ── T5：优先加载离线 `.nanite`（方案 §5.2）──
     // 命中条件：`offline` 打开、路径非空、文件可读、格式/构建器校验通过。
     // 任何一种失败都**回退运行时构建**（不是放弃渲染）：打一行告警说明原因。
