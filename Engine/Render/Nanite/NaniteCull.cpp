@@ -1,4 +1,4 @@
-﻿// ============================================================
+// ============================================================
 // Nanite/NaniteCull.cpp — 「计数 → 间接绘制」链的计数端（§14.8 任务 3）
 //   + 实例剔除（任务 13）+ per-instance cluster BVH（任务 14）
 //   + 三阶段簇剔除（任务 15：Phase 1 掩码 → Phase 2 Hi-Z → Phase 3 LOD 选择）
@@ -22,6 +22,10 @@
 // ============================================================
 
 #include "Nanite/NaniteCull.h"
+
+// T8：真实实例表的两个输入（快照 + 网格注册表）
+#include "Threading/FrameSceneSnapshot.h"
+#include "Threading/MeshRegistry.h"
 #include <iterator>
 
 #include "Core/Log.h"
@@ -864,6 +868,62 @@ void NaniteCull::BuildTestInstances() {
         // 球从 128B 契约的 boundsMin/boundsMax 推出 ⇒ "包围球来自 GPUSceneObject 契约"
         m_TestSpheres[i] = NaniteSphereFromInstanceBounds(instance);
     }
+}
+
+
+// ============================================================
+//  T8：真实实例表（来自场景快照）
+//
+//  【为什么实例表必须来自快照】此前的实例剔除用"合成测试实例"（相机前方铺一层平移立方体），
+//  只能验证 GPU/CPU 判据一致，无法证明真实场景的变换被正确消费。多资产渲染需要
+//  "每条绑定离线资产的网格 ⇒ 一条实例（localToWorld + 世界 AABB）"。
+//
+//  【口径】
+//   · 只收 `MeshRegistryEntry::naniteAssetIndex != 0xFFFFFFFF` 的条目（绑定见 MeshComponent）；
+//   · `localToWorld` 直接取快照条目的世界矩阵（收集侧已算好，渲染侧不再读 ECS）；
+//   · 包围盒取快照里的**世界空间** AABB（`SnapshotDrawItem::object.boundsMin/Max`），
+//     与 `NaniteSphereFromInstanceBounds` 的入参口径一致；
+//   · 索引/顶点数沿用快照的间接绘制参数（回退路径与 IA 共用同一份几何）。
+// ============================================================
+u32 NaniteCull::SetInstancesFromSnapshot(const FrameSceneSnapshot& snapshot,
+                                         const MeshRegistry& registry) {
+    const u32 capacity = kNaniteMaxTestInstances;
+    u32 written = 0u;
+
+    for (const SnapshotDrawItem& item : snapshot.draws) {
+        if (written >= capacity) break;
+        const MeshRegistryEntry* entry = registry.Find(item.meshIndex);
+        if (entry == nullptr) continue;
+        if (entry->naniteAssetIndex == 0xFFFFFFFFu) continue;   // 没有离线资产 ⇒ 不参与 Nanite 绘制
+        if (item.indexCount == 0u) continue;
+
+        NaniteInstanceGpuObject& instance = m_TestInstances[written];
+        instance = NaniteInstanceGpuObject{};
+        std::memcpy(instance.localToWorld, &item.object.worldMatrix[0][0],
+                    sizeof(instance.localToWorld));
+        for (u32 axis = 0u; axis < 3u; ++axis) {
+            instance.boundsMin[axis] = item.object.boundsMin[axis];
+            instance.boundsMax[axis] = item.object.boundsMax[axis];
+        }
+        instance.boundsMin[3]    = 0.0f;
+        instance.boundsMax[3]    = 0.0f;
+        instance.meshIndex       = item.meshIndex;
+        instance.materialIndex   = item.materialIndex;
+        instance.objectID        = item.objectID;
+        instance.visibilityFlags = item.visibilityFlags;
+        instance.indexCount      = item.indexCount;
+        instance.firstIndex      = item.firstIndex;
+        instance.vertexOffset    = item.vertexOffset;
+        instance._pad            = 0u;
+
+        m_TestSpheres[written]       = NaniteSphereFromInstanceBounds(instance);
+        m_RealAssetIndices[written]  = entry->naniteAssetIndex;
+        ++written;
+    }
+
+    m_RealInstanceCount = written;
+    if (written > 0u) m_TestInstanceCount = written;   // 让既有上传/剔除路径直接消费这张表
+    return written;
 }
 
 void NaniteCull::ResetInstanceCullBuffers() {

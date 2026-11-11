@@ -1061,6 +1061,13 @@ void App::Shutdown() {
         out["gpu_cull"]  = std::to_string(g.gpuCull ? 1 : 0);
         out["skybox"]    = std::to_string(g.skyboxOn ? 1 : 0);
         out["ssgi_enabled"] = std::to_string(g.ssgi ? 1 : 0);
+        // T8：Nanite 开关与离线资产路径（必须回写，否则下一次运行丢配置）
+        {
+            const auto& nanite = g.pipeline->GetNaniteSettings();
+            out["nanite_enable"]      = std::to_string(nanite.enabled ? 1 : 0);
+            out["nanite_offline"]     = std::to_string(nanite.offline ? 1 : 0);
+            out["nanite_offline_path"] = nanite.offlinePath;
+        }
         out["ddgi_enabled"] = std::to_string(g.ddgi ? 1 : 0);
         out["ssr_enabled"]  = std::to_string(g.ssr ? 1 : 0);
         out["ssao_enabled"] = std::to_string(g.ssao ? 1 : 0);

@@ -89,6 +89,7 @@
 #include "RHI/RHI.h"
 #include "Math/Math.h"   // 【任务 13】float3 / float4x4（相机视锥与合成实例网格的输入类型）
 
+#include <array>     // T8：真实实例的资产槽位表
 #include <functional>   // 【任务 15】`NaniteRenderer` 的 Hi-Z 源回调（纹理/深度）经这里传递
 // 【顺手修掉的一处既有笔误】本行过去是 `#include <memory>#include <vector>`（两条指令挤在同一
 //   行 ⇒ MSVC 只处理第一条并给出 C4067，`<vector>` 从未真正被包含，一直靠传递包含碰巧编过）。
@@ -98,6 +99,9 @@
 #include <span>   // 【任务 14】SetClusterBVH 的簇记录视图
 
 namespace he::render {
+struct FrameSceneSnapshot;   // T8：真实实例表的来源（Threading/FrameSceneSnapshot.h）
+class  MeshRegistry;        // T8：网格 → 离线资产绑定
+
 
 /// Nanite_Cull.comp.slang 的 push constant（逐字段对应；static_assert 钉住 8 字节）
 struct alignas(4) NaniteCullParams {
@@ -312,6 +316,21 @@ public:
     [[nodiscard]] const std::vector<u32>& GetCpuVisibleInstances() const { return m_CpuVisibleInstances; }
     /// 本帧合成实例条数（= 最近一次 `SetInstanceCullFrame` 的钳制后入参）
     [[nodiscard]] u32 GetTestInstanceCount() const { return m_TestInstanceCount; }
+    // ── T8：真实实例表（来自场景快照，取代合成测试实例）──
+    /// 用快照里的真实实例覆盖合成测试实例：只收"网格绑定了离线资产"
+    /// （`MeshRegistryEntry::naniteAssetIndex != 0xFFFFFFFF`）的条目，
+    /// 每个条目写一条 `NaniteInstanceGpuObject`（`localToWorld` = 快照的世界矩阵，
+    /// `boundsMin/Max` = 快照里的**世界空间** AABB）。
+    /// @return 写入的实例数；0 表示没有任何绑定资产的实例 ⇒ 调用方应保留合成测试实例。
+    u32 SetInstancesFromSnapshot(const FrameSceneSnapshot& snapshot, const MeshRegistry& registry);
+
+    /// 第 i 个真实实例对应的离线资产槽位（仅 `SetInstancesFromSnapshot` 写过时有效）
+    [[nodiscard]] u32 GetInstanceAssetIndex(u32 i) const {
+        return i < m_RealInstanceCount ? m_RealAssetIndices[i] : 0xFFFFFFFFu;
+    }
+    /// 本帧是否在用真实实例（false ⇒ 仍是合成测试实例）
+    [[nodiscard]] bool UsingRealInstances() const { return m_RealInstanceCount > 0u; }
+
     [[nodiscard]] static constexpr u32 MaxTestInstances() { return kNaniteMaxTestInstances; }
 
     // ============================================================
@@ -582,6 +601,9 @@ private:
 
     /// 本帧合成实例条数（`SetInstanceCullFrame` 的钳制后入参；默认 0 = 尚未设置）
     u32 m_TestInstanceCount = 0;
+    /// T8：真实实例的资产槽位表（与 `m_TestInstances` 同长同序）
+    std::array<u32, kNaniteMaxTestInstances> m_RealAssetIndices{};
+    u32 m_RealInstanceCount = 0u;
 
     // ── 四个自持缓冲（容量都是 `kNaniteMaxTestInstances`）──
     rhi::RHIBufferHandle m_InstanceBuf{};   // A-3             // 128B 实例表（Storage，CPU 每帧写）

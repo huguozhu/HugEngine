@@ -190,6 +190,19 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
     // 次数：模块内部有"只做一次"的门闩，所以放在帧图里（每帧都会走到）也只上传一次。
     if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady()) {
         m_Nanite.EnsureAssetUploaded(m_MeshBatcher);
+        // ── T8：真实实例表 ──
+        // 有网格绑定了离线资产（`MeshComponent::SetNaniteAssetIndex`）时，用快照里的
+        // 真实实例（世界矩阵 + 世界 AABB）替换合成测试实例；没有绑定则保留合成档，
+        // 既有验收（GPU/CPU 剔除逐项对照）因此逐位不变。
+        const u32 realInstances = m_Nanite.GetCull().SetInstancesFromSnapshot(FrameSnap(), m_MeshRegistry);
+        if (realInstances > 0u) {
+            static bool s_RealInstanceLogged = false;
+            if (!s_RealInstanceLogged) {
+                s_RealInstanceLogged = true;
+                HE_CORE_INFO("Nanite: 真实实例表就绪（{} 条绑定离线资产的实例），合成测试实例停用",
+                             realInstances);
+            }
+        }
     }
 
     // GPU 剔除读回（上帧结果）+ 过滤可见物体
