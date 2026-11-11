@@ -51,7 +51,13 @@ bool AutoExposurePass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
     d.computeShader = &m_CS;
     d.pushConstantRanges = {pc}; d.descriptorSetLayouts = {m_Layout}; d.debugName = "AutoExposure";
     m_PSO = device->CreatePipelineStateHandle(d);
-    HE_ASSERT(m_PSO.IsValid(), "AutoExposurePass: PSO failed");
+    // 【不要断言】某些移动驱动（Mali）建这条 compute 管线会失败；断言会把整个应用
+    // 打崩，而自动曝光只是可选后处理 ⇒ 标记为不可用并告警，主渲染继续。
+    if (!m_PSO.IsValid()) {
+        HE_CORE_WARN("AutoExposurePass: PSO 创建失败，自动曝光已禁用");
+        m_Ready = false;
+        return false;
+    }
 
     // SSBO: 256 个 partial sum（16×16 组 × 256 线程/组 → 256 组）
     {

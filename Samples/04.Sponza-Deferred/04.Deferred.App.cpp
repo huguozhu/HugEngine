@@ -389,16 +389,6 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
     g.pipeline->GetGPUCulling().enabled        = false;
     HE_CORE_INFO("04.App: 延迟管线初始化完成（SSGI/DDGI/SSR/SSAO/Clustered 已关）");
 
-    // ---- 自动曝光默认策略 ----
-    // 【Android 上默认关闭】Mali（真机 2608BPX34C / API 37）上 AutoExposurePass 的
-    // compute dispatch 会让驱动在 vkCmdDispatch 内部崩溃（SIGSEGV fault addr 0x3c）。
-    // 该 pass 只是自适应曝光的后处理，关掉不影响延迟管线正确性；
-    // 面板里仍可勾选开启（届时设备上可能复现崩溃，待进一步定位）。
-#if HE_PLATFORM_ANDROID
-    g.pipeline->GetAutoExposure().SetEnabled(false);
-    HE_CORE_INFO("04.App: Android 上默认关闭自动曝光（Mali 驱动在 AE dispatch 崩溃）");
-#endif
-
     g.cmdList = g.device->CreateCommandList();
     g.cmdList->SetSwapChain(g.swapchain.get());
     // 预设 ToneMap PSO：与后缓冲 RP 匹配（ImGui 的 LoadOp 兼容）

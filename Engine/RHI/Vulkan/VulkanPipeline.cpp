@@ -463,9 +463,19 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
         compInfo.stage.pName  = kDefaultShaderEntryPoint;
         compInfo.layout       = pipelineLayout;
 
-        VkPipeline pipeline;
-        vkCreateComputePipelines(device, pipelineCache, 1, &compInfo, nullptr, &pipeline);
+        // 【必须检查返回值】与图形/mesh 路径同一类问题：VkPipeline 未初始化时失败会
+        // 留下垃圾句柄，上层只判断"对象非空"就去 vkCmdBindPipeline —— Mali 驱动直接崩。
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        const VkResult compResult = vkCreateComputePipelines(device, pipelineCache, 1,
+                                                             &compInfo, nullptr, &pipeline);
         vkDestroyShaderModule(device, comp, nullptr);
+
+        if (compResult != VK_SUCCESS || pipeline == VK_NULL_HANDLE) {
+            HE_CORE_ERROR("[Vulkan] compute 管线创建失败: VkResult={}（name={}）",
+                          static_cast<int>(compResult), desc.debugName);
+            vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+            return nullptr;
+        }
 
         HE_CORE_INFO("Vulkan compute pipeline created");
         // ── 插入 PSO 缓存（首个引用也使用缓存模式，统一生命周期管理）──
