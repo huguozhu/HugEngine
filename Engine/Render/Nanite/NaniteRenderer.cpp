@@ -379,7 +379,7 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
             //   的 pass 按 LIFO 处理 —— 任务 15/16 的教训）。录进同一个 pass 体 + 命令缓冲里的
             //   显式屏障，是唯一稳的写法（任务 16 的间接绘制同理）。
             if (!softRasterOn) return;
-            const NaniteScene::AssetBuffers& asset = m_Scene.GetAssetBuffers();
+            const NaniteScene::AssetBuffers& asset = m_Scene.GetMergedAssetBuffers();   // T8：光栅端消费聚合视图
             if (!asset.clusters || !asset.vertices || !asset.indices) return;   // 资产未入库
 
             NaniteRaster::GBufferTargets targets;
@@ -769,7 +769,7 @@ void NaniteRenderer::EnsureSoftRasterReady(const NaniteGBufferHandles& gb) {
     //   与 `GB_Clear` 的 lambda 里（都按同一个开关门控）。
     if (!m_Settings.enabled || !m_Ready || !m_Settings.softRaster) return;
     if (!gb.HasFullGBufferTextures()) return;
-    const NaniteScene::AssetBuffers& asset = m_Scene.GetAssetBuffers();
+    const NaniteScene::AssetBuffers& asset = m_Scene.GetMergedAssetBuffers();   // T8：光栅端消费聚合视图
     if (!asset.clusters || !asset.vertices || !asset.indices) return;   // 资产未入库
 
     NaniteRaster::GBufferTargets targets;
@@ -797,7 +797,7 @@ void NaniteRenderer::EnsureHardRasterReady(const NaniteGBufferHandles& gb) {
     if (!m_Settings.softRaster || !m_Settings.hardRaster) return;
     if (!m_Raster.IsHardRasterSupported()) return;
     if (!gb.HasFullGBufferTextures()) return;
-    const NaniteScene::AssetBuffers& asset = m_Scene.GetAssetBuffers();
+    const NaniteScene::AssetBuffers& asset = m_Scene.GetMergedAssetBuffers();   // T8：光栅端消费聚合视图
     if (!asset.clusters || !asset.vertices || !asset.indices) return;   // 资产未入库
 
     NaniteRaster::GBufferTargets targets;
@@ -828,7 +828,7 @@ void NaniteRenderer::EnsureDebugViewReady() {
     if (m_Settings.debugView == kNaniteDebugViewOff) return;   // 默认档：一个资源都不建
     if (m_Settings.debugView > kNaniteDebugViewMaxMode) return; // 防御：越界档位不建（cfg 已钳）
 
-    const NaniteScene::AssetBuffers& asset = m_Scene.GetAssetBuffers();
+    const NaniteScene::AssetBuffers& asset = m_Scene.GetMergedAssetBuffers();   // T8：光栅端消费聚合视图
     if (!asset.clusters) return;                       // 资产未入库：没有数据可可视化
     rhi::IRHIBuffer* spheres = m_Cull.GetBVHSphereBuffer();
     rhi::IRHIBuffer* lodInfo = m_Cull.GetLODInfoBuffer();

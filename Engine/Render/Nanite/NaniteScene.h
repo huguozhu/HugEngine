@@ -120,6 +120,22 @@ public:
     /// T8：把一份资产追加进注册表，返回其下标（失败返回 `kInvalidAssetIndex`）。
     /// 【与 `UploadPackedAsset` 的关系】后者是"单资产"兼容入口（等价于替换 slot 0）；
     /// 本函数是"多资产"入口，多份资产各自持有独立的 6 段缓冲，互不覆盖。
+    // ── T8：聚合视图（**光栅端唯一消费的视图**）──
+    //
+    // 【为什么需要它】光栅按 `firstInstance = 簇号` 直接从"资产的簇/索引缓冲"取数据，
+    // 它并不知道资产号。多资产下最省事、且**不必改任何 shader**的做法是：把所有资产的五段
+    // 首尾相接成一份聚合缓冲，簇记录里的资产局部偏移在注册时改写为全局值
+    // （`triangleOffset / vertexOffset / materialID / childClusterOffset` 各加本资产基址）。
+    // 于是"全局簇号"在整个渲染链路里天然自洽 —— 剔除侧（第 5 步 ③）已经在写全局簇号。
+    //
+    // 【单资产等价性】只有一份资产时基址全 0，聚合视图与 `m_Asset` 逐字节相同。
+    [[nodiscard]] const AssetBuffers& GetMergedAssetBuffers() const {
+        return m_MergedValid ? m_Merged : m_Asset;
+    }
+    [[nodiscard]] bool HasMergedAsset() const { return m_MergedValid; }
+    [[nodiscard]] u32 GetMergedClusterCount() const { return (u32)m_MergedClusters.size(); }
+
+
     [[nodiscard]] u32 RegisterAsset(const NanitePackedAsset& asset);
 
     /// T8：注册表读取（越界返回 nullptr）
@@ -127,9 +143,20 @@ public:
         return index < m_Assets.size() ? &m_Assets[index] : nullptr;
     }
     [[nodiscard]] u32 GetAssetCount() const { return (u32)m_Assets.size(); }
-    void ClearAssets() { m_Assets.clear(); }
+    void ClearAssets() {
+        m_Assets.clear();
+        // 聚合段一并清空：不清会让"先 Upload 再 Register"的两条路径叠加出重复几何
+        m_MergedClusters.clear();
+        m_MergedVertices.clear();
+        m_MergedTriangles.clear();
+        m_MergedMaterials.clear();
+        m_MergedLodOffsets.clear();
+        m_Merged = AssetBuffers{};
+        m_MergedValid = false;
+    }
 
     /// 已上传的资产缓冲组（任务 13+ 绑定用；本任务只创建 + 校验）
+    /// 单资产（slot 0）的段组；**光栅端请用 `GetMergedAssetBuffers()`**（多资产时它才是全场景视图）
     [[nodiscard]] const AssetBuffers& GetAssetBuffers() const { return m_Asset; }
 
     // ============================================================
@@ -235,6 +262,15 @@ public:
 
     /// T8：多资产注册表（每资产独立段组 + CPU 段副本；空表示还没注册过任何资产）
     std::vector<NaniteAssetEntry> m_Assets;
+    /// T8：聚合五段（CPU 侧真值；每次注册资产后整体重建 GPU 缓冲）
+    std::vector<NaniteClusterRecord>  m_MergedClusters;
+    std::vector<NaniteVertex>         m_MergedVertices;
+    std::vector<NanitePackedTriangle> m_MergedTriangles;
+    std::vector<NaniteMaterialRecord> m_MergedMaterials;
+    std::vector<u32>                  m_MergedLodOffsets;
+    AssetBuffers m_Merged;           ///< 聚合 GPU 段组（光栅端消费）
+    bool         m_MergedValid = false;
+
 
     /// 【§14.8 任务 24】留存的资产 CPU 副本（页池的数据源；`bytes` 镜像被丢弃）
     NanitePackedAsset m_AssetCPU;

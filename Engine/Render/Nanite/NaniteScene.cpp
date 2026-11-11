@@ -245,10 +245,13 @@ bool NaniteScene::UploadAssetInto(const NanitePackedAsset& asset, AssetBuffers& 
     return outAsset.verified;
 }
 
-// T8：单资产兼容入口（等价于替换 slot 0；既有调用方行为不变）
+// T8：单资产兼容入口（等价于"清空注册表 + 注册一份"）
+// 【为什么走 RegisterAsset】光栅端消费的是**聚合视图**（多资产的唯一视图）；单资产若只写
+// `m_Asset`，聚合视图为空、光栅会读到空缓冲。走注册表保证"单资产 = 聚合视图里只有一份"，
+// 也就保证与 T8 之前的渲染结果逐字节相同。
 bool NaniteScene::UploadPackedAsset(const NanitePackedAsset& asset) {
-    m_Asset = AssetBuffers{};
-    return UploadAssetInto(asset, m_Asset);
+    ClearAssets();
+    return RegisterAsset(asset) != kInvalidAssetIndex;
 }
 
 // T8：多资产入口 —— 每份资产独立的 6 段缓冲，追加进注册表
@@ -264,6 +267,60 @@ u32 NaniteScene::RegisterAsset(const NanitePackedAsset& asset) {
     entry.cpu.bytes.clear();
     entry.cpu.bytes.shrink_to_fit();
     m_Assets.push_back(std::move(entry));
+
+    // ── T8：把这份资产追加进聚合五段，并把资产局部偏移改写成全局值 ──
+    const u32 clusterBase  = (u32)m_MergedClusters.size();
+    const u32 triangleBase = (u32)m_MergedTriangles.size();
+    const u32 vertexBase   = (u32)m_MergedVertices.size();
+    const u32 materialBase = (u32)m_MergedMaterials.size();
+
+    for (const NaniteClusterRecord& src : asset.clusters) {
+        NaniteClusterRecord r = src;
+        r.triangleOffset += triangleBase;   // 三角形下标（× 8B = 索引段字节偏移）
+        r.vertexOffset   += vertexBase;     // 顶点段下标（× 16B）
+        r.materialID     += materialBase;   // 材质段下标
+        if (r.childClusterOffset != 0u) r.childClusterOffset += clusterBase;   // 子簇是**簇下标**
+        m_MergedClusters.push_back(r);
+    }
+    m_MergedVertices.insert(m_MergedVertices.end(), asset.vertices.begin(), asset.vertices.end());
+    m_MergedTriangles.insert(m_MergedTriangles.end(), asset.triangles.begin(), asset.triangles.end());
+    m_MergedMaterials.insert(m_MergedMaterials.end(), asset.materials.begin(), asset.materials.end());
+    m_MergedLodOffsets.insert(m_MergedLodOffsets.end(), asset.lodOffsets.begin(), asset.lodOffsets.end());
+
+    // 整体重建聚合 GPU 缓冲（注册是启动期路径；重建比"预分配 + 增量写"更不容易出错）
+    auto uploadSection = [this](std::unique_ptr<rhi::IRHIBuffer>& slot, const void* data, usize bytes,
+                                const char* debugName) {
+        slot.reset();
+        if (bytes == 0u) return true;
+        rhi::BufferDesc desc;
+        desc.size        = bytes;
+        desc.usage       = rhi::BufferUsage::Storage | rhi::BufferUsage::TransferSrc;
+        desc.cpuAccess   = false;
+        desc.initialData = data;
+        desc.debugName   = debugName;
+        slot = m_Device->CreateBuffer(desc);
+        return slot != nullptr;
+    };
+    const bool ok = uploadSection(m_Merged.clusters, m_MergedClusters.data(),
+                                  m_MergedClusters.size() * sizeof(NaniteClusterRecord), "Nanite.MergedClusters") &&
+                    uploadSection(m_Merged.vertices, m_MergedVertices.data(),
+                                  m_MergedVertices.size() * sizeof(NaniteVertex), "Nanite.MergedVertices") &&
+                    uploadSection(m_Merged.indices, m_MergedTriangles.data(),
+                                  m_MergedTriangles.size() * sizeof(NanitePackedTriangle), "Nanite.MergedIndices") &&
+                    uploadSection(m_Merged.materials, m_MergedMaterials.data(),
+                                  m_MergedMaterials.size() * sizeof(NaniteMaterialRecord), "Nanite.MergedMaterials") &&
+                    uploadSection(m_Merged.lodOffsets, m_MergedLodOffsets.data(),
+                                  m_MergedLodOffsets.size() * sizeof(u32), "Nanite.MergedLod");
+    m_MergedValid = ok;
+    if (!ok) {
+        HE_CORE_ERROR("NaniteScene: 聚合资产缓冲重建失败（{} 簇 / {} 顶点）",
+                      m_MergedClusters.size(), m_MergedVertices.size());
+    } else {
+        HE_CORE_INFO("NaniteScene: 聚合资产视图更新（资产 {}：簇 {} / 顶点 {} / 三角形 {} / 材质 {}）",
+                     m_Assets.size(), m_MergedClusters.size(), m_MergedVertices.size(),
+                     m_MergedTriangles.size(), m_MergedMaterials.size());
+    }
+
     return (u32)m_Assets.size() - 1u;
 }
 
