@@ -1926,6 +1926,29 @@ inline constexpr u32 kNaniteMaxBVHNodes = 2u * kNaniteMaxBVHClusters;
 ///   而自顶向下的递归构建无法保证（左子树会吃掉中间的下标）；显式写两个下标只多 4B，
 ///   换掉一整类"布局约束"，也让 shader 的压栈只需读一个 uint4。
 /// 【`flags` 只定义 bit0】其余位保留写 0，避免"某些位有语义但没人知道"的隐患。
+// ── T8：共享剔除缓冲的"资产区间表"（GPU 侧，32B；与 `Nanite_ClusterBVH.comp.slang` 同布局）──
+//
+// 【为什么需要它】多资产把 BVH 节点 / 叶子簇表 / 簇球 / LOD / 绘制参数首尾相接放进共享缓冲，
+// 剔除时必须知道"当前实例属于哪一段"。本结构就是那张表的元素：全部是**元素下标**。
+//
+// 【口径】缓冲内的下标一律是**资产局部**的；shader/CPU 访问时加对应 base
+//（内部节点孩子 + nodeBase、叶子簇表项 + leafBase、簇级表项 + clusterBase）。
+struct alignas(16) NaniteAssetCullRangeGpu {
+    u32 nodeBase      = 0;   // 偏移 0
+    u32 nodeCount     = 0;   // 偏移 4
+    u32 leafBase      = 0;   // 偏移 8
+    u32 leafCount     = 0;   // 偏移 12
+    u32 clusterBase   = 0;   // 偏移 16
+    u32 clusterCount  = 0;   // 偏移 20
+    u32 lodInfoBase   = 0;   // 偏移 24
+    u32 drawRangeBase = 0;   // 偏移 28
+};
+static_assert(sizeof(NaniteAssetCullRangeGpu) == 32, "资产区间表元素必须 32B（8×u32）");
+static_assert(alignof(NaniteAssetCullRangeGpu) == 16, "资产区间表元素必须 16B 对齐");
+
+/// 共享剔除缓冲里可容纳的资产份数（每份的规模仍受 `kNaniteMaxBVH*` 总容量约束）
+inline constexpr u32 kNaniteMaxCullAssets = 64u;
+
 struct alignas(16) NaniteBVHNode {
     float center[3];   ///< 偏移 0：网格空间包围球心
     float radius;      ///< 偏移 12：包围球半径（≥ 0）
@@ -2048,7 +2071,11 @@ struct NaniteClusterBVHTraversalStats {
         NaniteVisibleClusterRef* outVisible,
         u32 outCapacity,
         NaniteClusterBVHTraversalStats* outStats,
-        const NaniteCullChainDesc& chain = NaniteCullChainDesc{}) {
+        const NaniteCullChainDesc& chain = NaniteCullChainDesc{},
+        // 【T8】多资产：每实例用 `instances[i].meshIndex` 当资产槽位，查这张表取基址；
+        //   传 nullptr ⇒ 单资产口径（基址全 0，与旧行为逐位相同）
+        const NaniteAssetCullRangeGpu* assetRanges = nullptr,
+        u32 assetRangeCount = 0u) {
     if (outStats != nullptr) *outStats = NaniteClusterBVHTraversalStats{};
     if (bvh.nodes == nullptr || bvh.nodeCount == 0u) return 0u;
     if (instances == nullptr || instanceCount == 0u || maxInstances == 0u) return 0u;
@@ -2071,6 +2098,11 @@ struct NaniteClusterBVHTraversalStats {
         // ── T8：实例变换用**完整**局部→世界矩阵（列主序；含旋转与非均匀缩放）──
         // 【为什么半径要乘最大轴缩放】球在非均匀缩放下会变成椭球；用最大轴缩放得到一个
         //   保守的包围球（宁可多留不可漏掉），与 GPU 侧 `Nanite_ClusterBVH.comp.slang` 同口径。
+        // 【T8】本实例的资产基址（无区间表 ⇒ 全 0 = 单资产）
+        NaniteAssetCullRangeGpu assetRange{};
+        if (assetRanges != nullptr && instances[instance].meshIndex < assetRangeCount) {
+            assetRange = assetRanges[instances[instance].meshIndex];
+        }
         const float* ltw = instances[instance].localToWorld;
         const float colX[3] = { ltw[0], ltw[1], ltw[2] };
         const float colY[3] = { ltw[4], ltw[5], ltw[6] };
@@ -2095,7 +2127,7 @@ struct NaniteClusterBVHTraversalStats {
             if (nodeIndex >= bvh.nodeCount) continue;   // 防御：非法孩子下标不越界
             ++stats.visitedNodes;                       // ⑤ 先计数、后判可见
 
-            const NaniteBVHNode& node = bvh.nodes[nodeIndex];
+            const NaniteBVHNode& node = bvh.nodes[assetRange.nodeBase + nodeIndex];
             float nodeCenter[3] = { 0.0f, 0.0f, 0.0f };
             toWorld(node.center, nodeCenter);
             if (!NaniteSphereVisibleInFrustum(frustum, nodeCenter, node.radius * maxScale)) {
@@ -2106,7 +2138,8 @@ struct NaniteClusterBVHTraversalStats {
                 if (bvh.leafClusterIndices == nullptr || bvh.clusterSpheres == nullptr) continue;
                 const u32 first = node.left;
                 for (u32 k = 0u; k < node.count; ++k) {
-                    const u32 cluster = bvh.leafClusterIndices[first + k];
+                    const u32 localCluster = bvh.leafClusterIndices[assetRange.leafBase + first + k];
+                    const u32 cluster = assetRange.clusterBase + localCluster;
                     if (cluster >= bvh.clusterCount) continue;   // 防御：越界簇下标不读球表
                     const NaniteClusterSphere& sphere = bvh.clusterSpheres[cluster];
                     float clusterCenter[3] = { 0.0f, 0.0f, 0.0f };

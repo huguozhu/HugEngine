@@ -688,6 +688,8 @@ private:
     NaniteClusterBVH m_BVHData;
     /// T8：多资产剔除区间表（与 `m_BVHData` 的聚合视图一一对应）
     std::vector<NaniteAssetCullRange> m_AssetCullRanges;
+    /// T8：资产区间表（GPU 只读；shader 用 `instance.meshIndex` 索引它取基址）
+    rhi::RHIBufferHandle m_AssetRangeBuf;
 
     /// 【任务 15】CPU 侧 LOD 元数据镜像（与 `m_BVHData.clusterSpheres` 同序、同长度）
     std::vector<NaniteClusterLODInfo> m_LODInfo;

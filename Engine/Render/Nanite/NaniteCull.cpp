@@ -290,6 +290,14 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         d.cpuAccess = true;   // 只在 SetClusterBVH 写一次
         m_BVHNodeBuf = m_Device->CreateBufferHandle(d);   // A-3
         if (!m_BVHNodeBuf.IsValid()) { HE_CORE_ERROR("NaniteCull: BVH 节点缓冲创建失败"); return false; }
+        // 【T8】资产区间表（每资产 32B；容量固定，CPU 侧追加资产时整表重写）
+        rhi::BufferDesc assetDesc;
+        assetDesc.size      = sizeof(NaniteAssetCullRangeGpu) * kNaniteMaxCullAssets;
+        assetDesc.debugName = "Nanite.AssetCullRanges";
+        assetDesc.usage     = rhi::BufferUsage::Storage;
+        assetDesc.cpuAccess = true;
+        m_AssetRangeBuf = m_Device->CreateBufferHandle(assetDesc);
+        if (!m_AssetRangeBuf.IsValid()) { HE_CORE_ERROR("NaniteCull: 资产区间表缓冲创建失败"); return false; }
     }
     {
         rhi::BufferDesc d;
@@ -413,6 +421,9 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
             {12, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },  // 【任务 16】间接命令（读写）
             {13, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },  // 【任务 16】绘制计数（读写）
         };
+        // 【T8】binding 14：资产区间表（多资产剔除的基址来源）
+        bvhLayout.bindings.push_back(
+            { 14, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false });
         m_BVHLayout = m_Device->CreateDescriptorSetLayout(bvhLayout);
         m_BVHSet    = m_Device->AllocateDescriptorSet(m_BVHLayout);
         m_Device->UpdateDescriptorSet(m_BVHSet, 0, rhi::DescriptorType::StorageBuffer, ResB(m_BVHNodeBuf));
@@ -432,6 +443,11 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
                                       ResB(m_IndirectDrawBuf));
         m_Device->UpdateDescriptorSet(m_BVHSet, 13, rhi::DescriptorType::StorageBuffer,
                                       ResB(m_DrawCountBuf));
+        // 【T8】资产区间表：容量按 `kNaniteMaxCullAssets` 固定（每份资产规模受总容量约束）
+        if (m_AssetRangeBuf.IsValid()) {
+            m_Device->UpdateDescriptorSet(m_BVHSet, 14, rhi::DescriptorType::StorageBuffer,
+                                          ResB(m_AssetRangeBuf));
+        }
 
         // 【任务 15】Hi-Z 采样器（本类自建；口径与既有 Hi-Z 采样器一致：点采样 + ClampToEdge
         //   + mip 0..8）。**为什么不借用 GPUCulling 的采样器**：§14.3 禁止模块 include
@@ -1168,19 +1184,13 @@ u32 NaniteCull::AppendAssetBVH(std::span<const NaniteClusterRecord> clusters,
     // ── ④ 聚合视图（既有深度/统计/单资产查询继续复用 `m_BVHData`）──
     const u32 levelBase = (u32)m_BVHData.nodes.size();
     m_BVHData.nodes.insert(m_BVHData.nodes.end(), built.nodes.begin(), built.nodes.end());
-    // BVH 内部的节点下标是**资产局部**的；聚合后要整体平移，否则叶子簇/子节点会指错
-    for (u32 i = levelBase; i < (u32)m_BVHData.nodes.size(); ++i) {
-        NaniteBVHNode& n = m_BVHData.nodes[i];
-        if (NaniteBVHNodeIsLeaf(n)) {
-            n.left += leafBase;    // 叶子：`left` 是**叶子簇表**下标 ⇒ 加 leafBase
-        } else {
-            n.left += levelBase;   // 内部节点：左右孩子是**节点表**下标 ⇒ 加 levelBase
-            n.right += levelBase;
-        }
-    }
-    // 叶子簇表里存的是**资产局部**簇下标 ⇒ 追加时要整体加上本资产的 `clusterBase`，
-    // 否则第 2 份资产的叶子会指到第 1 份资产的簇（画面会缺块且难以定位）。
-    for (u32 local : built.leafClusterIndices) m_BVHData.leafClusterIndices.push_back(clusterBase + local);
+    // 节点表同样保持资产局部下标（孩子下标不平移；基址由访问方加）
+    // 【口径】缓冲里一律存**资产局部**下标；访问时由 shader / CPU 参考加本资产的基址
+    //（`nodeBase` / `leafBase` / `clusterBase`）。这样每份资产的切片与单资产时逐字节相同，
+    // 也避免"同一处既平移又被加基址"的双重偏移。
+    m_BVHData.leafClusterIndices.insert(m_BVHData.leafClusterIndices.end(),
+                                        built.leafClusterIndices.begin(),
+                                        built.leafClusterIndices.end());
     m_BVHData.clusterSpheres.insert(m_BVHData.clusterSpheres.end(), built.clusterSpheres.begin(),
                                     built.clusterSpheres.end());
     m_BVHData.clusterCount += built.clusterCount;
@@ -1202,6 +1212,30 @@ u32 NaniteCull::AppendAssetBVH(std::span<const NaniteClusterRecord> clusters,
     range.lodInfoBase   = lodBase;
     range.drawRangeBase = drawBase;
     m_AssetCullRanges.push_back(range);
+
+    // ── ⑤ 资产区间表整表上传（规模上限 `kNaniteMaxCullAssets`，超出直接拒绝）──
+    if (m_AssetCullRanges.size() > kNaniteMaxCullAssets) {
+        HE_CORE_ERROR("NaniteCull: 资产份数超过区间表容量 {} ⇒ 拒绝注册", kNaniteMaxCullAssets);
+        m_AssetCullRanges.pop_back();
+        return 0xFFFFFFFFu;
+    }
+    if (m_AssetRangeBuf.IsValid()) {
+        if (void* p = ResB(m_AssetRangeBuf)->Map()) {
+            auto* gpu = static_cast<NaniteAssetCullRangeGpu*>(p);
+            for (usize i = 0; i < m_AssetCullRanges.size(); ++i) {
+                const NaniteAssetCullRange& r = m_AssetCullRanges[i];
+                gpu[i].nodeBase      = r.nodeBase;
+                gpu[i].nodeCount     = r.nodeCount;
+                gpu[i].leafBase      = r.leafBase;
+                gpu[i].leafCount     = r.leafCount;
+                gpu[i].clusterBase   = r.clusterBase;
+                gpu[i].clusterCount  = r.clusterCount;
+                gpu[i].lodInfoBase   = r.lodInfoBase;
+                gpu[i].drawRangeBase = r.drawRangeBase;
+            }
+            if (auto* ub = ResB(m_AssetRangeBuf)) ub->Unmap();
+        }
+    }
 
     HE_CORE_INFO("NaniteCull: 追加资产剔除数据（槽位 {}：簇 {} / 节点 {} / 叶子 {}；"
                  "基址 node={} cluster={}）",

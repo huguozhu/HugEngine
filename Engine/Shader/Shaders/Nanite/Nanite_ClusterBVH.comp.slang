@@ -185,6 +185,19 @@ struct CullChainParams {
 [[vk::binding(10, 0)]] SamplerState                   u_HiZSampler;
 [[vk::binding(11, 0)]] StructuredBuffer<ClusterDrawRange> u_ClusterDrawRanges;  // 【任务 16】只读
 [[vk::binding(12, 0)]] RWStructuredBuffer<IndirectCmd> u_IndirectCommands;      // 【任务 16】读写
+// ── T8：资产区间表（每资产 32B；`instance.meshIndex` 承载资产槽位，见 NaniteCull.h）──
+struct AssetCullRange {
+    uint nodeBase;
+    uint nodeCount;
+    uint leafBase;
+    uint leafCount;
+    uint clusterBase;
+    uint clusterCount;
+    uint lodInfoBase;
+    uint drawRangeBase;
+};
+[[vk::binding(14, 0)]] StructuredBuffer<AssetCullRange> u_AssetRanges;
+
 [[vk::binding(13, 0)]] RWStructuredBuffer<uint>        u_DrawCount;             // 【任务 16】读写
 
 [[vk::push_constant]] cbuffer NaniteClusterBVHParams {
@@ -301,8 +314,8 @@ bool hizOccluded(float3 center, float radius, out float outNdcYCenter) {
 //   ② 父簇"够好"（`parentError × focal <= threshold × distance`）⇒ 父簇会被选中 ⇒ 本簇不选；
 //      根簇没有父簇 ⇒ ② 自动成立（用 flags 的根位，不能用 parentError == 0：根的它也是 0）。
 // 【与 C++ 侧】`NaniteLODClusterSelected` 是逐字同构的实现（单测直接覆盖它）。
-bool lodSelected(uint cluster, float3 worldCenter, float focalPixels, float thresholdPixels) {
-    LODInfo info = u_LodInfo[cluster];
+bool lodSelected(uint lodInfoIndex, float3 worldCenter, float focalPixels, float thresholdPixels) {
+    LODInfo info = u_LodInfo[lodInfoIndex];
     float3 delta = worldCenter - u_Params[0].cameraPos.xyz;
     float distance = length(delta);
     if (!(distance > 1.0e-4f)) distance = 1.0e-4f;   // 与 kNaniteLODMinDistance 同一个常量
@@ -364,6 +377,8 @@ void main(uint3 id : SV_DispatchThreadID) {
     //   【为什么半径要乘最大轴缩放】球在非均匀缩放下是椭球；取最大轴缩放得到保守包围球
     //   （宁可多留不可漏掉）。CPU 参考 `NaniteTraverseClusterBVHCPU` 用同一口径，
     //   GPU/CPU 逐项对照因此仍然成立。纯平移实例（缩放=1）结果与旧实现逐位相同。
+    // 【T8】本实例的资产基址（缓冲里存的是资产局部下标，访问时加 base）
+    AssetCullRange asset = u_AssetRanges[instance.meshIndex];
     float3 origin = instance.ltw3.xyz;
     float3 colX   = instance.ltw0.xyz;
     float3 colY   = instance.ltw1.xyz;
@@ -379,11 +394,11 @@ void main(uint3 id : SV_DispatchThreadID) {
     stack[stackSize++] = 0u;   // 根节点恒为 0（CPU 构建器保证）
 
     while (stackSize > 0u) {
-        uint nodeIndex = stack[--stackSize];
-        if (nodeIndex >= nodeCount) continue;   // 防御：非法孩子下标不越界
+        uint localNode = stack[--stackSize];
+        if (localNode >= nodeCount) continue;   // 防御：非法孩子下标不越界
         ++visited;                              // 先计数、后判可见（与 CPU 参考同位置）
 
-        BVHNode node = u_Nodes[nodeIndex];
+        BVHNode node = u_Nodes[asset.nodeBase + localNode];
         if (!sphereVisibleInFrustum(HE_NANITE_LOCAL_TO_WORLD(node.centerRadius), node.centerRadius.w * maxScale)) {
             continue;   // 节点球不可见 ⇒ 整棵子树跳过（节点球是后代簇球的保守并集）
         }
@@ -393,8 +408,10 @@ void main(uint3 id : SV_DispatchThreadID) {
             uint first = node.link.x;
             uint count = node.link.z;
             for (uint k = 0u; k < count; ++k) {
-                uint cluster = u_LeafClusters[first + k];
-                if (cluster >= clusterCount) continue;   // 防御：越界簇下标不读球表
+                // 【T8】叶子簇表项是**资产局部**簇下标；全局簇号 = clusterBase + local
+                uint localCluster = u_LeafClusters[asset.leafBase + first + k];
+                if (localCluster >= asset.clusterCount) continue;   // 防御：越界簇下标不读球表
+                uint cluster = asset.clusterBase + localCluster;
                 ClusterSphere sphere = u_ClusterSpheres[cluster];
                 float3 worldCenter = HE_NANITE_LOCAL_TO_WORLD(sphere.centerRadius);
                 if (!sphereVisibleInFrustum(worldCenter, sphere.centerRadius.w)) {
@@ -415,8 +432,8 @@ void main(uint3 id : SV_DispatchThreadID) {
 
                 // ── Phase 3：DAG 割（LOD 选择；关闭时不筛任何簇）──
                 if (lodEnabled) {
-                    if (!lodSelected(cluster, worldCenter, focalPixels, thresholdPixels)) continue;
-                    LODInfo info = u_LodInfo[cluster];
+                    if (!lodSelected(asset.lodInfoBase + localCluster, worldCenter, focalPixels, thresholdPixels)) continue;
+                    LODInfo info = u_LodInfo[asset.lodInfoBase + localCluster];
                     uint level = (info.lodLevel < 8u) ? info.lodLevel : 7u;
                     InterlockedAdd(u_Stats[kStatLodBase + level], 1u);
                 }
@@ -439,7 +456,7 @@ void main(uint3 id : SV_DispatchThreadID) {
                 // 【绘制计数】只在**真的写了命令**时 +1 ⇒ count 恰好 = 命令缓冲里 [0, count) 的有效条数，
                 //   绘制端按 [0, count) 画 ⇒ 一条空转都不会有。
                 if (slot < drawCapacity) {
-                    ClusterDrawRange range = u_ClusterDrawRanges[cluster];
+                    ClusterDrawRange range = u_ClusterDrawRanges[asset.drawRangeBase + localCluster];
                     IndirectCmd cmd;
                     cmd.indexCount    = range.indexCount;      // 簇内索引个数（triangleCount × 3）
                     cmd.instanceCount = 1u;                    // 一个簇 = 一次绘制
