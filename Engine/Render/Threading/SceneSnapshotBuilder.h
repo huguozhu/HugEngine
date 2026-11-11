@@ -138,6 +138,10 @@ public:
         // 0 = 未注册 ⇒ 消费侧 `Find(0)` 返回空并跳过（可见化，而不是指错资源）。
         item.meshIndex         = comp.meshIndex;
         item.objectID          = objectID;
+        // T8：离线资产槽位随条目带走（只有网格组件有这个概念；其余类型保持无效）
+        if constexpr (std::is_base_of_v<he::MeshComponent, TComponent>) {
+            item.naniteAssetIndex = comp.GetNaniteAssetIndex();
+        }
 
         // 材质参数（E-3）：**在收集侧就算完** —— 复用 `MakePBRMaterial` + `FillObjectData`（纯计算），
         // 把结果直接放进 `item.object`。这样渲染侧消费快照时不必再拿 `MeshComponent*`，

@@ -1,4 +1,5 @@
 #include "Threading/SceneSnapshotBuilder.h"
+#include "Core/Log.h"   // T8 诊断日志
 // 共享注册器需要 MeshRegistryEntry 的完整定义
 #include "Threading/MeshRegistry.h"
 
@@ -408,6 +409,16 @@ u32 SceneSnapshotBuilder::RegisterMeshes(he::World& world, MeshRegistry& registr
         entry.naniteAssetIndex = comp.GetNaniteAssetIndex();
         comp.meshIndex         = registry.Register(&comp, entry);
         ++count;
+        // 【T8 诊断】首次统计：本帧有多少条目带着有效资产槽位被写进注册表
+        {
+            static bool s_Logged = false;
+            if (!s_Logged) {
+                s_Logged = true;
+                const u32 withAsset = registry.CountWithNaniteAsset();
+                HE_CORE_INFO("SceneSnapshotBuilder: 首次注册完成 —— 条目 {} 个，其中带资产槽位 {} 个",
+                             count, withAsset);
+            }
+        }
     };
 
     // 遍历顺序与 `BuildObjects` / `SceneRenderer::Prepare` 的收集顺序无关（注册表按组件地址为键），

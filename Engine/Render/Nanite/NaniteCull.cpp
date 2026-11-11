@@ -908,10 +908,18 @@ u32 NaniteCull::SetInstancesFromSnapshot(const FrameSceneSnapshot& snapshot,
 
     for (const SnapshotDrawItem& item : snapshot.draws) {
         if (written >= capacity) break;
-        const MeshRegistryEntry* entry = registry.Find(item.meshIndex);
-        if (entry == nullptr) continue;
-        if (entry->naniteAssetIndex == 0xFFFFFFFFu) continue;   // 没有离线资产 ⇒ 不参与 Nanite 绘制
-        if (item.indexCount == 0u) continue;
+        // 【T8】资产槽位直接用快照条目里的值（收集侧已从组件带过来）；
+        // 不再查 `MeshRegistry` —— 渲染侧可能持有另一个注册表实例，实测会查不到绑定。
+        if (item.naniteAssetIndex == 0xFFFFFFFFu) continue;   // 没有离线资产 ⇒ 不参与 Nanite 绘制
+        // 【索引数来源】快照里的 `indexCount` 由 `MeshBatcher` 回填；多资产档下样例跳过了
+        // 单资产上传路径，某些帧该字段可能仍是 0 ⇒ 退回注册表里组件登记的真实索引数。
+        u32 instanceIndexCount = item.indexCount;
+        if (instanceIndexCount == 0u) {
+            if (const MeshRegistryEntry* entry = registry.Find(item.meshIndex)) {
+                instanceIndexCount = entry->indexCount;
+            }
+        }
+        if (instanceIndexCount == 0u) continue;
 
         NaniteInstanceGpuObject& instance = m_TestInstances[written];
         instance = NaniteInstanceGpuObject{};
@@ -926,17 +934,17 @@ u32 NaniteCull::SetInstancesFromSnapshot(const FrameSceneSnapshot& snapshot,
         // 【T8 第 5 步 ②】Nanite 自己的实例表里，`meshIndex` 字段承载**资产槽位**
         // （`GPUSceneObject` 的 128B 契约不变；Nanite 的 shader 不读 meshIndex/materialIndex/objectID，
         //  它们只作为布局占位）。剔除阶段用它选"这份资产在共享剔除缓冲里的基址"。
-        instance.meshIndex       = entry->naniteAssetIndex;
+        instance.meshIndex       = item.naniteAssetIndex;
         instance.materialIndex   = item.materialIndex;
         instance.objectID        = item.objectID;
         instance.visibilityFlags = item.visibilityFlags;
-        instance.indexCount      = item.indexCount;
+        instance.indexCount      = instanceIndexCount;
         instance.firstIndex      = item.firstIndex;
         instance.vertexOffset    = item.vertexOffset;
         instance._pad            = 0u;
 
         m_TestSpheres[written]       = NaniteSphereFromInstanceBounds(instance);
-        m_RealAssetIndices[written]  = entry->naniteAssetIndex;
+        m_RealAssetIndices[written]  = item.naniteAssetIndex;
         ++written;
     }
 
@@ -947,11 +955,16 @@ u32 NaniteCull::SetInstancesFromSnapshot(const FrameSceneSnapshot& snapshot,
     if (!s_Logged) {
         s_Logged = true;
         u32 withEntry = 0u;
+        u32 withAssetAndIndex = 0u;
         for (const SnapshotDrawItem& item : snapshot.draws) {
-            if (registry.Find(item.meshIndex) != nullptr) ++withEntry;
+            if (item.naniteAssetIndex != 0xFFFFFFFFu) {
+                ++withEntry;
+                if (item.indexCount != 0u) ++withAssetAndIndex;
+            }
         }
-        HE_CORE_INFO("NaniteCull: 真实实例统计 —— 快照 {} 条，注册表命中 {} 条，绑定资产并成实例 {} 条",
-                     (u32)snapshot.draws.size(), withEntry, written);
+        HE_CORE_INFO("NaniteCull: 真实实例统计 —— 快照 {} 条，带资产槽位 {} 条（其中 indexCount≠0 的 {} 条），"
+                     "成实例 {} 条",
+                     (u32)snapshot.draws.size(), withEntry, withAssetAndIndex, written);
     }
     return written;
 }

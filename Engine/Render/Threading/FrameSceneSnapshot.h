@@ -117,6 +117,12 @@ struct SnapshotDrawItem {
     /// 可见性/实例化位标记（与 `GPUSceneObject::visibilityFlags` 同源）
     u32 visibilityFlags = 0;
 
+    /// T8：该物体所属的离线 Nanite 资产槽位（`0xFFFFFFFF` = 无）。
+    /// 【为什么进快照而不是让渲染侧查注册表】Nanite 的实例表需要"这条 draw 用哪份资产"，
+    /// 而快照本身就是"渲染侧唯一输入"；把绑定随条目带走，既少一次跨表查询，也避免
+    /// 渲染侧持有另一个 `MeshRegistry` 实例时查不到（实测踩过这个坑）。
+    u32 naniteAssetIndex = 0xFFFFFFFFu;
+
     /// 间接绘制参数（与 `GPUSceneObject` 的三元组一致；**由 MeshBatcher 填充**，收集阶段恒为 0）
     u32 indexCount = 0;
     u32 firstIndex = 0;

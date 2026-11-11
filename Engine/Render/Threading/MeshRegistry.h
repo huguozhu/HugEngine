@@ -89,6 +89,15 @@ public:
 
     [[nodiscard]] u32 Count() const { return m_LiveCount; }
 
+    /// T8：带"离线资产槽位"的条目数（诊断用；`0xFFFFFFFF` 视为无）
+    [[nodiscard]] u32 CountWithNaniteAsset() const {
+        u32 n = 0u;
+        for (const Record& r : m_Records) {
+            if (r.key != nullptr && r.entry.naniteAssetIndex != 0xFFFFFFFFu) ++n;
+        }
+        return n;
+    }
+
     void Clear() {
         m_Records.clear();
         m_Records.push_back(Record{});             // 保留哨兵
