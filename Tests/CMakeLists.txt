@@ -147,3 +147,12 @@ target_link_libraries(HugEngineTests PRIVATE
     # <meshoptimizer.h> 的包含路径都由这个 target 提供（v0.22，Engine/External/meshoptimizer）。
     meshoptimizer
 )
+
+# T14：注册到 CTest，CI 用 `ctest --output-on-failure` 就能跑全部用例。
+# 【为什么单独一条】此前测试只作为可执行文件存在，CI 得记住 exe 路径与参数；
+# 注册后 `ctest` 与 IDE 的测试面板都能直接发现/运行。
+add_test(NAME HugEngineTests COMMAND HugEngineTests)
+set_tests_properties(HugEngineTests PROPERTIES
+    TIMEOUT 1800
+    WORKING_DIRECTORY "$<TARGET_FILE_DIR:HugEngineTests>"
+)
