@@ -15,6 +15,9 @@
 #include "Platform/IVfs.h"   // 鸿蒙：字体从沙箱解析
 #include "Platform/IWindow.h"  // GetContentScale（UI 密度缩放）
 #include "imgui.h"
+#include <filesystem>    // std::filesystem::exists（字体存在性检查）
+#include <system_error>
+#include <fstream>
 #if HE_PLATFORM_WINDOWS
 #include "Platform/WindowWin32.h"   // GetGlfwWindow(IWindow*)
 #include "imgui_impl_glfw.h"
@@ -99,17 +102,19 @@ void ImGuiIntegration::Initialize(IWindow* window, rhi::IRHIDevice* device,
         const char* fontCandidates[] = { "C:\\Windows\\Fonts\\simhei.ttf" };
 #else
         // 鸿蒙：字体随包放在 rawfile 的 content/font/ 下，解压到沙箱后由 vfs 解析。
-        // 优先思源黑体（NotoSansSC，需自行放入 rawfile），退回随包 Roboto（无中文）。
-        // 鸿蒙：优先用**设备自带**的中文字体（免随包分发，也没有授权问题）；
-        // 其次找随包的思源黑体；最后退回 Roboto（无中文，中文会显示成问号）。
         static const String s_fontCjk   = vfs::Resolve("font/NotoSansSC-Regular.otf");
         static const String s_fontLatin = vfs::Resolve("font/Roboto-Regular.ttf");
+        // 【只用 TrueType（.ttf）】ImGui 用 stb_truetype 解析字体，它**读不了**
+        // `.ttc`（TrueType Collection）与 `.otf`（CFF/OpenType）。真机上曾把
+        // NotoSansCJK-Regular.ttc 放进候选，stbtt_InitFont 失败直接触发 ImGui 断言崩溃。
+        // 这里只列 .ttf，且下面还会校验文件头（00010000 / 'true'）再加载。
         const char* fontCandidates[] = {
-            "/system/fonts/HarmonyOS_Sans_SC.ttf",   // 鸿蒙设备系统字体（HarmonyOS Sans 简体中文）
-            "/system/fonts/NotoSansCJK-Regular.ttc", // Android 设备系统字体（思源黑体合集）
-            "/system/fonts/NotoSansSC-Regular.otf",  // 部分 Android 机型
-            s_fontCjk.c_str(),
-            s_fontLatin.c_str(),
+            "/system/fonts/MiSansVF.ttf",            // 小米/红米（TrueType 可变字体，含简体）
+            "/system/fonts/HarmonyOS_Sans_SC.ttf",   // 鸿蒙（HarmonyOS Sans 简体中文）
+            "/system/fonts/DroidSansFallback.ttf",   // 老 Android 中文兜底
+            "/system/fonts/MiSans-Regular.ttf",      // 部分小米机型
+            s_fontCjk.c_str(),                       // 随包思源黑体（若存在）
+            s_fontLatin.c_str(),                     // 随包 Roboto（无中文）
         };
 #endif
         ImFont* cjkFont = nullptr;
@@ -132,17 +137,41 @@ void ImGuiIntegration::Initialize(IWindow* window, rhi::IRHIDevice* device,
             glyphRanges = s_ohosRanges.Data;
         }
 #endif
+        // 【必须先判文件存在】ImGui 的 AddFontFromFileTTF 在文件打不开时会 IM_ASSERT
+        // （"Could not load font file!"）—— 真机上候选字体全不存在时直接 SIGABRT。
         for (const char* fontPath : fontCandidates) {
+            if (!fontPath || !*fontPath) continue;
+            std::error_code fsec;
+            if (!std::filesystem::exists(fontPath, fsec)) continue;
+            // 只接受 TrueType：magic 0x00010000 或 'true'；.ttc/.otf 一律跳过
+            {
+                std::ifstream probe(fontPath, std::ios::binary);
+                unsigned char magic[4] = {};
+                probe.read(reinterpret_cast<char*>(magic), 4);
+                const bool isTtf = (magic[0] == 0x00 && magic[1] == 0x01 &&
+                                    magic[2] == 0x00 && magic[3] == 0x00) ||
+                                   (magic[0] == 't' && magic[1] == 'r' &&
+                                    magic[2] == 'u' && magic[3] == 'e');
+                if (!isTtf) {
+                    HE_CORE_WARN("ImGui 字体跳过（非 TrueType，stb_truetype 无法解析）: {}", fontPath);
+                    continue;
+                }
+            }
             cjkFont = io.Fonts->AddFontFromFileTTF(fontPath, 16.0f * uiScale, &fontConfig, glyphRanges);
             if (cjkFont) {
                 io.FontDefault = cjkFont;
-                HE_CORE_INFO("ImGui 中文字体已加载: {}（字号 {}，图集 {}x{}）", fontPath, 16.0f * uiScale,
+                HE_CORE_INFO("ImGui 字体已加载: {}（字号 {}，图集 {}x{}）", fontPath, 16.0f * uiScale,
                              io.Fonts->TexWidth, io.Fonts->TexHeight);
                 break;
             }
+            HE_CORE_WARN("ImGui 字体加载失败（文件存在但解析失败）: {}", fontPath);
         }
         if (!cjkFont) {
-            HE_CORE_WARN("ImGui 中文字体加载失败，中文将无法正常显示（鸿蒙请把字体放到 rawfile/content/font/）");
+            // 兜底：ImGui 内置字体（无中文，但不会断言崩溃）
+            fontConfig.SizePixels = 13.0f * uiScale;
+            cjkFont = io.Fonts->AddFontDefault(&fontConfig);
+            io.FontDefault = cjkFont;
+            HE_CORE_WARN("ImGui 未找到可用的系统中文/随包字体，已回退内置字体（中文显示为方块）");
         }
     }
 

@@ -786,22 +786,8 @@ void VulkanDevice::CreateLogicalDevice() {
     vulkan13Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
     vulkan13Features.dynamicRendering = sup13.dynamicRendering;
 
-    // pNext 链: vulkan11 → vulkan12 → vulkan13 → [RT] → [Mesh] → [DGC] → [maint7] → [GPL] → [derivatives]
-    // （Vulkan12 的别名结构体已合并进 vulkan12Features，不能再出现在链里）
-    void** ppNext = &vulkan11Features.pNext;
-    *ppNext = &vulkan12Features; ppNext = &vulkan12Features.pNext;
-    *ppNext = &vulkan13Features; ppNext = &vulkan13Features.pNext;
-    if (m_CapsCache.supportsRayTracing) {
-        *ppNext = &asFeature; ppNext = &asFeature.pNext;
-        *ppNext = &rtPipelineFeature; ppNext = &rtPipelineFeature.pNext;
-        if (m_SupportsRTPositionFetch) {
-            *ppNext = &posFetchFeature; ppNext = &posFetchFeature.pNext;
-        }
-    }
-    if (m_CapsCache.supportsMeshShaders) {
-        *ppNext = &meshFeature; ppNext = &meshFeature.pNext;
-    }
-    // Compute Shader Derivatives（粒子系统 SSAO 等 Compute Shader 中使用 ddx/ddy）
+    // Compute Shader Derivatives（粒子 / SSAO 等 compute 里用 ddx/ddy）
+    // 扩展存在才启用；特性本身也是可选的，进不了分组重试的降级路径就靠这里先判断。
     VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR computeDerivativesFeature{};
     bool hasDerivatives = false;
     {
@@ -810,8 +796,10 @@ void VulkanDevice::CreateLogicalDevice() {
         std::vector<VkExtensionProperties> exts(extCount);
         vkEnumerateDeviceExtensionProperties(m_Physical, nullptr, &extCount, exts.data());
         for (auto& e : exts) {
-            if (strcmp(e.extensionName, VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME) == 0)
-                { hasDerivatives = true; break; }
+            if (strcmp(e.extensionName, VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME) == 0) {
+                hasDerivatives = true;
+                break;
+            }
         }
         if (hasDerivatives) {
             computeDerivativesFeature.sType =
@@ -822,22 +810,56 @@ void VulkanDevice::CreateLogicalDevice() {
         }
     }
 
-    if (m_CapsCache.supportsDGC) {
-        *ppNext = &dgcFeature; ppNext = &dgcFeature.pNext;
-    }
-    if (m_SupportsMaintenance7) {
-        *ppNext = &maint7Feature; ppNext = &maint7Feature.pNext;
-    }
-    if (m_SupportsVertexAttributeRobustness) {
-        *ppNext = &vertexAttrRobustnessFeature; ppNext = &vertexAttrRobustnessFeature.pNext;
-    }
-    if (m_CapsCache.supportsGraphicsPipelineLibrary) {
-        *ppNext = &gplFeature; ppNext = &gplFeature.pNext;
-    }
-    if (hasDerivatives) {
-        *ppNext = &computeDerivativesFeature; ppNext = &computeDerivativesFeature.pNext;
-    }
-    *ppNext = nullptr;
+    // ============================================================
+    // pNext 链：可选扩展特性按"分组"拼装
+    //
+    // 【为什么要分组 + 重试】真机上 vkCreateDevice 可能返回
+    // VK_ERROR_FEATURE_NOT_PRESENT(-8)：即使扩展存在、查询也报支持，
+    // 驱动仍可能拒绝某个特性结构体里的字段。这里把可选项分成 8 组，
+    // 创建失败时按"最不重要 → 最重要"逐组关闭并重试，成功后把相应能力
+    // 清零并告警 —— 而不是让整个引擎起不来。
+    //
+    // 链顺序：vulkan11 → vulkan12 → vulkan13 → [RT] → [Mesh] → [DGC]
+    //         → [maint7] → [vertexAttrRobustness] → [GPL] → [derivatives]
+    // （Vulkan12 的别名结构体已合并进 vulkan12Features，不能再出现在链里）
+    // ============================================================
+    struct OptionalGroups {
+        bool rt         = false;
+        bool posFetch   = false;
+        bool mesh       = false;
+        bool dgc        = false;
+        bool maint7     = false;
+        bool vertexAttr = false;
+        bool gpl        = false;
+        bool deriv      = false;
+    };
+    OptionalGroups groups;
+    groups.rt         = m_CapsCache.supportsRayTracing;
+    groups.posFetch   = m_SupportsRTPositionFetch;
+    groups.mesh       = m_CapsCache.supportsMeshShaders;
+    groups.dgc        = m_CapsCache.supportsDGC;
+    groups.maint7     = m_SupportsMaintenance7;
+    groups.vertexAttr = m_SupportsVertexAttributeRobustness;
+    groups.gpl        = m_CapsCache.supportsGraphicsPipelineLibrary;
+    groups.deriv      = hasDerivatives;
+
+    auto linkChain = [&](const OptionalGroups& g) {
+        void** ppNext = &vulkan11Features.pNext;
+        *ppNext = &vulkan12Features; ppNext = &vulkan12Features.pNext;
+        *ppNext = &vulkan13Features; ppNext = &vulkan13Features.pNext;
+        if (g.rt) {
+            *ppNext = &asFeature; ppNext = &asFeature.pNext;
+            *ppNext = &rtPipelineFeature; ppNext = &rtPipelineFeature.pNext;
+            if (g.posFetch) { *ppNext = &posFetchFeature; ppNext = &posFetchFeature.pNext; }
+        }
+        if (g.mesh)       { *ppNext = &meshFeature;                  ppNext = &meshFeature.pNext; }
+        if (g.dgc)        { *ppNext = &dgcFeature;                   ppNext = &dgcFeature.pNext; }
+        if (g.maint7)     { *ppNext = &maint7Feature;                ppNext = &maint7Feature.pNext; }
+        if (g.vertexAttr) { *ppNext = &vertexAttrRobustnessFeature;  ppNext = &vertexAttrRobustnessFeature.pNext; }
+        if (g.gpl)        { *ppNext = &gplFeature;                   ppNext = &gplFeature.pNext; }
+        if (g.deriv)      { *ppNext = &computeDerivativesFeature;    ppNext = &computeDerivativesFeature.pNext; }
+        *ppNext = nullptr;
+    };
 
     VkPhysicalDeviceFeatures features{};
     features.multiDrawIndirect = supCore.multiDrawIndirect;
@@ -882,14 +904,50 @@ void VulkanDevice::CreateLogicalDevice() {
 
     VkDeviceCreateInfo deviceInfo{};
     deviceInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-    deviceInfo.pNext = &vulkan11Features;
+    // pNext 在下面的重试循环里设置
     deviceInfo.queueCreateInfoCount = static_cast<u32>(queueInfos.size());
     deviceInfo.pQueueCreateInfos = queueInfos.data();
     deviceInfo.enabledExtensionCount = static_cast<u32>(deviceExtensions.size());
     deviceInfo.ppEnabledExtensionNames = deviceExtensions.data();
     deviceInfo.pEnabledFeatures = &features;
 
-    VkResult result = vkCreateDevice(m_Physical, &deviceInfo, nullptr, &m_Device);
+    // ---- 创建逻辑设备（失败时逐组降级重试）----
+    VkResult result = VK_ERROR_FEATURE_NOT_PRESENT;
+    const char* droppedGroup = nullptr;
+    for (u32 attempt = 0; attempt < 9; ++attempt) {
+        linkChain(groups);
+        deviceInfo.pNext = &vulkan11Features;
+        result = vkCreateDevice(m_Physical, &deviceInfo, nullptr, &m_Device);
+        if (result == VK_SUCCESS) break;
+
+        // 只有"特性缺失"才降级；扩展缺失/内存不足等直接报错退出
+        if (result != VK_ERROR_FEATURE_NOT_PRESENT) break;
+
+        // 依次丢掉最不重要的组（越靠前越不影响主要渲染路径）
+        if (groups.deriv)           { groups.deriv = false;           droppedGroup = "compute_shader_derivatives"; }
+        else if (groups.vertexAttr) { groups.vertexAttr = false;      droppedGroup = "vertex_attribute_robustness"; }
+        else if (groups.maint7)     { groups.maint7 = false;          droppedGroup = "maintenance7"; }
+        else if (groups.posFetch)   { groups.posFetch = false;        droppedGroup = "ray_tracing_position_fetch"; }
+        else if (groups.gpl)        { groups.gpl = false;             droppedGroup = "graphics_pipeline_library"; }
+        else if (groups.rt)         { groups.rt = false;              droppedGroup = "ray_tracing"; }
+        else if (groups.mesh)       { groups.mesh = false;            droppedGroup = "mesh_shader"; }
+        else if (groups.dgc)        { groups.dgc = false;             droppedGroup = "device_generated_commands"; }
+        else break;
+
+        HE_CORE_WARN("[Vulkan] vkCreateDevice 返回 VK_ERROR_FEATURE_NOT_PRESENT，"
+                     "降级重试：关闭 {}（第 {} 次重试）", droppedGroup, attempt + 1);
+    }
+
+    if (result == VK_SUCCESS && droppedGroup) {
+        HE_CORE_WARN("[Vulkan] 逻辑设备以降级配置创建成功，最后一个被关闭的特性组：{}", droppedGroup);
+    }
+    // 降级后同步能力位，避免上层继续走已经不支持的路径
+    if (!groups.rt)         { m_CapsCache.supportsRayTracing = false; m_SupportsRTPositionFetch = false; }
+    if (!groups.posFetch)   { m_SupportsRTPositionFetch = false; }
+    if (!groups.mesh)       { m_CapsCache.supportsMeshShaders = false; }
+    if (!groups.dgc)        { m_CapsCache.supportsDGC = false; }
+    if (!groups.gpl)        { m_CapsCache.supportsGraphicsPipelineLibrary = false; }
+
     if (result != VK_SUCCESS) {
         // 【为何显式打印】只靠断言看不到 VkResult，移动/模拟器驱动上排查很费劲
         HE_CORE_ERROR("[Vulkan] vkCreateDevice 失败: VkResult={} 扩展数={} 队列数={} "
@@ -901,7 +959,6 @@ void VulkanDevice::CreateLogicalDevice() {
                       features.tessellationShader ? 1 : 0,
                       features.fillModeNonSolid ? 1 : 0,
                       features.multiDrawIndirect ? 1 : 0);
-        // 把请求的扩展名逐个打出来：VK_ERROR_EXTENSION_NOT_PRESENT 时一眼能看出是哪一个
         for (u32 i = 0; i < deviceInfo.enabledExtensionCount; ++i) {
             HE_CORE_ERROR("[Vulkan]   请求的扩展[{}] = {}", i, deviceInfo.ppEnabledExtensionNames[i]);
         }

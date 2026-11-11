@@ -41,7 +41,10 @@ android {
                     "-DHUGENGINE_BUILD_TESTS=OFF",
                     "-DHUGENGINE_RHI_D3D12=OFF",
                     "-DHUGENGINE_RHI_D3D11=OFF",
-                    "-DANDROID_STL=c++_shared"
+                    "-DANDROID_STL=c++_shared",
+                    // Android 15+ 要求 .so 按 16KB 页对齐（否则安装时提示"不符合 16KB 对齐要求"）。
+                    // 这个开关让 NDK 给链接器加 -Wl,-z,max-page-size=16384。
+                    "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"
                 )
                 // 引擎用 C++20（与桌面/鸿蒙一致）
                 cppFlags += listOf("-std=c++20")

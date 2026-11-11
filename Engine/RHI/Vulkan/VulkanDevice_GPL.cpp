@@ -4,6 +4,7 @@
 
 #include "RHI/RHI.h"
 #include "Core/Log.h"
+#include "Core/Platform.h"   // HE_PLATFORM_ANDROID
 
 #include "VulkanPlatform.h"
 #include <vulkan/vulkan.h>
@@ -17,6 +18,14 @@ namespace he::rhi {
 void VulkanDevice::QueryGPLCapabilities() {
     m_CapsCache.supportsGraphicsPipelineLibrary = false;
     m_SupportsGPLFastLinking = false;
+
+#if HE_PLATFORM_ANDROID
+    // 【Android 上主动禁用 GPL】真机（Mali，API 37）在 PipelineLibraryCache::LinkPipeline
+    // 里 SIGSEGV，崩栈落在 vendor/lib64/egl/libGLES_mali.so。GPL 只是管线创建加速，
+    // 关掉不影响渲染结果（走单条图形管线路径），因此移动端直接不启用。
+    HE_CORE_INFO("Graphics Pipeline Library: Android 上主动禁用（Mali 驱动在 GPL link 时崩溃）");
+    return;
+#endif
 
     // 1. 检查设备扩展是否可用
     u32 extCount = 0;
