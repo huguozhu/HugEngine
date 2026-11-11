@@ -149,7 +149,7 @@ napi_value NativeInit(napi_env env, napi_callback_info info) {
     // ---- 资产：rawfile → 沙箱 ----
     // 【版本标记】只判断"目录存在"会导致换了 rawfile 资产后旧沙箱不更新（实测：加了
     // Sponza 资源后手机上仍只有旧文件）。这里写一个版本文件，版本不一致就重解压。
-    constexpr const char* kContentVersion = "2";   // 资产有变更时 +1
+    constexpr const char* kContentVersion = "3";   // 资产有变更时 +1（T13：加入 Processed/*.nanite）
     const std::string contentDir  = filesDir + "/content";
     const std::string versionFile = contentDir + "/.unpack_version";
 
