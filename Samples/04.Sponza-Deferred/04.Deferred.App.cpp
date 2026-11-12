@@ -236,6 +236,13 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
     //   `Init` 的后段），而 Sponza 的加载在这里 ⇒ 用 cfg 开关永远是 false。
     const bool transformOnly = std::getenv("HE_NANITE_TRANSFORM_ONLY") != nullptr;
     g.transformOnly = transformOnly;
+    // 【不污染 cfg】验收档的机位在这里**硬写**：之前是手工改 cfg 的 cam_*，退出时被样例回写，
+    //   下次正常启动仍停在"相机在建筑外、只看到天空盒"的机位（实测踩过）。
+    if (transformOnly) {
+        g.camera.GetCamera().position  = float3(0.0f, 200.0f, -2000.0f);
+        g.camera.SetOrientation(0.0f, 0.0f);
+
+    }
     if (transformOnly) {
         HE_CORE_INFO("04.App: nanite_transform_only=1 —— 跳过 Sponza，仅保留变换验收件");
     } else {
@@ -1249,6 +1256,9 @@ void App::Shutdown() {
     // ---- 保存配置（相机 + 灯光 + 管线开关）----
     {
         std::unordered_map<String, String> out;
+        // 【不要污染用户的机位】变换验收档用的是代码里硬写的试验机位，
+        //   若照常回写，下次正常启动会停在"建筑外、只看到天空盒"。
+        if (!g.transformOnly) {
         out["cam_pos_x"] = std::to_string(g.camera.GetCamera().position.x);
         out["cam_pos_y"] = std::to_string(g.camera.GetCamera().position.y);
         out["cam_pos_z"] = std::to_string(g.camera.GetCamera().position.z);
@@ -1257,6 +1267,7 @@ void App::Shutdown() {
         out["cam_near"]  = std::to_string(g.camera.GetCamera().nearPlane);
         out["cam_far"]   = std::to_string(g.camera.GetCamera().farPlane);
         out["clustered"] = std::to_string(g.clustered ? 1 : 0);
+        }
         out["gpu_cull"]  = std::to_string(g.gpuCull ? 1 : 0);
         out["skybox"]    = std::to_string(g.skyboxOn ? 1 : 0);
         out["ssgi_enabled"] = std::to_string(g.ssgi ? 1 : 0);
