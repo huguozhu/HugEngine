@@ -99,6 +99,8 @@ add_executable(HugEngineTests
     # 以及与真实 `BuildNaniteClusterBVH` 报出的 `depth` 的交叉核对。
     # 单独一文件：与上面三个 Nanite 测试文件同一个理由（避免单文件无限膨胀）。
     TestNaniteBvhDepth.cpp
+    TestNaniteMultiAsset.cpp
+    TestShadowCasterCull.cpp
     # T2（Nanite 离线预处理方案）：`.nanite` v2 读写、扩展段往返、v1 兼容与构建器确定性。
     # 单独一文件：与前四个 Nanite 测试文件同一个理由（避免单文件无限膨胀）。
     TestNaniteFileV2.cpp

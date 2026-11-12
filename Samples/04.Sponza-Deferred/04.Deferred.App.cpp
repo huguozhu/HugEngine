@@ -11,6 +11,7 @@
 #include "Core/Platform.h"
 #include "Core/Log.h"
 #include "Core/Engine.h"
+#include "Core/CrashHandler.h"
 #include "Platform/IWindow.h"
 #include "Platform/IVfs.h"
 #include "Platform/IInput.h"
@@ -42,6 +43,7 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#include "Scene/CubeComponent.h"   // T8：多网格变换验收用的立方体
 
 namespace he::samples::sponza04 {
 
@@ -493,6 +495,37 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
                 ++bound;
             }
             HE_CORE_INFO("04.App: 多资产验收档启用 —— 已注册并绑定 {} 份 per-primitive 资产", bound);
+
+            // ── T8 ④-b：多网格变换验收（cfg `nanite_transform_test=1`）──
+            // 生成 3 个立方体，分别带：纯平移 / 旋转 + 平移 / 非均匀缩放 + 平移，
+            // 各绑一份离线资产。它们覆盖第 4 步"完整 localToWorld + 最大轴缩放半径"的三条分支，
+            // 也覆盖第 5 步"多资产同帧绘制"。
+            if (GetBool(cfg, "nanite_transform_test", false) && bound >= 3u) {
+                struct CubeSpec { const char* name; float3 pos; float3 eulerDeg; float3 scale; };
+                const CubeSpec specs[3] = {
+                    { "NaniteCube_Translate", float3(-300.0f, 120.0f,    0.0f), float3(0.0f,   0.0f, 0.0f), float3(1.0f, 1.0f, 1.0f) },
+                    { "NaniteCube_Rotate",    float3(   0.0f, 120.0f,  -200.0f), float3(0.0f,  45.0f, 0.0f), float3(1.0f, 1.0f, 1.0f) },
+                    { "NaniteCube_NonUniform",float3( 300.0f, 120.0f,  -200.0f), float3(30.0f, 20.0f, 0.0f), float3(3.0f, 0.5f, 1.0f) },
+                };
+                for (u32 i = 0u; i < 3u; ++i) {
+                    Entity e = g.world.CreateEntity(specs[i].name);
+                    g.world.AddComponent<TransformComponent>(e);
+                    auto* cube = g.world.AddComponent<CubeComponent>(e);
+                    cube->halfExtent = 40.0f;
+                    cube->OnCreate();
+                    cube->SetNaniteAssetIndex(i);          // 三份不同资产
+                    if (auto* tf = g.world.GetComponent<TransformComponent>(e)) {
+                        tf->position = specs[i].pos;
+                        tf->rotation = float3(glm::radians(specs[i].eulerDeg.x),
+                                              glm::radians(specs[i].eulerDeg.y),
+                                              glm::radians(specs[i].eulerDeg.z));
+                        tf->scale    = specs[i].scale;
+                    }
+                    g.sceneGraph->SetParent(e, Entity{kInvalidEntity});
+                }
+                HE_CORE_INFO("04.App: 多网格变换验收 —— 已生成 3 个立方体（平移 / 旋转 / 非均匀缩放），"
+                             "分别绑定资产槽位 0..2");
+            }
             u32 boundCheck = 0u;
             g.world.ForEach<MeshComponent>([&](Entity, MeshComponent& mesh) {
                 if (mesh.GetNaniteAssetIndex() != 0xFFFFFFFFu) ++boundCheck;
@@ -508,11 +541,28 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
             naniteSettings.enabled = GetBool(cfg, "nanite_enable", naniteSettings.enabled);
             naniteSettings.offline = GetBool(cfg, "nanite_offline", naniteSettings.offline);
             naniteSettings.multiAsset = GetBool(cfg, "nanite_multi_asset", naniteSettings.multiAsset);
+            // 【T8 验收】多资产档可单独关软光栅：软光栅的资源创建路径与多资产偶发冲突，
+            // 硬光栅（T9 默认）已能覆盖多资产绘制验收。
+            naniteSettings.softRaster = GetBool(cfg, "nanite_soft_raster", naniteSettings.softRaster);
+            // 【T8 排查】假簇链：绕开剔除，直接用 6 个假簇走同一条光栅路径。
+            // 若假簇能出画面 ⇒ 光栅/呈现正常，问题在剔除到绘制的数据衔接。
+            naniteSettings.fakeChain = GetBool(cfg, "nanite_fake_chain", naniteSettings.fakeChain);
+            // 【T11】移除 GBuffer 的 IA 管线（几何只走 Nanite 硬光栅；无 MS 设备自动忽略）
+            naniteSettings.removeIaPso = GetBool(cfg, "nanite_remove_ia_pso", naniteSettings.removeIaPso);
+            // 【T8】LOD 阈值（像素）：调大 ⇒ 细分到叶子（全细节，慢）
+            naniteSettings.lodThresholdPixels = (float)GetInt(cfg, "nanite_lod_threshold", (int)naniteSettings.lodThresholdPixels);
+            naniteSettings.hardRasterRefBudget = (u32)GetInt(cfg, "nanite_hard_raster_budget", (int)naniteSettings.hardRasterRefBudget);
+            // 【T8】合成实例数：硬光栅的派发上界 = 簇数 × 实例域，太大就会被预算判为超限
+            naniteSettings.instanceTestCount = (u32)GetInt(cfg, "nanite_instance_test_count", (int)naniteSettings.instanceTestCount);
+            // 【T8】Hi-Z 遮挡剔除（Phase 2 后半）：关掉会让过绘制飙升
+            naniteSettings.hiz = GetBool(cfg, "nanite_hiz", naniteSettings.hiz);
             if (const String nanitePath = GetString(cfg, "nanite_offline_path", naniteSettings.offlinePath);
                 !nanitePath.empty()) {
                 naniteSettings.offlinePath = nanitePath;
             }
             g.pipeline->SetNaniteSettings(naniteSettings);
+        // 【T10】阴影绘制路径（cfg `shadow_ms`，默认 IA）
+        g.pipeline->SetShadowMeshEnabled(GetBool(cfg, "shadow_ms", false));
             if (naniteSettings.enabled) {
                 HE_CORE_INFO("04.App: Nanite 已启用（hardRaster={} offline={} path={}）",
                              naniteSettings.hardRaster ? 1 : 0, naniteSettings.offline ? 1 : 0,
@@ -636,6 +686,19 @@ bool App::RecordScene() {
 
 void App::RecordUIAndPresent() {
     Impl& g = *m_Impl;
+
+    // 【T8 验收钩子】`HE_CAPTURE_FRAME=N` 时在第 N 帧抓一张 PNG（默认关闭；与 01 的口径一致）。
+    // 路径写进当前工作目录，便于脚本对比"单资产 vs 多资产"两张图。
+    if (const char* captureEnv = std::getenv("HE_CAPTURE_FRAME")) {
+        static u32 s_Frame = 0u;
+        const int target = std::atoi(captureEnv);
+        if (++s_Frame == (u32)(target > 0 ? target : 0)) {
+            const char* outName = std::getenv("HE_CAPTURE_PATH");
+            RequestScreenshot(outName != nullptr ? outName : "capture_04.png");
+            HE_CORE_INFO("04.App: 已请求截图（第 {} 帧 → {}）", s_Frame,
+                         outName != nullptr ? outName : "capture_04.png");
+        }
+    }
     if (g.imgui && g.imgui->IsInitialized()) {
         g.imgui->BeginFrame();
         ImGui::SetNextWindowPos({10, 10}, ImGuiCond_Once);
@@ -1129,6 +1192,11 @@ void App::Shutdown() {
             out["nanite_enable"]      = std::to_string(nanite.enabled ? 1 : 0);
             out["nanite_offline"]     = std::to_string(nanite.offline ? 1 : 0);
             out["nanite_offline_path"] = nanite.offlinePath;
+            out["nanite_soft_raster"] = std::to_string(nanite.softRaster ? 1 : 0);
+            out["nanite_fake_chain"] = std::to_string(nanite.fakeChain ? 1 : 0);
+            out["nanite_remove_ia_pso"] = std::to_string(nanite.removeIaPso ? 1 : 0);
+            out["shadow_ms"] = std::to_string(g.pipeline->GetShadowMeshEnabled() ? 1 : 0);
+            out["nanite_multi_asset"] = std::to_string(nanite.multiAsset ? 1 : 0);
         }
         out["ddgi_enabled"] = std::to_string(g.ddgi ? 1 : 0);
         out["ssr_enabled"]  = std::to_string(g.ssr ? 1 : 0);
@@ -1225,6 +1293,9 @@ void App::Shutdown() {
 #include "DesktopHost.h"
 
 int main() {
+    // 【T8 诊断】装崩溃处理器：多资产档异常时把模块/偏移/调用栈落到 Content/Config 下，
+    // 比"窗口只是说 stopped working"更容易定位（06/07 已有同款做法）。
+    he::InstallCrashHandler("Content/Config/04_Sponza-Deferred_crash.log", nullptr);
     he::samples::desktop::HostConfig cfg;
     cfg.title  = "HugEngine — 04.Sponza-Deferred";
     cfg.width  = 960;
