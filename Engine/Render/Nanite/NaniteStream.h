@@ -273,6 +273,12 @@ private:
     rhi::RHIBufferHandle m_PoolClusters{};   // A-3   ///< clusterStride × slots 条簇记录
     rhi::RHIBufferHandle m_PoolVertices{};   // A-3   ///< vertexStride  × slots 条量化顶点
     rhi::RHIBufferHandle m_PoolTriangles{};   // A-3  ///< triangleStride× slots 条打包三角形
+    /// 【T12 性能】页池三段的**常驻映射**指针：`UploadPage` 每页都 Map/Unmap 一次大缓冲
+    /// （槽长可达 1.1 MB）会让流式档的帧时间从 5.9 ms 涨到 9.6 ms（实测 1.63×）。
+    /// 池缓冲本来就是 `cpuAccess=true`，建好后一直映射即可。
+    NaniteClusterRecord*  m_PoolClustersMapped  = nullptr;
+    NaniteVertex*         m_PoolVerticesMapped  = nullptr;
+    NanitePackedTriangle* m_PoolTrianglesMapped = nullptr;
     rhi::RHIBufferHandle m_ClusterPage{};   // A-3    ///< 簇 → 页（只读；上传后不再变）
     rhi::RHIBufferHandle m_PageTable{};   // A-3      ///< 页表（**只由 CPU 写**，每帧重写）
     /// 反馈环：`feedbackLatency` 个缓冲。帧 N 用 `N % L` 槽，同时读的也是它

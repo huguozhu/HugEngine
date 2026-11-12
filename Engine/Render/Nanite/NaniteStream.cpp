@@ -280,6 +280,10 @@ bool NaniteStream::CreateResources() {
 
         d.size = (usize)slots * ps.triangleStride * sizeof(NanitePackedTriangle);
         m_PoolTriangles = m_Device->CreateBufferHandle(d);
+    // 【T12 性能】三段池缓冲一次映射、常驻使用（见头文件说明）
+    if (m_PoolClusters.IsValid())  m_PoolClustersMapped  = static_cast<NaniteClusterRecord*>(ResB(m_PoolClusters)->Map());
+    if (m_PoolVertices.IsValid())  m_PoolVerticesMapped  = static_cast<NaniteVertex*>(ResB(m_PoolVertices)->Map());
+    if (m_PoolTriangles.IsValid()) m_PoolTrianglesMapped = static_cast<NanitePackedTriangle*>(ResB(m_PoolTriangles)->Map());
         if (!m_PoolTriangles.IsValid()) return false;
     }
 
@@ -355,8 +359,8 @@ void NaniteStream::UploadPage(u32 page, u32 slot) {
     {
         const u32 begin = m_Plan.pageClusterBegin[page];
         const u32 count = m_Plan.pageClusterCount[page];
-        if (void* p = ResB(m_PoolClusters)->Map()) {
-            NaniteClusterRecord* dst = static_cast<NaniteClusterRecord*>(p);
+        if (m_PoolClustersMapped != nullptr) {
+            NaniteClusterRecord* dst = m_PoolClustersMapped;
             for (u32 k = 0u; k < count; ++k) {
                 const u32 idx = m_CollectedClusterIndex[begin + k];
                 // 【T12】文件源优先：逐条从文件读该簇记录（一页内簇数很少，代价可忽略）
@@ -368,7 +372,6 @@ void NaniteStream::UploadPage(u32 page, u32 slot) {
                     dst[(usize)slot * ps.clusterStride + k] = m_Asset->clusters[idx];
                 }
             }
-            if (auto* b = ResB(m_PoolClusters)) b->Unmap();
             ok = true;
         }
     }
@@ -379,8 +382,8 @@ void NaniteStream::UploadPage(u32 page, u32 slot) {
         const u32 vCount = m_Plan.pageVertexCount[page];
         const u32 tBegin = m_Plan.pageTriangleBegin[page];
         const u32 tCount = m_Plan.pageTriangleCount[page];
-        if (void* p = ResB(m_PoolVertices)->Map()) {
-            NaniteVertex* dst = static_cast<NaniteVertex*>(p);
+        if (m_PoolVerticesMapped != nullptr) {
+            NaniteVertex* dst = m_PoolVerticesMapped;
             if (m_FileSource.IsOpen()) {
                 ok = m_FileSource.ReadVertices(vBegin, vCount, dst + (usize)slot * ps.vertexStride);
             } else {
@@ -389,12 +392,11 @@ void NaniteStream::UploadPage(u32 page, u32 slot) {
                             (usize)vCount * sizeof(NaniteVertex));
                 ok = true;
             }
-            if (auto* b = ResB(m_PoolVertices)) b->Unmap();
         }
         if (ok) {
             ok = false;
-            if (void* p = ResB(m_PoolTriangles)->Map()) {
-                NanitePackedTriangle* dst = static_cast<NanitePackedTriangle*>(p);
+            if (m_PoolTrianglesMapped != nullptr) {
+                NanitePackedTriangle* dst = m_PoolTrianglesMapped;
                 if (m_FileSource.IsOpen()) {
                     ok = m_FileSource.ReadTriangles(tBegin, tCount,
                                                     dst + (usize)slot * ps.triangleStride);
@@ -404,7 +406,6 @@ void NaniteStream::UploadPage(u32 page, u32 slot) {
                                 (usize)tCount * sizeof(NanitePackedTriangle));
                     ok = true;
                 }
-                if (auto* b = ResB(m_PoolTriangles)) b->Unmap();
             }
         }
     }

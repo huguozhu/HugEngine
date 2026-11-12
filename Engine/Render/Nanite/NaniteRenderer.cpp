@@ -1075,6 +1075,10 @@ void NaniteRenderer::StepStreaming() {
     //   不会发生任何 GPU 同步、也不会读任何缓冲。
     if (!m_Stream.IsReady()) return;
     m_Stream.BeginFrame(m_FrameIndex);
+    // 【T12 可观测性】`LogStreamReadback` 此前**从未被调用** ⇒ 流式在运行时没有任何读数
+    //   （页总数/驻留/上传/淘汰/缺页都看不到，§5.6 的量化目标无法验收）。
+    //   每 60 帧打一行（含一次 GPU 驻留页读回），代价可忽略。
+    if ((m_FrameIndex % 60u) == 0u) LogStreamReadback();
     ++m_FrameIndex;
 }
 
