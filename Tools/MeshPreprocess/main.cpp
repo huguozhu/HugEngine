@@ -254,10 +254,36 @@ int main(int argc, char** argv) {
     u32 failed  = 0;
     u32 verifyFailed = 0;
     for (BuildUnit& unit : units) {
-        const std::vector<NaniteMaterialRecord> materials;   // 运行时材质段由 T5 回填
+        // ── 材质段与"簇 → 源网格 → 材质"映射（T8/T25 的前置）──
+        // 【为什么要在这里填】此前 `materials` 恒为空、`meshes` 不传 ⇒ 每个簇的 `materialID`
+        //   都是 0、材质段为 0 条，光栅端只能走中性回退（实测 `回退 == 硬像素`）。
+        //   每个 primitive 一条材质记录，`materialIndex` 就是它在 `meshes[]` 里的下标；
+        //   纹理位暂留 0（运行时纹理绑定属 T25），因子照实取 glTF 的 pbr 值。
+        std::vector<NaniteMaterialRecord> materials;
+        std::vector<NaniteSourceMeshRange> meshes;
+        materials.reserve(unit.ranges.size());
+        meshes.reserve(unit.ranges.size());
+        for (usize ri = 0; ri < unit.ranges.size(); ++ri) {
+            const NaniteSourceClusterRange& range = unit.ranges[ri];
+            NaniteMaterialRecord rec{};
+            if (range.materialIndex < scene.materials.size()) {
+                const NaniteMaterialDesc& d = scene.materials[range.materialIndex].desc;
+                for (int c = 0; c < 4; ++c) rec.baseColorFactor[c] = d.baseColorFactor[c];
+                rec.metallicFactor  = d.metallicFactor;
+                rec.roughnessFactor = d.roughnessFactor;
+            }
+            materials.push_back(rec);
+
+            NaniteSourceMeshRange mesh{};
+            mesh.firstTriangle = range.firstCluster;      // MergePrimitives 暂存的是"首个三角形"
+            mesh.triangleCount = range.clusterCount;      // 暂存的是三角形数
+            mesh.materialIndex = (u32)ri;                 // 指向本单元的材质记录
+            meshes.push_back(mesh);
+        }
+
         NanitePackedAsset asset;
         if (!BuildNaniteAssetFromGeometry(unit.positions, unit.normals, unit.uvs, unit.indices,
-                                          materials, asset)) {
+                                          materials, meshes, asset)) {
             std::fprintf(stderr, "警告: %s 构建失败，已跳过\n", unit.name.c_str());
             ++failed;
             continue;
