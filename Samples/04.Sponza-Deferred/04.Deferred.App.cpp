@@ -611,7 +611,7 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
         // 因此这三个键与 07 同口径（硬件不支持 / 资产缺失时模块自己回退，见 NaniteRenderer）。
         {
             auto naniteSettings = g.pipeline->GetNaniteSettings();
-            naniteSettings.enabled = GetBool(cfg, "nanite_enable", naniteSettings.enabled);
+            naniteSettings.enabled = 0;// GetBool(cfg, "nanite_enable", naniteSettings.enabled);
             naniteSettings.offline = GetBool(cfg, "nanite_offline", naniteSettings.offline);
             naniteSettings.multiAsset = GetBool(cfg, "nanite_multi_asset", naniteSettings.multiAsset);
             // 【T8 验收】只画变换件时：**关掉离线 Sponza 资产**（否则 8287 簇的 Sponza 仍会
