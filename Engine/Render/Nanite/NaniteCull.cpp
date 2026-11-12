@@ -421,9 +421,11 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
             {12, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },  // 【任务 16】间接命令（读写）
             {13, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },  // 【任务 16】绘制计数（读写）
         };
-        // 【T8】binding 14：资产区间表（多资产剔除的基址来源）
+        // 【T8】binding 15：资产区间表（多资产剔除的基址来源）
+        //   【为什么是 15 而不是 14】bindless 堆的约定槽位是 13/14（纹理/采样器数组）；
+        //   把它们拿去当普通 SSBO 会在 Flush 时与堆的写入撞车。shader 里同样是 binding 15。
         bvhLayout.bindings.push_back(
-            { 14, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false });
+            { 15, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false });
         m_BVHLayout = m_Device->CreateDescriptorSetLayout(bvhLayout);
         m_BVHSet    = m_Device->AllocateDescriptorSet(m_BVHLayout);
         m_Device->UpdateDescriptorSet(m_BVHSet, 0, rhi::DescriptorType::StorageBuffer, ResB(m_BVHNodeBuf));
@@ -445,7 +447,7 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
                                       ResB(m_DrawCountBuf));
         // 【T8】资产区间表：容量按 `kNaniteMaxCullAssets` 固定（每份资产规模受总容量约束）
         if (m_AssetRangeBuf.IsValid()) {
-            m_Device->UpdateDescriptorSet(m_BVHSet, 14, rhi::DescriptorType::StorageBuffer,
+            m_Device->UpdateDescriptorSet(m_BVHSet, 15, rhi::DescriptorType::StorageBuffer,
                                           ResB(m_AssetRangeBuf));
         }
 
@@ -784,8 +786,12 @@ void NaniteCull::RecordCullPass(rhi::IRHICommandList* cmd) {
 
 void NaniteCull::SetCullChainFrame(const float4x4& viewProj, const float3& cameraPosition,
                                    u32 screenWidth, u32 screenHeight, float fovYDegrees,
-                                   u32 testInstanceCount) {
-    m_TestInstanceCount = std::min(testInstanceCount, kNaniteMaxTestInstances);
+                                   u32 testInstanceCount, float lodThresholdPixels) {
+    // 【T8】真实实例表优先：多资产档下 `testInstanceCount` 仍是合成档的设置值，
+    // 直接采用会让实例域变成 64（其中大量是空实例），日志与派发端口径都不对。
+    m_TestInstanceCount = (m_RealInstanceCount > 0u)
+                              ? m_RealInstanceCount
+                              : std::min(testInstanceCount, kNaniteMaxTestInstances);
     m_FrameViewProj     = viewProj;
     m_FrameCameraPos    = cameraPosition;
     // `&viewProj[0][0]` 就是 glm::mat4 的列主序首地址（16 个 float）
@@ -797,7 +803,7 @@ void NaniteCull::SetCullChainFrame(const float4x4& viewProj, const float3& camer
     m_FrameScreenW     = screenWidth;
     m_FrameScreenH     = screenHeight;
     m_FrameFocalPixels = NaniteClusterLODFocalPixels((float)screenHeight, fovYDegrees);
-    m_FrameLODThreshold = kNaniteLODThresholdPixels;   // 设计 §5.1 的 "threshold = 1 pixel"
+    m_FrameLODThreshold = (lodThresholdPixels > 0.0f) ? lodThresholdPixels : kNaniteLODThresholdPixels;
 
     // view-proj 的 4 个行（row 优先；`rows[r*4+c] = viewProj[c][r]`）——与 GPU 参数缓冲同一份比特。
     // 【为什么按行拆开】Slang 的 `float4x4` 行/列主序依赖编译选项（任务 14 已为 localToWorld 踩过），
@@ -976,6 +982,20 @@ u32 NaniteCull::SetInstancesFromSnapshot(const FrameSceneSnapshot& snapshot,
         instance._pad            = 0u;
 
         m_TestSpheres[written]       = NaniteSphereFromInstanceBounds(instance);
+        // 【T8 诊断】一次性打印首个真实实例的包围盒与推导出的球：
+        // 若 min/max 全 0 ⇒ 收集侧没填 world AABB，球在原点半径 0 ⇒ Phase 1 必然全剔（实测正是如此）。
+        if (written == 0u) {
+            static bool s_Logged = false;
+            if (!s_Logged) {
+                s_Logged = true;
+                HE_CORE_INFO("[Nanite] 首个真实实例 bounds min=({:.2f},{:.2f},{:.2f}) "
+                             "max=({:.2f},{:.2f},{:.2f}) → 球 c=({:.2f},{:.2f},{:.2f}) r={:.2f}",
+                             item.object.boundsMin.x, item.object.boundsMin.y, item.object.boundsMin.z,
+                             item.object.boundsMax.x, item.object.boundsMax.y, item.object.boundsMax.z,
+                             m_TestSpheres[written].center[0], m_TestSpheres[written].center[1],
+                             m_TestSpheres[written].center[2], m_TestSpheres[written].radius);
+            }
+        }
         m_RealAssetIndices[written]  = item.naniteAssetIndex;
         ++written;
     }
@@ -1048,6 +1068,21 @@ void NaniteCull::RecordInstanceCullPass(rhi::IRHICommandList* cmd) {
     //   且合成实例表在相机静止时逐位相同，故实测逐项一致；真正干净的修法是把上传也做进
     //   随帧轮转的暂存环（属引擎 TransientAllocator 的范畴），不在本任务改动面内。
     UploadInstanceCullInputs();
+    {
+        // 【T8 诊断】一次性打印实例剔除的输入与派发域：
+        //   · instanceCount / 上传条数 / 第 0 条球 —— 判断"上传是否跟上真实实例"；
+        //   · CPU 参考可见数 —— 与 GPU 计数（外部打印）对照。
+        static bool s_Logged = false;
+        if (!s_Logged) {
+            s_Logged = true;
+            const NaniteInstanceSphere* s0 = m_TestSpheres.empty() ? nullptr : m_TestSpheres.data();
+            HE_CORE_INFO("[Nanite] 实例剔除输入 count={} 上传条数={} 球0 c=({:.2f},{:.2f},{:.2f}) r={:.2f}",
+                         m_TestInstanceCount,
+                         (u32)std::min<usize>(m_TestInstanceCount, m_TestSpheres.size()),
+                         s0 ? s0->center[0] : 0.0f, s0 ? s0->center[1] : 0.0f,
+                         s0 ? s0->center[2] : 0.0f, s0 ? s0->radius : 0.0f);
+        }
+    }
 
     // ── CPU 参考剔除：与 GPU **同一份输入**（同样的平面、同样的实例表与球、同样的跳过规则）──
     m_CpuVisibleInstances.resize(m_TestInstanceCount);
@@ -1065,6 +1100,14 @@ void NaniteCull::RecordInstanceCullPass(rhi::IRHICommandList* cmd) {
     // 【为什么展开成掩码而不是直接用升序列表】遍历的实例域是 `[0, min(实例数, 64))`，掩码按实例下标
     //   寻址 ⇒ 钳制后的子集与 GPU 完全一致；压缩列表的槽位顺序由 GPU 原子决定，"取前 k 个"在可见数
     //   超过上限时是不确定的子集（会让逐项比较失去意义）。
+    {
+        // 【T8 诊断】CPU 参考的可见实例数：与 GPU 计数对照，区分"判据把实例剔了"与"GPU 没写"。
+        static bool s_Logged = false;
+        if (!s_Logged) {
+            s_Logged = true;
+            HE_CORE_INFO("[Nanite] 实例剔除 CPU 参考可见={} / 域={}", cpuVisible, m_TestInstanceCount);
+        }
+    }
     m_CpuVisibleMask.assign(m_TestInstanceCount, 0u);
     for (u32 i = 0u; i < cpuVisible; ++i) {
         const u32 index = m_CpuVisibleInstances[i];
@@ -1112,6 +1155,15 @@ void NaniteCull::RecordInstanceCullPass(rhi::IRHICommandList* cmd) {
     snprintf(label, sizeof(label), "Nanite_InstanceCull (%u instances)", m_TestInstanceCount);
     cmd->SetDrawDebugLabel(label);
     cmd->Dispatch((m_TestInstanceCount + 63u) / 64u, 1, 1);
+    {
+        // 【T8 诊断】确认"实例剔除派发"确实被录制（主机侧，一次）
+        static bool s_Logged = false;
+        if (!s_Logged) {
+            s_Logged = true;
+            HE_CORE_INFO("[Nanite] 实例剔除派发已录制 groups={} count={}",
+                         (m_TestInstanceCount + 63u) / 64u, m_TestInstanceCount);
+        }
+    }
 
     // 屏障：compute 写的可见列表/计数 → 后续 compute 读（任务 14 的按实例簇剔除会消费它）。
     // 本任务还没有同帧消费者，但先把同步面写对，避免任务 14 接入时出现难查的顺序依赖。
@@ -1169,7 +1221,8 @@ bool NaniteCull::SetClusterBVH(std::span<const NaniteClusterRecord> clusters,
 //  越界就**拒绝并告警**（不静默截断 —— 截断会让某个资产的簇下标错位，画面会莫名其妙缺块）。
 // ============================================================
 u32 NaniteCull::AppendAssetBVH(std::span<const NaniteClusterRecord> clusters,
-                               std::span<const u32>                 lodOffsets) {
+                               std::span<const u32>                 lodOffsets,
+                               u32 triangleBase, u32 vertexBase, u32 materialBase) {
     if (!m_Device || !m_BVHNodeBuf.IsValid() || !m_BVHLeafBuf.IsValid() ||
         !m_BVHSphereBuf.IsValid() || !m_LODInfoBuf.IsValid() || !m_ClusterDrawRangeBuf.IsValid()) {
         HE_CORE_ERROR("NaniteCull: 资产剔除数据追加失败（设备或自持缓冲未就绪）");
@@ -1213,8 +1266,17 @@ u32 NaniteCull::AppendAssetBVH(std::span<const NaniteClusterRecord> clusters,
         return 0xFFFFFFFFu;
     }
 
+    // 【T8 多资产】绘制参数必须落在**聚合几何**的坐标里：光栅按 `firstInstance = 全局簇号`
+    // 读聚合簇记录/索引/顶点，而簇记录里的 `triangleOffset/vertexOffset/materialID` 是资产局部值
+    // ⇒ 这里逐条加上该资产的基址（单资产基址全 0，与旧行为逐位相同）。
     std::vector<NaniteClusterDrawRange> drawRanges(clusterCount);
-    for (u32 i = 0u; i < clusterCount; ++i) drawRanges[i] = NaniteMakeClusterDrawRange(clusters[i]);
+    for (u32 i = 0u; i < clusterCount; ++i) {
+        NaniteClusterRecord rec = clusters[i];
+        rec.triangleOffset += triangleBase;
+        rec.vertexOffset   += vertexBase;
+        rec.materialID     += materialBase;
+        drawRanges[i] = NaniteMakeClusterDrawRange(rec);
+    }
 
     // ── ③ 写入共享缓冲的尾部（主机写；一次性路径，无在飞的 GPU 引用）──
     auto uploadAt = [&](rhi::IRHIBuffer* buf, usize elementBytes, u32 baseIndex,
@@ -1268,6 +1330,9 @@ u32 NaniteCull::AppendAssetBVH(std::span<const NaniteClusterRecord> clusters,
     range.lodInfoBase   = lodBase;
     range.drawRangeBase = drawBase;
     m_AssetCullRanges.push_back(range);
+    // 【T8】多资产档不走 `SetClusterBVH`，必须在这里把"BVH 已入库"置真，
+    // 否则 `RecordCullChainPass` 会在 Phase 2/3 之前直接返回（实测：实例域 0、dispatch_bound 0）。
+    m_BVHReady = true;
 
     // ── ⑤ 资产区间表整表上传（规模上限 `kNaniteMaxCullAssets`，超出直接拒绝）──
     if (m_AssetCullRanges.size() > kNaniteMaxCullAssets) {
@@ -1288,6 +1353,22 @@ u32 NaniteCull::AppendAssetBVH(std::span<const NaniteClusterRecord> clusters,
                 gpu[i].clusterCount  = r.clusterCount;
                 gpu[i].lodInfoBase   = r.lodInfoBase;
                 gpu[i].drawRangeBase = r.drawRangeBase;
+            }
+            // 【T8 修复】把**未使用**的槽位填成第 0 份资产：合成实例的 `meshIndex = i`
+            // 会直接索引这张表，空槽（全 0）会让 shader 的 `nodeBase/clusterCount` 全 0
+            // ⇒ 每个实例都立即跳过（实测：Phase 1 有 61 个可见实例，Phase 2 却一个节点都没访问）。
+            if (!m_AssetCullRanges.empty()) {
+                const NaniteAssetCullRange& r0 = m_AssetCullRanges.front();
+                for (usize i = m_AssetCullRanges.size(); i < kNaniteMaxCullAssets; ++i) {
+                    gpu[i].nodeBase      = r0.nodeBase;
+                    gpu[i].nodeCount     = r0.nodeCount;
+                    gpu[i].leafBase      = r0.leafBase;
+                    gpu[i].leafCount     = r0.leafCount;
+                    gpu[i].clusterBase   = r0.clusterBase;
+                    gpu[i].clusterCount  = r0.clusterCount;
+                    gpu[i].lodInfoBase   = r0.lodInfoBase;
+                    gpu[i].drawRangeBase = r0.drawRangeBase;
+                }
             }
             if (auto* ub = ResB(m_AssetRangeBuf)) ub->Unmap();
         }
@@ -1503,6 +1584,30 @@ u32 NaniteCull::ReadLastVisibleClusterCount() const {
     return count;
 }
 
+u32 NaniteCull::ReadLastDrawCount() const {
+    if (!m_DrawCountBuf.IsValid()) return 0u;
+    auto* buf = ResB(m_DrawCountBuf);
+    if (!buf) return 0u;
+    u32 count = 0u;
+    if (void* p = buf->Map()) {
+        count = *static_cast<const u32*>(p);
+        buf->Unmap();
+    }
+    return count;
+}
+
+bool NaniteCull::ReadLastCullStats(u32 out[kNaniteCullStatsU32]) const {
+    if (!m_CullStatsBuf.IsValid() || out == nullptr) return false;
+    auto* buf = ResB(m_CullStatsBuf);
+    if (!buf) return false;
+    if (void* p = buf->Map()) {
+        std::memcpy(out, p, sizeof(u32) * kNaniteCullStatsU32);
+        buf->Unmap();
+        return true;
+    }
+    return false;
+}
+
 void NaniteCull::RecordCullChainPass(rhi::IRHICommandList* cmd,
                                      rhi::IRHITexture* hizTexture, rhi::IRHITexture* depthTexture,
                                      bool enableOcclusion, bool hizFlipY) {    if (!cmd) return;
@@ -1538,8 +1643,20 @@ void NaniteCull::RecordCullChainPass(rhi::IRHICommandList* cmd,
     //   【为什么不把 Hi-Z 纹理 import 进帧图】既有 `HiZ_Build`（SSR 档）也会写同一张纹理且不声明，
     //   让帧图只跟踪其中一条会与另一条的真实布局打架。
     const bool hizRequested = enableOcclusion && (hizTexture != nullptr) && (depthTexture != nullptr)
+
                            && (hizTexture->GetMipLevels() >= 2u)   // 单层纹理不是金字塔（防护）
                            && (m_FrameScreenW > 0u) && (m_FrameScreenH > 0u);
+    {
+        // 【T8 诊断】一次性说明"为什么 Hi-Z 没开"：纹理为空 / mip 不足 / 屏幕尺寸为 0
+        static bool s_Logged = false;
+        if (!s_Logged) {
+            s_Logged = true;
+            HE_CORE_INFO("[Nanite] Hi-Z 请求={} tex={} depth={} mips={} screen={}x{}",
+                         hizRequested ? 1 : 0, (void*)hizTexture, (void*)depthTexture,
+                         hizTexture ? hizTexture->GetMipLevels() : 0u,
+                         m_FrameScreenW, m_FrameScreenH);
+        }
+    }
     // 【P0 修复】先记下本帧的 UV 翻转真值（无论 Hi-Z 是否真的开起来，读数都要如实反映约定）
     m_FrameHiZFlip         = hizFlipY;
     m_FrameHiZRequested    = hizRequested;

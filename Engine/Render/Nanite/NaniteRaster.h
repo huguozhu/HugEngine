@@ -45,6 +45,8 @@ namespace he::render {
 
 class NaniteRaster {
 public:
+    /// T8：帧边界处把挂起的 bindless 描述符写真正落地（由渲染器每帧调一次）
+    void FlushPendingBindlessDescriptors(rhi::IRHIDevice* device);
     NaniteRaster() = default;
     ~NaniteRaster() = default;
 
@@ -228,6 +230,10 @@ public:
     ///      → 写 4 张 GBuffer（每个像素恰好一个确定性赢家）；
     ///   ⑤ 深度解析（全屏片元 `Nanite_DepthResolve.*`）：深度键 → `SV_Depth` 写既有深度附件。
     /// 顺序全部由函数内**显式**发出的屏障给出（帧图不跟踪模块自持资源，也排不动这些内部段）。
+    /// 【T8 诊断】软/硬光栅录制调用次数（主机侧计数，用来区分"没被调用"与"调用了没画出"）
+    [[nodiscard]] u64 GetSoftRecordCount() const { return m_SoftRecordCount; }
+    [[nodiscard]] u64 GetHardRecordCount() const { return m_HardRecordCount; }
+
     void RecordSoftRasterPass(rhi::IRHICommandList* cmd,
                               const GBufferTargets& targets,
                               const AssetViews& asset,
@@ -586,6 +592,11 @@ private:
     u32 m_TexturedMaterials = 0u;   ///< 其中带 BaseColor 纹理的记录数
     /// 【任务 19】第 2 趟的描述符集是否已登记到 bindless 堆（只登记一次；登记后强制一次 Flush）
     bool m_BindlessRegistered = false;
+    /// T8：bindless 堆的 Flush 推迟到帧边界（见 `EnsureSoftRasterResources` 的说明）
+    bool m_BindlessFlushPending = false;
+    /// T8：软/硬光栅录制次数（只增计数，不做原子 —— 只在渲染线程写）
+    u64 m_SoftRecordCount = 0u;
+    u64 m_HardRecordCount = 0u;
 
     /// 【运行时格式能力】**GBuffer 深度格式能否做存储图像**（启动时查一次；
     ///   `IRHIDevice::SupportsStorageImage(Format::D32_FLOAT)`）。它决定"compute 写深度"这条

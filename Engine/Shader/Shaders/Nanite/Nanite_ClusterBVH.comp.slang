@@ -196,7 +196,8 @@ struct AssetCullRange {
     uint lodInfoBase;
     uint drawRangeBase;
 };
-[[vk::binding(14, 0)]] StructuredBuffer<AssetCullRange> u_AssetRanges;
+// 【为什么是 15】13/14 是 bindless 堆的约定槽位（纹理/采样器数组），不能占用
+[[vk::binding(15, 0)]] StructuredBuffer<AssetCullRange> u_AssetRanges;
 
 [[vk::binding(13, 0)]] RWStructuredBuffer<uint>        u_DrawCount;             // 【任务 16】读写
 

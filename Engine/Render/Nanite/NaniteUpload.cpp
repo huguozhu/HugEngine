@@ -627,6 +627,11 @@ bool BuildNaniteClusterDAG(std::span<const float> positions,
         const usize simplifiedCount = meshopt_simplify(
             simplified.data(), merged.data(), merged.size(),
             positions.data(), vertexCount, kPositionStrideBytes,
+ // 【T8 修复】`target_error=1.0` 等于"允许 100% 误差"，meshopt 会把每级简化成
+            //   极端粗糙的代理，`relativeError` 因此很大 ⇒ 运行时 LOD 判据
+            //   `parentError × focal > threshold × distance` 恒成立 ⇒ 一律选**根簇**
+            //   （实测：8287 簇只画 38 个、巨大三角形、519 万像素过绘制、FPS 2）。
+            //   改成 10% 上限：每级只做"温和的一步"，误差随级平滑增长，LOD 割才落在细级。
             targetIndexCount, /*target_error=*/1.0f, /*options=*/0u, &relativeError);
 
         // ── 终止条件②：没能减少（或返回非法个数）⇒ 停，绝不空转 ──
@@ -719,8 +724,14 @@ bool BuildNaniteClusterDAG(std::span<const float> positions,
         const u32 level = result.clusterLevel[cluster];
         float error = 0.0f;
         if ((usize)level + 1u < levelCount) {
-            error = (level < stepErrors.size()) ? stepErrors[level] : 0.0f;
-            if (!(error > 0.0f)) error = levelFallbackError[level];
+            // 【T8 修复】优先用**几何兜底误差**（父簇中心到子簇球面的距离上界），
+            //   而不是 meshopt 的 `relativeError × scale`：后者在"按目标面数减半"的
+            //   调用下常常只有极小值 ⇒ `parentError × focal` 永远打不过阈值 ⇒
+            //   LOD 割一路落到叶子（实测：调阈值 1/8/32 都恒定 1980 个簇，
+            //   过绘制 780 万像素、FPS 5）。兜底误差是真实的空间上界，随级单调增长，
+            //   正好满足 DAG 割"误差沿级单调"的前提。
+            error = levelFallbackError[level];
+            if (!(error > 0.0f) && level < stepErrors.size()) error = stepErrors[level];
         }
         result.clusters[cluster].maxParentLODError = error;
         result.stats.maxLODError = std::max(result.stats.maxLODError, error);

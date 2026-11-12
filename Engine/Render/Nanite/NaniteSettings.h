@@ -266,6 +266,22 @@ struct NaniteSettings {
     // 0 ⇒ 旧口径（单资产；离线/运行时构建各一条路径）。
     bool multiAsset = false;
 
+    // ── T11：移除 GBuffer 的 IA PSO（cfg 键 `nanite_remove_ia_pso`，默认 0）──
+    // 1 ⇒ 有离线资产 + 支持 MS 的设备上不再创建 GBuffer 的 IA 管线（几何只走 Nanite 硬光栅）；
+    // 0 ⇒ 保留（D3D11 / 无 MS 设备的回退路径照常可用）。
+    bool removeIaPso = false;
+
+    // ── LOD 阈值（像素；cfg 键 `nanite_lod_threshold`）──
+    // 判据：`ownError × focal > threshold × distance` ⇒ 保留父簇（粗）。
+    // 调大 ⇒ 更倾向一直细分到叶子（全细节，慢但正确）；默认 1 像素。
+    float lodThresholdPixels = 1.0f;
+
+    // ── 硬光栅的工作量预算（可见簇引用条数上界；cfg 键 `nanite_hard_raster_budget`）──
+    // 超过它 ⇒ 自动关掉硬光栅档位（大簇不画），以免长帧。默认 131072。
+    // 【为什么可配】Sponza 规模（8287 簇 × 64 实例 = 53 万上界）会被默认值直接判为超预算，
+    //   于是大簇永远不画、画面只剩小簇 —— 这与"能出画面"的验收冲突，必须能按资产规模调。
+    u32 hardRasterRefBudget = 131072u;
+
     // ── T5：离线资产（方案 §5.2）──
     /// 优先读离线 `.nanite`（cfg 键 `nanite_offline`，默认 1 = 优先离线）。
     /// 文件缺失 / 校验失败 / 版本或构建器过期 ⇒ 自动回退运行时构建并告警。

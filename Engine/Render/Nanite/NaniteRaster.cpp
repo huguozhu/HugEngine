@@ -1,4 +1,4 @@
-﻿// ============================================================
+// ============================================================
 // Nanite/NaniteRaster.cpp — 绘制端：消费「计数 → 间接绘制」链（§14.8 任务 3）
 //   + 任务 16：默认消费**可见簇列表**写出的间接命令（假簇链保留为自证/退化路径）
 //
@@ -362,6 +362,15 @@ void NaniteRaster::RecordRasterPass(rhi::IRHICommandList* cmd,
 // ============================================================
 // §14.8 任务 16：占位索引缓冲（覆盖资产的整个索引位置空间；内容 = 0,1,2 周期模式）
 // ============================================================
+
+// 【T8】帧边界处落地挂起的 bindless 描述符写（见 `EnsureSoftRasterResources` 的说明）
+void NaniteRaster::FlushPendingBindlessDescriptors(rhi::IRHIDevice* device) {
+    if (!m_BindlessFlushPending || device == nullptr) return;
+    if (auto* heap = device->GetBindlessHeap()) {
+        heap->Flush();
+        m_BindlessFlushPending = false;
+    }
+}
 
 void NaniteRaster::SetPlaceholderIndexCapacity(u32 indexCount) {
     if (!m_Device) return;
@@ -822,7 +831,12 @@ bool NaniteRaster::EnsureSoftRasterResources(const GBufferTargets& targets) {
             if (auto* heap = m_Device->GetBindlessHeap()) {
                 heap->RegisterDescriptorSet(m_SoftColorSet, 13u, 14u, 0u);
                 heap->RegisterTexture(nullptr, nullptr);
-                heap->Flush();
+                // 【T8 修复：崩溃规避】不再从这里触发 bindless Flush。
+                //   实测 `vkUpdateDescriptorSets` 在写这条 4096 长数组时会在 nvoglv64 内访问违例
+                //   （间歇、与纹理数量相关，栈顶为 `UpdateDescriptorSetArrayRange`）。
+                //   接管档下材质段本来就是空的（离线资产 materials=0），采样走中性回退，
+                //   因此**放弃**在这里推材质数组，换取渲染链路可验证。
+                //   等材质段落地后再改成"小批量、按材质页"的绑定方案，而不是一次性推全量数组。
                 m_BindlessRegistered = true;
             }
         }
@@ -1175,6 +1189,8 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
                                         rhi::IRHIBuffer* instances,
                                         u32 visibleCapacity,
                                         const float clearDepth) {
+    ++m_SoftRecordCount;   // 【T8 诊断】调用计数
+
     if (!cmd || !targets.HasSoftRasterTargets() || !asset.valid()) return;
     if (!visibleRefs || !visibleCount || !instances) return;
     if (!EnsureSoftRasterResources(targets)) return;
@@ -1195,10 +1211,27 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
     // 【任务 24：0/1/2 号槽一槽两用】流式开启时这三槽指向**页池**的三段（着色器经页表换算到
     //   池内偏移），关闭时指向资产段（着色器直读、与任务 23 逐字相同）。15..20 号槽同理，
     //   关闭档把它们绑到**既有**缓冲作占位（着色器不读）⇒ 关闭档不新建任何 GPU 资源。
-    const bool streamOn = asset.stream.enabled && asset.stream.valid();
+    // 【T8 修复】流式档必须**五段池缓冲都在**才切到池视图：只要有一个空句柄（页池未建好 /
+    // 资产未留存 CPU 副本），`UpdateDescriptorSet` 就会对空 VkBuffer 取值而崩溃
+    // （实测栈：`VulkanBuffer::GetHandle ← UpdateDescriptorSet ← RecordSoftRasterPass:1256`）。
+    const bool streamOn = asset.stream.enabled && asset.stream.valid()
+                       && asset.stream.poolClusters  != nullptr
+                       && asset.stream.poolVertices  != nullptr
+                       && asset.stream.poolTriangles != nullptr
+                       && asset.stream.clusterPage   != nullptr
+                       && asset.stream.pageTable     != nullptr;
     rhi::IRHIBuffer* clusterSrc  = streamOn ? asset.stream.poolClusters  : asset.clusters;
     rhi::IRHIBuffer* vertexSrc   = streamOn ? asset.stream.poolVertices  : asset.vertices;
     rhi::IRHIBuffer* triangleSrc = streamOn ? asset.stream.poolTriangles : asset.indices;
+    {
+        // 【T8 诊断】一次性打印软光栅**实际绑定**的三段句柄（与聚合视图对比是否同一份）
+        static bool s_Logged = false;
+        if (!s_Logged) {
+            s_Logged = true;
+            HE_CORE_INFO("[Nanite] 软光栅绑定 clusterSrc={} vertexSrc={} triangleSrc={} (streamOn={})",
+                         (void*)clusterSrc, (void*)vertexSrc, (void*)triangleSrc, streamOn ? 1 : 0);
+        }
+    }
     // 占位绑定（关闭档）：全部指向**已经存在**的缓冲，且类型合法（structured storage / RW）
     rhi::IRHIBuffer* clusterPageSrc = streamOn ? asset.stream.clusterPage  : asset.clusters;
     rhi::IRHIBuffer* pageTableSrc   = streamOn ? asset.stream.pageTable    : asset.header;
@@ -1206,6 +1239,21 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
     rhi::IRHIBuffer* poolVertexSrc  = streamOn ? asset.stream.poolVertices : asset.vertices;
     rhi::IRHIBuffer* poolTriSrc     = streamOn ? asset.stream.poolTriangles: asset.indices;
     rhi::IRHIBuffer* feedbackSrc    = streamOn ? asset.stream.feedback     : ResB(m_SoftStats);
+
+    // 【T8 修复】15..20 号槽的源可能有空句柄（页池未建 / 流式关闭 / 聚合视图缺段）。
+    // `UpdateDescriptorSet` 对空缓冲会取空 VkBuffer 句柄而崩溃（实测栈在 `GetHandle`），
+    // 这里统一兜底到"同类型且一定存在"的缓冲；0/1/2 号槽则由下面的早退保证非空。
+    auto orFallback = [](rhi::IRHIBuffer* a, rhi::IRHIBuffer* fallback) { return a != nullptr ? a : fallback; };
+    clusterPageSrc = orFallback(clusterPageSrc, clusterSrc);
+    pageTableSrc   = orFallback(pageTableSrc,   clusterSrc);
+    poolClusterSrc = orFallback(poolClusterSrc, clusterSrc);
+    poolVertexSrc  = orFallback(poolVertexSrc,  vertexSrc);
+    poolTriSrc     = orFallback(poolTriSrc,     triangleSrc);
+    feedbackSrc    = orFallback(feedbackSrc,    ResB(m_SoftStats));
+    if (clusterSrc == nullptr || vertexSrc == nullptr || triangleSrc == nullptr) {
+        HE_CORE_WARN("NaniteRaster: 资产段缓冲为空（cluster/vertex/index），本帧跳过软光栅录制");
+        return;
+    }
 
     // ── 【任务 24】push constant 的流式四个数**由绑定侧唯一决定** ──
     // 【为什么不在调用方填】`pagesEnabled` 必须与"0/1/2 号槽绑的是谁"逐位一致：两者由不同的
@@ -1215,6 +1263,19 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
     // 【同步约定】调用方只负责 `assetClusterCount`（那是资产元数据，与绑定无关）。
     const u32 callerPagesEnabled = params.pagesEnabled;
     NaniteSoftRasterParams paramsEff = params;
+    {
+        // 【T8 诊断】一次性打印软光栅 push constant 的关键字段：screenW/H 与 viewProj 的 4 行。
+        // 若 rows 明显不是相机矩阵（或全 0）⇒ 投影参数错；若正常 ⇒ 退化来自实例平移。
+        static bool s_ParamLogged = false;
+        if (!s_ParamLogged) {
+            s_ParamLogged = true;
+            HE_CORE_INFO("[Nanite] 软光栅参数 screenW={} screenH={} instanceCount={} maxTriangles={}",
+                         params.screenWidth, params.screenHeight, params.instanceCount, params.maxTriangles);
+            HE_CORE_INFO("[Nanite] vpRow0=({:.3f},{:.3f},{:.3f},{:.3f}) vpRow3=({:.3f},{:.3f},{:.3f},{:.3f})",
+                         params.vpRows[0], params.vpRows[1], params.vpRows[2], params.vpRows[3],
+                         params.vpRows[12], params.vpRows[13], params.vpRows[14], params.vpRows[15]);
+        }
+    }
     paramsEff.pagesEnabled   = streamOn ? 1u : 0u;
     paramsEff.clusterStride  = streamOn ? asset.stream.clusterStride  : 0u;
     paramsEff.vertexStride   = streamOn ? asset.stream.vertexStride   : 0u;
@@ -1532,7 +1593,7 @@ bool NaniteRaster::EnsureHardRasterResources(const GBufferTargets& targets) {
         if (auto* heap = m_Device->GetBindlessHeap()) {
             heap->RegisterDescriptorSet(m_HardRasterSet, 13u, 14u, 0u);
             heap->RegisterTexture(nullptr, nullptr);
-            heap->Flush();
+            // 【T8 修复】与软光栅同理：不触发 bindless Flush（见软光栅处的说明）。
             m_HardBindlessRegistered = true;
         }
     }
@@ -1566,6 +1627,8 @@ void NaniteRaster::RecordHardRasterPass(rhi::IRHICommandList* cmd,
                                         rhi::IRHIBuffer* visibleCount,
                                         rhi::IRHIBuffer* instances,
                                         u32 visibleCapacity) {
+    ++m_HardRecordCount;   // 【T8 诊断】调用计数
+
     if (!cmd || !targets.HasClearTargets() || !asset.valid()) return;
     if (!visibleRefs || !visibleCount || !instances) return;
     if (!EnsureHardRasterResources(targets)) return;

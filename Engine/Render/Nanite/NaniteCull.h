@@ -294,7 +294,7 @@ public:
     ///   它的 (1,1) 元素被视图旋转污染，反解出来的焦距在相机有俯仰/偏航时是错的。
     void SetCullChainFrame(const float4x4& viewProj, const float3& cameraPosition,
                            u32 screenWidth, u32 screenHeight, float fovYDegrees,
-                           u32 testInstanceCount);
+                           u32 testInstanceCount, float lodThresholdPixels = kNaniteLODThresholdPixels);
 
     /// 录制 `Nanite_InstanceCull` pass：
     ///   ① 上传合成实例表 + 包围球（主机可见缓冲，与任务 3 同款）；
@@ -374,8 +374,13 @@ public:
 
     /// 追加一份资产的剔除数据（建 BVH + LOD 元数据 + 绘制参数，写进共享缓冲的尾部）
     /// @return 资产槽位下标；容量不足 / 构建失败返回 `0xFFFFFFFF`
+    /// @param triangleBase  该资产在**聚合几何**里的三角形起始下标（多资产绘制参数用）
+    /// @param vertexBase    顶点起始下标
+    /// @param materialBase  材质起始下标
+    /// 单资产时三者都是 0，行为与旧实现一致。
     u32 AppendAssetBVH(std::span<const NaniteClusterRecord> clusters,
-                       std::span<const u32>                 lodOffsets);
+                       std::span<const u32>                 lodOffsets,
+                       u32 triangleBase = 0u, u32 vertexBase = 0u, u32 materialBase = 0u);
 
     /// 已注册资产的剔除区间表（`SetClusterBVH` / `AppendAssetBVH` 之后有效）
     [[nodiscard]] const std::vector<NaniteAssetCullRange>& GetAssetCullRanges() const {
@@ -508,6 +513,16 @@ public:
     /// 滞后一帧统计同一口径）。光栅端用它当派发上界 —— 详见 `NaniteRenderer` 里的使用处。
     /// 缓冲未就绪时返回 0（调用方退回静态上界）。
     [[nodiscard]] u32 ReadLastVisibleClusterCount() const;
+
+    /// 【T8 诊断】上一帧写进间接命令缓冲的**绘制条数**（= 绘制计数缓冲的值）。
+    /// 【为什么需要】可见簇数 > 0 但绘制条数 = 0 说明"算出来了却没翻译成命令"；
+    /// 两者都 > 0 仍空屏，问题就在光栅/呈现而不是剔除。
+    [[nodiscard]] u32 ReadLastDrawCount() const;
+
+    /// 【T8 诊断】三阶段读数（`visited / frustumPass / occluded / lodRejected / 直方图…`）。
+    /// 全部为 0 ⇒ Phase 2/3 的派发根本没写（不是"全被剔除"）：那就得查 PVS/域/绑定；
+    /// 只有 visited > 0 而 frustumPass = 0 ⇒ 是判据把簇全剔了（球/视锥口径问题）。
+    [[nodiscard]] bool ReadLastCullStats(u32 out[kNaniteCullStatsU32]) const;
 
     /// 【A5】可见簇引用数的 **CPU 可算上界** = 簇数 × 实例域（本帧元数据，与 GPU 写出的可见数无关）
     ///
