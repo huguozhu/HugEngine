@@ -32,7 +32,8 @@
 
 #include "doctest.h"
 
-#include "Nanite/NaniteUpload.h"   // BuildNanitePagePlan / BuildNaniteAssetFromGeometry
+#include "Nanite/NaniteUpload.h"
+#include "Nanite/NaniteStream.h"   // T12：NanitePageFileSource   // BuildNanitePagePlan / BuildNaniteAssetFromGeometry
 
 #include <algorithm>   // std::is_sorted / std::sort
 #include <set>         // 秩个数与集合比较（只做校验，不参与产物顺序）
@@ -554,4 +555,133 @@ TEST_CASE("NanitePage: 真实资产（DAG 去重路径）的偏移不单调，�
         if (!bad.empty()) { MESSAGE("真实资产不变式失败：" << bad.c_str()); }
         CHECK(bad.empty());
     }
+}
+
+// ============================================================
+// T12：页数据的文件来源（`NanitePageFileSource`）
+//
+// 【为什么值得单测】流式此前依赖"整份资产 CPU 副本"，T12 改成按段偏移读文件。
+//   这条路径完全 RHI-free（只碰 `<fstream>` 与段表），所以越界、短读、未打开这些
+//   边界都能在 CI 里钉死，不必等真机。
+// ============================================================
+TEST_CASE("NanitePageFileSource(T12): 按元素下标读三段，与内存资产逐字节一致") {
+    std::vector<float> positions = {
+        0, 0, 0, 1, 0, 0, 0, 1, 0,      // 三角形 1
+        1, 1, 0, 2, 0, 0, 0, 2, 0,      // 三角形 2
+    };
+    std::vector<u32> indices = { 0, 1, 2, 3, 4, 5 };
+    NanitePackedAsset asset;
+    REQUIRE(BuildNaniteAssetFromGeometry(positions, {}, {}, indices, {}, asset));
+
+    // ① 用打包器写出内存镜像，再落盘（`WriteNaniteFile` 的输出是 `std::vector<u8>`）
+    const NaniteFileWriteOptions options{};
+    std::vector<u8> bytes;
+    REQUIRE(WriteNaniteFile(asset, options, bytes));
+    const String path = "NanitePageFileSource_test.nanite";
+    {
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        REQUIRE(out.is_open());
+        out.write(reinterpret_cast<const char*>(bytes.data()), (std::streamsize)bytes.size());
+    }
+
+    // ② 段表：由头部计数推导（与写盘时同一套函数）
+    NaniteFileLayout layout{};
+    REQUIRE(TryBuildNaniteFileLayout(asset.header, layout) == NaniteFileError::None);
+
+    NanitePageFileSource src;
+    REQUIRE(src.Open(path, layout, (u32)asset.clusters.size(),
+                     (u32)asset.vertices.size(), (u32)asset.triangles.size()));
+
+    // ① 整段读 —— 与内存资产逐字节一致
+    std::vector<NaniteClusterRecord> clusters(asset.clusters.size());
+    REQUIRE(src.ReadClusters(0u, (u32)clusters.size(), clusters.data()));
+    CHECK(std::memcmp(clusters.data(), asset.clusters.data(),
+                      clusters.size() * sizeof(NaniteClusterRecord)) == 0);
+
+    std::vector<NaniteVertex> verts(asset.vertices.size());
+    REQUIRE(src.ReadVertices(0u, (u32)verts.size(), verts.data()));
+    CHECK(std::memcmp(verts.data(), asset.vertices.data(),
+                      verts.size() * sizeof(NaniteVertex)) == 0);
+
+    std::vector<NanitePackedTriangle> tris(asset.triangles.size());
+    REQUIRE(src.ReadTriangles(0u, (u32)tris.size(), tris.data()));
+    CHECK(std::memcmp(tris.data(), asset.triangles.data(),
+                      tris.size() * sizeof(NanitePackedTriangle)) == 0);
+
+    // ② 区间读 —— 偏移正确（取第 1 条起）
+    if (asset.clusters.size() > 1u) {
+        NaniteClusterRecord one{};
+        REQUIRE(src.ReadClusters(1u, 1u, &one));
+        CHECK(std::memcmp(&one, &asset.clusters[1], sizeof(one)) == 0);
+    }
+
+    // ③ 越界必须失败且不写半份数据
+    CHECK_FALSE(src.ReadClusters((u32)asset.clusters.size(), 1u, &clusters[0]));
+    CHECK_FALSE(src.ReadVertices(0u, (u32)asset.vertices.size() + 1u, verts.data()));
+
+    src.Close();
+    CHECK_FALSE(src.IsOpen());
+    CHECK_FALSE(src.ReadClusters(0u, 1u, &clusters[0]));
+
+    // ④ 不存在的文件 ⇒ Open 失败
+    NanitePageFileSource missing;
+    CHECK_FALSE(missing.Open("no_such_file_xyz.nanite", layout, 1u, 1u, 1u));
+
+    std::remove(path.c_str());
+}
+
+TEST_CASE("NanitePageFileSource(T12): 逐页区间与内存资产逐字节一致") {
+    // 造一份多簇资产（三角形数 > 1 页），确认"页 = 连续区间"这条在文件源上同样成立
+    std::vector<float> positions;
+    std::vector<u32>   indices;
+    for (u32 tri = 0; tri < 300u; ++tri) {
+        const float base = static_cast<float>(tri) * 4.0f;
+        positions.insert(positions.end(), { base, 0, 0, base + 1, 0, 0, base, 1, 0 });
+        indices.insert(indices.end(), { tri * 3u, tri * 3u + 1u, tri * 3u + 2u });
+    }
+    NanitePackedAsset asset;
+    REQUIRE(BuildNaniteAssetFromGeometry(positions, {}, {}, indices, {}, asset));
+
+    const NaniteFileWriteOptions options{};
+    std::vector<u8> bytes;
+    REQUIRE(WriteNaniteFile(asset, options, bytes));
+    const String path = "NanitePageFileSource_ranges.nanite";
+    {
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        REQUIRE(out.is_open());
+        out.write(reinterpret_cast<const char*>(bytes.data()), (std::streamsize)bytes.size());
+    }
+
+    NaniteFileLayout layout{};
+    REQUIRE(TryBuildNaniteFileLayout(asset.header, layout) == NaniteFileError::None);
+    NanitePageFileSource src;
+    REQUIRE(src.Open(path, layout, (u32)asset.clusters.size(),
+                     (u32)asset.vertices.size(), (u32)asset.triangles.size()));
+
+    NanitePagePlan plan;
+    REQUIRE(BuildNanitePagePlan(asset.clusters, (u32)asset.vertices.size(),
+                                (u32)asset.triangles.size(), 1u, plan));
+    REQUIRE(plan.pageCount > 1u);   // 300 三角形 ⇒ 多簇 ⇒ K=1 时必然多页
+
+    for (u32 page = 0; page < plan.pageCount; ++page) {
+        const u32 vBegin = plan.pageVertexBegin[page];
+        const u32 vCount = plan.pageVertexCount[page];
+        if (vCount > 0u) {
+            std::vector<NaniteVertex> mine(vCount);
+            REQUIRE(src.ReadVertices(vBegin, vCount, mine.data()));
+            CHECK(std::memcmp(mine.data(), asset.vertices.data() + vBegin,
+                              (usize)vCount * sizeof(NaniteVertex)) == 0);
+        }
+        const u32 tBegin = plan.pageTriangleBegin[page];
+        const u32 tCount = plan.pageTriangleCount[page];
+        if (tCount > 0u) {
+            std::vector<NanitePackedTriangle> mine(tCount);
+            REQUIRE(src.ReadTriangles(tBegin, tCount, mine.data()));
+            CHECK(std::memcmp(mine.data(), asset.triangles.data() + tBegin,
+                              (usize)tCount * sizeof(NanitePackedTriangle)) == 0);
+        }
+    }
+
+    src.Close();
+    std::remove(path.c_str());
 }

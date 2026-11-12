@@ -32,6 +32,56 @@ const char* NaniteStreamReasonName(NaniteStreamReason reason) {
     return "unknown";
 }
 
+// ============================================================
+// T12：`NanitePageFileSource` 实现
+// ============================================================
+
+bool NanitePageFileSource::Open(const String& path, const NaniteFileLayout& layout,
+                                u32 clusterCount, u32 vertexCount, u32 triangleCount) {
+    Close();
+    if (path.empty()) return false;
+    m_Layout        = layout;
+    m_ClusterCount  = clusterCount;
+    m_VertexCount   = vertexCount;
+    m_TriangleCount = triangleCount;
+    m_File.open(path, std::ios::binary);
+    if (!m_File.is_open()) {
+        HE_CORE_WARN("[Nanite] 页数据文件打开失败：{}", path);
+        return false;
+    }
+    return true;
+}
+
+void NanitePageFileSource::Close() {
+    if (m_File.is_open()) m_File.close();
+    m_ClusterCount = m_VertexCount = m_TriangleCount = 0u;
+}
+
+template <typename T>
+bool NanitePageFileSource::ReadRange(usize sectionOffset, u32 sectionCount,
+                                     u32 first, u32 count, T* out) const {
+    if (!m_File.is_open() || out == nullptr || count == 0u) return false;
+    if (first > sectionCount || count > sectionCount - first) return false;   // 越界（含无符号回绕）
+    const u64 byteOffset = (u64)sectionOffset + (u64)first * sizeof(T);
+    m_File.clear();
+    m_File.seekg((std::streamoff)byteOffset, std::ios::beg);
+    if (!m_File) return false;
+    m_File.read(reinterpret_cast<char*>(out), (std::streamsize)((u64)count * sizeof(T)));
+    return static_cast<usize>(m_File.gcount()) == (usize)count * sizeof(T);
+}
+
+bool NanitePageFileSource::ReadClusters(u32 first, u32 count, NaniteClusterRecord* out) const {
+    return ReadRange(m_Layout.clusterOffset, m_ClusterCount, first, count, out);
+}
+
+bool NanitePageFileSource::ReadVertices(u32 first, u32 count, NaniteVertex* out) const {
+    return ReadRange(m_Layout.vertexOffset, m_VertexCount, first, count, out);
+}
+
+bool NanitePageFileSource::ReadTriangles(u32 first, u32 count, NanitePackedTriangle* out) const {
+    return ReadRange(m_Layout.indexOffset, m_TriangleCount, first, count, out);
+}
+
 bool NaniteStream::Initialize(rhi::IRHIDevice* device) {
     Shutdown();
     m_Device = device;
@@ -86,8 +136,11 @@ void NaniteStream::Shutdown() {
     m_Device = nullptr;
 }
 
-bool NaniteStream::Setup(const NanitePackedAsset& asset, const NaniteStreamConfig& config) {
+bool NaniteStream::Setup(const NanitePackedAsset& asset, const NaniteStreamConfig& config,
+                         const String& pageFilePath) {
     // 【重新 Setup 是允许的】（资产重传/改档），先释放旧资源但保留设备指针
+    HE_CORE_INFO("[Nanite] stream Setup 收到文件路径: len={} path={}", pageFilePath.size(), pageFilePath);
+
     rhi::IRHIDevice* device = m_Device;
     const bool deviceOk = (device != nullptr);
     Shutdown();
@@ -153,6 +206,17 @@ bool NaniteStream::Setup(const NanitePackedAsset& asset, const NaniteStreamConfi
                               + (usize)asset.vertices.size()  * sizeof(NaniteVertex)
                               + (usize)asset.triangles.size() * sizeof(NanitePackedTriangle)
                               + (usize)asset.materials.size() * sizeof(NaniteMaterialRecord);
+    // 【T12】页数据来源：给了路径就打开文件，后续页上传按需读盘（不再读 `m_Asset` 副本）。
+    //   打开失败 ⇒ 保持内存副本路径（日志里能看出原因，不静默改变行为）。
+    if (!pageFilePath.empty()) {
+        if (m_FileSource.Open(pageFilePath, asset.layout, (u32)asset.clusters.size(),
+                              (u32)asset.vertices.size(), (u32)asset.triangles.size())) {
+            HE_CORE_INFO("[Nanite] 流式页数据来源：文件 {}（按需读盘）", pageFilePath);
+        } else {
+            HE_CORE_WARN("[Nanite] 流式页数据文件打开失败（{}）⇒ 回退到内存副本", pageFilePath);
+        }
+    }
+
     HE_CORE_INFO("[Nanite] stream_setup contents={} pages={} clusters={} K={} pool_slots={} "
                  "strides=(cluster={} vertex={} tri={}) slot_bytes=(c={} v={} t={}) pool_bytes={} "
                  "retained_bytes={} latency={} uploads_per_frame={}",
@@ -294,8 +358,15 @@ void NaniteStream::UploadPage(u32 page, u32 slot) {
         if (void* p = ResB(m_PoolClusters)->Map()) {
             NaniteClusterRecord* dst = static_cast<NaniteClusterRecord*>(p);
             for (u32 k = 0u; k < count; ++k) {
-                dst[(usize)slot * ps.clusterStride + k] =
-                    m_Asset->clusters[m_CollectedClusterIndex[begin + k]];
+                const u32 idx = m_CollectedClusterIndex[begin + k];
+                // 【T12】文件源优先：逐条从文件读该簇记录（一页内簇数很少，代价可忽略）
+                if (m_FileSource.IsOpen()) {
+                    NaniteClusterRecord rec{};
+                    if (!m_FileSource.ReadClusters(idx, 1u, &rec)) { ok = false; break; }
+                    dst[(usize)slot * ps.clusterStride + k] = rec;
+                } else {
+                    dst[(usize)slot * ps.clusterStride + k] = m_Asset->clusters[idx];
+                }
             }
             if (auto* b = ResB(m_PoolClusters)) b->Unmap();
             ok = true;
@@ -310,22 +381,42 @@ void NaniteStream::UploadPage(u32 page, u32 slot) {
         const u32 tCount = m_Plan.pageTriangleCount[page];
         if (void* p = ResB(m_PoolVertices)->Map()) {
             NaniteVertex* dst = static_cast<NaniteVertex*>(p);
-            std::memcpy(dst + (usize)slot * ps.vertexStride,
-                        m_Asset->vertices.data() + vBegin,
-                        (usize)vCount * sizeof(NaniteVertex));
+            if (m_FileSource.IsOpen()) {
+                ok = m_FileSource.ReadVertices(vBegin, vCount, dst + (usize)slot * ps.vertexStride);
+            } else {
+                std::memcpy(dst + (usize)slot * ps.vertexStride,
+                            m_Asset->vertices.data() + vBegin,
+                            (usize)vCount * sizeof(NaniteVertex));
+                ok = true;
+            }
             if (auto* b = ResB(m_PoolVertices)) b->Unmap();
-            ok = true;
         }
         if (ok) {
             ok = false;
             if (void* p = ResB(m_PoolTriangles)->Map()) {
                 NanitePackedTriangle* dst = static_cast<NanitePackedTriangle*>(p);
-                std::memcpy(dst + (usize)slot * ps.triangleStride,
-                            m_Asset->triangles.data() + tBegin,
-                            (usize)tCount * sizeof(NanitePackedTriangle));
+                if (m_FileSource.IsOpen()) {
+                    ok = m_FileSource.ReadTriangles(tBegin, tCount,
+                                                    dst + (usize)slot * ps.triangleStride);
+                } else {
+                    std::memcpy(dst + (usize)slot * ps.triangleStride,
+                                m_Asset->triangles.data() + tBegin,
+                                (usize)tCount * sizeof(NanitePackedTriangle));
+                    ok = true;
+                }
                 if (auto* b = ResB(m_PoolTriangles)) b->Unmap();
-                ok = true;
             }
+        }
+    }
+    if (ok && m_FileSource.IsOpen()) {
+        // 【T12 证据】首次从文件成功装载一页时打一条：证明页数据真的来自磁盘
+        //   （而不是悄悄回退到已释放的内存副本）。
+        static bool s_LoggedFilePage = false;
+        if (!s_LoggedFilePage) {
+            s_LoggedFilePage = true;
+            HE_CORE_INFO("[Nanite] 页 {} 已从文件读入槽 {}（簇 {} / 顶点 {} / 三角形 {}）",
+                         page, slot, m_Plan.pageClusterCount[page],
+                         m_Plan.pageVertexCount[page], m_Plan.pageTriangleCount[page]);
         }
     }
     if (!ok) {

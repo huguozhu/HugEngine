@@ -46,6 +46,7 @@
 
 #include <memory>
 #include <vector>
+#include <fstream>   // T12：页数据的文件来源
 
 namespace he::render {
 
@@ -97,6 +98,45 @@ struct NaniteStreamViews {
 };
 
 /// 页池 + 页表 + 反馈 + 驻留管理的宿主（§14.8 任务 24 阶段一）
+// ============================================================
+// T12：页数据的**文件**来源
+//
+// 【为什么需要】此前的页数据全部从 `NaniteScene` 留存的**整份资产 CPU 副本**里拷
+//   （§14.32 的第三处追加点）。那份副本对 Sponza 是 13.7 MB，而且流式的意义正是
+//   "只驻留少量页" —— 却还要为全量几何留一份内存，等于抵消一半收益。
+//   本类改为按段偏移**按需读文件**：页要哪段就读哪段，不再常驻整份几何。
+//
+// 【口径】对象是 RHI-free 的（只依赖 `<fstream>` 与 `.nanite` 的段表），
+//   因此可以直接被单测覆盖，不需要设备。
+// ============================================================
+class NanitePageFileSource {
+public:
+    /// 打开一份 `.nanite` 文件。
+    /// @param layout   由头部计数推导出的段表（`NaniteFileLayout`）
+    /// @param clusterCount / vertexCount / triangleCount  段内条数（用于越界判定）
+    [[nodiscard]] bool Open(const String& path, const NaniteFileLayout& layout,
+                            u32 clusterCount, u32 vertexCount, u32 triangleCount);
+    void Close();
+
+    [[nodiscard]] bool IsOpen() const { return m_File.is_open(); }
+
+    /// 按**元素下标**读一段（不是字节偏移）。越界 / 未打开 / 读失败 ⇒ false（不写半份数据）。
+    [[nodiscard]] bool ReadClusters(u32 first, u32 count, NaniteClusterRecord* out) const;
+    [[nodiscard]] bool ReadVertices(u32 first, u32 count, NaniteVertex* out) const;
+    [[nodiscard]] bool ReadTriangles(u32 first, u32 count, NanitePackedTriangle* out) const;
+
+private:
+    template <typename T>
+    [[nodiscard]] bool ReadRange(usize sectionOffset, u32 sectionCount, u32 first, u32 count,
+                                 T* out) const;
+
+    mutable std::ifstream m_File;
+    NaniteFileLayout      m_Layout{};
+    u32 m_ClusterCount  = 0;
+    u32 m_VertexCount   = 0;
+    u32 m_TriangleCount = 0;
+};
+
 class NaniteStream {
 public:
     NaniteStream() = default;
@@ -114,7 +154,13 @@ public:
     ///
     /// @param asset 资产的 CPU 副本（调用方保证其生命周期长于本对象，见 `NaniteScene::GetAssetCPUCopy`）
     /// @return true = 流式可用；false = 已按原因退化（`Reason()` 给出原因，**不静默**）
-    [[nodiscard]] bool Setup(const NanitePackedAsset& asset, const NaniteStreamConfig& config);
+    /// @param pageFilePath  T12：`.nanite` 文件路径。非空 ⇒ 页数据**按需读文件**
+    ///   （不再依赖 `m_Asset` 的整份 CPU 副本，省下全量几何的内存）；空 ⇒ 沿用内存副本。
+    [[nodiscard]] bool Setup(const NanitePackedAsset& asset, const NaniteStreamConfig& config,
+                             const String& pageFilePath = String{});
+
+    /// 【T12】页数据是否走**文件**（true ⇒ 资产的几何 CPU 副本可以释放）
+    [[nodiscard]] bool UsesFileSource() const { return m_FileSource.IsOpen(); }
 
     /// 是否可用（`Setup` 成功且资源齐备）
     [[nodiscard]] bool IsReady() const { return m_Ready; }
@@ -242,6 +288,8 @@ private:
     u32              m_UploadQueueHead = 0u;///< 队列头（用下标弹出，避免每次都 erase 整段）
     /// "收集后的簇记录序 → 原簇下标"的反查表（装一页的簇段时用；一次性构建）
     std::vector<u32> m_CollectedClusterIndex;
+    /// T12：页数据的文件来源（非空且已打开 ⇒ 页上传走文件，不再读 `m_Asset`）
+    NanitePageFileSource m_FileSource;
     std::vector<NanitePageTableEntry> m_TableCPU;  ///< 页表的主机镜像（每帧按需上传）
 
     u32 m_FrameIndex           = 0u;   ///< 当前帧号（上传页时写进 `lastRequestedFrame`）
