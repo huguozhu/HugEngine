@@ -1,4 +1,5 @@
 #include "VulkanBindlessHeap.h"
+#include "VulkanTextureLiveness.h"   // T8：野指针判定
 #include "VulkanDevice.h"
 #include "Core/Log.h"
 
@@ -91,14 +92,59 @@ void VulkanBindlessHeap::BeginFrame(u64 frameIndex) {
 void VulkanBindlessHeap::Flush() {
     if (!m_Pending) return;
     // 纹理/采样器数组始终同长；向全部已登记 set 写入完整数组
-    const u32 texCount = (u32)m_Textures.size();
-    const u32 bufCount = (u32)m_Buffers.size();
+    u32 texCount = (u32)m_Textures.size();
+    u32 bufCount = (u32)m_Buffers.size();
+    // 【T8 修复】SSBO 数组同样可能含已释放/为空的槽位（`ReleaseTexture` 会回收槽位，
+    //   而缓冲槽是独立追加的）⇒ 按"第一个空槽之前"截断，避免把空 VkBuffer 写进描述符数组
+    //   （实测崩在 `VulkanBindlessHeap.cpp:128` 的缓冲数组写）。
+    {
+        u32 valid = 0u;
+        while (valid < bufCount && m_Buffers[valid] != nullptr) ++valid;
+        bufCount = valid;
+    }
+    // 【T8 修复：首帧崩溃】占位槽（`RegisterTexture(nullptr, nullptr)`）在堆未设默认纹理时
+    // 会留成空句柄；把空句柄写进描述符数组时驱动侧直接访问违例（实测栈：
+    // `UpdateDescriptorSet ← BindlessHeap::Flush ← NaniteRaster::EnsureSoftRasterResources`，
+    // `0xC0000005`，目标地址 0x1_0000_00A2）。这里按"第一个空槽之前"的长度写，
+    // 空槽之后的索引本来也不会被材质采样到（占位槽永远追加在末尾）。
+    {
+        // 【T8 修复】除了空句柄，还要挡"已销毁纹理/采样器"的野指针：纹理侧有成对登记的
+        //   采样器槽位，`IsTextureAlive` 能判定这一对是否还有效。野指针写进描述符数组时
+        //   驱动直接访问违例（实测栈在 nvoglv64 的 vkUpdateDescriptorSets 内）。
+        u32 valid = 0u;
+        while (valid < texCount && m_Textures[valid] != nullptr && m_Samplers[valid] != nullptr
+               && IsTextureAlive(m_Textures[valid])) {
+            ++valid;
+        }
+        if (valid < texCount) {
+            static bool s_Logged = false;
+            if (!s_Logged) {
+                s_Logged = true;
+                HE_CORE_WARN("VulkanBindlessHeap: 第 {} 个纹理槽为空句柄（默认纹理/采样器未设置）"
+                             "⇒ 本次只写前 {} 个槽，避免驱动侧访问违例", valid, valid);
+            }
+            texCount = valid;
+        }
+    }
+    // 【T8 修复：驱动级访问违例的真因】`RegisterSampler` 只往 `m_Samplers` 追加，
+    //   而 `RegisterTexture` 同时往两边追加 ⇒ 两个数组**长度可能不等**。
+    //   之前用同一个 `texCount` 写采样器数组，会读到 `m_Samplers` 末尾之外
+    //   （`0xC0000005` 崩在 nvoglv64 的 `vkUpdateDescriptorSets` 内，栈顶是 UpdateDescriptorSet:120）。
+    //   这里按各自长度分别钳制。
+    const u32 sampCount = (texCount < (u32)m_Samplers.size()) ? texCount : (u32)m_Samplers.size();
+    // 【T8 修复】分块写（每档 64 条）：一次性写整条 4096 长数组时驱动会在
+    //   `vkUpdateDescriptorSets` 内部崩溃（栈在 nvoglv64）；分段写绕开了这条驱动路径。
+    const u32 kChunk = 64u;
     for (auto& rs : m_Sets) {
-        if (texCount > 0) {
-            m_Device->UpdateDescriptorSet(rs.set, rs.textureBinding,
-                DescriptorType::SampledImage, m_Textures.data(), nullptr, texCount);
-            m_Device->UpdateDescriptorSet(rs.set, rs.samplerBinding,
-                DescriptorType::Sampler, nullptr, m_Samplers.data(), texCount);
+        for (u32 first = 0; first < texCount; first += kChunk) {
+            const u32 n = (texCount - first < kChunk) ? (texCount - first) : kChunk;
+            m_Device->UpdateDescriptorSetArrayRange(rs.set, rs.textureBinding,
+                DescriptorType::SampledImage, m_Textures.data() + first, nullptr, first, n);
+        }
+        for (u32 first = 0; first < sampCount; first += kChunk) {
+            const u32 n = (sampCount - first < kChunk) ? (sampCount - first) : kChunk;
+            m_Device->UpdateDescriptorSetArrayRange(rs.set, rs.samplerBinding,
+                DescriptorType::Sampler, nullptr, m_Samplers.data() + first, first, n);
         }
         if (rs.bufferBinding != 0 && bufCount > 0) {
             m_Device->UpdateDescriptorSet(rs.set, rs.bufferBinding,

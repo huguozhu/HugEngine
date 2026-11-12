@@ -196,6 +196,18 @@ DescriptorSetHandle VulkanDevice::AllocateDescriptorSet(DescriptorSetLayoutHandl
 void VulkanDevice::UpdateDescriptorSet(DescriptorSetHandle setHandle, u32 binding,
                                         DescriptorType type, IRHIBuffer* buffer) {
     if (setHandle == 0 || setHandle > m_DescSets.size()) return;
+    // 【T8 修复：空缓冲守卫】调用方可能传入空句柄（资源未建好 / 可选绑定），
+    //   此前直接解引用会崩在 `VulkanBuffer::GetHandle`（实测栈：
+    //   `UpdateDescriptorSet ← NaniteRaster::RecordHardRasterPass / RecordSoftRasterPass`）。
+    //   空句柄按"跳过写入"处理：管线该绑定保持上一次的合法值或未绑定，不会崩。
+    if (buffer == nullptr) {
+        static bool s_Logged = false;
+        if (!s_Logged) {
+            s_Logged = true;
+            HE_CORE_WARN("VulkanDevice: UpdateDescriptorSet 收到空缓冲（binding={}）⇒ 跳过写入", binding);
+        }
+        return;
+    }
     VkDescriptorSet ds = m_DescSets[static_cast<usize>(setHandle - 1)];
 
     auto* vkBuf = static_cast<VulkanBuffer*>(buffer);
@@ -520,6 +532,48 @@ void VulkanDevice::DestroyDescriptorSetLayout(DescriptorSetLayoutHandle handle) 
     if (info.layout == VK_NULL_HANDLE) return;
     vkDestroyDescriptorSetLayout(m_Device, info.layout, nullptr);
     info.layout = VK_NULL_HANDLE;
+}
+
+
+// ============================================================
+// UpdateDescriptorSet — 纹理数组的**区间**写入（T8：分块写，绕开驱动崩溃）
+// ============================================================
+void VulkanDevice::UpdateDescriptorSetArrayRange(DescriptorSetHandle setHandle, u32 binding,
+                                                 DescriptorType type, IRHITexture** textures,
+                                                 IRHISampler** samplers,
+                                                 u32 firstElement, u32 count) {
+    if (setHandle == 0 || setHandle > m_DescSets.size() || count == 0u) return;
+    VkDescriptorSet ds = m_DescSets[static_cast<usize>(setHandle - 1)];
+    if (ds == VK_NULL_HANDLE) return;
+
+    const VkDescriptorType vkType = ToVkDescType(type);
+    std::vector<VkDescriptorImageInfo> infos(count);
+    for (u32 i = 0; i < count; ++i) {
+        infos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        infos[i].imageView   = VK_NULL_HANDLE;
+        infos[i].sampler     = VK_NULL_HANDLE;
+        if (vkType == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE) {
+            if (!textures || !IsTextureAlive(textures[i])) continue;
+            infos[i].imageView = static_cast<VulkanTexture*>(textures[i])->GetImageView();
+        } else if (vkType == VK_DESCRIPTOR_TYPE_SAMPLER) {
+            if (!samplers || !samplers[i]) continue;
+            infos[i].sampler = static_cast<VulkanSampler*>(samplers[i])->GetHandle();
+        } else {
+            if (!textures || !IsTextureAlive(textures[i]) || !samplers || !samplers[i]) continue;
+            infos[i].imageView = static_cast<VulkanTexture*>(textures[i])->GetImageView();
+            infos[i].sampler   = static_cast<VulkanSampler*>(samplers[i])->GetHandle();
+        }
+    }
+
+    VkWriteDescriptorSet write{};
+    write.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet          = ds;
+    write.dstBinding      = binding;
+    write.dstArrayElement = firstElement;
+    write.descriptorCount = count;
+    write.descriptorType  = vkType;
+    write.pImageInfo      = infos.data();
+    vkUpdateDescriptorSets(m_Device, 1, &write, 0, nullptr);
 }
 
 } // namespace he::rhi
