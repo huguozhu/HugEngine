@@ -141,9 +141,15 @@ void Logger::Initialize(LogLevel level) {
 }
 
 void Logger::Shutdown() {
-    s_CoreLogger.reset();
-    s_ClientLogger.reset();
-    spdlog::shutdown();
+    // 【为什么**不** reset / 不调 `spdlog::shutdown()`】
+    //   退出顺序是"Engine::Shutdown() → 各系统析构"，而 `World`、渲染管线、样例 App 的
+    //   析构函数里仍会打日志（例如 `World::~World` 的 OnDestroy 与统计）。
+    //   一旦在这里把 logger 释放掉，那些迟到的日志就会解引用已析构的 spdlog 对象 ——
+    //   实测 03 / 04 关闭窗口时崩在 `spdlog::logger::should_log`（`_Atomic_storage::load`）。
+    //   改为只 flush、把 logger 留给进程退出时回收：代价是退出时少量内存不释放，
+    //   换来的是"任何析构顺序下打日志都安全"。
+    if (s_CoreLogger)   s_CoreLogger->flush();
+    if (s_ClientLogger) s_ClientLogger->flush();
 }
 
 } // namespace he
