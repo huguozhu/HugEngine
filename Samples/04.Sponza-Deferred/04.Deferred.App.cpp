@@ -128,6 +128,7 @@ struct App::Impl {
     SkyboxComponent* skybox = nullptr;
 
     // ---- 管线开关（面板 + 配置）----
+    bool transformOnly = false;   // T8：只画变换验收件（cfg `nanite_transform_only`）
     bool clustered = true;
     bool gpuCull   = true;    // 与旧完整版一致：默认开启 GPU 视锥剔除
     bool skyboxOn  = true;
@@ -226,15 +227,25 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
 
     // ---- 场景 ----
     g.sceneGraph = std::make_unique<SceneGraph>(g.world);
+    // 【T8 验收开关】`nanite_transform_only=1` 时**不加载 Sponza**，场景只剩 3 个变换验收件，
+    //   截图才能干净地看出"平移 / 旋转 / 非均匀缩放"是否真的作用到了 Nanite 资产上。
     const String sponzaPath = vfs::Resolve("gltf/Sponza/glTF/Sponza.gltf");
-    HE_CORE_INFO("04.App: 加载 Sponza: {}", sponzaPath);
-    auto loadResult = asset::LoadGLTF(g.world, *g.sceneGraph, sponzaPath);
-    if (!loadResult.success) {
-        HE_CORE_ERROR("04.App: Sponza 加载失败: {}", loadResult.error);
-        return false;
+    // 【为什么用环境变量而不是 cfg】cfg 在**场景加载之后**才解析（`LoadConfig` 在
+    //   `Init` 的后段），而 Sponza 的加载在这里 ⇒ 用 cfg 开关永远是 false。
+    const bool transformOnly = std::getenv("HE_NANITE_TRANSFORM_ONLY") != nullptr;
+    g.transformOnly = transformOnly;
+    if (transformOnly) {
+        HE_CORE_INFO("04.App: nanite_transform_only=1 —— 跳过 Sponza，仅保留变换验收件");
+    } else {
+        HE_CORE_INFO("04.App: 加载 Sponza: {}", sponzaPath);
+        auto loadResult = asset::LoadGLTF(g.world, *g.sceneGraph, sponzaPath);
+        if (!loadResult.success) {
+            HE_CORE_ERROR("04.App: Sponza 加载失败: {}", loadResult.error);
+            return false;
+        }
+        HE_CORE_INFO("04.App: Sponza 加载完成: {} 实体, {} 网格图元",
+                     loadResult.entities.size(), loadResult.meshCount);
     }
-    HE_CORE_INFO("04.App: Sponza 加载完成: {} 实体, {} 网格图元",
-                 loadResult.entities.size(), loadResult.meshCount);
 
     // ---- 灯光 ----
     {
@@ -434,6 +445,7 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
         g.camera.GetCamera().farPlane  = GetFloat(cfg, "cam_far", 2000.0f);
 
         g.clustered = GetBool(cfg, "clustered", true);
+        g.transformOnly = GetBool(cfg, "nanite_transform_only", false);
         g.gpuCull   = GetBool(cfg, "gpu_cull", true);
         g.skyboxOn  = GetBool(cfg, "skybox", true);
         g.ssgi      = GetBool(cfg, "ssgi_enabled", false);
@@ -504,10 +516,14 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
             // 也覆盖第 5 步"多资产同帧绘制"。
             if (GetBool(cfg, "nanite_transform_test", false) && bound >= 3u) {
                 struct CubeSpec { const char* name; float3 pos; float3 eulerDeg; float3 scale; };
+                // 【T8 验收】三件放在 Sponza 建筑**之外**（y=300、z=-2600 一线）：在建筑内部会被
+                //   墙体遮住，截图看不出变换是否正确。资产是 Sponza 的原始尺寸（数百单位），
+                //   用 0.02 缩放缩成"小块"；第三件用 (0.06, 0.01, 0.02) 覆盖"包围球半径按
+                //   最大轴放大"这条分支。
                 const CubeSpec specs[3] = {
-                    { "NaniteCube_Translate", float3(-300.0f, 120.0f,    0.0f), float3(0.0f,   0.0f, 0.0f), float3(1.0f, 1.0f, 1.0f) },
-                    { "NaniteCube_Rotate",    float3(   0.0f, 120.0f,  -200.0f), float3(0.0f,  45.0f, 0.0f), float3(1.0f, 1.0f, 1.0f) },
-                    { "NaniteCube_NonUniform",float3( 300.0f, 120.0f,  -200.0f), float3(30.0f, 20.0f, 0.0f), float3(3.0f, 0.5f, 1.0f) },
+                    { "NaniteCube_Translate", float3(-400.0f, 300.0f, -2600.0f), float3(0.0f,  0.0f, 0.0f), float3(0.02f, 0.02f, 0.02f) },
+                    { "NaniteCube_Rotate",    float3(   0.0f, 300.0f, -2600.0f), float3(0.0f, 45.0f, 0.0f), float3(0.02f, 0.02f, 0.02f) },
+                    { "NaniteCube_NonUniform",float3( 400.0f, 300.0f, -2600.0f), float3(30.0f,20.0f, 0.0f), float3(0.06f, 0.01f, 0.02f) },
                 };
                 for (u32 i = 0u; i < 3u; ++i) {
                     Entity e = g.world.CreateEntity(specs[i].name);
