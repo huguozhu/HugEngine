@@ -526,7 +526,10 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
                 const String cubePath = vfs::Resolve("Processed/cube_0.nanite");
                 std::ifstream cubeFile(std::filesystem::path(cubePath), std::ios::binary);
                 if (cubeFile) {
-                    const std::streamsize n = cubeFile.tellg();
+                    // 【为什么要单独取文件大小】`tellg()` 在刚打开的流上不保证返回文件长度
+                    //   （实测返回 0 ⇒ 读到 0 字节、解析失败、验收件根本没被创建）。
+                    std::error_code sizeEc;
+                    const u64 n = (u64)std::filesystem::file_size(std::filesystem::path(cubePath), sizeEc);
                     cubeFile.seekg(0, std::ios::beg);
                     std::vector<u8> bytes((size_t)n);
                     if (cubeFile.read(reinterpret_cast<char*>(bytes.data()), n)) {
@@ -540,8 +543,14 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
                             cubeAssetSlot = g.pipeline->GetNanite().GetScene().RegisterAsset(cubeAsset);
                             HE_CORE_INFO("04.App: 变换验收件资产已注册（cube_0.nanite → 槽位 {}）",
                                          cubeAssetSlot);
+                        } else {
+                            HE_CORE_WARN("04.App: cube_0.nanite 解析失败（{} 字节）", (u64)bytes.size());
                         }
+                    } else {
+                        HE_CORE_WARN("04.App: cube_0.nanite 读取失败");
                     }
+                } else {
+                    HE_CORE_WARN("04.App: cube_0.nanite 打开失败：{}", cubePath);
                 }
             }
 
@@ -553,9 +562,9 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
                 //   用 0.02 缩放缩成"小块"；第三件用 (0.06, 0.01, 0.02) 覆盖"包围球半径按
                 //   最大轴放大"这条分支。
                 const CubeSpec specs[3] = {
-                    { "NaniteCube_Translate", float3(-300.0f, 200.0f, -2600.0f), float3(0.0f,  0.0f, 0.0f), float3(1.0f, 1.0f, 1.0f) },
-                    { "NaniteCube_Rotate",    float3(   0.0f, 200.0f, -2600.0f), float3(0.0f, 45.0f, 0.0f), float3(1.0f, 1.0f, 1.0f) },
-                    { "NaniteCube_NonUniform",float3( 300.0f, 200.0f, -2600.0f), float3(30.0f,20.0f, 0.0f), float3(1.6f, 0.4f, 1.0f) },
+                    { "NaniteCube_Translate", float3(-150.0f, 200.0f, -2600.0f), float3(0.0f,  0.0f, 0.0f), float3(40.0f, 40.0f, 40.0f) },
+                    { "NaniteCube_Rotate",    float3(   0.0f, 200.0f, -2600.0f), float3(0.0f, 45.0f, 0.0f), float3(40.0f, 40.0f, 40.0f) },
+                    { "NaniteCube_NonUniform",float3( 150.0f, 200.0f, -2600.0f), float3(30.0f,20.0f, 0.0f), float3(60.0f, 15.0f, 40.0f) },
                 };
                 for (u32 i = 0u; i < 3u; ++i) {
                     Entity e = g.world.CreateEntity(specs[i].name);
