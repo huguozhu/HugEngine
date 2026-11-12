@@ -488,7 +488,13 @@ void NaniteStream::BeginFrame(u32 frameIndex) {
     //   【代价与替代方案】见 §14.37 的"存疑未做"：它把 CPU/GPU 的并行度压成串行，
     //   本样例整帧本来就 CPU 受限（§14.36 实测墙钟 126~146 ms vs GPU 9~43 ms），
     //   所以对"阶段一的功能验收"没有影响；真正的流水线化留给阶段二。
-    m_Device->WaitIdle();
+    // 【T12 性能】这里的 `WaitIdle` 已**下移**到"真的要写页池/页表"之前（见下面的上传段）。
+    //   原来每帧无条件等一次会把 CPU/GPU 压成串行：实测流式档 9.55 ms vs 关闭档 5.90 ms
+    //   （1.62×），而跳过这次等待后是 5.93 ms（1.006×）——开销 100% 来自这次串行化。
+    //   【安全性】本函数在等待之前只做两件事：
+    //     ① 读反馈环槽 `frame % latency`（该槽上次被写是 `latency` 帧之前，默认 2 ≥ 在飞帧数）；
+    //     ② 清空该槽与戳记数组（GPU 本帧还没提交，写它不会与任何在飞命令冲突）。
+    //   真正的风险在"改页表 / 写页池"，那一步前仍会 WaitIdle（见下）。
 
     // ── ① 读回 `latency` 帧之前的请求（环槽 = frame % L；它上次被写正是帧 frame-L）──
     if (!m_FeedbackRing.empty()) {
@@ -528,6 +534,12 @@ void NaniteStream::BeginFrame(u32 frameIndex) {
     // ── ② 限流上传：每帧最多 `uploadsPerFrame` 页，按请求到达顺序（FIFO）──
     // 【为什么用 FIFO 而不是"屏幕误差贡献"】后者需要 LOD 选择与逐簇误差，属阶段二
     //   （§14.32 ⑫ 明确不做）；阶段一的优先级就是"谁先被请求谁先来"，可复现、可核对。
+    // 【T12 性能】只有"本帧真的要写页池/页表"时才等 GPU 空闲；稳态（所有可见页已驻留、
+    //   无淘汰）下这里一次都不等。等待放在循环外，每帧至多一次。
+    const bool willUpload = (m_UploadQueueHead < m_UploadQueue.size()) &&
+                            (m_UploadsThisFrame < m_Config.uploadsPerFrame);
+    if (willUpload) m_Device->WaitIdle();
+
     while (m_UploadQueueHead < m_UploadQueue.size() &&
            m_UploadsThisFrame < m_Config.uploadsPerFrame) {
         const u32 page = m_UploadQueue[m_UploadQueueHead++];
