@@ -129,6 +129,8 @@ struct App::Impl {
 
     // ---- 管线开关（面板 + 配置）----
     bool transformOnly = false;   // T8：只画变换验收件（cfg `nanite_transform_only`）
+    u32  multiAssetCount = 8;     // T8：多资产档注册份数（cfg `nanite_multi_asset_count`）
+    bool transformTest   = false; // T8：生成三个变换验收件（cfg `nanite_transform_test`）
     bool clustered = true;
     bool gpuCull   = true;    // 与旧完整版一致：默认开启 GPU 视锥剔除
     bool skyboxOn  = true;
@@ -446,6 +448,7 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
 
         g.clustered = GetBool(cfg, "clustered", true);
         g.transformOnly = GetBool(cfg, "nanite_transform_only", false);
+        g.transformTest = GetBool(cfg, "nanite_transform_test", false);
         g.gpuCull   = GetBool(cfg, "gpu_cull", true);
         g.skyboxOn  = GetBool(cfg, "skybox", true);
         g.ssgi      = GetBool(cfg, "ssgi_enabled", false);
@@ -477,6 +480,7 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
             }
             std::sort(files.begin(), files.end());
             const int limit = std::max(1, GetInt(cfg, "nanite_multi_asset_count", 8));
+        g.multiAssetCount = (u32)limit;
             if ((int)files.size() > limit) files.resize((usize)limit);
 
             u32 bound = 0u;
@@ -1215,6 +1219,15 @@ void App::Shutdown() {
             out["nanite_remove_ia_pso"] = std::to_string(nanite.removeIaPso ? 1 : 0);
             out["shadow_ms"] = std::to_string(g.pipeline->GetShadowMeshEnabled() ? 1 : 0);
             out["nanite_multi_asset"] = std::to_string(nanite.multiAsset ? 1 : 0);
+            // 【修正】这几个键此前只读不写 ⇒ 样例退出时回写 cfg 会把它们**抹掉**，
+            //   下次启动就回到默认值（实例域 64 会让 Sponza 的硬光栅上界超预算而被自动关闭）。
+            out["nanite_multi_asset_count"] = std::to_string(g.multiAssetCount);
+            out["nanite_transform_test"] = std::to_string(g.transformTest ? 1 : 0);
+            out["nanite_transform_only"] = std::to_string(g.transformOnly ? 1 : 0);
+            out["nanite_hiz"] = std::to_string(nanite.hiz ? 1 : 0);
+            out["nanite_lod_threshold"] = std::to_string((int)nanite.lodThresholdPixels);
+            out["nanite_hard_raster_budget"] = std::to_string(nanite.hardRasterRefBudget);
+            out["nanite_instance_test_count"] = std::to_string(nanite.instanceTestCount);
         }
         out["ddgi_enabled"] = std::to_string(g.ddgi ? 1 : 0);
         out["ssr_enabled"]  = std::to_string(g.ssr ? 1 : 0);
