@@ -616,6 +616,8 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
             // 【T8 验收】多资产档可单独关软光栅：软光栅的资源创建路径与多资产偶发冲突，
             // 硬光栅（T9 默认）已能覆盖多资产绘制验收。
             naniteSettings.softRaster = GetBool(cfg, "nanite_soft_raster", naniteSettings.softRaster);
+            // 【排查用】软光栅"大簇阈值"：调到 64 可让所有簇都走软光栅（用于区分软/硬路径问题）
+            naniteSettings.softMaxTriangles = (u32)GetInt(cfg, "nanite_soft_max_triangles", (int)naniteSettings.softMaxTriangles);
             // 【T8 排查】假簇链：绕开剔除，直接用 6 个假簇走同一条光栅路径。
             // 若假簇能出画面 ⇒ 光栅/呈现正常，问题在剔除到绘制的数据衔接。
             naniteSettings.fakeChain = GetBool(cfg, "nanite_fake_chain", naniteSettings.fakeChain);
