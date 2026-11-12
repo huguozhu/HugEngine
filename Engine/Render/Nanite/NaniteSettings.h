@@ -266,10 +266,14 @@ struct NaniteSettings {
     // 0 ⇒ 旧口径（单资产；离线/运行时构建各一条路径）。
     bool multiAsset = false;
 
-    // ── T11：移除 GBuffer 的 IA PSO（cfg 键 `nanite_remove_ia_pso`，默认 0）──
-    // 1 ⇒ 有离线资产 + 支持 MS 的设备上不再创建 GBuffer 的 IA 管线（几何只走 Nanite 硬光栅）；
-    // 0 ⇒ 保留（D3D11 / 无 MS 设备的回退路径照常可用）。
-    bool removeIaPso = false;
+    // ── T11：移除 GBuffer / 阴影的 IA PSO（cfg 键 `nanite_remove_ia_pso`，**默认 1**）──
+    // 1 ⇒ 有资产 + 支持 MS 的设备上不再保留 IA 管线（几何只走 mesh：GBuffer 由 Nanite 硬光栅、
+    //     阴影由 `Shadow.mesh` 写入）；
+    // 0 ⇒ 保留 IA（对照实验用）。
+    // 【为什么默认改成 1】T11 的验收口径是"有资产 + 支持 MS 的设备**不再建** IA PSO"，
+    //   默认 0 等于"机制具备但从不生效"。回退条件仍由 `supportsMeshShaders` 把住：
+    //   D3D11 / 无 MS 的移动端自动继续走 IA，不受影响。
+    bool removeIaPso = true;
 
     // ── LOD 阈值（像素；cfg 键 `nanite_lod_threshold`）──
     // 判据：`ownError × focal > threshold × distance` ⇒ 保留父簇（粗）。
