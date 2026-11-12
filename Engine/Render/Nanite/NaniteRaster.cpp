@@ -740,6 +740,7 @@ bool NaniteRaster::EnsureSoftRasterResources(const GBufferTargets& targets) {
             {18, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },  // 池·顶点段
             {19, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },  // 池·三角形段
             {20, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },  // 反馈环（读写）
+            {22, rhi::DescriptorType::StorageBuffer, 1,    rhi::kStageMaskCompute, false },  // 每簇量化尺度
         };
         m_SoftDepthLayout = m_Device->CreateDescriptorSetLayout(layout);
         if (m_SoftDepthLayout == rhi::kInvalidLayout) {
@@ -802,7 +803,10 @@ bool NaniteRaster::EnsureSoftRasterResources(const GBufferTargets& targets) {
             {18, rhi::DescriptorType::StorageBuffer, 1,    rhi::kStageMaskCompute, false },
             {19, rhi::DescriptorType::StorageBuffer, 1,    rhi::kStageMaskCompute, false },
             {20, rhi::DescriptorType::StorageBuffer, 1,    rhi::kStageMaskCompute, false },
-            // 【确定性赢家选择】21 = 赢家候选号（读写；R32_UINT，与深度键同尺寸同格式）。
+            // 【T8】22 = 每簇量化尺度表（float/cluster）：聚合视图里各资产 bbox 尺度不同，
+        //   按全局单值解码会把小资产放大到视锥外（实测"可见、有簇、零片元"）。
+        {22, rhi::DescriptorType::StorageBuffer, 1,    rhi::kStageMaskCompute, false },
+        // 【确定性赢家选择】21 = 赢家候选号（读写；R32_UINT，与深度键同尺寸同格式）。
             // 【为什么加在第 2 趟的布局上】仲裁趟（第 2.5 趟）**复用本布局与本集合**：它需要
             //   0..7 / 15..20 与第 2 趟完全一样，只多读一个 21。第 2 趟的着色器不声明 21
             //   （多余绑定在 Vulkan 里是合法的：管线布局允许是着色器所用绑定的**超集**）。
@@ -1307,10 +1311,22 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
         m_Device->UpdateDescriptorSet(set, 19, rhi::DescriptorType::StorageBuffer, poolTriSrc);
         m_Device->UpdateDescriptorSet(set, 20, rhi::DescriptorType::StorageBuffer, feedbackSrc);
     }
+    // 【T8】每簇量化尺度（22）：两个软光栅集合都要绑（第 1 趟也解码顶点位置）
+    if (asset.clusterExtent) {
+        m_Device->UpdateDescriptorSet(m_SoftDepthSet, 22, rhi::DescriptorType::StorageBuffer,
+                                      asset.clusterExtent);
+        m_Device->UpdateDescriptorSet(m_SoftColorSet, 22, rhi::DescriptorType::StorageBuffer,
+                                      asset.clusterExtent);
+    }
     // 【任务 19】材质段（bindings 13/14 由 bindless 堆负责，这里不写）
     if (asset.materials) {
         m_Device->UpdateDescriptorSet(m_SoftColorSet, 12, rhi::DescriptorType::StorageBuffer,
                                       asset.materials);
+    // 【T8】每簇量化尺度（22）
+    if (asset.clusterExtent) {
+        m_Device->UpdateDescriptorSet(m_HardRasterSet, 22, rhi::DescriptorType::StorageBuffer,
+                                      asset.clusterExtent);
+    }
     }
     // 【确定性赢家选择】binding 21 = 赢家候选号：**只写给第 2 趟的集合**（`m_SoftColorSet`）。
     //   【为什么必须在上面那个循环之外单独写】第 1 趟的布局（`m_SoftDepthLayout`）**根本没有 21**
@@ -1486,6 +1502,7 @@ bool NaniteRaster::EnsureHardRasterResources(const GBufferTargets& targets) {
             {18, rhi::DescriptorType::StorageBuffer, 1,    kStages, false },  // 池·顶点段
             {19, rhi::DescriptorType::StorageBuffer, 1,    kStages, false },  // 池·三角形段
             {20, rhi::DescriptorType::StorageBuffer, 1,    kStages, false },  // 反馈环（未使用，占位）
+            {22, rhi::DescriptorType::StorageBuffer, 1,    kStages, false },  // 每簇量化尺度
         };
         m_HardRasterLayout = m_Device->CreateDescriptorSetLayout(layout);
         if (m_HardRasterLayout == rhi::kInvalidLayout) {

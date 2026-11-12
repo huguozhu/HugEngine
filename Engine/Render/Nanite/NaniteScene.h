@@ -93,6 +93,10 @@ public:
         std::unique_ptr<rhi::IRHIBuffer> indices;     ///< 索引段（3×u16 进 u32[2]，8B/三角形）
         std::unique_ptr<rhi::IRHIBuffer> materials;   ///< 材质段（8B/条）
         std::unique_ptr<rhi::IRHIBuffer> lodOffsets;  ///< LOD 段（每级一个 u32）
+    /// 【T8】每簇的量化尺度（float/cluster）：每份资产的顶点是按**各自 bbox 最大轴**量化的，
+    ///   聚合视图里只有单一的 `meshMaxExtent` ⇒ 尺度差异大的资产会被按别人的尺度解码，
+    ///   表现为"可见、有簇、零片元"。这张表让着色器按簇取正确尺度。
+    std::unique_ptr<rhi::IRHIBuffer> clusterExtent;
 
         usize totalBytes    = 0;      ///< 已上传的镜像字节数（= `asset.bytes.size()`）
         usize mismatchBytes = 0;      ///< 读回逐字节比较的不一致字节数（0 = 完全一致）
@@ -305,6 +309,8 @@ public:
     std::vector<NanitePackedTriangle> m_MergedTriangles;
     std::vector<NaniteMaterialRecord> m_MergedMaterials;
     std::vector<u32>                  m_MergedLodOffsets;
+    /// 【T8】每簇量化尺度（与 `m_MergedClusters` 一一对应）
+    std::vector<float>                m_MergedClusterExtent;
     AssetBuffers m_Merged;           ///< 聚合 GPU 段组（光栅端消费）
     bool         m_MergedValid = false;
 

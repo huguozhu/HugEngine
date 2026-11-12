@@ -283,6 +283,16 @@ u32 NaniteScene::RegisterAsset(const NanitePackedAsset& asset, bool waitForReadb
     const u32 vertexBase   = (u32)m_MergedVertices.size();
     const u32 materialBase = (u32)m_MergedMaterials.size();
 
+    // 【T8】本资产的量化尺度（与打包器同口径：头部 bbox 最大轴长），逐簇记录
+    {
+        const float ex = asset.header.bboxMax[0] - asset.header.bboxMin[0];
+        const float ey = asset.header.bboxMax[1] - asset.header.bboxMin[1];
+        const float ez = asset.header.bboxMax[2] - asset.header.bboxMin[2];
+        const float assetExtent = std::max(ex, std::max(ey, ez));
+        m_MergedClusterExtent.insert(m_MergedClusterExtent.end(), asset.clusters.size(),
+                                     assetExtent > 0.0f ? assetExtent : 1.0f);
+    }
+
     for (const NaniteClusterRecord& src : asset.clusters) {
         NaniteClusterRecord r = src;
         r.triangleOffset += triangleBase;   // 三角形下标（× 8B = 索引段字节偏移）
@@ -344,6 +354,9 @@ bool NaniteScene::BuildMergedBuffers() {
                       m_MergedTriangles.size() * sizeof(NanitePackedTriangle), "Nanite.MergedIndices") &&
         uploadSection(m_Merged.materials, m_MergedMaterials.data(),
                       m_MergedMaterials.size() * sizeof(NaniteMaterialRecord), "Nanite.MergedMaterials") &&
+        // 【T8】每簇量化尺度表（float/cluster）——光栅按簇取，避免"按别人的尺度解码"
+        uploadSection(m_Merged.clusterExtent, m_MergedClusterExtent.data(),
+                      m_MergedClusterExtent.size() * sizeof(float), "Nanite.MergedClusterExtent") &&
         uploadSection(m_Merged.lodOffsets, m_MergedLodOffsets.data(),
                       m_MergedLodOffsets.size() * sizeof(u32), "Nanite.MergedLod");
     m_MergedValid = ok;

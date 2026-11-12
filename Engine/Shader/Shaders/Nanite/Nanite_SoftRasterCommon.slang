@@ -118,6 +118,21 @@ uint naniteRasterSlot(uint3 gid) { return gid.x + gid.y * kNaniteRasterDispatchW
 // 反馈环（读写）：[0] = 本帧写入的请求条数（原子取号）、[1] = 环满丢弃数（原子）、
 // [2, 2 + kNanitePageRequestSlots) = 环形缓冲本体。**GPU 只追加，去重在 CPU 读回侧做**。
 [[vk::binding(20, 0)]] RWStructuredBuffer<uint>               u_PageFeedback;
+// ── 【T8】每簇量化尺度（float/cluster，binding 22）──
+// 【为什么需要】顶点是按**各自资产** bbox 的最大轴量化的；聚合视图里只有一个全局
+//   `meshMaxExtent`，把尺度差异大的资产混在一起时，小资产会被按大尺度解码而飞出视锥
+//   （实测"实例可见、有簇、零片元"）。这张表让解码按簇取正确尺度。
+// 【回退】表为空（单资产档 / 未启用该表）⇒ 用调用方给的全局 `meshMaxExtent`，
+//   因此关闭档与既有行为逐位一致。
+[[vk::binding(22, 0)]] StructuredBuffer<float>                u_ClusterExtent;
+
+/// 取第 `clusterIndex` 个簇的量化尺度；表缺失时回退 `fallback`
+float naniteClusterExtent(uint clusterIndex, float fallback) {
+    uint count = 0u;
+    uint stride = 0u;
+    u_ClusterExtent.GetDimensions(count, stride);
+    return (clusterIndex < count) ? u_ClusterExtent[clusterIndex] : fallback;
+}
 
 // ── 【确定性赢家选择】赢家候选号（binding 21；读写；R32_UINT，与深度键**同尺寸同格式**）──
 // 【为什么不在本文件里声明】它只被第 2.5 趟（`Nanite_SoftRasterWinner.comp.slang`，做原子最小）
@@ -317,6 +332,7 @@ float2 softRasterNdcToPixel(float2 ndc) {
 // ============================================================
 struct SoftRasterClusterView {
     NaniteCluster cluster;   // 簇记录（来自资产段或页池，取决于档位）
+    uint index;              // 本簇的**下标**（资产簇下标；取每簇量化尺度用）
     uint vertexBase;         // 顶点取址基（页池内的**绝对**元素下标；关闭档 = 簇记录里的偏移）
     uint triangleBase;       // 三角形取址基
     uint page;               // 该簇所在页（0xFFFFFFFF = 关闭档，无页语义）
@@ -331,6 +347,7 @@ SoftRasterClusterView softRasterResolveCluster(uint clusterIndex) {
     v.page = 0xFFFFFFFFu;
     v.resident = false;
     v.valid = false;
+    v.index = clusterIndex;
     if (pagesEnabled == 0u) {
         // 关闭档：直读资产段（与任务 23 的代码路径逐字相同）
         v.cluster = u_Clusters[clusterIndex];
@@ -421,8 +438,9 @@ SoftRasterTriangle softRasterFetchTriangle(SoftRasterClusterView view, uint triL
         uint li = (k == 0u) ? local.x : ((k == 1u) ? local.y : local.z);
         if (!naniteIsValidClusterLocalVertexIndex(li)) return tri;
         NaniteVertex v = u_Vertices[base + li];
-        // 位置：簇内局部量化 + **本簇球心** + 网格最大范围（§14.19 硬约束①）+ 实例平移
-        float3 meshPos = naniteDecodeVertexPosition(v, cluster, meshMaxExtent);
+        // 位置：簇内局部量化 + **本簇球心** + **本簇所属资产的**网格最大范围（§14.19 硬约束①）
+        float3 meshPos = naniteDecodeVertexPosition(
+            v, cluster, naniteClusterExtent(view.index, meshMaxExtent));
         // 【T8】完整实例变换（3×3 的旋转/缩放 + 平移）：只加平移会让旋转与非均匀缩放失效
         world[k] = naniteApplyInstanceBasis(instanceBasis, meshPos);
         clip[k] = softRasterProjectWorld(world[k]);

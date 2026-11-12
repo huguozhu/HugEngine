@@ -151,9 +151,9 @@ void main(uint3 tid : SV_GroupThreadID, uint3 gid : SV_GroupID) {
                 // ── ④ 透视校正插值 → 写 GBuffer ──
                 // 【T8】世界位置同样要走完整实例基（旋转/缩放 + 平移），与取三角形那条路径一致
                 float3 worldPos = softRasterAttribute(bary, tri,
-                    naniteApplyInstanceBasis(instanceBasis, naniteDecodeVertexPosition(v0, cluster, meshMaxExtent)),
-                    naniteApplyInstanceBasis(instanceBasis, naniteDecodeVertexPosition(v1, cluster, meshMaxExtent)),
-                    naniteApplyInstanceBasis(instanceBasis, naniteDecodeVertexPosition(v2, cluster, meshMaxExtent)));
+                    naniteApplyInstanceBasis(instanceBasis, naniteDecodeVertexPosition(v0, cluster, naniteClusterExtent(view.index, meshMaxExtent))),
+                    naniteApplyInstanceBasis(instanceBasis, naniteDecodeVertexPosition(v1, cluster, naniteClusterExtent(view.index, meshMaxExtent))),
+                    naniteApplyInstanceBasis(instanceBasis, naniteDecodeVertexPosition(v2, cluster, naniteClusterExtent(view.index, meshMaxExtent))));
                 float3 normal = normalize(softRasterAttribute(bary, tri, n0, n1, n2));
                 float2 uv = softRasterAttribute(bary, tri, float3(t0, 0.0), float3(t1, 0.0),
                                                 float3(t2, 0.0)).xy;

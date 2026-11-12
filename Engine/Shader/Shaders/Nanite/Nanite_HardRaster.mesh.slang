@@ -238,7 +238,8 @@ void main(
         if (!naniteIsValidClusterLocalVertexIndex(li)) { valid = false; break; }
         NaniteVertex v = u_Vertices[base + li];
         // 位置：簇内局部量化 + **本簇球心** + 网格最大范围（§14.19 硬约束①）+ 实例平移
-        float3 meshPos = naniteDecodeVertexPosition(v, cluster, meshMaxExtent);
+        float3 meshPos = naniteDecodeVertexPosition(
+            v, cluster, naniteClusterExtent(view.index, meshMaxExtent));
         // 【T8】完整实例变换（3×3 + 平移）
         world[k] = naniteApplyInstanceBasis(basis, meshPos);
         // 投影：与软光栅用**同一个** `softRasterProjectWorld`（4 次显式点积，不是矩阵乘法）

@@ -189,6 +189,9 @@ public:
         /// 【任务 19】材质段（32B/条）。为 nullptr ⇒ 软光栅按 `materialCount = 0` 走中性兜底
         /// 并把像素计进 `fallback_pixels`（**不静默**）。
         rhi::IRHIBuffer* materials = nullptr;
+    /// 【T8】每簇量化尺度表（float/cluster，binding 22）。为 nullptr ⇒ 着色器回退到
+    ///   全局 `meshMaxExtent`（单资产档与"只有一份资产"的多资产档都能正确解码）。
+    rhi::IRHIBuffer* clusterExtent = nullptr;
 
         /// 【任务 24】流式视图（bindings 15..20）。
         /// 【为什么放在这里而不是另开一个参数】`RecordSoftRasterPass` / `RecordHardRasterPass`
