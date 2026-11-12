@@ -13,6 +13,7 @@
 #include "Math/Math.h"
 #include <vector>
 #include <memory>
+#include "Core/Log.h"   // T11：移除 IA 管线时打日志
 
 namespace he::render {
 
@@ -197,6 +198,22 @@ public:
 
     // ── 描述符集访问器 ──
     rhi::IRHIPipelineState*       GetPSO()           const { return ResP(m_PSO); }
+
+    /// 【T11】是否跳过 GBuffer 的 IA 管线（几何只走 Nanite 硬光栅时置真）。
+    /// 【为什么不禁用整个 GBufferRenderer】纹理/描述符/DGC 上下文仍要建；
+    /// 只有"顶点着色器 + IA 的几何管线"这一项按 T11 移除。
+    void SetSkipIaPipeline(bool skip) {
+        m_SkipIaPipeline = skip;
+        // 【T11】门面在**样例加载配置之后**才调到这里（晚于 Initialize），所以不能只靠
+        //   "创建时跳过"：已经在的那条 IA 管线要真的销毁，否则等于没移除。
+        if (skip && m_PSO.IsValid() && m_Device != nullptr) {
+            m_Device->DestroyPipelineStateHandle(m_PSO);
+            m_PSO = {};
+            HE_CORE_INFO("GBufferRenderer: T11 —— 已销毁 GBuffer 的 IA PSO"
+                         "（几何只走 Nanite 硬光栅；D3D11/无 MS 设备不会走到这里）");
+        }
+    }
+    [[nodiscard]] bool IsIaPipelineSkipped() const { return m_SkipIaPipeline; }
     /// 【P9】网格着色器版 GBuffer 管线（未开启 / 设备不支持时为空）
     rhi::IRHIPipelineState*       GetMeshPSO()       const { return ResP(m_MeshPSO); }
     rhi::DescriptorSetLayoutHandle GetLayout()       const { return m_Layout; }
@@ -220,6 +237,8 @@ private:
 
     // ── PSO + 描述符集 ──
     rhi::RHIPipelineStateHandle m_PSO{};   // A-3：句柄持有
+    bool m_SkipIaPipeline = false;   // T11：跳过 IA 几何管线
+    rhi::IRHIDevice* m_Device = nullptr;   // T11：延迟移除 IA 管线时需要它来销毁句柄
     /// 【P9】网格着色器版 GBuffer 管线（`GBuffer.mesh.slang` + 同一个 GBuffer.frag）。
     /// 只在 `HE_GBUFFER_MESH=1`、D3D12 后端、设备支持网格着色器时创建。
     rhi::RHIPipelineStateHandle m_MeshPSO{};

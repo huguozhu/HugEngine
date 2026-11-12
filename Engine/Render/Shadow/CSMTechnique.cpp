@@ -1,4 +1,7 @@
-﻿#include "Shadow/CSMTechnique.h"
+#include "Shadow/CSMTechnique.h"
+#include "Shadow/ShadowCasterCull.h"
+#include "Shadow.mesh.spv.h"   // T10：阴影 MS 变体
+#include "Shadow.mesh.dxil.h"   // T10：逐级联剔除
 #include <iterator>
 #include "Pipeline/Camera.h"
 #include "Shadow.vert.spv.h"
@@ -133,6 +136,54 @@ void CSMTechnique::CreatePSO(rhi::DescriptorSetLayoutHandle layout){
     d.pushConstantRanges={pcr};d.descriptorSetLayouts={layout};d.debugName="CSMDepth";
     m_ShadowPSO=m_Device->CreatePipelineStateHandle(d);   // A-3
     HE_ASSERT(m_ShadowPSO.IsValid(),"CSMTechnique: PSO 句柄创建失败");
+
+    // ── 【T10】阴影的 mesh 管线：与 IA 版**同附件、同深度状态、同 push constant**，
+    //   只把几何入口换成 mesh shader（顶点/索引走 SRV，见布局 binding 27/28）。
+    if (m_Device->GetCaps().supportsMeshShaders) {
+        rhi::ShaderBytecode mesh{};
+        mesh.stage = rhi::ShaderStage::Mesh;
+        mesh.spirv = k_Shadow_mesh_spv;
+        mesh.dxil.assign(std::begin(k_Shadow_mesh_dxil), std::end(k_Shadow_mesh_dxil));
+
+        rhi::PipelineStateDesc md = d;          // 其余状态照抄 IA 版
+        md.vertexShader = nullptr;
+        md.meshShader   = &mesh;
+        md.vertexLayout = rhi::VertexInputLayout{};   // MS 不用 IA 布局
+        md.debugName    = "CSMDepthMS";
+        m_ShadowMeshPSO = m_Device->CreatePipelineStateHandle(md);
+        if (!m_ShadowMeshPSO.IsValid()) {
+            HE_CORE_WARN("CSMTechnique: T10 阴影 mesh PSO 创建失败 ⇒ 保持 IA 路径");
+        }
+    }
+}
+
+void CSMTechnique::SetMeshShadowEnabled(bool enable){
+    // 【门控】设备不支持 MS 或 mesh PSO 没建起来 ⇒ 保持 IA 路径（不静默切换）
+    const bool msOk = m_Device != nullptr && m_Device->GetCaps().supportsMeshShaders
+                   && m_ShadowMeshPSO.IsValid();
+    const bool want = enable && msOk;
+    if (want != m_UseMeshPath) {
+        HE_CORE_INFO("CSMTechnique: T10 阴影绘制路径 → {}", want ? "mesh" : "IA");
+    }
+    m_UseMeshPath = want;
+}
+
+bool CSMTechnique::SetRemoveIaPipeline(bool remove){
+    if (!remove) return false;
+    const bool msOk = m_Device != nullptr && m_Device->GetCaps().supportsMeshShaders
+                   && m_ShadowMeshPSO.IsValid();
+    if (!msOk) {
+        HE_CORE_WARN("CSMTechnique: T11 —— 本设备无可用 mesh 阴影管线 ⇒ 保留 IA 管线（回退路径）");
+        return false;
+    }
+    // 强制走 mesh，并把 IA 管线真的销毁（不是"不再使用"）
+    m_UseMeshPath = true;
+    if (m_ShadowPSO.IsValid()) {
+        m_Device->DestroyPipelineStateHandle(m_ShadowPSO);
+        m_ShadowPSO = {};
+        HE_CORE_INFO("CSMTechnique: T11 —— 已销毁阴影的 IA PSO（阴影改走 mesh 管线）");
+    }
+    return true;
 }
 
 void CSMTechnique::Shutdown(){
@@ -171,6 +222,18 @@ u32 CSMTechnique::CollectLights(const FrameSceneSnapshot& snapshot,const CameraD
         sd.splitDistances[3]=shDist;
         sd.cameraForward=float4(glm::normalize(cam.forward),0);
         sd.shadowParams=float4(lc.shadowBias,lc.shadowNormalBias,lc.shadowStrength,0);
+        {
+            // 【T10 诊断】一次性打印级联矩阵的产出与相机输入
+            static bool s_Logged = false;
+            if (!s_Logged) {
+                s_Logged = true;
+                HE_CORE_INFO("[CSMTechnique] CollectLights 相机 near={:.3f} far={:.3f} fov={:.1f} aspect={:.3f} "
+                             "split=[{:.1f},{:.1f},{:.1f},{:.1f}] VP0[3][3]={:.3f}",
+                             cam.nearPlane, cam.farPlane, cam.fov, cam.aspectRatio,
+                             sd.splitDistances[0], sd.splitDistances[1], sd.splitDistances[2],
+                             sd.splitDistances[3], (float)sd.lightViewProj[0][3][3]);
+            }
+        }
         out.push_back(sd);
         ent.push_back(he::Entity{lc.sourceEntity});
     }
@@ -181,6 +244,11 @@ void CSMTechnique::Render(rhi::IRHICommandList* cmd,const FrameSceneSnapshot& sn
                            const MeshRegistry& registry,
                            const std::vector<GPUShadowData>& sd,u32 start){
     if(sd.empty()||!m_ExternalObjectBuffer||m_ExternalDescSet==rhi::kInvalidSet)return;
+    // 【T10 修复】`start` 是本技术在本帧 `m_AllShadowData` 里的**起始偏移**；
+    //   若本技术收集到 0 个光源（例如场景没有方向光），`start == sd.size()`
+    //   ⇒ 再取 `sd[start]` 就是越界读（实测拿到的"零矩阵"正是这么来的：
+    //   级联 VP 全 0 ⇒ 剔除退化、阴影矩阵也是零）。
+    if(start>=sd.size())return;
     for(u32 c=0;c<CASCADE_COUNT;++c)RenderCascade(cmd,c,snapshot,registry,sd[start]);
     for(u32 c=0;c<CASCADE_COUNT;++c)
         cmd->PipelineBarrier(rhi::PipelineStage::LateFragmentTests,rhi::PipelineStage::FragmentShader,
@@ -190,6 +258,16 @@ void CSMTechnique::Render(rhi::IRHICommandList* cmd,const FrameSceneSnapshot& sn
 void CSMTechnique::RenderCascade(rhi::IRHICommandList* cmd,u32 ci,const FrameSceneSnapshot& snapshot,
                                   const MeshRegistry& registry,const GPUShadowData& sd){
     m_LightVPs[ci] = sd.lightViewProj[ci];  // 缓存供 RSM 查询
+    {
+        // 【T10 诊断】打印本级 VP 的两个元素：若全 0 ⇒ CollectLights 产出的矩阵就是零
+        static bool s_VpLogged = false;
+        if (!s_VpLogged) {
+            s_VpLogged = true;
+            HE_CORE_INFO("[CSMTechnique] 级联 {} VP[0][0]={:.4f} VP[1][1]={:.4f} VP[2][2]={:.4f} VP[3][3]={:.4f}",
+                         ci, (float)m_LightVPs[ci][0][0], (float)m_LightVPs[ci][1][1],
+                         (float)m_LightVPs[ci][2][2], (float)m_LightVPs[ci][3][3]);
+        }
+    }
     void*dv=ResT(m_ShadowMaps[m_FrameSlot][ci])->GetNativeHandle();
     if(!dv)return;
     rhi::ClearValue cv{};cv.depth=1.f;
@@ -197,17 +275,73 @@ void CSMTechnique::RenderCascade(rhi::IRHICommandList* cmd,u32 ci,const FrameSce
     char passLabel[32];
     snprintf(passLabel,sizeof(passLabel),"CSM Shadow C%u",ci);
     cmd->SetDrawDebugLabel(passLabel);
-    cmd->SetPipeline(ResP(m_ShadowPSO));
     cmd->BeginOffscreenPass(nullptr,dv,m_ShadowMapSize,m_ShadowMapSize,&cv);
-    cmd->SetPipeline(ResP(m_ShadowPSO));
     cmd->SetFullscreenViewport(static_cast<u32>(m_ShadowMapSize), static_cast<u32>(m_ShadowMapSize));
+    // 【T11 防御】两版 PSO 都可能在重载/尺寸变化后失效；此时**不录制**本级联，
+    //   而不是把空句柄交给 `SetPipeline`（实测会崩在 `VulkanPipelineState::GetPipeline`）。
+    rhi::IRHIPipelineState* cascadePso = m_UseMeshPath ? ResP(m_ShadowMeshPSO) : ResP(m_ShadowPSO);
+    if (cascadePso == nullptr) {
+        cascadePso = ResP(m_ShadowMeshPSO);
+        if (cascadePso == nullptr) cascadePso = ResP(m_ShadowPSO);
+    }
+    if (cascadePso == nullptr) {
+        static bool s_Warned = false;
+        if (!s_Warned) {
+            s_Warned = true;
+            HE_CORE_WARN("CSMTechnique: 两级阴影 PSO 均不可用 ⇒ 本帧跳过级联绘制");
+        }
+        return;
+    }
+    cmd->SetPipeline(cascadePso);
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame,m_ExternalDescSet);
  auto*objData=static_cast<GPUObjectData*>(m_ExternalObjectBuffer->Map());
     u32 oi=0;
+    static u32 s_MeshObjects = 0u;
+    static u32 s_MeshTriangles = 0u;
     // 【第③段第 2 批】遍历**快照**里的阴影投射者（顺序 = 旧的 Mesh→Cube→Sphere 相对顺序），
     // 顶点/索引缓冲与索引数从注册表按 meshIndex 取。
-    for(const SnapshotDrawItem& it : snapshot.draws){
-        if(!it.bShadowCaster||oi>=MAX_OBJECTS)continue;
+    // 【T10】先收集本帧所有阴影投射者的**世界 AABB**，用本级的 lightViewProj 做一次剔除，
+    //   只对可见的物体填对象数据并 DrawIndexed。级联之间只差裁剪矩阵，
+    //   但物体集合应当随级联不同 ⇒ 这才是"逐光源/逐级联剔除"的意义。
+    std::vector<ShadowCasterBounds> casterBounds;
+    std::vector<u32>                casterDrawIndex;
+    casterBounds.reserve(snapshot.draws.size());
+    casterDrawIndex.reserve(snapshot.draws.size());
+    for (u32 di = 0; di < (u32)snapshot.draws.size(); ++di) {
+        const SnapshotDrawItem& it = snapshot.draws[di];
+        if (!it.bShadowCaster) continue;
+        ShadowCasterBounds b{};
+        b.min[0] = it.object.boundsMin.x; b.min[1] = it.object.boundsMin.y; b.min[2] = it.object.boundsMin.z;
+        b.max[0] = it.object.boundsMax.x; b.max[1] = it.object.boundsMax.y; b.max[2] = it.object.boundsMax.z;
+        casterBounds.push_back(b);
+        casterDrawIndex.push_back(di);
+    }
+    const NaniteFrustumPlanes cascadeFrustum =
+        NaniteExtractFrustumPlanes(&m_LightVPs[ci][0][0]);
+    std::vector<u32> visibleIdx(casterBounds.size());
+    const u32 visibleCount = CullShadowCasters(cascadeFrustum, casterBounds.data(),
+                                               (u32)casterBounds.size(),
+                                               visibleIdx.data(), (u32)visibleIdx.size());
+    if (visibleCount < casterBounds.size()) visibleIdx.resize(visibleCount);
+    {
+        // 【T10 诊断】一次性打印本级视锥的 6 个平面常数项与首个法线：
+        //   若法线全 0 ⇒ 矩阵口径不对，剔除退化成"永远可见"（当前 105/105 的可疑点）。
+        static bool s_PlaneLogged = false;
+        if (!s_PlaneLogged) {
+            s_PlaneLogged = true;
+            HE_CORE_INFO("[CSMTechnique] T10 级联 {} 平面 d=[{:.2f},{:.2f},{:.2f},{:.2f},{:.2f},{:.2f}] "
+                         "n0=({:.3f},{:.3f},{:.3f})",
+                         ci, cascadeFrustum.planes[0][3], cascadeFrustum.planes[1][3],
+                         cascadeFrustum.planes[2][3], cascadeFrustum.planes[3][3],
+                         cascadeFrustum.planes[4][3], cascadeFrustum.planes[5][3],
+                         cascadeFrustum.planes[0][0], cascadeFrustum.planes[0][1],
+                         cascadeFrustum.planes[0][2]);
+        }
+    }
+
+    for (u32 vi = 0; vi < visibleIdx.size(); ++vi) {
+        const SnapshotDrawItem& it = snapshot.draws[casterDrawIndex[visibleIdx[vi]]];
+        if (oi >= MAX_OBJECTS) break;
         const MeshRegistryEntry* me=registry.Find(it.meshIndex);
         if(!me||!me->vertexBuffer||!me->indexBuffer)continue;
         objData[oi].worldMatrix=it.object.worldMatrix;
@@ -220,19 +354,70 @@ void CSMTechnique::RenderCascade(rhi::IRHICommandList* cmd,u32 ci,const FrameSce
         snprintf(label,sizeof(label),"Shadow C%u Obj#%u",ci,oi);
         cmd->SetDrawDebugLabel(label);
         ShadowPushConstant pc{};pc.lightViewProj=sd.lightViewProj[ci];pc.objectIndex=oi++;
-        cmd->SetPushConstants(0,sizeof(ShadowPushConstant),&pc);
-        cmd->SetVertexBuffer(me->vertexBuffer,0);
-        cmd->SetIndexBuffer(me->indexBuffer);
-        cmd->DrawIndexed(me->indexCount);
+        if (m_UseMeshPath) {
+            // ── 【T10】mesh 路径：顶点/索引走 SRV（布局 binding 27/28），
+            //   一个工作组 = 64 个三角形 ⇒ 按本物体三角形数算 Y 向组数 ──
+            const u32 triCount = me->indexCount / 3u;
+            m_Device->UpdateDescriptorSet(m_ExternalDescSet, 27,
+                                          rhi::DescriptorType::StorageBuffer, me->vertexBuffer);
+            m_Device->UpdateDescriptorSet(m_ExternalDescSet, 28,
+                                          rhi::DescriptorType::StorageBuffer, me->indexBuffer);
+            // 【T10 关键】mesh 版 push constant 与 IA 版**同长**（80B），但后 3 个 u32 的语义不同：
+            //   IA 只用 `objectIndex`；MS 还要 `firstTriangle` / `triangleCount`。
+            //   直接复用 `ShadowPushConstant` 会把这两个字段留成 0 ⇒ 着色器
+            //   `SetMeshOutputCounts(0,0)`，阴影图整帧不被写入（实测与 IA 版差异 5.4%）。
+            struct ShadowMeshPush {
+                float4x4 lightViewProj;
+                u32      objectIndex;
+                u32      firstTriangle;
+                u32      triangleCount;
+                u32      pad;
+            };
+            static_assert(sizeof(ShadowMeshPush) == sizeof(ShadowPushConstant),
+                          "两版 push constant 必须同长，否则同一 PSO 布局会错位");
+            ShadowMeshPush mp{};
+            mp.lightViewProj = sd.lightViewProj[ci];
+            mp.objectIndex   = pc.objectIndex;
+            mp.firstTriangle = 0u;
+            mp.triangleCount = triCount;
+            mp.pad           = 0u;
+            ++s_MeshObjects;
+            s_MeshTriangles += triCount;
+            const u32 groupsY = (triCount + 63u) / 64u;
+            cmd->SetPushConstants(0, sizeof(mp), &mp);
+            cmd->DrawMeshTasks(1u, groupsY, 1u);
+        } else {
+            cmd->SetPushConstants(0,sizeof(ShadowPushConstant),&pc);
+            cmd->SetVertexBuffer(me->vertexBuffer,0);
+            cmd->SetIndexBuffer(me->indexBuffer);
+            cmd->DrawIndexed(me->indexCount);
+        }
     }
     m_ExternalObjectBuffer->Unmap();
     // 一次性诊断日志：确认阴影级联实际绘制了物体数（RenderDoc 复核用）
-    static bool s_CSMDrawDiagLogged = false;
-    if (!s_CSMDrawDiagLogged && ci == 0) {
-        s_CSMDrawDiagLogged = true;
-        HE_CORE_INFO("[CSMTechnique] Cascade0 绘制物体数: {}", oi);
+    // 【T10】每级一次：剔除前后条数（RenderDoc 之外的量化对照）
+    {
+        static bool s_CullLogged[CASCADE_COUNT] = { false };
+        if (ci < CASCADE_COUNT && !s_CullLogged[ci]) {
+            s_CullLogged[ci] = true;
+            HE_CORE_INFO("[CSMTechnique] T10 级联 {} 剔除后 {} / 全部 {}（绘制物体 {}）",
+                         ci, visibleCount, (u32)casterBounds.size(), oi);
+        }
     }
     cmd->EndOffscreenPass();
+    {
+        // 【T10 对比】每级一次：mesh 路径实际派发的物体数 / 三角形数（与 IA 版的物体数对照）
+        static bool s_Logged[CASCADE_COUNT] = { false };
+        if (ci < CASCADE_COUNT && !s_Logged[ci]) {
+            s_Logged[ci] = true;
+            HE_CORE_INFO("[CSMTechnique] T10 级联 {} 路径={} 物体={} 三角形={}",
+                         ci, m_UseMeshPath ? "mesh" : "IA",
+                         m_UseMeshPath ? s_MeshObjects : oi,
+                         m_UseMeshPath ? s_MeshTriangles : 0u);
+            s_MeshObjects = 0u;
+            s_MeshTriangles = 0u;
+        }
+    }
 }
 
 rhi::IRHITexture* CSMTechnique::GetShadowMap(u32 i)const{   // A-3：句柄按需解析

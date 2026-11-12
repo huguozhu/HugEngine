@@ -46,6 +46,9 @@ public:
     void NextFrame()override;
     void SetRenderResources(rhi::IRHIBuffer* objBuf,rhi::IRHIBuffer* shadowBuf,rhi::DescriptorSetHandle descSet)override;
     void CreateShadowPSO()override;
+    /// 【T10】切换 CSM 的阴影绘制路径（mesh / IA）。设备不支持 MS 时内部自动保持 IA。
+    void SetMeshShadowEnabled(bool enable);
+    void SetRemoveIaPipeline(bool remove) override;
     u32 GetShadowMapCount()const override;
     rhi::IRHITexture* GetShadowMap(u32 i)const override;
     rhi::IRHITexture* GetShadowMapAt(u32 slot,u32 i)const override;

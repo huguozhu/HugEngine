@@ -150,8 +150,24 @@ public:
     /// `DeferredPipeline_FrameGraph.cpp` 的 GBuffer 段（**唯一**的逻辑改动处）。
     NaniteRenderer&     GetNanite()        { return m_Nanite; }
     /// 开关与档位的唯一真值（外部只经这两个函数读写；§14.4 的三层都落在这里）
-    void                SetNaniteSettings(const NaniteSettings& s) { m_Nanite.SetSettings(s); }
+    void                SetNaniteSettings(const NaniteSettings& s) {
+        m_Nanite.SetSettings(s);
+        // 【T11】几何只走 Nanite 硬光栅 ⇒ 不再建 GBuffer 的 IA 管线。
+        //   不满足（D3D11 / 无 MS 的移动端）⇒ 保持 IA 管线，回退路径不受影响。
+        const bool msOk = m_Device != nullptr && m_Device->GetCaps().supportsMeshShaders;
+        if (m_GBuffer) {
+            m_GBuffer->SetSkipIaPipeline(s.enabled && s.removeIaPso && msOk && s.hardRaster);
+        }
+        // 【T11】阴影侧同理：有 MS ⇒ 强制 mesh 并销毁 IA 阴影 PSO；无 MS ⇒ 内部保持 IA。
+        if (m_ShadowSystem) {
+            m_ShadowSystem->SetRemoveIaPipeline(s.enabled && s.removeIaPso && msOk);
+        }
+    }
     [[nodiscard]] const NaniteSettings& GetNaniteSettings() const  { return m_Nanite.GetSettings(); }
+
+    /// 【T10】阴影绘制路径开关（mesh / IA）；由样例从 cfg 读入后调用。
+    void SetShadowMeshEnabled(bool enable) { m_ShadowMeshEnabled = enable; if (m_ShadowSystem) m_ShadowSystem->SetMeshShadowEnabled(enable); }
+    [[nodiscard]] bool GetShadowMeshEnabled() const { return m_ShadowMeshEnabled; }
     /// 已注册的 GI Provider（帧图按注册表遍历构建 pass，而非手写门控）
     std::vector<std::unique_ptr<IGIProvider>>& GetGIProviders() { return m_GIProviders; }
 
@@ -345,6 +361,7 @@ private:
     /// 【为什么不是 IGIProvider】Nanite 不是 GI 源（不产生通道输出、不参与层栈归一化），
     /// 它是 GBuffer 段的**几何写入者**（§14.2 不变式 3），故与 GBufferRenderer 同类由管线直接持有。
     NaniteRenderer m_Nanite;
+    bool m_ShadowMeshEnabled = false;   // T10：阴影路径当前是否 mesh
     /// 前帧 HDR 辐射度（GI 源共享；DDGI 探针与 SSGI 的入射辐射度都取自它）
     GIRadianceHistory m_RadianceHistory;
     GIConfig m_GIConfig;   // GI 配置（M2 档位/通道/强度 → P3 源层栈单一数据源）

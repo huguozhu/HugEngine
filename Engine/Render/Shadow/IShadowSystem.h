@@ -23,6 +23,11 @@ namespace he::render {
 // ============================================================================
 class IShadowSystem : public IRenderSubsystem {
 public:
+    /// 【T10】切换 CSM 的阴影绘制路径（mesh / IA）。默认空实现 ⇒ 其它后端/桩不受影响。
+    virtual void SetMeshShadowEnabled(bool /*enable*/) {}
+    /// 【T11】要求"移除阴影的 IA 管线"：有 MS 时强制走 mesh 并销毁 IA PSO；
+    ///   无 MS 设备上本调用是**空操作**（回退路径必须保留）。默认空实现。
+    virtual void SetRemoveIaPipeline(bool /*remove*/) {}
     ~IShadowSystem() override = default;
 
     // ---- 阴影模式 ----

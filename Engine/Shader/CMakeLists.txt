@@ -264,6 +264,8 @@ elseif(SLANGC)
         # （与软光栅同一约定），只对 `triangleCount > maxTriangles` 的簇调用
         # `SetMeshOutputCounts(3*triCount, triCount)`（逐角点展开，最多 192 顶点 / 64 图元）。
         "${SHADER_DIR}/Nanite/Nanite_HardRaster.mesh.slang"
+   # T10：阴影的 mesh shader 变体（一个工作组 = 一个物体的 64 个三角形）
+   "${SHADER_DIR}/Lighting/Shadow.mesh.slang"
     )
     # 公共共享头（被多个 shader include）——每个 shader 编译依赖这些；
     # 单个着色器文件本身由各自 SRC 依赖。改为显式列表而非 glob 所有 .slang，

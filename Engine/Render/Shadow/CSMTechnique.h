@@ -62,6 +62,17 @@ private:
 
     rhi::ShaderBytecode m_ShadowVS,m_ShadowFS;
     rhi::RHIPipelineStateHandle m_ShadowPSO{};   // A-3：句柄持有
+    /// 【T10】阴影的 mesh 管线（设备支持 MS 时才建）；`m_UseMeshPath` 决定 Render 走哪条
+    rhi::RHIPipelineStateHandle m_ShadowMeshPSO{};   // A-3：句柄持有
+    bool                        m_UseMeshPath = false;
+public:
+    /// T10：切换阴影绘制路径（false ⇒ 既有的 IA 路径）。设备不支持 MS 时忽略。
+    void SetMeshShadowEnabled(bool enable);
+    /// 【T11】移除 IA 阴影管线：有 mesh 管线时强制走 mesh 并销毁 `m_ShadowPSO`。
+    /// @return 是否真的移除了（false ⇒ 该设备不支持 MS，IA 保留）
+    bool SetRemoveIaPipeline(bool remove);
+    [[nodiscard]] bool IsMeshPathActive() const { return m_UseMeshPath; }
+private:
     // 【为什么是二维数组】级联贴图每帧"清空→重画"且同帧被采样，而 GPU 最多落后 CPU 三个飞行帧：
     // 单份时第 N+1 帧的清空/重画会盖掉第 N 帧正在采样的内容（相机移动时表现为阴影闪动/丢失）。
     // 按 [飞行帧][级联] 分份后本帧只写本槽位、采样也只读本槽位。

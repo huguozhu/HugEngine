@@ -40,6 +40,7 @@ static_assert(offsetof(he::StaticVertex, normal)   == 16, "GBuffer.mesh 假设 n
 static_assert(offsetof(he::StaticVertex, uv)       == 32, "GBuffer.mesh 假设 uv 在偏移 32");
 
 bool GBufferRenderer::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
+    m_Device = device;   // T11：延迟移除 IA 管线用
     m_Width  = width;
     m_Height = height;
 
@@ -225,6 +226,14 @@ void GBufferRenderer::CreateTextures(rhi::IRHIDevice* device) {
 }
 
 void GBufferRenderer::CreatePSO(rhi::IRHIDevice* device) {
+    // 【T11】几何只走 Nanite 硬光栅时**不建**这条 IA 管线：少一条与 MS 路线并行的入口，
+    //   也就少一处"两条路径都能写 GBuffer、覆盖率口径却不同"的隐患。
+    //   回退设备（D3D11 / 无 MS）不会走到这里 —— 门面按 `supported + asset` 决定是否置位。
+    if (m_SkipIaPipeline) {
+        HE_CORE_INFO("GBufferRenderer: T11 —— 跳过 GBuffer 的 IA PSO 创建（几何由 Nanite 硬光栅写入）");
+        return;
+    }
+
     // 描述符集布局：set=0 = per-frame GPUObjectData[] + bindless 纹理/采样器数组
     // 【P9】另加两个网格着色器几何 SSBO（合并 VB/IB）：只有 `GBuffer.mesh.slang` 引用它们，
     // 顶点/片元着色器不引用 ⇒ 不开网格路径时不写这两个描述符也不影响既有绘制。
