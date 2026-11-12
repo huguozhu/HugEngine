@@ -635,9 +635,21 @@ void NaniteRenderer::EnsureAssetUploaded(const MeshBatcher& batcher) {
         m_Raster.SetPlaceholderIndexCapacity(maxIndexCount);
         m_MeshMaxExtent     = maxExtent;
         m_AssetClusterCount = m_Scene.GetMergedClusterCount();
-        HE_CORE_INFO("NaniteRenderer: 多资产模式就绪（{} 份资产 / 聚合 {} 簇；"
+        // 【T8】材质段是否真的带上了（空 ⇒ 光栅会全走回退，画面纯白）
+        u32 matTotal = 0u;
+        for (u32 i = 0u; i < m_Scene.GetAssetCount(); ++i) {
+            if (const NaniteScene::NaniteAssetEntry* e = m_Scene.GetAssetEntry(i)) {
+                matTotal += (u32)e->cpu.materials.size();
+            }
+        }
+        // 【T8 修复】光栅端的"材质条数"必须同步：多资产分支此前没设 `m_MaterialCount`，
+        //   着色器把每个像素都判成 `materialID >= materialCount` ⇒ 全走中性回退
+        //   （实测 `回退 == 硬像素` ≈ 99.7 万）。
+        m_MaterialCount = matTotal;
+        HE_CORE_INFO("NaniteRenderer: 多资产模式就绪（{} 份资产 / 聚合 {} 簇 / 材质记录 {} 条；"
                      "占位索引上界 {}，量化尺度 {:.3f}）",
-                     cullAssets, m_AssetClusterCount, maxIndexCount, maxExtent);
+                     cullAssets, m_AssetClusterCount, matTotal, maxIndexCount, maxExtent);
+
         return;
     }
 
@@ -667,21 +679,14 @@ void NaniteRenderer::EnsureAssetUploaded(const MeshBatcher& batcher) {
                                  offlineAsset.clusters.size(), offlineAsset.triangles.size(),
                                  info.extSectionCount);
 
-                    // 【T8】把 `MaterialDesc` 扩展段翻译成光栅端用的材质记录（纯因子；纹理暂不绑定）
-                    if (offlineAsset.materials.empty() && !info.materialDescs.empty()) {
-                        offlineAsset.materials.reserve(info.materialDescs.size());
-                        for (const NaniteMaterialDesc& d : info.materialDescs) {
-                            NaniteMaterialRecord r{};
-                            r.baseColorFactor[0] = d.baseColorFactor[0];
-                            r.baseColorFactor[1] = d.baseColorFactor[1];
-                            r.baseColorFactor[2] = d.baseColorFactor[2];
-                            r.baseColorFactor[3] = d.baseColorFactor[3];
-                            r.metallicFactor      = d.metallicFactor;
-                            r.roughnessFactor     = d.roughnessFactor;
-                            offlineAsset.materials.push_back(r);
+                    // 【T8】把 `MaterialDesc` 扩展段翻译成光栅端的材质记录（公共辅助，单/多资产共用）
+                    {
+                        const usize before = offlineAsset.materials.size();
+                        NaniteFillMaterialsFromDesc(offlineAsset, info.materialDescs);
+                        if (offlineAsset.materials.size() != before) {
+                            HE_CORE_INFO("NaniteRenderer: 从 MaterialDesc 恢复 {} 个材质记录（仅因子）",
+                                         (u32)offlineAsset.materials.size());
                         }
-                        HE_CORE_INFO("NaniteRenderer: 从 MaterialDesc 恢复 {} 个材质记录（仅因子）",
-                                     (u32)offlineAsset.materials.size());
                     }
 
                 } else {

@@ -483,6 +483,8 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
                     render::NaniteAssetLoadStatus::Ok) {
                     continue;
                 }
+                // 【T8】每份资产的材质记录由 MaterialDesc 扩展段翻译（否则多资产档全部回退）
+                render::NaniteFillMaterialsFromDesc(asset, info.materialDescs);
                 const u32 slot = g.pipeline->GetNanite().GetScene().RegisterAsset(asset);
                 if (slot == render::NaniteScene::kInvalidAssetIndex) continue;
 

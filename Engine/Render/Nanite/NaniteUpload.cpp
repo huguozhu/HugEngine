@@ -2032,6 +2032,24 @@ bool BuildNanitePagePlan(std::span<const NaniteClusterRecord> clusters,
 // T2：`.nanite` v2 读写
 // ============================================================
 
+void NaniteFillMaterialsFromDesc(NanitePackedAsset& asset,
+                                 const std::vector<NaniteMaterialDesc>& descs) {
+    if (!asset.materials.empty() || descs.empty()) return;
+    asset.materials.reserve(descs.size());
+    for (const NaniteMaterialDesc& d : descs) {
+        NaniteMaterialRecord r{};
+        r.baseColorFactor[0] = d.baseColorFactor[0];
+        r.baseColorFactor[1] = d.baseColorFactor[1];
+        r.baseColorFactor[2] = d.baseColorFactor[2];
+        r.baseColorFactor[3] = d.baseColorFactor[3];
+        r.metallicFactor      = d.metallicFactor;
+        r.roughnessFactor     = d.roughnessFactor;
+        r.textureMask         = 0u;   // 纹理绑定待材质系统（T25）接线
+        r.bindlessTextureBase = 0u;
+        asset.materials.push_back(r);
+    }
+}
+
 bool WriteNaniteFile(const NanitePackedAsset& asset, const NaniteFileWriteOptions& options,
                      std::vector<u8>& outBytes) {
     // 固定五段（头部 + 簇/顶点/索引/材质/LOD，均已 16B 对齐）的尾部

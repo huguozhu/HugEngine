@@ -1015,6 +1015,16 @@ struct NaniteFileImage {
                                    const NaniteFileWriteOptions& options,
                                    std::vector<u8>& outBytes);
 
+/// 【T8】把 `MaterialDesc` 扩展段的描述**翻译**成光栅端使用的材质记录。
+///
+/// 【为什么需要】打包器当前只写 `MaterialDesc` 扩展段，资产自带的 `materials` 段是空的；
+///   光栅端按 `materials[cluster.materialID]` 取材质，空段会让每个像素走中性回退
+///   （实测 `回退 == 硬像素`，画面全白）。这里做一次纯数据翻译（只取因子，纹理留 0），
+///   单资产与多资产两条注册路径共用。
+/// 【幂等】`asset.materials` 非空或 `descs` 为空时什么都不做。
+void NaniteFillMaterialsFromDesc(NanitePackedAsset& asset,
+                                 const std::vector<NaniteMaterialDesc>& descs);
+
 /// 解析并校验 `.nanite`（接受 v1 / v2），成功返回 `NaniteFileError::None`。
 /// 【v1 语义】无扩展段表、哈希与构建器版本为 0 ⇒ 调用方应视为"元数据无效、需回退或重建"。
 [[nodiscard]] NaniteFileError ReadNaniteFile(const void* data, usize size, NaniteFileImage& out);
