@@ -415,7 +415,14 @@ void main(uint3 id : SV_DispatchThreadID) {
                 uint cluster = asset.clusterBase + localCluster;
                 ClusterSphere sphere = u_ClusterSpheres[cluster];
                 float3 worldCenter = HE_NANITE_LOCAL_TO_WORLD(sphere.centerRadius);
-                if (!sphereVisibleInFrustum(worldCenter, sphere.centerRadius.w)) {
+                // 【T8 关键修复】簇球半径**必须同样乘最大轴缩放**：非均匀（或大比例）缩放下
+                //   球在世界空间被拉成椭球，用未缩放的半径会把"其实在视锥内"的簇判掉。
+                //   节点球（上面几行）已经乘了 `maxScale`，CPU 参考
+                //   （`NaniteTraverseClusterBVHCPU`，`clusterRadius = sphere.radius * maxScale`）
+                //   也乘了 —— 只有这里漏掉 ⇒ 实测立方体验收档（scale=40）
+                //   `frustumPass=0`、光栅 0 簇、画面全空。
+                const float clusterRadius = sphere.centerRadius.w * maxScale;
+                if (!sphereVisibleInFrustum(worldCenter, clusterRadius)) {
                     continue;
                 }
                 // ── Phase 2 前半：通过视锥（计数位置与 CPU 参考的 ++ 同位置）──
@@ -423,7 +430,7 @@ void main(uint3 id : SV_DispatchThreadID) {
 
                 // ── Phase 2 后半：Hi-Z 遮挡（mipCount < 2 ⇒ 恒不遮挡）──
                 float occludedNdcY = 0.0f;
-                if (hizOccluded(worldCenter, sphere.centerRadius.w, occludedNdcY)) {
+                if (hizOccluded(worldCenter, clusterRadius, occludedNdcY)) {
                     InterlockedAdd(u_Stats[kStatOccluded], 1u);
                     // 【P0 修复的可复现判据】按投影包围盒中心的 ndc.y 分半屏计数
                     InterlockedAdd(u_Stats[(occludedNdcY > 0.0f) ? kStatOccludedUpper

@@ -1612,6 +1612,43 @@ void NaniteCull::RecordCullChainPass(rhi::IRHICommandList* cmd,
                                      rhi::IRHITexture* hizTexture, rhi::IRHITexture* depthTexture,
                                      bool enableOcclusion, bool hizFlipY) {    if (!cmd) return;
 
+    // 【T8 诊断】`HE_NANITE_CULL_DIAG=1` 时把"第一个实例 + 第一个簇球"的世界球与六个平面
+    //   距离打出来：GPU 侧 `frustumPass=0` 而 CPU 参考认为实例可见时，这一行能直接指出
+    //   是"球心没被实例变换"、"半径没乘缩放"还是"平面/矩阵口径不一致"。
+    if (std::getenv("HE_NANITE_CULL_DIAG") != nullptr && !m_TestInstances.empty() &&
+        !m_BVHData.clusterSpheres.empty()) {
+        static bool s_DiagLogged = false;
+        if (!s_DiagLogged) {
+            s_DiagLogged = true;
+            const NaniteInstanceGpuObject& inst = m_TestInstances[0];
+            const NaniteClusterSphere& sph = m_BVHData.clusterSpheres[0];
+            // `localToWorld` 是**列主序的 16 个 float**（`m[列][行]`）：列 C 的三个分量在
+            //   [C*4+0 .. C*4+2]，平移在第 3 列。
+            const float* m = inst.localToWorld;
+            const float3 colX(m[0], m[1], m[2]);
+            const float3 colY(m[4], m[5], m[6]);
+            const float3 colZ(m[8], m[9], m[10]);
+            const float3 origin(m[12], m[13], m[14]);
+            const float3 c(sph.center[0], sph.center[1], sph.center[2]);
+            const float r = sph.radius;
+            const float maxScale = std::max(std::sqrt(colX.x*colX.x+colX.y*colX.y+colX.z*colX.z),
+                                   std::max(std::sqrt(colY.x*colY.x+colY.y*colY.y+colY.z*colY.z),
+                                            std::sqrt(colZ.x*colZ.x+colZ.y*colZ.y+colZ.z*colZ.z)));
+            const float3 world = colX * c.x + colY * c.y + colZ * c.z + origin;
+            HE_CORE_INFO("[Nanite] CULL-DIAG 实例0 资产槽={} 簇球 c=({:.2f},{:.2f},{:.2f}) r={:.2f} "
+                         "maxScale={:.3f} 世界球心=({:.2f},{:.2f},{:.2f})",
+                         inst.meshIndex, c.x, c.y, c.z, r, maxScale, world.x, world.y, world.z);
+            for (u32 pi = 0; pi < 6u; ++pi) {
+                const float* pl = m_FrameFrustum.planes[pi];
+                const float d1 = pl[0]*world.x + pl[1]*world.y + pl[2]*world.z + pl[3];
+                const float d2 = pl[0]*c.x + pl[1]*c.y + pl[2]*c.z + pl[3];   // 未变换（错误口径）的对照
+                HE_CORE_INFO("[Nanite] CULL-DIAG 平面{} n=({:.3f},{:.3f},{:.3f}) d={:.2f} "
+                             "变换后距离={:.2f}（r={:.2f}，r*scale={:.2f}） 未变换距离={:.2f}",
+                             pi, pl[0], pl[1], pl[2], pl[3], d1, r, r * maxScale, d2);
+            }
+        }
+    }
+
     // ── Phase 1：实例剔除（写可见列表 + 可见性掩码）──
     // 【为什么和 Phase 2/3 挤在同一个 pass 里】帧图对"两个零资源 pass"的顺序**无法表达**
     //   （`RenderGraph::TopologicalSort` 对 inDegree=0 的 pass 按 LIFO 出队 ⇒ 注册顺序 ≠ 执行顺序）。
