@@ -518,16 +518,44 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
             // 生成 3 个立方体，分别带：纯平移 / 旋转 + 平移 / 非均匀缩放 + 平移，
             // 各绑一份离线资产。它们覆盖第 4 步"完整 localToWorld + 最大轴缩放半径"的三条分支，
             // 也覆盖第 5 步"多资产同帧绘制"。
-            if (GetBool(cfg, "nanite_transform_test", false) && bound >= 3u) {
+            // 【T8 验收】三件改用**单位立方体资产**（`Processed/cube_0.nanite`）：
+            //   Sponza 的 primitive 资产顶点在建筑坐标系里（离原点数百单位），缩放后仍会跑到
+            //   画面外，截图无法验收；立方体资产以原点为中心，三种变换一眼可辨。
+            u32 cubeAssetSlot = render::NaniteScene::kInvalidAssetIndex;
+            if (GetBool(cfg, "nanite_transform_test", false)) {
+                const String cubePath = vfs::Resolve("Processed/cube_0.nanite");
+                std::ifstream cubeFile(std::filesystem::path(cubePath), std::ios::binary);
+                if (cubeFile) {
+                    const std::streamsize n = cubeFile.tellg();
+                    cubeFile.seekg(0, std::ios::beg);
+                    std::vector<u8> bytes((size_t)n);
+                    if (cubeFile.read(reinterpret_cast<char*>(bytes.data()), n)) {
+                        render::NanitePackedAsset cubeAsset;
+                        render::NaniteAssetLoadInfo cubeInfo;
+                        if (render::ParseNaniteAsset(bytes.data(), bytes.size(),
+                                                     render::kNaniteBuilderVersion,
+                                                     cubeAsset, &cubeInfo) ==
+                            render::NaniteAssetLoadStatus::Ok) {
+                            render::NaniteFillMaterialsFromDesc(cubeAsset, cubeInfo.materialDescs);
+                            cubeAssetSlot = g.pipeline->GetNanite().GetScene().RegisterAsset(cubeAsset);
+                            HE_CORE_INFO("04.App: 变换验收件资产已注册（cube_0.nanite → 槽位 {}）",
+                                         cubeAssetSlot);
+                        }
+                    }
+                }
+            }
+
+            if (GetBool(cfg, "nanite_transform_test", false) &&
+                cubeAssetSlot != render::NaniteScene::kInvalidAssetIndex) {
                 struct CubeSpec { const char* name; float3 pos; float3 eulerDeg; float3 scale; };
                 // 【T8 验收】三件放在 Sponza 建筑**之外**（y=300、z=-2600 一线）：在建筑内部会被
                 //   墙体遮住，截图看不出变换是否正确。资产是 Sponza 的原始尺寸（数百单位），
                 //   用 0.02 缩放缩成"小块"；第三件用 (0.06, 0.01, 0.02) 覆盖"包围球半径按
                 //   最大轴放大"这条分支。
                 const CubeSpec specs[3] = {
-                    { "NaniteCube_Translate", float3(-400.0f, 300.0f, -2600.0f), float3(0.0f,  0.0f, 0.0f), float3(0.10f, 0.10f, 0.10f) },
-                    { "NaniteCube_Rotate",    float3(   0.0f, 300.0f, -2600.0f), float3(0.0f, 45.0f, 0.0f), float3(0.10f, 0.10f, 0.10f) },
-                    { "NaniteCube_NonUniform",float3( 400.0f, 300.0f, -2600.0f), float3(30.0f,20.0f, 0.0f), float3(0.30f, 0.05f, 0.10f) },
+                    { "NaniteCube_Translate", float3(-300.0f, 200.0f, -2600.0f), float3(0.0f,  0.0f, 0.0f), float3(1.0f, 1.0f, 1.0f) },
+                    { "NaniteCube_Rotate",    float3(   0.0f, 200.0f, -2600.0f), float3(0.0f, 45.0f, 0.0f), float3(1.0f, 1.0f, 1.0f) },
+                    { "NaniteCube_NonUniform",float3( 300.0f, 200.0f, -2600.0f), float3(30.0f,20.0f, 0.0f), float3(1.6f, 0.4f, 1.0f) },
                 };
                 for (u32 i = 0u; i < 3u; ++i) {
                     Entity e = g.world.CreateEntity(specs[i].name);
@@ -535,7 +563,7 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
                     auto* cube = g.world.AddComponent<CubeComponent>(e);
                     cube->halfExtent = 40.0f;
                     cube->OnCreate();
-                    cube->SetNaniteAssetIndex(i);          // 三份不同资产
+                    cube->SetNaniteAssetIndex(cubeAssetSlot);   // 同一份立方体资产，靠变换区分
                     if (auto* tf = g.world.GetComponent<TransformComponent>(e)) {
                         tf->position = specs[i].pos;
                         tf->rotation = float3(glm::radians(specs[i].eulerDeg.x),
@@ -546,7 +574,8 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
                     g.sceneGraph->SetParent(e, Entity{kInvalidEntity});
                 }
                 HE_CORE_INFO("04.App: 多网格变换验收 —— 已生成 3 个立方体（平移 / 旋转 / 非均匀缩放），"
-                             "分别绑定资产槽位 0..2");
+                             "共用立方体资产槽位 {}", cubeAssetSlot);
+
             }
             u32 boundCheck = 0u;
             g.world.ForEach<MeshComponent>([&](Entity, MeshComponent& mesh) {
@@ -563,6 +592,12 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
             naniteSettings.enabled = GetBool(cfg, "nanite_enable", naniteSettings.enabled);
             naniteSettings.offline = GetBool(cfg, "nanite_offline", naniteSettings.offline);
             naniteSettings.multiAsset = GetBool(cfg, "nanite_multi_asset", naniteSettings.multiAsset);
+            // 【T8 验收】只画变换件时：**关掉离线 Sponza 资产**（否则 8287 簇的 Sponza 仍会
+            //   被单资产路径画出来，验收件被淹没），并强制走多资产路径（立方体资产经注册表绘制）。
+            if (g.transformOnly) {
+                naniteSettings.offline = false;
+                naniteSettings.multiAsset = true;
+            }
             // 【T8 验收】多资产档可单独关软光栅：软光栅的资源创建路径与多资产偶发冲突，
             // 硬光栅（T9 默认）已能覆盖多资产绘制验收。
             naniteSettings.softRaster = GetBool(cfg, "nanite_soft_raster", naniteSettings.softRaster);
