@@ -259,7 +259,16 @@ bool NaniteScene::UploadAssetInto(const NanitePackedAsset& asset, AssetBuffers& 
 // `m_Asset`，聚合视图为空、光栅会读到空缓冲。走注册表保证"单资产 = 聚合视图里只有一份"，
 // 也就保证与 T8 之前的渲染结果逐字节相同。
 bool NaniteScene::UploadPackedAsset(const NanitePackedAsset& asset, bool waitForReadbackVerify) {
-    ClearAssets();
+    // 【T8 修复】只有在"注册表为空"时才清空。调用方（样例）可能**先**注册了多份资产，
+    //   而第一帧的设置还没生效（`multiAsset` 仍为 false）⇒ 这里无条件 `ClearAssets()`
+    //   会把它们连同聚合段一起清掉，随后多资产分支看到"0 份资产 / 聚合 N 簇"的
+    //   半截状态（实测：剔除端一份 BVH 都没追加、画面全空）。
+    if (m_Assets.empty()) {
+        ClearAssets();
+    } else {
+        HE_CORE_WARN("NaniteScene: 单资产上传时注册表已有 {} 份资产 —— 跳过清空（避免抹掉多资产注册）",
+                     m_Assets.size());
+    }
     return RegisterAsset(asset, waitForReadbackVerify) != kInvalidAssetIndex;
 }
 
