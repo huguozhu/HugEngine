@@ -62,6 +62,10 @@ private:
 
     rhi::ShaderBytecode m_ShadowVS,m_ShadowFS;
     rhi::RHIPipelineStateHandle m_ShadowPSO{};   // A-3：句柄持有
+    /// 【退出崩溃】`Shutdown()` 之后置 false；`Render`/`RenderCascade` 直接返回。
+    ///   实测 02 关闭窗口时，收尾阶段仍有在飞帧执行到 `BeginOffscreenPass`，
+    ///   而阴影贴图已被销毁 ⇒ 在 nvoglv64 内访问违例。
+    bool m_Active = true;
     /// 【T10】阴影的 mesh 管线（设备支持 MS 时才建）；`m_UseMeshPath` 决定 Render 走哪条
     rhi::RHIPipelineStateHandle m_ShadowMeshPSO{};   // A-3：句柄持有
     bool                        m_UseMeshPath = false;

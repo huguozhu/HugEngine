@@ -187,6 +187,10 @@ bool CSMTechnique::SetRemoveIaPipeline(bool remove){
 }
 
 void CSMTechnique::Shutdown(){
+    // 【退出崩溃】先关掉渲染再销毁资源：收尾阶段可能还有在飞帧执行到
+    //   `BeginOffscreenPass`，此时阴影贴图已销毁 ⇒ 驱动内崩溃。
+    m_Active = false;
+    if (m_Device) m_Device->WaitIdle();
     // 【空保护】m_Device 可能为空（Shutdown 被调用两次，或 Initialize 失败后进入清理路径），
     // 直接解引用会崩溃（实测：02.Cube 退出时连续崩在多个 Shutdown 里）。
     if (!m_Device) return;
@@ -243,6 +247,7 @@ u32 CSMTechnique::CollectLights(const FrameSceneSnapshot& snapshot,const CameraD
 void CSMTechnique::Render(rhi::IRHICommandList* cmd,const FrameSceneSnapshot& snapshot,
                            const MeshRegistry& registry,
                            const std::vector<GPUShadowData>& sd,u32 start){
+    if(!m_Active)return;
     if(sd.empty()||!m_ExternalObjectBuffer||m_ExternalDescSet==rhi::kInvalidSet)return;
     // 【T10 修复】`start` 是本技术在本帧 `m_AllShadowData` 里的**起始偏移**；
     //   若本技术收集到 0 个光源（例如场景没有方向光），`start == sd.size()`
@@ -257,6 +262,7 @@ void CSMTechnique::Render(rhi::IRHICommandList* cmd,const FrameSceneSnapshot& sn
 
 void CSMTechnique::RenderCascade(rhi::IRHICommandList* cmd,u32 ci,const FrameSceneSnapshot& snapshot,
                                   const MeshRegistry& registry,const GPUShadowData& sd){
+    if(!m_Active)return;
     m_LightVPs[ci] = sd.lightViewProj[ci];  // 缓存供 RSM 查询
     {
         // 【T10 诊断】打印本级 VP 的两个元素：若全 0 ⇒ CollectLights 产出的矩阵就是零
