@@ -403,7 +403,7 @@ struct SoftRasterTriangle {
 // 【任务 24】取址经 `SoftRasterClusterView`：关闭档 = 资产段（与任务 23 逐字相同），
 //   开启档 = 页池段（基址已由页表换算）。**函数体只有一份** ⇒ 两档不可能分叉。
 SoftRasterTriangle softRasterFetchTriangle(SoftRasterClusterView view, uint triLocal,
-                                           float3 instanceTranslation) {
+                                           NaniteInstanceBasis instanceBasis) {
     SoftRasterTriangle tri;
     tri.valid = false;
     tri.p0 = tri.p1 = tri.p2 = float2(0.0, 0.0);
@@ -423,7 +423,8 @@ SoftRasterTriangle softRasterFetchTriangle(SoftRasterClusterView view, uint triL
         NaniteVertex v = u_Vertices[base + li];
         // 位置：簇内局部量化 + **本簇球心** + 网格最大范围（§14.19 硬约束①）+ 实例平移
         float3 meshPos = naniteDecodeVertexPosition(v, cluster, meshMaxExtent);
-        world[k] = meshPos + instanceTranslation;
+        // 【T8】完整实例变换（3×3 的旋转/缩放 + 平移）：只加平移会让旋转与非均匀缩放失效
+        world[k] = naniteApplyInstanceBasis(instanceBasis, meshPos);
         clip[k] = softRasterProjectWorld(world[k]);
         if (!(clip[k].w > 1.0e-6)) return tri;          // 跨越/落在相机平面后 ⇒ 丢弃
     }

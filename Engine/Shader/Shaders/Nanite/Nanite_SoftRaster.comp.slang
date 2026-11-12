@@ -73,7 +73,12 @@ void main(uint3 tid : SV_GroupThreadID, uint3 gid : SV_GroupID) {
 
     InstanceObject instance = u_Instances[ref.instance];
     if (instance.indexCount == 0u) return;
-    float3 translation = instance.ltw3.xyz;
+    // 【T8】完整实例基（旋转 + 缩放 + 平移），不再只取平移
+    NaniteInstanceBasis instanceBasis;
+    instanceBasis.cx = instance.ltw0.xyz;
+    instanceBasis.cy = instance.ltw1.xyz;
+    instanceBasis.cz = instance.ltw2.xyz;
+    instanceBasis.t  = instance.ltw3.xyz;
 
     // ── 【任务 24】与第 1 趟**逐字相同**的页解析（这是等值复检成立的前提）──
     //   缺页的簇在第 1 趟没有写过深度键 ⇒ 本趟也必须跳过它，否则会写出"没有任何深度键与之匹配"
@@ -91,7 +96,7 @@ void main(uint3 tid : SV_GroupThreadID, uint3 gid : SV_GroupID) {
 
     // ── ② 逐三角形：重跑光栅化 → 等值复检 → 写 GBuffer ──
     for (uint triLocal = tid.x; triLocal < triangleCount; triLocal += 16u) {
-        SoftRasterTriangle tri = softRasterFetchTriangle(view, triLocal, translation);
+        SoftRasterTriangle tri = softRasterFetchTriangle(view, triLocal, instanceBasis);
         if (!tri.valid) continue;
 
         // 三个顶点的属性（法线 / UV 按**簇内局部下标**取 —— 任务 18 的 P0 修复保证了
@@ -144,10 +149,11 @@ void main(uint3 tid : SV_GroupThreadID, uint3 gid : SV_GroupID) {
                                                | (triLocal & 0x3Fu))) continue;
 
                 // ── ④ 透视校正插值 → 写 GBuffer ──
+                // 【T8】世界位置同样要走完整实例基（旋转/缩放 + 平移），与取三角形那条路径一致
                 float3 worldPos = softRasterAttribute(bary, tri,
-                    naniteDecodeVertexPosition(v0, cluster, meshMaxExtent) + translation,
-                    naniteDecodeVertexPosition(v1, cluster, meshMaxExtent) + translation,
-                    naniteDecodeVertexPosition(v2, cluster, meshMaxExtent) + translation);
+                    naniteApplyInstanceBasis(instanceBasis, naniteDecodeVertexPosition(v0, cluster, meshMaxExtent)),
+                    naniteApplyInstanceBasis(instanceBasis, naniteDecodeVertexPosition(v1, cluster, meshMaxExtent)),
+                    naniteApplyInstanceBasis(instanceBasis, naniteDecodeVertexPosition(v2, cluster, meshMaxExtent)));
                 float3 normal = normalize(softRasterAttribute(bary, tri, n0, n1, n2));
                 float2 uv = softRasterAttribute(bary, tri, float3(t0, 0.0), float3(t1, 0.0),
                                                 float3(t2, 0.0)).xy;

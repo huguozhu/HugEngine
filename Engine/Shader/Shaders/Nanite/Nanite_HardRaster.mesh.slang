@@ -97,11 +97,11 @@ struct HardRasterVertexOut {
 //   multiple times"。这里把所有早退判据收拢成返回值，入口按它统一调用一次。
 //   所有判据只依赖 gid（工作组一致），满足 Vulkan "所有线程调用且参数一致" 的要求。
 uint hardRasterSelectCluster(uint slot, out ClusterRef ref, out SoftRasterClusterView view,
-                             out float3 translation)
+                             out NaniteInstanceBasis basis)
 {
     ref = (ClusterRef)0;
     view = (SoftRasterClusterView)0;
-    translation = float3(0.0, 0.0, 0.0);
+    basis = naniteInstanceBasisIdentity();
 
     uint visibleCount = u_VisibleClusterCount[0];
     if (slot >= visibleCount) return 0u;                    // 多派发的组（dispatch 按容量取整）
@@ -121,7 +121,11 @@ uint hardRasterSelectCluster(uint slot, out ClusterRef ref, out SoftRasterCluste
 
     InstanceObject instance = u_Instances[ref.instance];
     if (instance.indexCount == 0u) return 0u;               // 空实例：与剔除链的规则一致
-    translation = instance.ltw3.xyz;
+    // 【T8】完整实例基（旋转 + 缩放 + 平移）：只加平移会让旋转/非均匀缩放失效
+    basis.cx = instance.ltw0.xyz;
+    basis.cy = instance.ltw1.xyz;
+    basis.cz = instance.ltw2.xyz;
+    basis.t  = instance.ltw3.xyz;
 
     // ── 【任务 24】页解析（与软光栅两趟逐字相同的口径）──
     //   缺页的簇在软光栅两趟里已被跳过（没有颜色也没有深度）⇒ 硬光栅也必须跳过它，
@@ -146,7 +150,7 @@ uint hardRasterSelectCluster(uint slot, out ClusterRef ref, out SoftRasterCluste
 groupshared uint                  gsTriangleCount;
 groupshared ClusterRef            gsRef;
 groupshared SoftRasterClusterView gsView;
-groupshared float3                gsTranslation;
+groupshared NaniteInstanceBasis     gsBasis;
 
 [numthreads(128, 1, 1)]
 [outputtopology("triangle")]
@@ -186,18 +190,18 @@ void main(
     if (tid == 0u) {
         ClusterRef            ref0;
         SoftRasterClusterView view0;
-        float3                translation0;
-        gsTriangleCount = hardRasterSelectCluster(naniteRasterSlot(gid), ref0, view0, translation0);
+        NaniteInstanceBasis   basis0;
+        gsTriangleCount = hardRasterSelectCluster(naniteRasterSlot(gid), ref0, view0, basis0);
         gsRef           = ref0;
         gsView          = view0;
-        gsTranslation   = translation0;
+        gsBasis         = basis0;
     }
     GroupMemoryBarrierWithGroupSync();
 
     const uint                  triangleCount = gsTriangleCount;
     const ClusterRef            ref           = gsRef;
     const SoftRasterClusterView view          = gsView;
-    const float3                translation   = gsTranslation;
+    const NaniteInstanceBasis   basis         = gsBasis;
     NaniteCluster cluster = view.cluster;
 
     // 逐**角点**展开：三角形 `t` 用输出顶点 `3t / 3t+1 / 3t+2`。整个入口只调用这一次
@@ -235,7 +239,8 @@ void main(
         NaniteVertex v = u_Vertices[base + li];
         // 位置：簇内局部量化 + **本簇球心** + 网格最大范围（§14.19 硬约束①）+ 实例平移
         float3 meshPos = naniteDecodeVertexPosition(v, cluster, meshMaxExtent);
-        world[k] = meshPos + translation;
+        // 【T8】完整实例变换（3×3 + 平移）
+        world[k] = naniteApplyInstanceBasis(basis, meshPos);
         // 投影：与软光栅用**同一个** `softRasterProjectWorld`（4 次显式点积，不是矩阵乘法）
         // ⇒ 两条路径的顶点位置逐位同源，任务 22 的 A/B 相关系数才不会掉。
         clip[k] = softRasterProjectWorld(world[k]);

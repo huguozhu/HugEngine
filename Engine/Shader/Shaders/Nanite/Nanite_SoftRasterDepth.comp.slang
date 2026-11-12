@@ -57,7 +57,12 @@ void main(uint3 tid : SV_GroupThreadID, uint3 gid : SV_GroupID) {
 
     InstanceObject instance = u_Instances[ref.instance];
     if (instance.indexCount == 0u) return;          // 空实例：与剔除链的跳过规则一致
-    float3 translation = instance.ltw3.xyz;
+    // 【T8】完整实例基（旋转 + 缩放 + 平移），不再只取平移
+    NaniteInstanceBasis instanceBasis;
+    instanceBasis.cx = instance.ltw0.xyz;
+    instanceBasis.cy = instance.ltw1.xyz;
+    instanceBasis.cz = instance.ltw2.xyz;
+    instanceBasis.t  = instance.ltw3.xyz;
 
     // ── 【任务 24】页解析：取记录 + 三段基址（缺页 ⇒ 跳过、计数、上报请求）──
     // 【位置：必须在任何分流判据之前】这样"每个可见簇的页归属"只判定一次，且与
@@ -106,7 +111,7 @@ void main(uint3 tid : SV_GroupThreadID, uint3 gid : SV_GroupID) {
 
     // ── ③ 逐三角形：投影 → 2D 包围盒 → 重心坐标 → 原子深度键 ──
     for (uint triLocal = tid.x; triLocal < triangleCount; triLocal += 16u) {
-        SoftRasterTriangle tri = softRasterFetchTriangle(view, triLocal, translation);
+        SoftRasterTriangle tri = softRasterFetchTriangle(view, triLocal, instanceBasis);
         if (!tri.valid) {
             InterlockedAdd(u_Stats[kSoftStatDegenerate], 1u);
             continue;
