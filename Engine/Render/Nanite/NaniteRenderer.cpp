@@ -609,7 +609,20 @@ void NaniteRenderer::EnsureAssetUploaded(const MeshBatcher& batcher) {
         u32 materialBase = 0u;
         for (u32 i = 0u; i < m_Scene.GetAssetCount(); ++i) {
             const NaniteScene::NaniteAssetEntry* entry = m_Scene.GetAssetEntry(i);
-            if (entry == nullptr || entry->cpu.clusters.empty()) continue;
+            if (entry == nullptr) continue;
+            // 【顺序很重要】量化尺度 / 索引上界只看**头部**，不看 `cpu.clusters`：
+            //   `cpu` 在某些路径下会被裁（只留页池要用的段），此时按 `clusters.empty()`
+            //   提前 continue 会把 `maxExtent` 算成 0 ⇒ 顶点解码范围 0 ⇒ 全部塌到簇心、
+            //   光栅一个片元都不出（实测"实例可见、硬簇 22、硬像素 0、量化尺度 0.000"）。
+            {
+                const auto& hdr = entry->cpu.header;
+                const float ext[3] = { hdr.bboxMax[0] - hdr.bboxMin[0],
+                                       hdr.bboxMax[1] - hdr.bboxMin[1],
+                                       hdr.bboxMax[2] - hdr.bboxMin[2] };
+                maxExtent = std::max(maxExtent, std::max(ext[0], std::max(ext[1], ext[2])));
+                maxIndexCount = std::max(maxIndexCount, hdr.indexCount);
+            }
+            if (entry->cpu.clusters.empty()) continue;
             if (!m_Cull.AppendAssetBVH(entry->cpu.clusters, entry->cpu.lodOffsets,
                                        triangleBase, vertexBase, materialBase)) {
                 HE_CORE_ERROR("NaniteRenderer: 多资产 —— 资产 {} 的剔除数据注册失败", i);
@@ -618,13 +631,6 @@ void NaniteRenderer::EnsureAssetUploaded(const MeshBatcher& batcher) {
             triangleBase += (u32)entry->cpu.triangles.size();
             vertexBase   += (u32)entry->cpu.vertices.size();
             materialBase += (u32)entry->cpu.materials.size();
-            maxIndexCount = std::max(maxIndexCount, entry->cpu.header.indexCount);
-            // 【量化尺度】解析层不填 `stats`，这里从头部 bbox 现算（与打包器同一口径：最大轴长）。
-            const auto& hdr = entry->cpu.header;
-            const float ext[3] = { hdr.bboxMax[0] - hdr.bboxMin[0],
-                                   hdr.bboxMax[1] - hdr.bboxMin[1],
-                                   hdr.bboxMax[2] - hdr.bboxMin[2] };
-            maxExtent = std::max(maxExtent, std::max(ext[0], std::max(ext[1], ext[2])));
             ++cullAssets;
         }
         // 【T8】所有资产的剔除数据都注册完之后，再**一次性**建聚合 GPU 缓冲。

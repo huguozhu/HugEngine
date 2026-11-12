@@ -447,7 +447,8 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
         g.camera.GetCamera().farPlane  = GetFloat(cfg, "cam_far", 2000.0f);
 
         g.clustered = GetBool(cfg, "clustered", true);
-        g.transformOnly = GetBool(cfg, "nanite_transform_only", false);
+        // 【不要覆盖环境变量】场景加载阶段已按 `HE_NANITE_TRANSFORM_ONLY` 置过 true，这里只能"或"上去
+        g.transformOnly = g.transformOnly || GetBool(cfg, "nanite_transform_only", false);
         g.transformTest = GetBool(cfg, "nanite_transform_test", false);
         g.gpuCull   = GetBool(cfg, "gpu_cull", true);
         g.skyboxOn  = GetBool(cfg, "skybox", true);
@@ -482,6 +483,11 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
             const int limit = std::max(1, GetInt(cfg, "nanite_multi_asset_count", 8));
         g.multiAssetCount = (u32)limit;
             if ((int)files.size() > limit) files.resize((usize)limit);
+            // 【T8 诊断】只画变换验收件时**不注册 Sponza primitive**：多资产档的量化尺度取
+            //   各资产 bbox 最大轴的最大值，Sponza 是 3720、立方体是 2 ⇒ 立方体顶点会按 1860×
+            //   的错误尺度解码，直接飞出视锥（表现为"实例可见、簇也取到、但零片元"）。
+            //   清空后只剩立方体，量化尺度 = 2.0，可用于验证这条判断。
+            if (g.transformOnly) files.clear();
 
             u32 bound = 0u;
             for (const String& file : files) {
