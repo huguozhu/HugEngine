@@ -786,7 +786,7 @@ void NaniteCull::RecordCullPass(rhi::IRHICommandList* cmd) {
 
 void NaniteCull::SetCullChainFrame(const float4x4& viewProj, const float3& cameraPosition,
                                    u32 screenWidth, u32 screenHeight, float fovYDegrees,
-                                   u32 testInstanceCount, float lodThresholdPixels) {
+                                   u32 testInstanceCount, float lodThresholdPixels, bool lodEnabled) {
     // 【T8】真实实例表优先：多资产档下 `testInstanceCount` 仍是合成档的设置值，
     // 直接采用会让实例域变成 64（其中大量是空实例），日志与派发端口径都不对。
     m_TestInstanceCount = (m_RealInstanceCount > 0u)
@@ -804,6 +804,7 @@ void NaniteCull::SetCullChainFrame(const float4x4& viewProj, const float3& camer
     m_FrameScreenH     = screenHeight;
     m_FrameFocalPixels = NaniteClusterLODFocalPixels((float)screenHeight, fovYDegrees);
     m_FrameLODThreshold = (lodThresholdPixels > 0.0f) ? lodThresholdPixels : kNaniteLODThresholdPixels;
+    m_FrameLodEnabled = lodEnabled;
 
     // view-proj 的 4 个行（row 优先；`rows[r*4+c] = viewProj[c][r]`）——与 GPU 参数缓冲同一份比特。
     // 【为什么按行拆开】Slang 的 `float4x4` 行/列主序依赖编译选项（任务 14 已为 localToWorld 踩过），
@@ -1753,7 +1754,7 @@ void NaniteCull::RecordCullChainPass(rhi::IRHICommandList* cmd,
     m_ChainParams.screenW      = (float)m_FrameScreenW;
     m_ChainParams.screenH      = (float)m_FrameScreenH;
     m_ChainParams.hizMipCount  = m_FrameHiZMipCount;
-    m_ChainParams.lodEnabled   = (m_FrameFocalPixels > 0.0f) ? 1u : 0u;
+    m_ChainParams.lodEnabled   = (m_FrameLodEnabled && m_FrameFocalPixels > 0.0f) ? 1u : 0u;
     // 【任务 16】绘制容量（`misc.z`）：间接命令与绘制计数都按它设门 ⇒ 计数恒 ≤ 容量。
     m_ChainParams._pad1        = m_FrameDrawCapacity;
     // 【P0 修复】Hi-Z 采样 UV 的 y 翻转（`misc.w`）：负高度视口下 `v = 0.5 - 0.5*ndc.y` 才是

@@ -294,7 +294,8 @@ public:
     ///   它的 (1,1) 元素被视图旋转污染，反解出来的焦距在相机有俯仰/偏航时是错的。
     void SetCullChainFrame(const float4x4& viewProj, const float3& cameraPosition,
                            u32 screenWidth, u32 screenHeight, float fovYDegrees,
-                           u32 testInstanceCount, float lodThresholdPixels = kNaniteLODThresholdPixels);
+                           u32 testInstanceCount, float lodThresholdPixels = kNaniteLODThresholdPixels,
+                           bool lodEnabled = true);
 
     /// 录制 `Nanite_InstanceCull` pass：
     ///   ① 上传合成实例表 + 包围球（主机可见缓冲，与任务 3 同款）；
@@ -673,6 +674,8 @@ private:
     float m_FrameViewProjRows[16] = { 0.0f };
     float m_FrameFocalPixels  = 0.0f;   ///< 像素焦距（0 ⇒ 关闭 LOD 选择）
     float m_FrameLODThreshold = kNaniteLODThresholdPixels;
+    /// 【排查】本帧是否做 LOD 割（false ⇒ 所有过视锥/遮挡的簇都画）
+    bool  m_FrameLodEnabled = true;
     u32   m_FrameScreenW = 0u;          ///< 屏幕宽（Hi-Z 选层）
     u32   m_FrameScreenH = 0u;          ///< 屏幕高
     bool  m_FrameHiZRequested = false;  ///< 本帧调用方是否请求了 Hi-Z（cfg `nanite_hiz`）
