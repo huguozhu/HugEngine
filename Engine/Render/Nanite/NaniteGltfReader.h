@@ -60,6 +60,10 @@ struct NaniteGltfMaterial {
 struct NaniteGltfScene {
     std::vector<NaniteGltfPrimitive> primitives;
     std::vector<NaniteGltfMaterial>  materials;
+    /// 【T8 纹理回退】glTF 的 image URI 列表（下标 = `NaniteMaterialDesc::textureImageIndex`）。
+    /// 预处理工具用它把 baseColor 贴图的**平均色**烘进 `baseColorFactor`：光栅端暂时无法
+    /// 绑 bindless 纹理（写描述符数组会让驱动崩），至少不要画成纯白。
+    std::vector<std::string>         imageUris;
     std::string                      sourcePath;   ///< 读入的文件路径（诊断用）
     u64                              sourceHash = 0;  ///< 源几何 + 材质描述的 64 位哈希
 

@@ -10,6 +10,12 @@
 
 add_executable(MeshPreprocess
     main.cpp
+    StbImageImpl.cpp        # 【T8】baseColor 平均色烘焙用的 stb_image 实现单元
+)
+
+# 【T8 纹理回退】stb_image 是 header-only；实现只允许出现在一个 TU 里（见 StbImageImpl.cpp）
+target_include_directories(MeshPreprocess PRIVATE
+    "${CMAKE_SOURCE_DIR}/Engine/External/stb"
 )
 
 target_link_libraries(MeshPreprocess PRIVATE

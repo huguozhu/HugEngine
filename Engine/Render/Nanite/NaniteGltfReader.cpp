@@ -126,6 +126,13 @@ bool LoadNaniteGltfFile(const char* path, NaniteGltfScene& out, std::string* err
     NaniteGltfScene scene;
     scene.sourcePath = path;
 
+    // ── 图像 URI（供预处理工具取 baseColor 平均色；只记录外部文件，bufferView 内嵌图跳过）──
+    scene.imageUris.reserve((usize)data->images_count);
+    for (usize i = 0; i < data->images_count; ++i) {
+        const cgltf_image& img = data->images[i];
+        scene.imageUris.push_back((img.uri != nullptr) ? std::string(img.uri) : std::string());
+    }
+
     // ── 材质（下标与 glTF materials[] 一一对应，primitive 的 materialIndex 直接可用）──
     scene.materials.reserve((usize)data->materials_count);
     for (usize m = 0; m < data->materials_count; ++m) {

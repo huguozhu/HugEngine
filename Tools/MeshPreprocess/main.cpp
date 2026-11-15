@@ -24,6 +24,7 @@
 #include "Nanite/NaniteGltfReader.h"
 #include "Nanite/NaniteTypes.h"
 #include "Nanite/NaniteUpload.h"
+#include <stb_image.h>   // 【T8】baseColor 平均色烘焙
 
 #include <chrono>   // T7：基准测量
 #include <algorithm>
@@ -129,6 +130,24 @@ struct BuildUnit {
 };
 
 /// 把一组 primitive 拼成一个 BuildUnit（索引加 baseVertex；区间按三角形记，簇区间在构建后填）
+/// 【T8 纹理回退】读一张图、算平均色（直接对 sRGB 值取平均，目的只是"不要白模"）。
+/// 失败（文件缺失/内嵌图/不支持格式）返回 false，调用方保持 glTF 的因子色不变。
+bool AverageImageColor(const std::string& path, float outRgb[3]) {
+    int w = 0, h = 0, ch = 0;
+    stbi_uc* pixels = stbi_load(path.c_str(), &w, &h, &ch, 4);
+    if (pixels == nullptr || w <= 0 || h <= 0) return false;
+    double sr = 0.0, sg = 0.0, sb = 0.0;
+    for (int i = 0; i < w * h; ++i) {
+        const stbi_uc* px = pixels + (usize)i * 4u;
+        if (px[3] < 8u) continue;   // 全透明像素不参与平均
+        sr += px[0] / 255.0; sg += px[1] / 255.0; sb += px[2] / 255.0;
+    }
+    stbi_image_free(pixels);
+    const double n = (double)w * (double)h;
+    outRgb[0] = (float)(sr / n); outRgb[1] = (float)(sg / n); outRgb[2] = (float)(sb / n);
+    return true;
+}
+
 BuildUnit MergePrimitives(const std::vector<NaniteGltfPrimitive*>& primitives, const std::string& name) {
     BuildUnit unit;
     unit.name = name;
@@ -213,8 +232,8 @@ int main(int argc, char** argv) {
     const std::string stem = std::filesystem::path(options.inputPath).stem().string();
 
     if (options.verbose) {
-        std::printf("glTF: %s\n  primitive=%zu material=%zu 三角形=%llu 源哈希=0x%016llX\n",
-                    options.inputPath.c_str(), scene.primitives.size(), scene.materials.size(),
+        std::printf("glTF: %s\n  image=%zu  primitive=%zu material=%zu 三角形=%llu 源哈希=0x%016llX\n",
+                    options.inputPath.c_str(), scene.imageUris.size(), scene.primitives.size(), scene.materials.size(),
                     (unsigned long long)scene.TotalTriangleCount(),
                     (unsigned long long)scene.sourceHash);
     }
@@ -259,6 +278,7 @@ int main(int argc, char** argv) {
         //   都是 0、材质段为 0 条，光栅端只能走中性回退（实测 `回退 == 硬像素`）。
         //   每个 primitive 一条材质记录，`materialIndex` 就是它在 `meshes[]` 里的下标；
         //   纹理位暂留 0（运行时纹理绑定属 T25），因子照实取 glTF 的 pbr 值。
+        u32 bakedAlbedoCount = 0u;   // 【T8】烘到平均色的材质数
         std::vector<NaniteMaterialRecord> materials;
         std::vector<NaniteSourceMeshRange> meshes;
         materials.reserve(unit.ranges.size());
@@ -271,6 +291,20 @@ int main(int argc, char** argv) {
                 for (int c = 0; c < 4; ++c) rec.baseColorFactor[c] = d.baseColorFactor[c];
                 rec.metallicFactor  = d.metallicFactor;
                 rec.roughnessFactor = d.roughnessFactor;
+                // 【T8 纹理回退】把 baseColor 贴图的平均色乘进因子（没有贴图/读失败则不变）
+                const u32 texIdx = d.textureImageIndex[0];   // 槽位 0 = baseColor
+                if (texIdx < scene.imageUris.size() && !scene.imageUris[texIdx].empty()) {
+                    const std::string imgPath =
+                        (std::filesystem::path(options.inputPath).parent_path() /
+                         scene.imageUris[texIdx]).string();
+                    float avg[3] = { 1.0f, 1.0f, 1.0f };
+                    if (AverageImageColor(imgPath, avg)) {
+                        rec.baseColorFactor[0] *= avg[0];
+                        rec.baseColorFactor[1] *= avg[1];
+                        rec.baseColorFactor[2] *= avg[2];
+                        ++bakedAlbedoCount;
+                    }
+                }
             }
             materials.push_back(rec);
 
@@ -289,6 +323,10 @@ int main(int argc, char** argv) {
             continue;
         }
         FinalizeRanges(unit, (u32)asset.clusters.size());
+        if (bakedAlbedoCount > 0u) {
+            std::printf("  %s: %u 个材质的 baseColor 用贴图平均色（无纹理绑定时的回退）\n",
+                        unit.name.c_str(), bakedAlbedoCount);
+        }
 
         // 扩展段：材质描述 + 簇归属 + Fallback 低模
         NaniteFileWriteOptions writeOptions;
