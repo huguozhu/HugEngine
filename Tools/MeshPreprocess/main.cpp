@@ -323,6 +323,21 @@ int main(int argc, char** argv) {
             continue;
         }
         FinalizeRanges(unit, (u32)asset.clusters.size());
+        // 【T8 排查】逐级三角形数：级 0 必须等于输入网格三角形数（否则 DAG 层级是"切分"而非"简化"）
+        if (!asset.lodOffsets.empty()) {
+            std::string per;
+            for (usize L = 0; L + 1u < asset.lodOffsets.size() || L == 0u; ++L) {
+                const u32 begin = asset.lodOffsets[L];
+                const u32 end = (L + 1u < asset.lodOffsets.size()) ? asset.lodOffsets[L + 1u]
+                                                                   : (u32)asset.clusters.size();
+                u64 tri = 0ull;
+                for (u32 ci = begin; ci < end; ++ci) tri += asset.clusters[ci].triangleCount;
+                per += std::to_string(tri);
+                if (L + 2u < asset.lodOffsets.size()) per += ",";
+            }
+            std::printf("  逐级三角形=[%s]（输入网格 %zu）\n", per.c_str(),
+                        (size_t)(unit.indices.size() / 3u));
+        }
         if (bakedAlbedoCount > 0u) {
             std::printf("  %s: %u 个材质的 baseColor 用贴图平均色（无纹理绑定时的回退）\n",
                         unit.name.c_str(), bakedAlbedoCount);
