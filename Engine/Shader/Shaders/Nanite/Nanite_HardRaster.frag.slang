@@ -97,6 +97,15 @@ HardRasterFragOut fragmentMain(HardRasterFragIn input) {
         matMetallic = 0.0;
         matRoughness = 1.0;
     }
+    // debugView == 5：**直接把数组纹理采样结果当 albedo**（不做任何材质/光照调制），
+    //   用来判定"采样到底有没有走、采到的是不是白色"。
+    if (debugView == 5u) {
+        uint layer = u_Materials[min(input.materialID, materialCount - 1u)].bindlessTextureBase;
+        matAlbedo   = u_MatArray.SampleLevel(u_MatArraySamp, float3(input.uv, (float)layer), 0.0).rgb;
+        matMetallic = 0.0;
+        matRoughness = 1.0;
+    }
+
     // debugView == 3：按簇号着色（相邻簇颜色差别明显）——用来判断"孔洞区域是没有任何簇，
     //   还是有簇但三角形/索引没覆盖到"。
     if (debugView == 3u) {
