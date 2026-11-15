@@ -632,7 +632,10 @@ bool BuildNaniteClusterDAG(std::span<const float> positions,
             //   `parentError × focal > threshold × distance` 恒成立 ⇒ 一律选**根簇**
             //   （实测：8287 簇只画 38 个、巨大三角形、519 万像素过绘制、FPS 2）。
             //   改成 10% 上限：每级只做"温和的一步"，误差随级平滑增长，LOD 割才落在细级。
-            targetIndexCount, /*target_error=*/1.0f, /*options=*/0u, &relativeError);
+            // 【2% 上限】此前 1.0（=100%）允许 meshopt 提前停下并报出巨大相对误差
+            //   （Sponza 实测某级 ~988 单位）⇒ LOD 割瞬间跳到根、只画 200 多簇。
+            //   收到 2% 后每级只做"温和一步"，误差量级与几何尺度相符。
+            targetIndexCount, /*target_error=*/0.02f, /*options=*/0u, &relativeError);
 
         // ── 终止条件②：没能减少（或返回非法个数）⇒ 停，绝不空转 ──
         if (simplifiedCount == 0u || (simplifiedCount % kIndicesPerTriangle) != 0u ||
@@ -720,21 +723,35 @@ bool BuildNaniteClusterDAG(std::span<const float> positions,
     }
 
     // ── maxParentLODError：级 L → L+1 的简化绝对误差；报 0 时退几何兜底；根写 0 ──
+    std::vector<float> levelErrorMax(levelCount, 0.0f);   // 【单调】每级已达到的最大误差
     for (usize cluster = 0; cluster < totalClusters; ++cluster) {
         const u32 level = result.clusterLevel[cluster];
         float error = 0.0f;
         if ((usize)level + 1u < levelCount) {
-            // 【T8 修复】优先用**几何兜底误差**（父簇中心到子簇球面的距离上界），
-            //   而不是 meshopt 的 `relativeError × scale`：后者在"按目标面数减半"的
-            //   调用下常常只有极小值 ⇒ `parentError × focal` 永远打不过阈值 ⇒
-            //   LOD 割一路落到叶子（实测：调阈值 1/8/32 都恒定 1980 个簇，
-            //   过绘制 780 万像素、FPS 5）。兜底误差是真实的空间上界，随级单调增长，
-            //   正好满足 DAG 割"误差沿级单调"的前提。
-            error = levelFallbackError[level];
-            if (!(error > 0.0f) && level < stepErrors.size()) error = stepErrors[level];
+            // 【T8 第 7 轮】误差来源改回 **meshopt 实测误差**，并用几何兜底保证"沿级单调且非零"：
+            //   · 纯几何兜底（父簇中心到子簇球面距离）量级过大 ⇒ 割一直落到叶子、
+            //     可见簇只有 ~840/3465（实测），屏幕出现大片孔洞；
+            //   · 纯 meshopt 相对误差又常常为 0（按目标面数减半时几乎不报错）⇒ 割恒在根。
+            //   取两者里"非零且较小的一步"更接近真实 LOD 误差：优先 stepErrors，
+            //   再与上一级的误差取 max 保证单调（DAG 割的前提）。
+            float step = (level < stepErrors.size()) ? stepErrors[level] : 0.0f;
+            // 【不要用几何兜底】它是"父簇中心到子簇球面距离"的量级（sponza 实测 ~988），
+            //   比 meshopt 实测误差（0.5/1.9/6.2）大两个数量级 ⇒ 割瞬间跳到根、只画 215 簇。
+            //   meshopt 没报误差（常为 0）时按"上一级 × 2"递推，保持单调且量级连续。
+            if (!(step > 0.0f)) {
+                step = (level > 0u && levelErrorMax[level - 1u] > 0.0f)
+                           ? levelErrorMax[level - 1u] * 2.0f
+                           : 1.0e-2f;
+            }
+            error = step;
         }
-        result.clusters[cluster].maxParentLODError = error;
-        result.stats.maxLODError = std::max(result.stats.maxLODError, error);
+        // 【单调】沿级非递减：低级的误差不得大于高级（否则割的行为不单调）
+        float& levelMax = levelErrorMax[level];
+        if (error > levelMax) levelMax = error;
+        // 【跨级单调】级 L 的误差不得小于级 L-1（否则割在两级之间不单调）
+        if (level > 0u && levelErrorMax[level - 1u] > levelMax) levelMax = levelErrorMax[level - 1u];
+        result.clusters[cluster].maxParentLODError = levelMax;
+        result.stats.maxLODError = std::max(result.stats.maxLODError, levelMax);
     }
 
     // ── 每级引用到的不同唯一内容数（级视图的最后一个读数）──

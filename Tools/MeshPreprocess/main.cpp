@@ -337,6 +337,17 @@ int main(int argc, char** argv) {
             }
             std::printf("  逐级三角形=[%s]（输入网格 %zu）\n", per.c_str(),
                         (size_t)(unit.indices.size() / 3u));
+            // 【T8】逐级误差（maxParentLODError 的级内最大值）：割的判据靠它，必须沿级单调
+            std::string errPer;
+            for (usize L = 0; L + 1u < asset.lodOffsets.size(); ++L) {
+                const u32 begin = asset.lodOffsets[L];
+                const u32 end = asset.lodOffsets[L + 1u];
+                float e = 0.0f;
+                for (u32 ci = begin; ci < end; ++ci) e = std::max(e, asset.clusters[ci].maxParentLODError);
+                errPer += std::to_string(e);
+                if (L + 2u < asset.lodOffsets.size()) errPer += ",";
+            }
+            std::printf("  逐级 LOD 误差=[%s]\n", errPer.c_str());
         }
         if (bakedAlbedoCount > 0u) {
             std::printf("  %s: %u 个材质的 baseColor 用贴图平均色（无纹理绑定时的回退）\n",
