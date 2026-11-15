@@ -297,6 +297,9 @@ public:
     ///   （`focalPixels = 0.5 × screenH / tan(fovY/2)`，见 `NaniteClusterLODFocalPixels`）。
     ///   取"相机 fov + 屏幕高度"而不是"反解 viewProj 的 m11"：view-proj 是 `P×V`，
     ///   它的 (1,1) 元素被视图旋转污染，反解出来的焦距在相机有俯仰/偏航时是错的。
+    /// 【T8 排查】实例变换档（见 cfg `nanite_instance_identity`）
+    void SetInstanceIdentity(bool identity) { m_InstanceIdentity = identity; }
+
     void SetCullChainFrame(const float4x4& viewProj, const float3& cameraPosition,
                            u32 screenWidth, u32 screenHeight, float fovYDegrees,
                            u32 testInstanceCount, float lodThresholdPixels = kNaniteLODThresholdPixels,
@@ -683,6 +686,8 @@ private:
     bool  m_FrameLodEnabled = true;
     /// 【T8 排查】LOD 割模式：0=正常，1=不筛（全画），2=只选叶子层
     u32   m_FrameLodMode = 0u;
+    /// 【T8 排查】true = 实例用单位变换（资产已在世界空间烘焙，见 cfg `nanite_instance_identity`）
+    bool  m_InstanceIdentity = false;
     u32   m_FrameScreenW = 0u;          ///< 屏幕宽（Hi-Z 选层）
     u32   m_FrameScreenH = 0u;          ///< 屏幕高
     bool  m_FrameHiZRequested = false;  ///< 本帧调用方是否请求了 Hi-Z（cfg `nanite_hiz`）

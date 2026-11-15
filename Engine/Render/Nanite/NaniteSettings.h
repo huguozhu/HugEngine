@@ -263,6 +263,12 @@ struct NaniteSettings {
     // 0 = 正常判据；1 = **不筛**（所有过视锥/遮挡的簇都画 = 覆盖率上界）；
     // 2 = **只选叶子层**（L0）。用来区分"割判据不闭合"与"几何数据缺三角形"。
     u32 lodMode = 0u;
+    // ── 【T8 排查】实例变换档（cfg `nanite_instance_identity`，默认 0）──
+    // 1 = 实例用**单位矩阵**（只保留平移）。
+    // 【为什么要这一档】`--granularity=mesh` 的离线资产是按 **glTF 世界空间**烘焙的
+    //   （节点变换已烘进顶点）；若运行时再乘一次对象的 `worldMatrix`，几何会被**变换两次**
+    //   ⇒ 画面表现为"建筑缩小/偏移、只剩天空"。
+    bool instanceIdentity = false;
 
     // ── T8：多资产模式（cfg 键 `nanite_multi_asset`，默认 0）──
     // 1 ⇒ 场景资产由样例逐份 `NaniteScene::RegisterAsset` 注册，渲染器**不再**上传

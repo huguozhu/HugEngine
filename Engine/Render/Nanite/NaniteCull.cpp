@@ -963,8 +963,17 @@ u32 NaniteCull::SetInstancesFromSnapshot(const FrameSceneSnapshot& snapshot,
 
         NaniteInstanceGpuObject& instance = m_TestInstances[written];
         instance = NaniteInstanceGpuObject{};
-        std::memcpy(instance.localToWorld, &item.object.worldMatrix[0][0],
-                    sizeof(instance.localToWorld));
+        if (m_InstanceIdentity) {
+            // 【T8 排查档】资产已在世界空间烘焙 ⇒ 只保留对象的平移列，旋转/缩放一律不乘
+            float identity[16] = { 1.0f, 0.0f, 0.0f, 0.0f,
+                                   0.0f, 1.0f, 0.0f, 0.0f,
+                                   0.0f, 0.0f, 1.0f, 0.0f,
+                                   0.0f, 0.0f, 0.0f, 1.0f };
+            std::memcpy(instance.localToWorld, identity, sizeof(identity));
+        } else {
+            std::memcpy(instance.localToWorld, &item.object.worldMatrix[0][0],
+                        sizeof(instance.localToWorld));
+        }
         for (u32 axis = 0u; axis < 3u; ++axis) {
             instance.boundsMin[axis] = item.object.boundsMin[axis];
             instance.boundsMax[axis] = item.object.boundsMax[axis];

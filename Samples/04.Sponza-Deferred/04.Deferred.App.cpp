@@ -695,6 +695,7 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
             naniteSettings.lodThresholdPixels = (float)GetInt(cfg, "nanite_lod_threshold", (int)naniteSettings.lodThresholdPixels);
             naniteSettings.lodEnabled = GetBool(cfg, "nanite_lod_enabled", naniteSettings.lodEnabled);
             naniteSettings.lodMode = (u32)GetInt(cfg, "nanite_lod_mode", (int)naniteSettings.lodMode);
+            naniteSettings.instanceIdentity = GetBool(cfg, "nanite_instance_identity", naniteSettings.instanceIdentity);
             naniteSettings.debugView = (u32)GetInt(cfg, "nanite_debug_view", (int)naniteSettings.debugView);
             naniteSettings.hardRasterRefBudget = (u32)GetInt(cfg, "nanite_hard_raster_budget", (int)naniteSettings.hardRasterRefBudget);
             // 【T8】合成实例数：硬光栅的派发上界 = 簇数 × 实例域，太大就会被预算判为超限

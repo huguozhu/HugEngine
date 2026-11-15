@@ -181,6 +181,7 @@ void NaniteRenderer::AddPasses(RenderGraph& rg, const NaniteGBufferHandles& gb,
     // 【T8】帧边界的 bindless 落地已停用：它会写全量纹理数组并在驱动内崩溃。
     //   保留调用点与接口，等材质绑定方案改为"按需小批量"后再启用。
 
+    m_Cull.SetInstanceIdentity(m_Settings.instanceIdentity);
     m_Cull.SetCullChainFrame(camera.GetViewProjMatrix(), camera.position,
                              m_Width, m_Height, camera.fov,
                              m_Settings.instanceTestCount,
