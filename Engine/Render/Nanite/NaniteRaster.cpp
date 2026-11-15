@@ -1689,6 +1689,13 @@ void NaniteRaster::RecordHardRasterPass(rhi::IRHICommandList* cmd,
     rhi::IRHIBuffer* clusterSrc  = streamOn ? asset.stream.poolClusters  : asset.clusters;
     rhi::IRHIBuffer* vertexSrc   = streamOn ? asset.stream.poolVertices  : asset.vertices;
     rhi::IRHIBuffer* triangleSrc = streamOn ? asset.stream.poolTriangles : asset.indices;
+    // 【T8 纹理】硬光栅集合是懒建的（首帧才创建）⇒ 数组纹理必须每帧补绑，否则采样恒为 0
+    if (m_MatArrayTex != nullptr && m_MatArraySamp != nullptr) {
+        m_Device->UpdateDescriptorSet(m_HardRasterSet, 23, rhi::DescriptorType::SampledImage,
+                                      m_MatArrayTex, m_MatArraySamp);
+        m_Device->UpdateDescriptorSet(m_HardRasterSet, 24, rhi::DescriptorType::Sampler,
+                                      m_MatArrayTex, m_MatArraySamp);
+    }
     m_Device->UpdateDescriptorSet(m_HardRasterSet, 0, rhi::DescriptorType::StorageBuffer, clusterSrc);
     m_Device->UpdateDescriptorSet(m_HardRasterSet, 1, rhi::DescriptorType::StorageBuffer, vertexSrc);
     m_Device->UpdateDescriptorSet(m_HardRasterSet, 2, rhi::DescriptorType::StorageBuffer, triangleSrc);
@@ -2078,6 +2085,8 @@ void NaniteRaster::LogDebugViewReadback(u32 visible) {
 
 void NaniteRaster::SetMaterialTextureArray(rhi::IRHITexture* array, rhi::IRHISampler* sampler) {
     if (!m_Device || array == nullptr || sampler == nullptr) return;
+    m_MatArrayTex = array;
+    m_MatArraySamp = sampler;
     for (rhi::DescriptorSetHandle set : { m_SoftDepthSet, m_SoftColorSet, m_HardRasterSet }) {
         if (set == rhi::kInvalidSet) continue;
         m_Device->UpdateDescriptorSet(set, 23u, rhi::DescriptorType::SampledImage, array, sampler);

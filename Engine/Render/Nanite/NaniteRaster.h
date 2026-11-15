@@ -588,6 +588,9 @@ private:
     /// 【容量】与深度键**共用** `m_DepthKeyPixels`（两者永远同生共死、尺寸逐位相同），
     ///   不另开一个容量字段 —— 避免出现"两个容量字段互相不一致"这种可以避免的状态。
     rhi::RHIBufferHandle m_WinnerID{};   // A-3
+    /// 【T8 纹理】材质数组纹理（硬光栅集合是懒建的 ⇒ 每帧绑定一次）
+    rhi::IRHITexture* m_MatArrayTex = nullptr;
+    rhi::IRHISampler* m_MatArraySamp = nullptr;
 
     /// 读数缓冲（扁平 u32，`kNaniteSoftStatsCapacity` 条）+ 每帧清零用的常驻 0 源
     rhi::RHIBufferHandle m_SoftStats{};   // A-3
