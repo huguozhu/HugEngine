@@ -173,7 +173,9 @@ struct App::Impl {
             while (maxDim > 1) { maxDim >>= 1; ++mipLevels; }
 
             rhi::TextureDesc td;
-            td.format      = rhi::Format::RGBA8_UNORM;
+            // 【T8 修复】贴图是 **sRGB** 编码的（标准路径的纹理按 sRGB 采样会自动解码到线性）；
+            //   这里若用 UNORM，颜色会被当成已经是线性值 ⇒ albedo 整体偏亮（实测画面发白）。
+            td.format      = rhi::Format::RGBA8_SRGB;
             td.width       = static_cast<u32>(w);
             td.height      = static_cast<u32>(h);
             td.mipLevels   = mipLevels;

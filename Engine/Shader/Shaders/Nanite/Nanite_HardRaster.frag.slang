@@ -152,7 +152,9 @@ HardRasterFragOut fragmentMain(HardRasterFragIn input) {
     }
     // MRT2：Nanite 几何没有自发光 ⇒ 常规档写 0（避免残留别的 pass 写入的值）；
     // albedoDebug = 2/6 时改写调试色，得到**与光照无关**的覆盖/定位视图。
-    float4 emissiveOut = float4(0.0, 0.0, 0.0, 0.0);
+    // 【T8 修复】MRT2 的 alpha 是 **AO**（GBuffer 清屏值 = 1）。此前写 0 会把 AO 抹成 0，
+    //   光照端按 AO 调制的项因此整体失真。Nanite 几何没有 AO 贴图 ⇒ 写 1（不遮挡）。
+    float4 emissiveOut = float4(0.0, 0.0, 0.0, 1.0);
     if (albedoDebug == 8u) {
         // 【T8 自检】用片段自身的 worldPos 反算 NDC 并编码成颜色：
         //   R = 0.5 + 0.5*ndc.x（左→右递增），G = 0.5 + 0.5*ndc.y（下→上递增）。
@@ -167,9 +169,9 @@ HardRasterFragOut fragmentMain(HardRasterFragIn input) {
     } else if (albedoDebug == 9u) {
         // 【T8 纹理自检】把材质数组的采样结果直接写进 emissive（绕过光照），
         //   UV 与材质层号都走与正常渲染完全相同的代码路径。
-        uint layer9 = u_Materials[min(input.materialID, materialCount - 1u)].bindlessTextureBase;
-        emissiveOut = float4(u_MatArray.SampleLevel(u_MatArraySamp,
-                                                   float3(input.uv, (float)layer9), 0.0).rgb, 1.0);
+        // 【T8 自检】直接输出**最终材质 albedo**（= baseColorFactor × 贴图采样），绕过光照：
+        //   用来判断"发白"是 albedo 本身白，还是光照/曝光的问题。
+        emissiveOut = float4(matAlbedo, 1.0);
         dbgAlbedo = float4(0.0, 0.0, 0.0, 0.0);
     } else if (albedoDebug == 2u) {
         emissiveOut = float4(0.0, 0.6, 0.0, 0.0);

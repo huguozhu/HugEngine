@@ -934,6 +934,12 @@ void NaniteRenderer::EnsureAssetUploaded(const MeshBatcher& batcher) {
             }
             HE_CORE_INFO("NaniteRenderer: 数组档写入层号 {} 条（材质共 {} 条）", (u32)n,
                          (u32)offlineAsset.materials.size());
+            HE_CORE_INFO("NaniteRenderer: 材质[0] baseColor=({:.3f},{:.3f},{:.3f}) metallic={:.3f} roughness={:.3f}",
+                         offlineAsset.materials[0].baseColorFactor[0],
+                         offlineAsset.materials[0].baseColorFactor[1],
+                         offlineAsset.materials[0].baseColorFactor[2],
+                         offlineAsset.materials[0].metallicFactor,
+                         offlineAsset.materials[0].roughnessFactor);
             HE_CORE_INFO("NaniteRenderer: 材质[0] mask=0x{:X} base={}（层号应 < {})",
                          offlineAsset.materials[0].textureMask,
                          offlineAsset.materials[0].bindlessTextureBase, (u32)m_MatLayers.size());

@@ -281,7 +281,13 @@ bool softRasterEvaluateMaterial(uint materialIndex, float2 uv,
     if (matArrayEnabled != 0u && (material.textureMask & NANITE_TEXMASK_BASECOLOR) != 0u) {
         outAlbedo *= u_MatArray.SampleLevel(u_MatArraySamp,
                                            float3(uv, (float)material.bindlessTextureBase), 0.0).rgb;
-        return true;   // 数组档只提供 baseColor（MR 仍按因子近似）
+        // 【T8 修复】数组档只带 baseColor，没有 MetallicRoughness 贴图：
+        //   材质段里的 `metallicFactor` 按 glTF 规范缺省是 1.0 ⇒ 全金属 + 镜面反射天空
+        //   ⇒ 画面整体过曝发白（实测 baseColor=(0.079,…) metallic=1 roughness=1 时最明显）。
+        //   没有 MR 贴图时按"非金属 + 较粗糙"处理，石头/灰泥才不会被当成镜子。
+        metallic  = 0.0;
+        roughness = max(material.roughnessFactor, 0.55);
+        return true;
     }
     if ((material.textureMask & NANITE_TEXMASK_BASECOLOR) != 0u) {
         uint slot = material.bindlessTextureBase + NANITE_TEXSLOT_BASECOLOR;
