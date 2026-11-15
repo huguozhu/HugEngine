@@ -155,7 +155,11 @@ HardRasterFragOut fragmentMain(HardRasterFragIn input) {
     // 【T8 修复】MRT2 的 alpha 是 **AO**（GBuffer 清屏值 = 1）。此前写 0 会把 AO 抹成 0，
     //   光照端按 AO 调制的项因此整体失真。Nanite 几何没有 AO 贴图 ⇒ 写 1（不遮挡）。
     float4 emissiveOut = float4(0.0, 0.0, 0.0, 1.0);
-    if (albedoDebug == 8u) {
+    if (albedoDebug == 4u) {
+        // 法线可视化（绕过光照）：正确的法线应当随表面朝向呈现明显颜色分区
+        emissiveOut = float4(normal * 0.5 + 0.5, 1.0);
+        dbgAlbedo = float4(0.0, 0.0, 0.0, 0.0);
+    } else if (albedoDebug == 8u) {
         // 【T8 自检】用片段自身的 worldPos 反算 NDC 并编码成颜色：
         //   R = 0.5 + 0.5*ndc.x（左→右递增），G = 0.5 + 0.5*ndc.y（下→上递增）。
         //   与"像素在屏幕上的实际位置"逐点对照，即可判定投影是否一致。
