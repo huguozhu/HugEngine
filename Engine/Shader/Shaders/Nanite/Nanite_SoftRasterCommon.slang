@@ -250,6 +250,7 @@ static uint softRasterSizeBucket(uint triangleCount) {
     uint   assetClusterCount; // 偏移 108：资产的簇出现总数（页映射的索引空间上界）
     uint   debugView;         // 偏移 112：【T8 排查】1 = 品红平涂（几何孔洞判定）
     uint   matArrayEnabled;   // 偏移 116：1 = 从 Texture2DArray 采样材质（binding 23/24）
+    uint   debugCluster;      // 偏移 120：debugView=6 时涂红的簇号
 };
 
 // ── 【任务 19】按**资产材质段** + bindless 纹理算一个像素的 albedo/metallic/roughness ──

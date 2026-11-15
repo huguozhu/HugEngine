@@ -97,6 +97,15 @@ HardRasterFragOut fragmentMain(HardRasterFragIn input) {
         matMetallic = 0.0;
         matRoughness = 1.0;
     }
+    // debugView == 6：只把 **0 号簇** 涂成红色、其余涂黑 —— 用来把"这一簇到底画在屏幕哪里"
+    //   与 CPU 侧同一个簇中心的投影结果对照（判定位移/缩放/镜像）。
+    if (debugView == 6u) {
+        matAlbedo   = (input.clusterIndex == debugCluster) ? float3(1.0, 0.0, 0.0)
+                                                              : float3(0.0, 0.0, 0.0);
+        matMetallic = 0.0;
+        matRoughness = 1.0;
+    }
+
     // debugView == 5：**直接把数组纹理采样结果当 albedo**（不做任何材质/光照调制），
     //   用来判定"采样到底有没有走、采到的是不是白色"。
     if (debugView == 5u) {

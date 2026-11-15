@@ -207,6 +207,53 @@ void NaniteRenderer::AddPasses(RenderGraph& rg, const NaniteGBufferHandles& gb,
         m_SoftParams.meshMaxExtent = m_MeshMaxExtent;
     m_SoftParams.debugView     = m_Settings.debugView;
     m_SoftParams.matArrayEnabled = (m_MatArray != nullptr) ? 1u : 0u;
+    // 【T8 排查】CPU 侧把 0 号簇的中心投影到屏幕并打印（与 debugView=6 的实拍像素对照）
+    if (m_Settings.debugView == 6u && m_Scene.HasAssetCPUCopy()) {
+        static bool s_Logged = false;
+        if (!s_Logged) {
+            s_Logged = true;
+            const auto& asset = m_Scene.GetAssetCPUCopy();
+            if (!asset.clusters.empty()) {
+                const float cx = asset.clusters[0].boundsCenterRadius[0];
+                const float cy = asset.clusters[0].boundsCenterRadius[1];
+                const float cz = asset.clusters[0].boundsCenterRadius[2];
+                const float* vp = m_SoftParams.vpRows;
+                const float hp[4] = { cx, cy, cz, 1.0f };
+                const float clipX = vp[0]*hp[0] + vp[1]*hp[1] + vp[2]*hp[2] + vp[3]*hp[3];
+                const float clipY = vp[4]*hp[0] + vp[5]*hp[1] + vp[6]*hp[2] + vp[7]*hp[3];
+                const float clipW = vp[12]*hp[0] + vp[13]*hp[1] + vp[14]*hp[2] + vp[15]*hp[3];
+                // 【挑一个"确实在视锥里"的簇】0 号簇在这台机位可能落在相机背面，那样没法对照。
+                //   这里从头扫，取第一个 w>0.1 且 NDC 在 [-1,1] 内的簇，把它作为涂红目标。
+                u32 picked = 0xFFFFFFFFu;
+                float pickedPx = 0.0f, pickedPy = 0.0f, pickedW = 0.0f;
+                for (u32 ci = 0; ci < (u32)asset.clusters.size(); ++ci) {
+                    const float* br = asset.clusters[ci].boundsCenterRadius;
+                    const float q[4] = { br[0], br[1], br[2], 1.0f };
+                    const float wx = vp[0]*q[0] + vp[1]*q[1] + vp[2]*q[2] + vp[3]*q[3];
+                    const float wy = vp[4]*q[0] + vp[5]*q[1] + vp[6]*q[2] + vp[7]*q[3];
+                    const float ww = vp[12]*q[0] + vp[13]*q[1] + vp[14]*q[2] + vp[15]*q[3];
+                    if (ww <= 0.1f) continue;
+                    const float nx = wx / ww, ny = wy / ww;
+                    if (nx < -0.9f || nx > 0.9f || ny < -0.9f || ny > 0.9f) continue;
+                    picked  = ci;
+                    pickedPx = (0.5f + 0.5f * nx) * (float)m_Width;
+                    pickedPy = (0.5f - 0.5f * ny) * (float)m_Height;
+                    pickedW  = ww;
+                    break;
+                }
+                m_SoftParams.debugCluster = (picked != 0xFFFFFFFFu) ? picked : 0u;
+                if (picked != 0xFFFFFFFFu) {
+                    HE_CORE_INFO("[Nanite] CPU 投影：{} 号簇中心=({:.1f},{:.1f},{:.1f}) → 像素=({:.1f},{:.1f}) w={:.1f}",
+                                 picked, asset.clusters[picked].boundsCenterRadius[0],
+                                 asset.clusters[picked].boundsCenterRadius[1],
+                                 asset.clusters[picked].boundsCenterRadius[2],
+                                 pickedPx, pickedPy, pickedW);
+                } else {
+                    HE_CORE_INFO("[Nanite] CPU 投影：没有落在视锥内的簇中心（对照不可用）");
+                }
+            }
+        }
+    }
     {
         static bool s_Logged = false;
         if (!s_Logged && m_MatArray != nullptr) {
