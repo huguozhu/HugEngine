@@ -236,9 +236,11 @@ void NaniteRenderer::AddPasses(RenderGraph& rg, const NaniteGBufferHandles& gb,
                 const float clipW = vp[12]*hp[0] + vp[13]*hp[1] + vp[14]*hp[2] + vp[15]*hp[3];
                 // 【挑一个"确实在视锥里"的簇】0 号簇在这台机位可能落在相机背面，那样没法对照。
                 //   这里从头扫，取第一个 w>0.1 且 NDC 在 [-1,1] 内的簇，把它作为涂红目标。
-                u32 picked = 0xFFFFFFFFu;
+                // 【T8 排查】优先用上一帧从**可见列表**里挑出的簇（保证它真的被画）；
+                //   只有在没有候选时才退回全表扫描。
+                u32 picked = m_DebugClusterCandidate;
                 float pickedPx = 0.0f, pickedPy = 0.0f, pickedW = 0.0f;
-                for (u32 ci = 0; ci < (u32)asset.clusters.size(); ++ci) {
+                for (u32 ci = 0; picked == 0xFFFFFFFFu && ci < (u32)asset.clusters.size(); ++ci) {
                     const float* br = asset.clusters[ci].boundsCenterRadius;
                     const float q[4] = { br[0], br[1], br[2], 1.0f };
                     const float wx = vp[0]*q[0] + vp[1]*q[1] + vp[2]*q[2] + vp[3]*q[3];
@@ -250,7 +252,9 @@ void NaniteRenderer::AddPasses(RenderGraph& rg, const NaniteGBufferHandles& gb,
                     //   否则"涂红的簇被 UI 盖住"会让人误以为没画。
                     const float sxTest = (0.5f + 0.5f * nx) * (float)m_Width;
                     const float syTest = (0.5f - 0.5f * ny) * (float)m_Height;
-                    if (sxTest < 600.0f || syTest < 30.0f || syTest > (float)m_Height - 40.0f) continue;
+                    // 取屏幕中右部（避开左半屏的 UI 面板），保证涂红的簇一定可见
+                    if (sxTest < 620.0f || sxTest > 900.0f ||
+                        syTest < 200.0f || syTest > 420.0f) continue;
                     picked  = ci;
                     pickedPx = (0.5f + 0.5f * nx) * (float)m_Width;
                     pickedPy = (0.5f - 0.5f * ny) * (float)m_Height;
@@ -258,6 +262,13 @@ void NaniteRenderer::AddPasses(RenderGraph& rg, const NaniteGBufferHandles& gb,
                     break;
                 }
                 m_SoftParams.debugCluster = (picked != 0xFFFFFFFFu) ? picked : 0u;
+                {
+                    static u32 s_LastLogged = 0xFFFFFFFFu;
+                    if (s_LastLogged != m_SoftParams.debugCluster) {
+                        s_LastLogged = m_SoftParams.debugCluster;
+                        HE_CORE_INFO("[Nanite] 调试簇更新：debugCluster={}", s_LastLogged);
+                    }
+                }
                 if (picked != 0xFFFFFFFFu) {
                     HE_CORE_INFO("[Nanite] CPU 投影：{} 号簇中心=({:.1f},{:.1f},{:.1f}) → 像素=({:.1f},{:.1f}) w={:.1f}",
                                  picked, asset.clusters[picked].boundsCenterRadius[0],
@@ -565,6 +576,23 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
                             minY = std::min(minY, sy); maxY = std::max(maxY, sy);
                             if (sx >= 0.0f && sx < (float)m_Width && sy >= 0.0f && sy < (float)m_Height) ++inside;
                         }
+                        // 【T8 排查】从可见列表里挑一个投影落在屏幕中部的簇，作为 debugCluster 候选
+                        m_DebugClusterCandidate = 0xFFFFFFFFu;
+                        for (const NaniteVisibleClusterRef& ref : cpuVisible) {
+                            if (ref.cluster >= assetCpu.clusters.size()) continue;
+                            const float* br = assetCpu.clusters[ref.cluster].boundsCenterRadius;
+                            const float p4b[4] = { br[0], br[1], br[2], 1.0f };
+                            const float bx = vp2[0]*p4b[0] + vp2[1]*p4b[1] + vp2[2]*p4b[2] + vp2[3]*p4b[3];
+                            const float by = vp2[4]*p4b[0] + vp2[5]*p4b[1] + vp2[6]*p4b[2] + vp2[7]*p4b[3];
+                            const float bw = vp2[12]*p4b[0] + vp2[13]*p4b[1] + vp2[14]*p4b[2] + vp2[15]*p4b[3];
+                            if (bw <= 0.1f) continue;
+                            const float bxPix = (0.5f + 0.5f * (bx / bw)) * (float)m_Width;
+                            const float byPix = (0.5f - 0.5f * (by / bw)) * (float)m_Height;
+                            if (bxPix < 620.0f || bxPix > 900.0f || byPix < 200.0f || byPix > 420.0f) continue;
+                            m_DebugClusterCandidate = ref.cluster;
+                            break;
+                        }
+
                         if (maxX > minX) {
                             HE_CORE_INFO("[Nanite] CPU 可见簇屏幕范围 x=[{:.0f},{:.0f}] y=[{:.0f},{:.0f}]（落在屏内 {} / {}）",
                                          minX, maxX, minY, maxY, inside, (u32)cpuVisible.size());

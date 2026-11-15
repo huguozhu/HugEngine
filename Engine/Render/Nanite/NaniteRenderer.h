@@ -607,6 +607,8 @@ public:
     rhi::IRHITexture*  m_MatArray = nullptr;
     rhi::IRHISampler*  m_MatArraySamp = nullptr;
     std::vector<u32>   m_MatLayers;
+    /// 【T8 排查】上一帧从 CPU 可见簇里挑出的调试簇号（-1 = 无）
+    u32 m_DebugClusterCandidate = 0xFFFFFFFFu;
 };
 
 } // namespace he::render
