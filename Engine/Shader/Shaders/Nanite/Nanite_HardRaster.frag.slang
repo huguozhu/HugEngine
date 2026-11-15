@@ -142,7 +142,18 @@ HardRasterFragOut fragmentMain(HardRasterFragIn input) {
     // MRT2：Nanite 几何没有自发光 ⇒ 常规档写 0（避免残留别的 pass 写入的值）；
     // albedoDebug = 2/6 时改写调试色，得到**与光照无关**的覆盖/定位视图。
     float4 emissiveOut = float4(0.0, 0.0, 0.0, 0.0);
-    if (albedoDebug == 2u) {
+    if (albedoDebug == 8u) {
+        // 【T8 自检】用片段自身的 worldPos 反算 NDC 并编码成颜色：
+        //   R = 0.5 + 0.5*ndc.x（左→右递增），G = 0.5 + 0.5*ndc.y（下→上递增）。
+        //   与"像素在屏幕上的实际位置"逐点对照，即可判定投影是否一致。
+        float4 hp = float4(input.worldPos, 1.0);
+        float cx = dot(float4(vpRow0), hp);
+        float cy = dot(float4(vpRow1), hp);
+        float cw = dot(float4(vpRow3), hp);
+        float2 ndc = float2(cx / max(cw, 1.0e-6), cy / max(cw, 1.0e-6));
+        emissiveOut = float4(0.5 + 0.5 * ndc.x, 0.5 + 0.5 * ndc.y, 0.0, 1.0);
+        dbgAlbedo = float4(0.0, 0.0, 0.0, 0.0);
+    } else if (albedoDebug == 2u) {
         emissiveOut = float4(0.0, 0.6, 0.0, 0.0);
     } else if (albedoDebug == 6u) {
         emissiveOut = (input.clusterIndex == debugCluster) ? float4(1.0, 0.0, 0.0, 0.0)
