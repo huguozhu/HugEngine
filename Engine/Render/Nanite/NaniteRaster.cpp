@@ -2054,6 +2054,16 @@ void NaniteRaster::LogDebugViewReadback(u32 visible) {
                  m_DebugLastVisibleCapacity);
 }
 
+void NaniteRaster::ReadbackWinnerId(u32* out, u32 count) {
+    if (out == nullptr || count == 0u || !m_WinnerID.IsValid()) return;
+    auto* buf = ResB(m_WinnerID);
+    if (buf == nullptr) return;
+    if (void* p = buf->Map()) {
+        std::memcpy(out, p, sizeof(u32) * count);
+        buf->Unmap();
+    }
+}
+
 void NaniteRaster::ReadbackSoftStats(u32 (&out)[kNaniteSoftStatsCapacity]) {    // 【清零语义】缓冲不存在（软光栅未就绪）时全部写 0：调用方不必先自己清，
     //   也不会读到未初始化的栈内存（`size_dist` / `perf` 行在未就绪档下会打印全 0 而不是垃圾）。
     for (u32 i = 0u; i < kNaniteSoftStatsCapacity; ++i) out[i] = 0u;

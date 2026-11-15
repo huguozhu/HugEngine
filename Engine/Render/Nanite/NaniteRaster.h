@@ -264,6 +264,10 @@ public:
     ///   缓冲不存在（软光栅未就绪）时把 `out` 清零后返回。
     void ReadbackSoftStats(u32 (&out)[kNaniteSoftStatsCapacity]);
 
+    /// 【T8 排查】读回赢家候选号缓冲的前 `count` 个像素（只 Map、不等待）。
+    /// 用途：判断第 2.5 趟仲裁是否真的写过 —— 全 `0xFFFFFFFF` 就是没写。
+    void ReadbackWinnerId(u32* out, u32 count);
+
     /// 【§14.8 任务 23】最近一次软光栅录制用的阈值（push constant 的真值，来自 `NaniteSettings`）。
     /// `size_dist` / `perf` 读数行打印它 —— 与 `soft_raster` 行的 `max_triangles` 同源同值。
     [[nodiscard]] u32 SoftLastMaxTriangles() const { return m_SoftLastMaxTriangles; }

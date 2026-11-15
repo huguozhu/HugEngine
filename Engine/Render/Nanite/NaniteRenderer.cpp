@@ -438,6 +438,16 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
                 HE_CORE_INFO("[Nanite] cull3 上帧读数 可见簇={} 绘制条数={}",
                              lastSeenRaw, lastDrawRaw);
 
+                // 【T8 排查】软光栅赢家缓冲抽查：全 0xFFFFFFFF ⇒ 第 2.5 趟没写过
+                {
+                    u32 winners[16]{};
+                    m_Raster.ReadbackWinnerId(winners, 16u);
+                    u32 written = 0u;
+                    for (u32 i = 0u; i < 16u; ++i) if (winners[i] != 0xFFFFFFFFu) ++written;
+                    HE_CORE_INFO("[Nanite] 赢家缓冲前 16 像素：已写 {} 个（首个=0x{:08X}）",
+                                 written, winners[0]);
+                }
+
                 // 【T8 排查】同一帧的 CPU 参考遍历：与 GPU 的可见簇数对照。
                 //   CPU≈GPU ⇒ 剔除端没问题（孔洞来自几何/解码）；
                 //   CPU≫GPU ⇒ GPU 侧遍历/写入丢失（剔除端 bug）。
