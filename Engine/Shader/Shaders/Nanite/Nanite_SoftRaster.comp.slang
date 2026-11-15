@@ -167,7 +167,8 @@ void main(uint3 tid : SV_GroupThreadID, uint3 gid : SV_GroupID) {
                                                matAlbedo, matMetallic, matRoughness);
 
                 u_Albedo[uint2((uint)px, (uint)py)]      = float4(matAlbedo, matMetallic);
-                u_Normal[uint2((uint)px, (uint)py)]      = float4(normal, matRoughness);
+                // 【T8 修复】与 GBuffer 同一约定：法线 [-1,1] 打包到 [0,1]
+                u_Normal[uint2((uint)px, (uint)py)]      = float4(normal * 0.5 + 0.5, matRoughness);
                 u_WorldPos[uint2((uint)px, (uint)py)]    = float4(worldPos, 1.0);
                 u_LightmapKey[uint2((uint)px, (uint)py)] = float4(uv, (float)(kNaniteObjectIndexBegin + ref.instance), 0.0);
                 InterlockedAdd(u_Stats[kSoftStatPixels], 1u);

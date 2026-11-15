@@ -172,7 +172,10 @@ HardRasterFragOut fragmentMain(HardRasterFragIn input) {
     }
     output.emissiveAO = emissiveOut;
     output.albedoMetallic  = dbgAlbedo;
-    output.normalRoughness = float4(normal, matRoughness);
+    // 【T8 修复】MRT1 的法线是 **[-1,1] 打包到 [0,1]**（GBuffer.frag 写 `N*0.5+0.5`，
+    //   光照端按 `*2-1` 解包）。这里直接写原始法线 ⇒ 光照读到错方向，表现为
+    //   强烈黑白硬阴影（实测）。必须与 GBuffer 同一约定。
+    output.normalRoughness = float4(normal * 0.5 + 0.5, matRoughness);
     // 【不要动 worldPos】它驱动 SSGI/DDGI；清零会让光照整片变黑，反而掩盖了"几何是否覆盖"。
     output.worldPosition   = float4(input.worldPos, 1.0);
     output.lightmapKey     = float4(input.uv,
