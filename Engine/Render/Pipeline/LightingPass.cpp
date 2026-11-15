@@ -66,6 +66,15 @@ void LightingPass::OnResize(rhi::IRHIDevice* device, u32 width, u32 height) {
 // Render — 执行完整延迟光照 Pass
 // ============================================================
 void LightingPass::Render(rhi::IRHICommandList* cmd, const LightingInputs& in) {
+    // 【T8 排查】确认光照通道本帧确实被调用（并打印它读的 GBuffer A 句柄，
+    //   与 Nanite 硬光栅写入的 `targets.albedo` 句柄对照）。
+    {
+        static bool s_Logged = false;
+        if (!s_Logged) {
+            s_Logged = true;
+            HE_CORE_INFO("[T8] LightingPass 已调用：gbA={}", (const void*)in.gbA);
+        }
+    }
     // 【每飞行帧一份描述符集】本帧只更新/绑定本槽位自己的集合：逐帧轮换的资源（光源、阴影、
     // 探针 SSBO 与合成参数 UBO）绑进各自槽位后，重绑不再跨帧（§9.2-J）。
     const u32 slot = in.frameSlot % rhi::kMaxFramesInFlight;

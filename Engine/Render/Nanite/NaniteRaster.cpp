@@ -1751,6 +1751,15 @@ void NaniteRaster::RecordHardRasterPass(rhi::IRHICommandList* cmd,
     for (u32 i = 0u; i < 8u; ++i) views[i] = colors[i]->GetNativeHandle();
     // clears = nullptr：两个 loadOp 都是 Load，清除值不参与（`BeginOffscreenPassMRT` 的
     // 清除值数组契约是"颜色数 + 1 个深度"，传 nullptr 时它的内部数组是零初始化的）。
+    {
+        static bool s_Logged = false;
+        if (!s_Logged) {
+            s_Logged = true;
+            HE_CORE_INFO("[T8] 硬光栅写入的 GBuffer：albedo={} worldPos={} depth={}",
+                         (void*)colors[0]->GetNativeHandle(), (void*)colors[4]->GetNativeHandle(),
+                         (void*)targets.depth->GetNativeHandle());
+        }
+    }
     cmd->BeginOffscreenPassMRT(views, 8u, targets.depth->GetNativeHandle(), w, h, nullptr, false);
     // 【视口必须与软光栅/深度解析同款（负高度）】本引擎的离屏通道统一用 `-h` 抵消"NDC y 向上、
     //   帧缓冲 y 向下"的差异；软光栅的 `softRasterNdcToPixel` 也是按这条约定把 NDC 映射到行列的
