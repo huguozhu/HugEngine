@@ -135,6 +135,13 @@ HardRasterFragOut fragmentMain(HardRasterFragIn input) {
     float4 dbgAlbedo = float4(matAlbedo, matMetallic);
     if (albedoDebug == 2u) {
         dbgAlbedo = float4(1.0, 1.0, 0.0, 0.0);
+    } else if (albedoDebug == 3u) {
+        // 按簇号哈希着色（压暗，避免被光照推白）：看"缺块区域是否根本没有簇"
+        uint c3 = input.clusterIndex;
+        dbgAlbedo = float4(0.02 + 0.30 * float((c3 * 37u) & 255u) / 255.0,
+                           0.02 + 0.30 * float((c3 * 91u) & 255u) / 255.0,
+                           0.02 + 0.30 * float((c3 * 151u) & 255u) / 255.0, 0.0);
+        matRoughness = 1.0;
     } else if (albedoDebug == 6u) {
         dbgAlbedo = (input.clusterIndex == debugCluster) ? float4(1.0, 0.0, 0.0, 0.0)
                                                          : float4(0.0, 0.0, 0.0, 0.0);
