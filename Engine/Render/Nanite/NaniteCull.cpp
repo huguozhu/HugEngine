@@ -786,7 +786,7 @@ void NaniteCull::RecordCullPass(rhi::IRHICommandList* cmd) {
 
 void NaniteCull::SetCullChainFrame(const float4x4& viewProj, const float3& cameraPosition,
                                    u32 screenWidth, u32 screenHeight, float fovYDegrees,
-                                   u32 testInstanceCount, u32 lodMode, float lodThresholdPixels, bool lodEnabled) {
+                                   u32 testInstanceCount, float lodThresholdPixels, bool lodEnabled, u32 lodMode) {
     // 【T8】真实实例表优先：多资产档下 `testInstanceCount` 仍是合成档的设置值，
     // 直接采用会让实例域变成 64（其中大量是空实例），日志与派发端口径都不对。
     m_TestInstanceCount = (m_RealInstanceCount > 0u)

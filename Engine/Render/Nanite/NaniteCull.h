@@ -299,9 +299,8 @@ public:
     ///   它的 (1,1) 元素被视图旋转污染，反解出来的焦距在相机有俯仰/偏航时是错的。
     void SetCullChainFrame(const float4x4& viewProj, const float3& cameraPosition,
                            u32 screenWidth, u32 screenHeight, float fovYDegrees,
-                           u32 testInstanceCount, u32 lodMode = 0u,
-                           float lodThresholdPixels = kNaniteLODThresholdPixels,
-                           bool lodEnabled = true);
+                           u32 testInstanceCount, float lodThresholdPixels = kNaniteLODThresholdPixels,
+                           bool lodEnabled = true, u32 lodMode = 0u);
 
     /// 录制 `Nanite_InstanceCull` pass：
     ///   ① 上传合成实例表 + 包围球（主机可见缓冲，与任务 3 同款）；

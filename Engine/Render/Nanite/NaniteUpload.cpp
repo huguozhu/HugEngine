@@ -745,13 +745,18 @@ bool BuildNaniteClusterDAG(std::span<const float> positions,
             }
             error = step;
         }
-        // 【单调】沿级非递减：低级的误差不得大于高级（否则割的行为不单调）
-        float& levelMax = levelErrorMax[level];
-        if (error > levelMax) levelMax = error;
-        // 【跨级单调】级 L 的误差不得小于级 L-1（否则割在两级之间不单调）
-        if (level > 0u && levelErrorMax[level - 1u] > levelMax) levelMax = levelErrorMax[level - 1u];
-        result.clusters[cluster].maxParentLODError = levelMax;
-        result.stats.maxLODError = std::max(result.stats.maxLODError, levelMax);
+        // 【根写 0】最高一级没有父簇 ⇒ `maxParentLODError` 必须是 0（单测硬约束）。
+        //   单调化只对"还有父级"的层级生效，且不把上一级的值带进根。
+        if ((usize)level + 1u < levelCount) {
+            float& levelMax = levelErrorMax[level];
+            if (error > levelMax) levelMax = error;
+            // 【跨级单调】级 L 的误差不得小于级 L-1（否则割在两级之间不单调）
+            if (level > 0u && levelErrorMax[level - 1u] > levelMax) levelMax = levelErrorMax[level - 1u];
+            result.clusters[cluster].maxParentLODError = levelMax;
+            result.stats.maxLODError = std::max(result.stats.maxLODError, levelMax);
+        } else {
+            result.clusters[cluster].maxParentLODError = 0.0f;
+        }
     }
 
     // ── 每级引用到的不同唯一内容数（级视图的最后一个读数）──

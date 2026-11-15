@@ -184,9 +184,9 @@ void NaniteRenderer::AddPasses(RenderGraph& rg, const NaniteGBufferHandles& gb,
     m_Cull.SetCullChainFrame(camera.GetViewProjMatrix(), camera.position,
                              m_Width, m_Height, camera.fov,
                              m_Settings.instanceTestCount,
-                             m_Settings.lodMode,
                              m_Settings.lodThresholdPixels,
-                             m_Settings.lodEnabled);
+                             m_Settings.lodEnabled,
+                             m_Settings.lodMode);
 
     // ── 【任务 18】软光栅两趟的 push constant（本帧算一次；执行期推给 GPU）──
     // 【view-proj 拆成 4 个"行"】与任务 15 同一口径：`vpRows[r*4+c] = viewProj[c][r]`
