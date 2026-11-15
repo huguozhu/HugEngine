@@ -208,6 +208,16 @@ void NaniteRenderer::AddPasses(RenderGraph& rg, const NaniteGBufferHandles& gb,
         m_SoftParams.meshMaxExtent = m_MeshMaxExtent;
     m_SoftParams.debugView     = m_Settings.debugView;
     m_SoftParams.albedoDebug   = m_Settings.albedoDebug;
+    // 【T8 排查】打印 Nanite 用的相机位置与视图矩阵首行，供与标准路径对照
+    {
+        static u32 s_Seq = 0u;
+        if ((s_Seq++ % 30u) == 0u) {
+            HE_CORE_INFO("[T8-CAM] Nanite 相机=({:.3f},{:.3f},{:.3f}) vpRow0=({:.4f},{:.4f},{:.4f},{:.4f})",
+                         camera.position.x, camera.position.y, camera.position.z,
+                         m_SoftParams.vpRows[0], m_SoftParams.vpRows[1],
+                         m_SoftParams.vpRows[2], m_SoftParams.vpRows[3]);
+        }
+    }
     m_SoftParams.matArrayEnabled = (m_MatArray != nullptr) ? 1u : 0u;
     // 【T8 排查】CPU 侧把 0 号簇的中心投影到屏幕并打印（与 debugView=6 的实拍像素对照）
     if (m_Settings.albedoDebug == 6u && m_Scene.HasAssetCPUCopy()) {
