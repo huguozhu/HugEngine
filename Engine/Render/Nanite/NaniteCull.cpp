@@ -1602,6 +1602,22 @@ void NaniteCull::EnsureHiZBuildViews(rhi::IRHITexture* pyramid) {
 // ============================================================
 // 【A5】上一帧可见簇数（主机侧直接 Map 读：滞后一帧、无同步、不停顿）
 // ============================================================
+u32 NaniteCull::ReadbackVisibleClusters(NaniteVisibleClusterRef* out, u32 count) {
+    if (out == nullptr || count == 0u) return 0u;
+    rhi::IRHIBuffer* buffer = GetVisibleClusterBuffer();
+    if (buffer == nullptr) return 0u;
+
+    // 先用（帧延迟的）上次可见计数钳一次，避免把未使用槽位的垃圾当数据
+    const u32 limit = std::min(count, std::min(ReadLastVisibleClusterCount(), GetVisibleRefBound()));
+    if (limit == 0u) return 0u;
+    if (void* p = buffer->Map()) {
+        std::memcpy(out, p, sizeof(NaniteVisibleClusterRef) * limit);
+        buffer->Unmap();
+        return limit;
+    }
+    return 0u;
+}
+
 u32 NaniteCull::ReadLastVisibleClusterCount() const {
     if (!m_VisibleClusterCountBuf.IsValid()) return 0u;
     auto* buf = ResB(m_VisibleClusterCountBuf);

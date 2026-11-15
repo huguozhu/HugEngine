@@ -442,6 +442,10 @@ public:
 
     // ── 任务 14/15 的读回访问（`NaniteRenderer::LogCull3Readback` 使用）──
     [[nodiscard]] rhi::IRHIBuffer* GetVisibleClusterBuffer()      const { return m_Device->ResolveBuffer(m_VisibleClusterBuf); }
+
+    /// 【T8 排查】读回可见簇列表的前 `count` 条（只 Map、不等待；调用方需先 WaitIdle）。
+    /// 返回实际写入出参的条数（受 `count` 与可见计数同时限制）。
+    u32 ReadbackVisibleClusters(NaniteVisibleClusterRef* out, u32 count);
     [[nodiscard]] rhi::IRHIBuffer* GetVisibleClusterCountBuffer() const { return m_Device->ResolveBuffer(m_VisibleClusterCountBuf); }
     /// 【任务 15】三阶段读数缓冲（扁平 u32，槽位见 `kNaniteCullStat*`）
     [[nodiscard]] rhi::IRHIBuffer* GetCullStatsBuffer()           const { return m_Device->ResolveBuffer(m_CullStatsBuf); }

@@ -527,6 +527,18 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
                 HE_CORE_INFO("[Nanite] cull3 上帧读数 可见簇={} 绘制条数={}",
                              lastSeenRaw, lastDrawRaw);
 
+                // 【T8 排查】读回 GPU 可见列表前 8 条，与 CPU 参考集合对照
+                {
+                    NaniteVisibleClusterRef gpuRefs[8]{};
+                    const u32 got = m_Cull.ReadbackVisibleClusters(gpuRefs, 8u);
+                    std::string gpuStr;
+                    for (u32 i = 0u; i < got; ++i) {
+                        gpuStr += std::to_string(gpuRefs[i].cluster);
+                        if (i + 1u < got) gpuStr += ",";
+                    }
+                    HE_CORE_INFO("[Nanite] GPU 可见列表前 {} 条簇号=[{}]", got, gpuStr);
+                }
+
                 // 【T8 排查】软光栅赢家缓冲抽查：全 0xFFFFFFFF ⇒ 第 2.5 趟没写过
                 {
                     u32 winners[16]{};
