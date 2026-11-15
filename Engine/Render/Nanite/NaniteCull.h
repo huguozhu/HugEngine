@@ -168,9 +168,14 @@ struct alignas(16) NaniteCullChainParams {
     u32   lodEnabled;     // 偏移 100：1 = 打开 LOD 选择（与 focalPixels > 0 同时成立才算）
     u32   _pad1;          // 偏移 104：绘制容量（`misc.z`；任务 16 的截断门）
     u32   hizFlip;        // 偏移 108：【P0】1 = Hi-Z 采样 UV 的 y 翻转（负高度视口的正确约定）
+    // ── 【T8 排查】LOD 割模式（偏移 112）：0=正常，1=不筛（全画），2=只选叶子层 ──
+    u32   lodMode;        // 偏移 112
+    u32   _padMode1;      // 偏移 116
+    u32   _padMode2;      // 偏移 120
+    u32   _padMode3;      // 偏移 124
 };
-static_assert(sizeof(NaniteCullChainParams) == 112,
-              "NaniteCullChainParams 必须与 Slang 结构体一致（4×float4 + float4 + float4 + uint4）");
+static_assert(sizeof(NaniteCullChainParams) == 128,
+              "NaniteCullChainParams 必须与 Slang 结构体一致（4×float4 + float4 + float4 + uint4 + uint4）");
 static_assert(offsetof(NaniteCullChainParams, vpRows)      == 0,   "vpRows 必须在偏移 0");
 static_assert(offsetof(NaniteCullChainParams, cameraPos)   == 64,  "cameraPos 必须在偏移 64");
 static_assert(offsetof(NaniteCullChainParams, focalPixels) == 80,  "focalPixels 必须在偏移 80");
@@ -294,7 +299,8 @@ public:
     ///   它的 (1,1) 元素被视图旋转污染，反解出来的焦距在相机有俯仰/偏航时是错的。
     void SetCullChainFrame(const float4x4& viewProj, const float3& cameraPosition,
                            u32 screenWidth, u32 screenHeight, float fovYDegrees,
-                           u32 testInstanceCount, float lodThresholdPixels = kNaniteLODThresholdPixels,
+                           u32 testInstanceCount, u32 lodMode = 0u,
+                           float lodThresholdPixels = kNaniteLODThresholdPixels,
                            bool lodEnabled = true);
 
     /// 录制 `Nanite_InstanceCull` pass：
@@ -676,6 +682,8 @@ private:
     float m_FrameLODThreshold = kNaniteLODThresholdPixels;
     /// 【排查】本帧是否做 LOD 割（false ⇒ 所有过视锥/遮挡的簇都画）
     bool  m_FrameLodEnabled = true;
+    /// 【T8 排查】LOD 割模式：0=正常，1=不筛（全画），2=只选叶子层
+    u32   m_FrameLodMode = 0u;
     u32   m_FrameScreenW = 0u;          ///< 屏幕宽（Hi-Z 选层）
     u32   m_FrameScreenH = 0u;          ///< 屏幕高
     bool  m_FrameHiZRequested = false;  ///< 本帧调用方是否请求了 Hi-Z（cfg `nanite_hiz`）

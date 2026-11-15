@@ -259,6 +259,10 @@ struct NaniteSettings {
     //   配置层 = cfg 键 `nanite_debug_view`（默认 0，钳到 [0, kNaniteDebugViewMaxMode]），
     //   样例负责解析/序列化 + 面板勾选框。
     u32 debugView = 0u;
+    // ── 【T8 排查】LOD 割模式（cfg `nanite_lod_mode`，默认 0）──
+    // 0 = 正常判据；1 = **不筛**（所有过视锥/遮挡的簇都画 = 覆盖率上界）；
+    // 2 = **只选叶子层**（L0）。用来区分"割判据不闭合"与"几何数据缺三角形"。
+    u32 lodMode = 0u;
 
     // ── T8：多资产模式（cfg 键 `nanite_multi_asset`，默认 0）──
     // 1 ⇒ 场景资产由样例逐份 `NaniteScene::RegisterAsset` 注册，渲染器**不再**上传

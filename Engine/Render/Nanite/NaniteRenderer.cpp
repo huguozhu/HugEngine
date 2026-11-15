@@ -184,6 +184,7 @@ void NaniteRenderer::AddPasses(RenderGraph& rg, const NaniteGBufferHandles& gb,
     m_Cull.SetCullChainFrame(camera.GetViewProjMatrix(), camera.position,
                              m_Width, m_Height, camera.fov,
                              m_Settings.instanceTestCount,
+                             m_Settings.lodMode,
                              m_Settings.lodThresholdPixels,
                              m_Settings.lodEnabled);
 

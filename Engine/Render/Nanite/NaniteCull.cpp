@@ -786,7 +786,7 @@ void NaniteCull::RecordCullPass(rhi::IRHICommandList* cmd) {
 
 void NaniteCull::SetCullChainFrame(const float4x4& viewProj, const float3& cameraPosition,
                                    u32 screenWidth, u32 screenHeight, float fovYDegrees,
-                                   u32 testInstanceCount, float lodThresholdPixels, bool lodEnabled) {
+                                   u32 testInstanceCount, u32 lodMode, float lodThresholdPixels, bool lodEnabled) {
     // 【T8】真实实例表优先：多资产档下 `testInstanceCount` 仍是合成档的设置值，
     // 直接采用会让实例域变成 64（其中大量是空实例），日志与派发端口径都不对。
     m_TestInstanceCount = (m_RealInstanceCount > 0u)
@@ -804,6 +804,7 @@ void NaniteCull::SetCullChainFrame(const float4x4& viewProj, const float3& camer
     m_FrameScreenH     = screenHeight;
     m_FrameFocalPixels = NaniteClusterLODFocalPixels((float)screenHeight, fovYDegrees);
     m_FrameLODThreshold = (lodThresholdPixels > 0.0f) ? lodThresholdPixels : kNaniteLODThresholdPixels;
+    m_FrameLodMode = lodMode;
     m_FrameLodEnabled = lodEnabled;
 
     // view-proj 的 4 个行（row 优先；`rows[r*4+c] = viewProj[c][r]`）——与 GPU 参数缓冲同一份比特。
@@ -1757,6 +1758,7 @@ void NaniteCull::RecordCullChainPass(rhi::IRHICommandList* cmd,
     m_ChainParams.lodEnabled   = (m_FrameLodEnabled && m_FrameFocalPixels > 0.0f) ? 1u : 0u;
     // 【任务 16】绘制容量（`misc.z`）：间接命令与绘制计数都按它设门 ⇒ 计数恒 ≤ 容量。
     m_ChainParams._pad1        = m_FrameDrawCapacity;
+    m_ChainParams.lodMode      = m_FrameLodMode;
     // 【P0 修复】Hi-Z 采样 UV 的 y 翻转（`misc.w`）：负高度视口下 `v = 0.5 - 0.5*ndc.y` 才是
     //   纹理行一致的写法；`false` 是给"历史镜像约定"的可复现 A/B 对照留的（默认 true）。
     m_ChainParams.hizFlip       = hizFlipY ? 1u : 0u;    if (void* p = m_ChainParamBuf.IsValid() ? ResB(m_ChainParamBuf)->Map() : nullptr) {

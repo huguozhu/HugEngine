@@ -169,6 +169,7 @@ struct CullChainParams {
     float4 cameraPos;
     float4 lodParams;
     uint4  misc;          // (hizMipCount, lodEnabled, drawCapacity, hizFlip)
+    uint4  misc2;         // (lodMode, _, _, _)：0=正常 1=不筛 2=只选叶子层
 };
 
 [[vk::binding(0, 0)]] StructuredBuffer<BVHNode>       u_Nodes;
@@ -317,6 +318,10 @@ bool hizOccluded(float3 center, float radius, out float outNdcYCenter) {
 // 【与 C++ 侧】`NaniteLODClusterSelected` 是逐字同构的实现（单测直接覆盖它）。
 bool lodSelected(uint lodInfoIndex, float3 worldCenter, float focalPixels, float thresholdPixels) {
     LODInfo info = u_LodInfo[lodInfoIndex];
+    // 【T8 排查】割模式：1 = 不过滤（覆盖率上界）；2 = 只选叶子层（L0）
+    const uint lodMode = u_Params[0].misc2.x;
+    if (lodMode == 1u) return true;
+    if (lodMode == 2u) return (info.lodLevel == 0u);
     float3 delta = worldCenter - u_Params[0].cameraPos.xyz;
     float distance = length(delta);
     if (!(distance > 1.0e-4f)) distance = 1.0e-4f;   // 与 kNaniteLODMinDistance 同一个常量
