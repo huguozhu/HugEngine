@@ -473,7 +473,12 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
             //   的 pass 按 LIFO 处理 —— 任务 15/16 的教训）。录进同一个 pass 体 + 命令缓冲里的
             //   显式屏障，是唯一稳的写法（任务 16 的间接绘制同理）。
             if (!softRasterOn) return;
-            const NaniteScene::AssetBuffers& asset = m_Scene.GetMergedAssetBuffers();   // T8：光栅端消费聚合视图
+            // 【T8 修复】聚合视图没建好时退回单资产段组：单资产离线档若只注册未构建聚合，
+            //   光栅端会直接早退（实测：`软簇/硬簇` 读数是垃圾值、一条绘制都没有）。
+            const NaniteScene::AssetBuffers& mergedAsset = m_Scene.GetMergedAssetBuffers();
+            const NaniteScene::AssetBuffers& asset =
+                (mergedAsset.clusters && mergedAsset.vertices && mergedAsset.indices)
+                    ? mergedAsset : m_Scene.GetAssetBuffers();
             if (!asset.clusters || !asset.vertices || !asset.indices) return;   // 资产未入库
 
             NaniteRaster::GBufferTargets targets;
