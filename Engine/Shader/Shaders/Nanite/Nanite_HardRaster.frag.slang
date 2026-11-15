@@ -153,6 +153,13 @@ HardRasterFragOut fragmentMain(HardRasterFragIn input) {
         float2 ndc = float2(cx / max(cw, 1.0e-6), cy / max(cw, 1.0e-6));
         emissiveOut = float4(0.5 + 0.5 * ndc.x, 0.5 + 0.5 * ndc.y, 0.0, 1.0);
         dbgAlbedo = float4(0.0, 0.0, 0.0, 0.0);
+    } else if (albedoDebug == 9u) {
+        // 【T8 纹理自检】把材质数组的采样结果直接写进 emissive（绕过光照），
+        //   UV 与材质层号都走与正常渲染完全相同的代码路径。
+        uint layer9 = u_Materials[min(input.materialID, materialCount - 1u)].bindlessTextureBase;
+        emissiveOut = float4(u_MatArray.SampleLevel(u_MatArraySamp,
+                                                   float3(input.uv, (float)layer9), 0.0).rgb, 1.0);
+        dbgAlbedo = float4(0.0, 0.0, 0.0, 0.0);
     } else if (albedoDebug == 2u) {
         emissiveOut = float4(0.0, 0.6, 0.0, 0.0);
     } else if (albedoDebug == 6u) {
