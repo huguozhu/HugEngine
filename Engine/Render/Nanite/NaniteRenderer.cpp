@@ -204,6 +204,11 @@ void NaniteRenderer::AddPasses(RenderGraph& rg, const NaniteGBufferHandles& gb,
         m_SoftParams.instanceCount = std::min(m_Settings.instanceTestCount,
                                               NaniteCull::MaxBVHInstances());
         m_SoftParams.meshMaxExtent = m_MeshMaxExtent;
+    m_SoftParams.debugView     = m_Settings.debugView;
+    {
+        static u32 s_Logged = 0xFFFFFFFFu;
+        if (s_Logged != m_Settings.debugView) { s_Logged = m_Settings.debugView; HE_CORE_INFO("[Nanite] debugView={}（写入光栅 push constant）", s_Logged); }
+    }
         m_SoftParams.depthKeyEpsilon = 0.0f;   // 两趟的等值复检实测严格逐位相等即可
         // 【任务 19】材质段条数（资产构建时记下；0 ⇒ shader 走中性兜底并把像素计进 fallback_pixels）
         m_SoftParams.materialCount = m_MaterialCount;

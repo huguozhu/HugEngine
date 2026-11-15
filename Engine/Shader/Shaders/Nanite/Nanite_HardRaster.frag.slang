@@ -81,9 +81,26 @@ HardRasterFragOut fragmentMain(HardRasterFragIn input) {
     // ── ② 法线：硬件插值后归一化（与软光栅 `normalize(softRasterAttribute(...))` 同一口径）──
     float3 normal = normalize(input.normal);
 
+    // ── 【T8 排查】debugView == 1：品红平涂 ──
+    //   把 albedo 强制成纯黑（过光照后仍接近黑），画面里**任何明亮的区域**就是"没有几何"的孔洞
+    //   （孔洞）。这比看白模截图可靠：材质/光照/纹理的差异都不会再干扰判断。
+    if (debugView == 1u) {
+        matAlbedo  = float3(0.0, 0.0, 0.0);   // 纯黑：孔洞会露出明亮天空，最易辨认
+        matMetallic = 0.0;
+        matRoughness = 1.0;
+    }
+    // debugView == 2：纯黄 albedo + 世界坐标清零 —— 用来验证"本片元着色器确实在跑"：
+    //   世界坐标驱动 SSGI/DDGI，若画面明显变化，说明开关已生效。
+    if (debugView == 2u) {
+        matAlbedo  = float3(1.0, 1.0, 0.0);
+        matMetallic = 0.0;
+        matRoughness = 1.0;
+    }
+
     // ── ③ 写 4 张 GBuffer（字段与软光栅逐字段一致）──
     output.albedoMetallic  = float4(matAlbedo, matMetallic);
     output.normalRoughness = float4(normal, matRoughness);
+    // 【不要动 worldPos】它驱动 SSGI/DDGI；清零会让光照整片变黑，反而掩盖了"几何是否覆盖"。
     output.worldPosition   = float4(input.worldPos, 1.0);
     output.lightmapKey     = float4(input.uv,
                                     (float)(kNaniteObjectIndexBegin + input.instanceIndex), 0.0);

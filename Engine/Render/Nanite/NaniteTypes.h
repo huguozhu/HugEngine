@@ -2457,10 +2457,11 @@ struct NaniteSoftRasterParams {
     u32   vertexStride;     ///< 偏移 100：【任务 24】池内一个槽占多少条量化顶点（= 每页最大顶点数）
     u32   triangleStride;   ///< 偏移 104：【任务 24】池内一个槽占多少条打包三角形（= 每页最大三角形数）
     u32   assetClusterCount;///< 偏移 108：【任务 24】资产的簇出现总数（页映射的索引空间上界）
+    u32   debugView;        ///< 偏移 112：【T8 排查】0=正常；1=品红平涂（几何孔洞判定）
 };
 
-static_assert(sizeof(NaniteSoftRasterParams) == 112u,
-              "软光栅 push constant 必须 112B（4×float4 + 11×u32/float；任务 24 从 96B 扩展）");
+static_assert(sizeof(NaniteSoftRasterParams) == 116u,
+              "软光栅 push constant 必须 116B（4×float4 + 12×u32/float；T8 加 debugView）");
 static_assert(offsetof(NaniteSoftRasterParams, vpRows)        == 0,  "vpRows 在偏移 0");
 static_assert(offsetof(NaniteSoftRasterParams, screenWidth)   == 64, "screenWidth 在偏移 64");
 static_assert(offsetof(NaniteSoftRasterParams, screenHeight)  == 68, "screenHeight 在偏移 68");

@@ -286,6 +286,7 @@ struct NaniteSettings {
     //   本身有问题；若孔洞消失，说明是 DAG 割（父/子覆盖）的问题。
     bool lodEnabled = true;
 
+
     // ── 硬光栅的工作量预算（可见簇引用条数上界；cfg 键 `nanite_hard_raster_budget`）──
     // 超过它 ⇒ 自动关掉硬光栅档位（大簇不画），以免长帧。默认 131072。
     // 【为什么可配】Sponza 规模（8287 簇 × 64 实例 = 53 万上界）会被默认值直接判为超预算，

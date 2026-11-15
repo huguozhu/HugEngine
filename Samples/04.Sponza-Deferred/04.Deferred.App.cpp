@@ -634,6 +634,7 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
             // 【T8】LOD 阈值（像素）：调大 ⇒ 细分到叶子（全细节，慢）
             naniteSettings.lodThresholdPixels = (float)GetInt(cfg, "nanite_lod_threshold", (int)naniteSettings.lodThresholdPixels);
             naniteSettings.lodEnabled = GetBool(cfg, "nanite_lod_enabled", naniteSettings.lodEnabled);
+            naniteSettings.debugView = (u32)GetInt(cfg, "nanite_debug_view", (int)naniteSettings.debugView);
             naniteSettings.hardRasterRefBudget = (u32)GetInt(cfg, "nanite_hard_raster_budget", (int)naniteSettings.hardRasterRefBudget);
             // 【T8】合成实例数：硬光栅的派发上界 = 簇数 × 实例域，太大就会被预算判为超限
             naniteSettings.instanceTestCount = (u32)GetInt(cfg, "nanite_instance_test_count", (int)naniteSettings.instanceTestCount);

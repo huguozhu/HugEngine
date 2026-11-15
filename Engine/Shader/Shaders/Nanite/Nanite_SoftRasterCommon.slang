@@ -244,6 +244,7 @@ static uint softRasterSizeBucket(uint triangleCount) {
     uint   vertexStride;      // 偏移 100：池内一个槽占多少条量化顶点
     uint   triangleStride;    // 偏移 104：池内一个槽占多少条打包三角形
     uint   assetClusterCount; // 偏移 108：资产的簇出现总数（页映射的索引空间上界）
+    uint   debugView;         // 偏移 112：【T8 排查】1 = 品红平涂（几何孔洞判定）
 };
 
 // ── 【任务 19】按**资产材质段** + bindless 纹理算一个像素的 albedo/metallic/roughness ──
