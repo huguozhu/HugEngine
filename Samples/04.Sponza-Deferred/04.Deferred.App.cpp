@@ -412,6 +412,22 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
     });
     HE_CORE_INFO("04.App: 纹理注册完成: {} 张", g.texCache.size());
 
+    // 【T8 排查】打印引擎侧（标准路径）网格的合并世界包围盒，与离线资产头部 bbox 对照，
+    //   用来判断"资产与场景是否同一空间"。
+    {
+        float lo[3] = {  1.0e30f,  1.0e30f,  1.0e30f };
+        float hi[3] = { -1.0e30f, -1.0e30f, -1.0e30f };
+        g.world.ForEach<MeshComponent>([&](Entity, MeshComponent& mesh) {
+            const AABB b = mesh.GetBounds();
+            for (u32 a = 0u; a < 3u; ++a) {
+                lo[a] = std::min(lo[a], b.min[a]);
+                hi[a] = std::max(hi[a], b.max[a]);
+            }
+        });
+        HE_CORE_INFO("04.App: 引擎侧网格世界包围盒 min=({:.1f},{:.1f},{:.1f}) max=({:.1f},{:.1f},{:.1f})",
+                     lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]);
+    }
+
     // ── 【T8 纹理】把 baseColor 贴图打包成一张 Texture2DArray ──
     //   描符数组写（UpdateDescriptorSet 13/14）在本机 NVIDIA 驱动上必崩；数组纹理只用
     //   一个纹理绑定 + 一个采样器，材质层号存在 NaniteMaterialRecord::bindlessTextureBase。
