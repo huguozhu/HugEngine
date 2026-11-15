@@ -207,9 +207,10 @@ void NaniteRenderer::AddPasses(RenderGraph& rg, const NaniteGBufferHandles& gb,
                                               NaniteCull::MaxBVHInstances());
         m_SoftParams.meshMaxExtent = m_MeshMaxExtent;
     m_SoftParams.debugView     = m_Settings.debugView;
+    m_SoftParams.albedoDebug   = m_Settings.albedoDebug;
     m_SoftParams.matArrayEnabled = (m_MatArray != nullptr) ? 1u : 0u;
     // 【T8 排查】CPU 侧把 0 号簇的中心投影到屏幕并打印（与 debugView=6 的实拍像素对照）
-    if (m_Settings.debugView == 6u && m_Scene.HasAssetCPUCopy()) {
+    if (m_Settings.albedoDebug == 6u && m_Scene.HasAssetCPUCopy()) {
         static bool s_Logged = false;
         if (!s_Logged) {
             s_Logged = true;
@@ -235,7 +236,11 @@ void NaniteRenderer::AddPasses(RenderGraph& rg, const NaniteGBufferHandles& gb,
                     const float ww = vp[12]*q[0] + vp[13]*q[1] + vp[14]*q[2] + vp[15]*q[3];
                     if (ww <= 0.1f) continue;
                     const float nx = wx / ww, ny = wy / ww;
-                    if (nx < -0.9f || nx > 0.9f || ny < -0.9f || ny > 0.9f) continue;
+                    // 【挑右侧可见区】界面面板占了左半边：只挑投影落在右半屏、且避开面板的簇，
+                    //   否则"涂红的簇被 UI 盖住"会让人误以为没画。
+                    const float sxTest = (0.5f + 0.5f * nx) * (float)m_Width;
+                    const float syTest = (0.5f - 0.5f * ny) * (float)m_Height;
+                    if (sxTest < 600.0f || syTest < 30.0f || syTest > (float)m_Height - 40.0f) continue;
                     picked  = ci;
                     pickedPx = (0.5f + 0.5f * nx) * (float)m_Width;
                     pickedPy = (0.5f - 0.5f * ny) * (float)m_Height;

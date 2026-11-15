@@ -129,7 +129,16 @@ HardRasterFragOut fragmentMain(HardRasterFragIn input) {
     }
 
     // ── ③ 写 4 张 GBuffer（字段与软光栅逐字段一致）──
-    output.albedoMetallic  = float4(matAlbedo, matMetallic);
+    // 【T8 排查】调试色统一写在最终赋值处（分支写法会被后续代码覆盖，实测无效）：
+    //   2 = 纯黄（几何覆盖）；6 = 指定簇红、其余黑（与 CPU 投影对照）；0 = 正常。
+    float4 dbgAlbedo = float4(matAlbedo, matMetallic);
+    if (albedoDebug == 2u) {
+        dbgAlbedo = float4(1.0, 1.0, 0.0, 0.0);
+    } else if (albedoDebug == 6u) {
+        dbgAlbedo = (input.clusterIndex == debugCluster) ? float4(1.0, 0.0, 0.0, 0.0)
+                                                         : float4(0.0, 0.0, 0.0, 0.0);
+    }
+    output.albedoMetallic  = dbgAlbedo;
     output.normalRoughness = float4(normal, matRoughness);
     // 【不要动 worldPos】它驱动 SSGI/DDGI；清零会让光照整片变黑，反而掩盖了"几何是否覆盖"。
     output.worldPosition   = float4(input.worldPos, 1.0);

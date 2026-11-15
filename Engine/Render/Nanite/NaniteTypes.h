@@ -2459,11 +2459,12 @@ struct NaniteSoftRasterParams {
     u32   assetClusterCount;///< 偏移 108：【任务 24】资产的簇出现总数（页映射的索引空间上界）
     u32   debugView;        ///< 偏移 112：【T8 排查】0=正常；1=品红平涂（几何孔洞判定）
     u32   matArrayEnabled;  ///< 偏移 116：1 = 材质从 Texture2DArray 采样（binding 23/24）
-    u32   debugCluster;     ///< 偏移 120：【T8 排查】debugView=6 时涂红的簇号
+    u32   debugCluster;     ///< 偏移 120：【T8 排查】albedoDebug=6 时涂红的簇号
+    u32   albedoDebug;      ///< 偏移 124：【T8 排查】albedo 调试档（0=关 2=黄 6=簇红）
 };
 
-static_assert(sizeof(NaniteSoftRasterParams) == 124u,
-              "软光栅 push constant 必须 124B（4×float4 + 14×u32/float；T8 加 debugCluster）");
+static_assert(sizeof(NaniteSoftRasterParams) == 128u,
+              "软光栅 push constant 必须 128B（4×float4 + 15×u32/float；T8 加 albedoDebug）");
 static_assert(offsetof(NaniteSoftRasterParams, vpRows)        == 0,  "vpRows 在偏移 0");
 static_assert(offsetof(NaniteSoftRasterParams, screenWidth)   == 64, "screenWidth 在偏移 64");
 static_assert(offsetof(NaniteSoftRasterParams, screenHeight)  == 68, "screenHeight 在偏移 68");

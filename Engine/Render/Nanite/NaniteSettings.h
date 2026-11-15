@@ -269,6 +269,11 @@ struct NaniteSettings {
     //   （节点变换已烘进顶点）；若运行时再乘一次对象的 `worldMatrix`，几何会被**变换两次**
     //   ⇒ 画面表现为"建筑缩小/偏移、只剩天空"。
     bool instanceIdentity = false;
+    // ── 【T8 排查】albedo 调试档（cfg `nanite_albedo_debug`，默认 0）──
+    // 【为什么不复用 `debugView`】`debugView` 是模块既有的"簇统计面板"档位（0..4）且会被钳到
+    //   该范围；拿它当 albedo 调试开关时 5/6 会被钳掉，表现为"改了没反应"（踩过）。
+    //   0 = 关；2 = 黄涂（几何覆盖）；6 = 指定簇红、其余黑（与 CPU 投影对照）。
+    u32 albedoDebug = 0u;
 
     // ── T8：多资产模式（cfg 键 `nanite_multi_asset`，默认 0）──
     // 1 ⇒ 场景资产由样例逐份 `NaniteScene::RegisterAsset` 注册，渲染器**不再**上传
