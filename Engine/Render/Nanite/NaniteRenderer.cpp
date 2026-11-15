@@ -702,6 +702,16 @@ void NaniteRenderer::EnsureAssetUploaded(const MeshBatcher& batcher) {
                     ParseNaniteAsset(bytes.data(), bytes.size(), kNaniteBuilderVersion,
                                      offlineAsset, &info);
                 if (status == NaniteAssetLoadStatus::Ok) {
+                    // 【T8 排查】打印 LOD 级偏移：确认 level 0 是最细（簇多）还是最粗（簇少）。
+                    {
+                        std::string lodStr;
+                        for (usize li = 0; li < offlineAsset.lodOffsets.size(); ++li) {
+                            lodStr += std::to_string(offlineAsset.lodOffsets[li]);
+                            if (li + 1u < offlineAsset.lodOffsets.size()) lodStr += ",";
+                        }
+                        HE_CORE_INFO("NaniteRenderer: LOD 级偏移 [{}]（共 {} 簇）",
+                                     lodStr, (u32)offlineAsset.clusters.size());
+                    }
                     HE_CORE_INFO("NaniteRenderer: 离线资产加载成功（{}，格式 v{}，构建器 v{}，{} 簇 / {} 三角形，扩展段 {}）",
                                  m_Settings.offlinePath, info.formatVersion, info.builderVersion,
                                  offlineAsset.clusters.size(), offlineAsset.triangles.size(),
