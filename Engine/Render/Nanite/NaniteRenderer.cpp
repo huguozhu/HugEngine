@@ -422,11 +422,11 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
             // 【T8 诊断】一次性确认"这个 pass 体真的被执行了"：若日志里一次都不出现，
             //   说明问题在帧图（pass 未被执行），而不是剔除/光栅本身。
             {
-                static bool s_Logged = false;
-                if (!s_Logged) {
-                    s_Logged = true;
-                    HE_CORE_INFO("[Nanite] Nanite_CullChain3 pass 体已执行（drawFromVisible={}）",
-                                 drawFromVisibleChain ? 1 : 0);
+                // 【T8 排序排查】每 30 帧打印一次：与 LightingPass 的同序号日志按时间戳对照，
+                //   就能看出"纳尼特写入"和"光照读取"在命令流里的先后。
+                static u32 s_Seq = 0u;
+                if ((s_Seq++ % 30u) == 0u) {
+                    HE_CORE_INFO("[T8-ORDER] Nanite_CullChain3 执行 seq={}", s_Seq / 30u);
                 }
             }
             rhi::IRHITexture* hizTexture = hiz.texture ? hiz.texture() : nullptr;
