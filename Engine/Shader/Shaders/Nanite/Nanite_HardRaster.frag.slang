@@ -59,6 +59,7 @@ struct HardRasterFragOut {
     [[vk::location(0)]] float4 albedoMetallic  : SV_Target0;   // MRT0
     [[vk::location(1)]] float4 normalRoughness : SV_Target1;   // MRT1
     [[vk::location(4)]] float4 worldPosition   : SV_Target4;   // MRT4
+    [[vk::location(2)]] float4 emissiveAO      : SV_Target2;   // MRT2（Nanite 无自发光 ⇒ 写 0；调试档用它做覆盖视图）
     [[vk::location(7)]] float4 lightmapKey     : SV_Target7;   // MRT7
 };
 
@@ -138,6 +139,16 @@ HardRasterFragOut fragmentMain(HardRasterFragIn input) {
         dbgAlbedo = (input.clusterIndex == debugCluster) ? float4(1.0, 0.0, 0.0, 0.0)
                                                          : float4(0.0, 0.0, 0.0, 0.0);
     }
+    // MRT2：Nanite 几何没有自发光 ⇒ 常规档写 0（避免残留别的 pass 写入的值）；
+    // albedoDebug = 2/6 时改写调试色，得到**与光照无关**的覆盖/定位视图。
+    float4 emissiveOut = float4(0.0, 0.0, 0.0, 0.0);
+    if (albedoDebug == 2u) {
+        emissiveOut = float4(0.0, 0.6, 0.0, 0.0);
+    } else if (albedoDebug == 6u) {
+        emissiveOut = (input.clusterIndex == debugCluster) ? float4(1.0, 0.0, 0.0, 0.0)
+                                                          : float4(0.0, 0.0, 0.0, 0.0);
+    }
+    output.emissiveAO = emissiveOut;
     output.albedoMetallic  = dbgAlbedo;
     output.normalRoughness = float4(normal, matRoughness);
     // 【不要动 worldPos】它驱动 SSGI/DDGI；清零会让光照整片变黑，反而掩盖了"几何是否覆盖"。
