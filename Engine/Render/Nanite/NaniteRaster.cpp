@@ -1755,7 +1755,12 @@ void NaniteRaster::RecordHardRasterPass(rhi::IRHICommandList* cmd,
     // 【视口必须与软光栅/深度解析同款（负高度）】本引擎的离屏通道统一用 `-h` 抵消"NDC y 向上、
     //   帧缓冲 y 向下"的差异；软光栅的 `softRasterNdcToPixel` 也是按这条约定把 NDC 映射到行列的
     //   ⇒ 只有用同一个负高度视口，两条光栅路径才会落在**同一批像素**上。
-    cmd->SetFullscreenViewport(static_cast<u32>(w), static_cast<u32>(h));
+    // 【T8 修复】这里原先调的是 `SetFullscreenViewport(w, h)`（**正**高度），与上一段注释
+    //   "必须用负高度"自相矛盾 ⇒ NDC y 被翻了一次，硬光栅输出的画面**上下颠倒**
+    //   （实测同一机位标准路径看到的是内景、Nanite 档看到的是上半截拱顶 + 下半屏天空）。
+    //   改成与 GBuffer 通道完全一致的负高度视口。
+    cmd->SetViewport({ 0.0f, static_cast<float>(h),
+                       static_cast<float>(w), -static_cast<float>(h), 0.0f, 1.0f });
     // 任务数 = 可见簇引用的**CPU 可算上界**（与软光栅同一条既有口径：可见计数是**同一帧 GPU
     // 刚写出**的、CPU 读不到，读回会破坏无停顿）⇒ 由 shader 按 `slot >= visibleCount` 与分流
     // 判据早退收口。
@@ -2068,7 +2073,11 @@ void NaniteRaster::SetMaterialTextureArray(rhi::IRHITexture* array, rhi::IRHISam
         m_Device->UpdateDescriptorSet(set, 23u, rhi::DescriptorType::SampledImage, array, sampler);
         m_Device->UpdateDescriptorSet(set, 24u, rhi::DescriptorType::Sampler, array, sampler);
     }
-    HE_CORE_INFO("NaniteRaster: 材质 Texture2DArray 已绑定（binding 23/24）");
+    {
+        void* native = array->GetNativeHandle();
+        HE_CORE_INFO("NaniteRaster: 材质 Texture2DArray 已绑定（binding 23/24，view={}, sampler={}）",
+                     native, (void*)sampler);
+    }
 }
 
 void NaniteRaster::ReadbackDepthKeys(u32* out, u32 count) {

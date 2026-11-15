@@ -208,6 +208,15 @@ void NaniteRenderer::AddPasses(RenderGraph& rg, const NaniteGBufferHandles& gb,
     m_SoftParams.debugView     = m_Settings.debugView;
     m_SoftParams.matArrayEnabled = (m_MatArray != nullptr) ? 1u : 0u;
     {
+        static bool s_Logged = false;
+        if (!s_Logged && m_MatArray != nullptr) {
+            s_Logged = true;
+            HE_CORE_INFO("[Nanite] 数组档参数：matArrayEnabled={} array={} sampler={} 层表={}",
+                         m_SoftParams.matArrayEnabled, (void*)m_MatArray, (void*)m_MatArraySamp,
+                         (u32)m_MatLayers.size());
+        }
+    }
+    {
         static u32 s_Logged = 0xFFFFFFFFu;
         if (s_Logged != m_Settings.debugView) { s_Logged = m_Settings.debugView; HE_CORE_INFO("[Nanite] debugView={}（写入光栅 push constant）", s_Logged); }
     }
@@ -789,6 +798,9 @@ void NaniteRenderer::EnsureAssetUploaded(const MeshBatcher& batcher) {
             }
             HE_CORE_INFO("NaniteRenderer: 数组档写入层号 {} 条（材质共 {} 条）", (u32)n,
                          (u32)offlineAsset.materials.size());
+            HE_CORE_INFO("NaniteRenderer: 材质[0] mask=0x{:X} base={}（层号应 < {})",
+                         offlineAsset.materials[0].textureMask,
+                         offlineAsset.materials[0].bindlessTextureBase, (u32)m_MatLayers.size());
         }
     if (m_Scene.UploadPackedAsset(asset)) {
             m_MaterialCount     = (u32)asset.materials.size();
