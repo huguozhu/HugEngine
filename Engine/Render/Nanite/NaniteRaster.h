@@ -268,6 +268,9 @@ public:
     /// 用途：判断第 2.5 趟仲裁是否真的写过 —— 全 `0xFFFFFFFF` 就是没写。
     void ReadbackWinnerId(u32* out, u32 count);
 
+    /// 【T8 纹理】绑定材质 Texture2DArray（binding 23/24）——单张纹理，避免写描述符数组。
+    void SetMaterialTextureArray(rhi::IRHITexture* array, rhi::IRHISampler* sampler);
+
     /// 【T8 排查】读回深度键缓冲的前 count 个像素（全 `0xFFFFFFFF` ⇒ 第 1 趟没写过键）。
     void ReadbackDepthKeys(u32* out, u32 count);
 

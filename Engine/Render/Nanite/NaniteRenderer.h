@@ -129,6 +129,10 @@ public:
 
     // ── 开档与档位（§14.4：唯一真值在本类，外部只拿 const 引用读）──
     [[nodiscard]] const NaniteSettings& GetSettings() const { return m_Settings; }
+
+    /// 【T8 纹理】材质打包成一张 Texture2DArray：layers[i] = 第 i 个材质记录用的层号。
+    void SetMaterialTextureArray(rhi::IRHITexture* array, rhi::IRHISampler* sampler,
+                                 std::vector<u32> layers);
     void SetSettings(const NaniteSettings& settings) { m_Settings = settings; }
 
     /// 帧图接入点（在 `DeferredPipeline_FrameGraph.cpp` 的 GBuffer 段被调用）。
@@ -598,6 +602,11 @@ public:
     NaniteUpload m_Upload;
     NaniteCull   m_Cull;
     NaniteRaster m_Raster;
+
+    /// 【T8 纹理】材质数组纹理与"材质记录 -> 层号"表
+    rhi::IRHITexture*  m_MatArray = nullptr;
+    rhi::IRHISampler*  m_MatArraySamp = nullptr;
+    std::vector<u32>   m_MatLayers;
 };
 
 } // namespace he::render

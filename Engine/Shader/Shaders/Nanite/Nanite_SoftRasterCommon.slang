@@ -118,6 +118,10 @@ uint naniteRasterSlot(uint3 gid) { return gid.x + gid.y * kNaniteRasterDispatchW
 // 反馈环（读写）：[0] = 本帧写入的请求条数（原子取号）、[1] = 环满丢弃数（原子）、
 // [2, 2 + kNanitePageRequestSlots) = 环形缓冲本体。**GPU 只追加，去重在 CPU 读回侧做**。
 [[vk::binding(20, 0)]] RWStructuredBuffer<uint>               u_PageFeedback;
+// ── 【T8 纹理】材质打包成一张 Texture2DArray（绕开"写描述符数组会崩驱动"）──
+//   `u_MatArray` 的层号来自材质记录的 `bindlessTextureBase`；采样器单独绑定（binding 24）。
+[[vk::binding(23, 0)]] Texture2DArray<float4>                   u_MatArray;
+[[vk::binding(24, 0)]] SamplerState                             u_MatArraySamp;
 // ── 【T8】每簇量化尺度（float/cluster，binding 22）──
 // 【为什么需要】顶点是按**各自资产** bbox 的最大轴量化的；聚合视图里只有一个全局
 //   `meshMaxExtent`，把尺度差异大的资产混在一起时，小资产会被按大尺度解码而飞出视锥
@@ -245,6 +249,7 @@ static uint softRasterSizeBucket(uint triangleCount) {
     uint   triangleStride;    // 偏移 104：池内一个槽占多少条打包三角形
     uint   assetClusterCount; // 偏移 108：资产的簇出现总数（页映射的索引空间上界）
     uint   debugView;         // 偏移 112：【T8 排查】1 = 品红平涂（几何孔洞判定）
+    uint   matArrayEnabled;   // 偏移 116：1 = 从 Texture2DArray 采样材质（binding 23/24）
 };
 
 // ── 【任务 19】按**资产材质段** + bindless 纹理算一个像素的 albedo/metallic/roughness ──
@@ -268,6 +273,14 @@ bool softRasterEvaluateMaterial(uint materialIndex, float2 uv,
     float mrG = 1.0;   // 无 MetallicRough 纹理：g（粗糙度）不调制
     float mrB = 0.0;   // 无 MetallicRough 纹理：b（金属度）为 0（与 GBuffer 路径的中性值一致）
 #if !defined(HE_SHADER_D3D11)
+    // ── 【T8 纹理】Texture2DArray 路径（binding 23/24）──
+    //   `bindlessTextureBase` 在这次变身里承载**层号**（不是 bindless 下标）：
+    //   整批 baseColor 贴图被打包成一张数组纹理 ⇒ 不需要写描述符数组（那条路会崩驱动）。
+    if (matArrayEnabled != 0u && (material.textureMask & NANITE_TEXMASK_BASECOLOR) != 0u) {
+        outAlbedo *= u_MatArray.SampleLevel(u_MatArraySamp,
+                                           float3(uv, (float)material.bindlessTextureBase), 0.0).rgb;
+        return true;   // 数组档只提供 baseColor（MR 仍按因子近似）
+    }
     if ((material.textureMask & NANITE_TEXMASK_BASECOLOR) != 0u) {
         uint slot = material.bindlessTextureBase + NANITE_TEXSLOT_BASECOLOR;
         // 【为什么是 `SampleLevel(..., 0)` 而不是 `Sample`】compute 入口没有导数（quad）语义：

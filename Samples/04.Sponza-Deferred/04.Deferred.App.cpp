@@ -128,6 +128,10 @@ struct App::Impl {
     SkyboxComponent* skybox = nullptr;
 
     // ---- 管线开关（面板 + 配置）----
+    // 【T8 纹理】材质 Texture2DArray（绕开描述符数组写）+ 每材质层号
+    std::unique_ptr<rhi::IRHITexture> matArrayTex;
+    std::unique_ptr<rhi::IRHISampler> matArraySamp;
+    std::vector<u32> matLayers;
     bool transformOnly = false;   // T8：只画变换验收件（cfg `nanite_transform_only`）
     u32  multiAssetCount = 8;     // T8：多资产档注册份数（cfg `nanite_multi_asset_count`）
     bool transformTest   = false; // T8：生成三个变换验收件（cfg `nanite_transform_test`）
@@ -408,6 +412,56 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
     });
     HE_CORE_INFO("04.App: 纹理注册完成: {} 张", g.texCache.size());
 
+    // ── 【T8 纹理】把 baseColor 贴图打包成一张 Texture2DArray ──
+    //   描符数组写（UpdateDescriptorSet 13/14）在本机 NVIDIA 驱动上必崩；数组纹理只用
+    //   一个纹理绑定 + 一个采样器，材质层号存在 NaniteMaterialRecord::bindlessTextureBase。
+    //   统一缩到 256x256（原图 1024）控制显存：103 层 x 256^2 x 4B ≈ 27 MB。
+    {
+        constexpr u32 kLayerSize = 256;
+        std::vector<String> baseColorPaths;
+        g.world.ForEach<MeshComponent>([&](Entity, MeshComponent& mesh) {
+            baseColorPaths.push_back(mesh.baseColorTexture.empty()
+                ? String{}
+                : (std::filesystem::path(sponzaPath).parent_path() / mesh.baseColorTexture).string());
+        });
+        const u32 layerCount = (u32)baseColorPaths.size();
+        if (layerCount > 0u) {
+            std::vector<u8> atlas((size_t)kLayerSize * kLayerSize * 4u * layerCount, 255u);
+            for (u32 layer = 0u; layer < layerCount; ++layer) {
+                if (baseColorPaths[layer].empty()) continue;
+                int w = 0, h = 0, ch = 0;
+                u8* pixels = stbi_load(baseColorPaths[layer].c_str(), &w, &h, &ch, 4);
+                if (pixels == nullptr || w <= 0 || h <= 0) continue;
+                u8* dst = atlas.data() + (size_t)layer * kLayerSize * kLayerSize * 4u;
+                for (u32 y = 0u; y < kLayerSize; ++y) {
+                    const u32 sy = (u32)((u64)y * (u64)h / kLayerSize);
+                    for (u32 x = 0u; x < kLayerSize; ++x) {
+                        const u32 sx = (u32)((u64)x * (u64)w / kLayerSize);
+                        const u8* src = pixels + ((size_t)sy * w + sx) * 4u;
+                        std::memcpy(dst + ((size_t)y * kLayerSize + x) * 4u, src, 4u);
+                    }
+                }
+                stbi_image_free(pixels);
+            }
+            rhi::TextureDesc td;
+            td.format      = rhi::Format::RGBA8_UNORM;
+            td.width       = kLayerSize;
+            td.height      = kLayerSize;
+            td.arrayLayers = layerCount;
+            td.mipLevels   = 1;
+            td.usage       = rhi::TextureUsage::ShaderResource;
+            td.initialData = atlas.data();
+            g.matArrayTex = g.device->CreateTexture(td);
+            rhi::SamplerDesc sd;
+            sd.minFilter = sd.magFilter = rhi::FilterMode::Linear;
+            sd.addressU = sd.addressV = rhi::AddressMode::Repeat;
+            g.matArraySamp = g.device->CreateSampler(sd);
+            g.matLayers.resize(layerCount);
+            for (u32 i = 0u; i < layerCount; ++i) g.matLayers[i] = i;
+            HE_CORE_INFO("04.App: 材质数组纹理就绪（{} 层 x {}）", layerCount, kLayerSize);
+        }
+    }
+
     // ---- 延迟管线 ----
     g.pipeline = std::make_unique<render::DeferredPipeline>();
     g.pipeline->Initialize(g.device.get());
@@ -612,6 +666,12 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
         {
             auto naniteSettings = g.pipeline->GetNaniteSettings();
             // 【不要在这里硬写 0】此前为排查把开关写死成关闭，cfg 的 `nanite_enable` 因此完全失效；
+            // 【T8 纹理】把材质数组纹理交给 Nanite（层号写进材质记录，走 binding 23/24）
+            if (g.matArrayTex) {
+                g.pipeline->GetNanite().SetMaterialTextureArray(g.matArrayTex.get(),
+                                                                g.matArraySamp.get(),
+                                                                g.matLayers);
+            }
             naniteSettings.enabled = GetBool(cfg, "nanite_enable", naniteSettings.enabled);
             naniteSettings.offline = GetBool(cfg, "nanite_offline", naniteSettings.offline);
             naniteSettings.multiAsset = GetBool(cfg, "nanite_multi_asset", naniteSettings.multiAsset);

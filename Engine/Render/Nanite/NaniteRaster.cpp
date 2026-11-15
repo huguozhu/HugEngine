@@ -741,6 +741,11 @@ bool NaniteRaster::EnsureSoftRasterResources(const GBufferTargets& targets) {
             {19, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },  // 池·三角形段
             {20, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },  // 反馈环（读写）
             {22, rhi::DescriptorType::StorageBuffer, 1,    rhi::kStageMaskCompute, false },  // 每簇量化尺度
+            {23, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskCompute, false },  // 材质数组
+            {24, rhi::DescriptorType::Sampler,      1, rhi::kStageMaskCompute, false },
+        // 【T8 纹理】23/24 = 材质 Texture2DArray + 采样器（单张纹理，不走描述符数组）
+        {23, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskCompute, false },
+        {24, rhi::DescriptorType::Sampler,      1, rhi::kStageMaskCompute, false },
         };
         m_SoftDepthLayout = m_Device->CreateDescriptorSetLayout(layout);
         if (m_SoftDepthLayout == rhi::kInvalidLayout) {
@@ -1503,6 +1508,8 @@ bool NaniteRaster::EnsureHardRasterResources(const GBufferTargets& targets) {
             {19, rhi::DescriptorType::StorageBuffer, 1,    kStages, false },  // 池·三角形段
             {20, rhi::DescriptorType::StorageBuffer, 1,    kStages, false },  // 反馈环（未使用，占位）
             {22, rhi::DescriptorType::StorageBuffer, 1,    kStages, false },  // 每簇量化尺度
+            {23, rhi::DescriptorType::SampledImage, 1,    kStages, false },  // 材质数组
+            {24, rhi::DescriptorType::Sampler,      1,    kStages, false },
         };
         m_HardRasterLayout = m_Device->CreateDescriptorSetLayout(layout);
         if (m_HardRasterLayout == rhi::kInvalidLayout) {
@@ -2052,6 +2059,16 @@ void NaniteRaster::LogDebugViewReadback(u32 visible) {
                  (unsigned long long)tiled, visible, (unsigned long long)offscreen,
                  hardSharePermille, meanLodMilli, maxBvhDepth,
                  m_DebugLastVisibleCapacity);
+}
+
+void NaniteRaster::SetMaterialTextureArray(rhi::IRHITexture* array, rhi::IRHISampler* sampler) {
+    if (!m_Device || array == nullptr || sampler == nullptr) return;
+    for (rhi::DescriptorSetHandle set : { m_SoftDepthSet, m_SoftColorSet, m_HardRasterSet }) {
+        if (set == rhi::kInvalidSet) continue;
+        m_Device->UpdateDescriptorSet(set, 23u, rhi::DescriptorType::SampledImage, array, sampler);
+        m_Device->UpdateDescriptorSet(set, 24u, rhi::DescriptorType::Sampler, array, sampler);
+    }
+    HE_CORE_INFO("NaniteRaster: 材质 Texture2DArray 已绑定（binding 23/24）");
 }
 
 void NaniteRaster::ReadbackDepthKeys(u32* out, u32 count) {
