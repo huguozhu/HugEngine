@@ -522,6 +522,34 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
                                  (u32)cpuVisible.size(), cpuStats.visitedNodes,
                                  cpuStats.frustumPassClusters, cpuStats.lodRejectedClusters,
                                  cpuStats.stackOverflows);
+
+                    // 【T8 排查】把 CPU 参考的可见簇中心投影到屏幕，统计覆盖范围：
+                    //   范围铺满 ⇒ 可见几何本身是全屏的（问题在解码/绘制）；
+                    //   只占一小块 ⇒ 可见集合在几何上就是小的（问题在剔除/资产）。
+                    if (!cpuVisible.empty() && m_Scene.HasAssetCPUCopy()) {
+                        const auto& assetCpu = m_Scene.GetAssetCPUCopy();
+                        const float* vp2 = m_SoftParams.vpRows;
+                        float minX = 1.0e9f, minY = 1.0e9f, maxX = -1.0e9f, maxY = -1.0e9f;
+                        u32 inside = 0u;
+                        for (const NaniteVisibleClusterRef& ref : cpuVisible) {
+                            if (ref.cluster >= assetCpu.clusters.size()) continue;
+                            const float* br = assetCpu.clusters[ref.cluster].boundsCenterRadius;
+                            const float p4[4] = { br[0], br[1], br[2], 1.0f };
+                            const float ax = vp2[0]*p4[0] + vp2[1]*p4[1] + vp2[2]*p4[2] + vp2[3]*p4[3];
+                            const float ay = vp2[4]*p4[0] + vp2[5]*p4[1] + vp2[6]*p4[2] + vp2[7]*p4[3];
+                            const float aw = vp2[12]*p4[0] + vp2[13]*p4[1] + vp2[14]*p4[2] + vp2[15]*p4[3];
+                            if (aw <= 0.1f) continue;
+                            const float sx = (0.5f + 0.5f * (ax / aw)) * (float)m_Width;
+                            const float sy = (0.5f - 0.5f * (ay / aw)) * (float)m_Height;
+                            minX = std::min(minX, sx); maxX = std::max(maxX, sx);
+                            minY = std::min(minY, sy); maxY = std::max(maxY, sy);
+                            if (sx >= 0.0f && sx < (float)m_Width && sy >= 0.0f && sy < (float)m_Height) ++inside;
+                        }
+                        if (maxX > minX) {
+                            HE_CORE_INFO("[Nanite] CPU 可见簇屏幕范围 x=[{:.0f},{:.0f}] y=[{:.0f},{:.0f}]（落在屏内 {} / {}）",
+                                         minX, maxX, minY, maxY, inside, (u32)cpuVisible.size());
+                        }
+                    }
                 }
                 // 【T8 诊断】Phase 1 的产物：可见实例计数 + 可见性掩码里非零条数。
                 // 【为什么要看它】掩码全 0 时 Phase 2 会逐实例早退 ⇒ 一条命令都不写（当前症状）。
