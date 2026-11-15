@@ -308,7 +308,12 @@ bool hizOccluded(float3 center, float radius, out float outNdcYCenter) {
     float d2 = u_HiZ.SampleLevel(u_HiZSampler, float2(rMin.x, rMax.y), mip);
     float d3 = u_HiZ.SampleLevel(u_HiZSampler, float2(rMax.x, rMax.y), mip);
     float deepest = max(max(d0, d1), max(d2, d3));
-    return zNear > deepest;
+    // 【T8 修复】遮挡判据加**深度偏置**：Hi-Z 用的是下采样后的保守深度，
+    //   且簇球只取了 4 个角采样；偏置太小会把"其实可见"的簇判成遮挡
+    //   （实测：关掉 Hi-Z 后画面多出大片拱廊/柱列/地面 ⇒ 之前被过度剔除）。
+    //   偏置按选层放大（层越粗，单个 texel 覆盖越大，深度误差也越大）。
+    const float bias = 0.0025f * float(mip);
+    return zNear > deepest + bias;
 }
 
 // 【任务 15】Phase 3：DAG 割（LOD 选择）
