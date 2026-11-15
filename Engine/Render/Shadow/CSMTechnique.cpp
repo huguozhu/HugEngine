@@ -281,10 +281,10 @@ void CSMTechnique::RenderCascade(rhi::IRHICommandList* cmd,u32 ci,const FrameSce
     char passLabel[32];
     snprintf(passLabel,sizeof(passLabel),"CSM Shadow C%u",ci);
     cmd->SetDrawDebugLabel(passLabel);
-    cmd->BeginOffscreenPass(nullptr,dv,m_ShadowMapSize,m_ShadowMapSize,&cv);
-    cmd->SetFullscreenViewport(static_cast<u32>(m_ShadowMapSize), static_cast<u32>(m_ShadowMapSize));
-    // 【T11 防御】两版 PSO 都可能在重载/尺寸变化后失效；此时**不录制**本级联，
-    //   而不是把空句柄交给 `SetPipeline`（实测会崩在 `VulkanPipelineState::GetPipeline`）。
+    // 【必须放在 BeginOffscreenPass **之前**】两版 PSO 都可能在重载/尺寸变化后失效。
+    //   此前这段判空写在 Begin 之后：一旦 PSO 为空就 `return`，**render pass 不会结束**
+    //   ⇒ 同一帧的下一个级联再 Begin 就是"嵌套 render pass"，驱动在
+    //   `vkCmdBeginRenderPass` 内直接访问违例（实测 02 关闭窗口时崩在这里）。
     rhi::IRHIPipelineState* cascadePso = m_UseMeshPath ? ResP(m_ShadowMeshPSO) : ResP(m_ShadowPSO);
     if (cascadePso == nullptr) {
         cascadePso = ResP(m_ShadowMeshPSO);
@@ -296,9 +296,15 @@ void CSMTechnique::RenderCascade(rhi::IRHICommandList* cmd,u32 ci,const FrameSce
             s_Warned = true;
             HE_CORE_WARN("CSMTechnique: 两级阴影 PSO 均不可用 ⇒ 本帧跳过级联绘制");
         }
-        return;
+        return;   // 此时还没 Begin，安全返回
     }
+    // 【顺序不能变】`BeginOffscreenPass` 用的是 `m_CurrentRenderPass`，它由
+    //   **最近一次 SetPipeline** 决定 ⇒ 必须先把阴影 PSO 绑上，再 Begin。
+    //   （T11 重构时曾把 SetPipeline 挪到 Begin 之后：framebuffer 被按"上一个 pass 的
+    //   render pass"创建，`vkCmdBeginRenderPass` 拿到不匹配的 FB/RP 组合，驱动直接崩。）
     cmd->SetPipeline(cascadePso);
+    cmd->BeginOffscreenPass(nullptr,dv,m_ShadowMapSize,m_ShadowMapSize,&cv);
+    cmd->SetFullscreenViewport(static_cast<u32>(m_ShadowMapSize), static_cast<u32>(m_ShadowMapSize));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame,m_ExternalDescSet);
  auto*objData=static_cast<GPUObjectData*>(m_ExternalObjectBuffer->Map());
     u32 oi=0;

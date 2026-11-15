@@ -416,7 +416,23 @@ void VulkanCommandList::BeginOffscreenPass(
     fbInfo.width           = width;
     fbInfo.height          = height;
     fbInfo.layers          = 1;
-    vkCreateFramebuffer(m_Device, &fbInfo, nullptr, &offscreenFB);
+    // 【必须检查返回值】此前没查：一旦 `vkCreateFramebuffer` 失败（附件已失效、
+    //   render pass 与附件不匹配、宽高为 0 等），`offscreenFB` 保持 VK_NULL_HANDLE，
+    //   随后 `vkCmdBeginRenderPass` 把空 framebuffer 交给驱动 ⇒ 在 nvoglv64 内访问违例
+    //   （实测 02 关闭窗口时正是这条路径，栈顶 `vkGetInstanceProcAddr` 只是驱动内部符号）。
+    const VkResult fbResult = vkCreateFramebuffer(m_Device, &fbInfo, nullptr, &offscreenFB);
+    if (fbResult != VK_SUCCESS || offscreenFB == VK_NULL_HANDLE) {
+        static bool s_Logged = false;
+        if (!s_Logged) {
+            s_Logged = true;
+            HE_CORE_ERROR("BeginOffscreenPass: 帧缓冲创建失败（result={} rp={} color={} depth={} {}x{}）"
+                          " ⇒ 跳过本 pass（不再让空 framebuffer 进驱动）",
+                          (int)fbResult, (void*)m_CurrentRenderPass, colorImageView, depthImageView,
+                          width, height);
+        }
+        m_CurrentOffscreenFB = VK_NULL_HANDLE;
+        return;
+    }
     TraceFramebuffer("create(offscreen)", offscreenFB, CurrentFrameOf(m_VulkanDevice), UINT64_MAX);
     m_CurrentOffscreenFB = offscreenFB;
 
