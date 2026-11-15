@@ -959,7 +959,16 @@ u32 NaniteCull::SetInstancesFromSnapshot(const FrameSceneSnapshot& snapshot,
                 instanceIndexCount = entry->indexCount;
             }
         }
-        if (instanceIndexCount == 0u) continue;
+        // 【T8 修复】绑定了离线资产的实例：索引数只作"是否有几何"的门控，
+        //   合并资产路径下快照里的 indexCount 可能是 0（实测 103 条带资产实例全是 0），
+        //   若直接跳过就整帧没有实例。资产存在 ⇒ 置 1 占位（光栅端不读该字段）。
+        if (instanceIndexCount == 0u) {
+            if (item.naniteAssetIndex != 0xFFFFFFFFu) {
+                instanceIndexCount = 1u;
+            } else {
+                continue;
+            }
+        }
 
         NaniteInstanceGpuObject& instance = m_TestInstances[written];
         instance = NaniteInstanceGpuObject{};
@@ -977,6 +986,21 @@ u32 NaniteCull::SetInstancesFromSnapshot(const FrameSceneSnapshot& snapshot,
         for (u32 axis = 0u; axis < 3u; ++axis) {
             instance.boundsMin[axis] = item.object.boundsMin[axis];
             instance.boundsMax[axis] = item.object.boundsMax[axis];
+        }
+        // 【T8 修复】合并资产（`granularity=mesh`）的网格在快照里常常没有世界包围盒
+        //   （boundsMin/boundsMax 全 0，甚至 min>max）⇒ 实例视锥测试必然判"不可见"，
+        //   整帧一条实例都进不了 Phase 2（实测：真实实例 1 条、可见簇 0 条）。
+        //   退化时给一个保守大盒；逐簇剔除仍在 Phase 2 里照常工作，只是少了整实例的精剔除。
+        if (!(instance.boundsMax[0] >= instance.boundsMin[0] &&
+              instance.boundsMax[1] >= instance.boundsMin[1] &&
+              instance.boundsMax[2] >= instance.boundsMin[2]) ||
+            (instance.boundsMax[0] - instance.boundsMin[0] < 1.0e-3f &&
+             instance.boundsMax[1] - instance.boundsMin[1] < 1.0e-3f &&
+             instance.boundsMax[2] - instance.boundsMin[2] < 1.0e-3f)) {
+            for (u32 axis = 0u; axis < 3u; ++axis) {
+                instance.boundsMin[axis] = -1.0e6f;
+                instance.boundsMax[axis] =  1.0e6f;
+            }
         }
         instance.boundsMin[3]    = 0.0f;
         instance.boundsMax[3]    = 0.0f;
