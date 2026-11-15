@@ -2054,6 +2054,16 @@ void NaniteRaster::LogDebugViewReadback(u32 visible) {
                  m_DebugLastVisibleCapacity);
 }
 
+void NaniteRaster::ReadbackDepthKeys(u32* out, u32 count) {
+    if (out == nullptr || count == 0u || !m_DepthKey.IsValid()) return;
+    auto* buf = ResB(m_DepthKey);
+    if (buf == nullptr) return;
+    if (void* p = buf->Map()) {
+        std::memcpy(out, p, sizeof(u32) * count);
+        buf->Unmap();
+    }
+}
+
 void NaniteRaster::ReadbackWinnerId(u32* out, u32 count) {
     if (out == nullptr || count == 0u || !m_WinnerID.IsValid()) return;
     auto* buf = ResB(m_WinnerID);

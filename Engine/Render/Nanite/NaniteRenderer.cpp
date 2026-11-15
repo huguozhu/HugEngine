@@ -446,6 +446,12 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
                     for (u32 i = 0u; i < 16u; ++i) if (winners[i] != 0xFFFFFFFFu) ++written;
                     HE_CORE_INFO("[Nanite] 赢家缓冲前 16 像素：已写 {} 个（首个=0x{:08X}）",
                                  written, winners[0]);
+                    u32 keys[16]{};
+                    m_Raster.ReadbackDepthKeys(keys, 16u);
+                    u32 keyWritten = 0u;
+                    for (u32 i = 0u; i < 16u; ++i) if (keys[i] != 0xFFFFFFFFu) ++keyWritten;
+                    HE_CORE_INFO("[Nanite] 深度键前 16 像素：已写 {} 个（首个=0x{:08X}）",
+                                 keyWritten, keys[0]);
                 }
 
                 // 【T8 排查】同一帧的 CPU 参考遍历：与 GPU 的可见簇数对照。

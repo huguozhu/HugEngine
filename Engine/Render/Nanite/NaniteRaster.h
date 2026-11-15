@@ -268,6 +268,9 @@ public:
     /// 用途：判断第 2.5 趟仲裁是否真的写过 —— 全 `0xFFFFFFFF` 就是没写。
     void ReadbackWinnerId(u32* out, u32 count);
 
+    /// 【T8 排查】读回深度键缓冲的前 count 个像素（全 `0xFFFFFFFF` ⇒ 第 1 趟没写过键）。
+    void ReadbackDepthKeys(u32* out, u32 count);
+
     /// 【§14.8 任务 23】最近一次软光栅录制用的阈值（push constant 的真值，来自 `NaniteSettings`）。
     /// `size_dist` / `perf` 读数行打印它 —— 与 `soft_raster` 行的 `max_triangles` 同源同值。
     [[nodiscard]] u32 SoftLastMaxTriangles() const { return m_SoftLastMaxTriangles; }
