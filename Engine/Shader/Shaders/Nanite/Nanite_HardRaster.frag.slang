@@ -47,6 +47,7 @@ struct HardRasterFragIn {
     float2 uv           : TEXCOORD2;
     nointerpolation uint materialID     : TEXCOORD3;
     nointerpolation uint instanceIndex  : TEXCOORD4;
+    nointerpolation uint clusterIndex   : TEXCOORD5;   // 【T8 排查】全局簇号
 };
 
 // ── 输出：只声明本模块真正写的 4 个 location（0 / 1 / 4 / 7）──
@@ -93,6 +94,18 @@ HardRasterFragOut fragmentMain(HardRasterFragIn input) {
     //   世界坐标驱动 SSGI/DDGI，若画面明显变化，说明开关已生效。
     if (debugView == 2u) {
         matAlbedo  = float3(1.0, 1.0, 0.0);
+        matMetallic = 0.0;
+        matRoughness = 1.0;
+    }
+    // debugView == 3：按簇号着色（相邻簇颜色差别明显）——用来判断"孔洞区域是没有任何簇，
+    //   还是有簇但三角形/索引没覆盖到"。
+    if (debugView == 3u) {
+        uint c = input.clusterIndex;
+        float r = float((c * 37u) & 255u) / 255.0;
+        float g = float((c * 91u) & 255u) / 255.0;
+        float b = float((c * 151u) & 255u) / 255.0;
+        // 【压暗】调试色必须远低于 1，否则被光照/色调映射推到白，色相全丢
+        matAlbedo   = float3(0.02 + 0.30 * r, 0.02 + 0.30 * g, 0.02 + 0.30 * b);
         matMetallic = 0.0;
         matRoughness = 1.0;
     }

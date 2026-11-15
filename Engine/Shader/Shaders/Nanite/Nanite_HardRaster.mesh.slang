@@ -87,6 +87,9 @@ struct HardRasterVertexOut {
     //   `nointerpolation` 取 provoking vertex 的值。
     nointerpolation uint materialID     : TEXCOORD3;
     nointerpolation uint instanceIndex  : TEXCOORD4;
+    /// 【T8 排查】簇号（全局簇下标）：`debugView==3` 时用它着色，
+    ///   用来区分"是哪些簇在画"与"哪些区域一个簇都没有"。
+    nointerpolation uint clusterIndex   : TEXCOORD5;
 };
 
 // 取簇与分流判据：返回本工作组要输出的三角形数，0 表示"没有图元"（多派发的组、越界引用、
@@ -264,6 +267,7 @@ void main(
         degenerate.uv          = float2(0.0, 0.0);
         degenerate.materialID  = 0u;
         degenerate.instanceIndex = ref.instance;
+        degenerate.clusterIndex  = ref.cluster;
         verts[3u * triLocal + 0u] = degenerate;
         verts[3u * triLocal + 1u] = degenerate;
         verts[3u * triLocal + 2u] = degenerate;
