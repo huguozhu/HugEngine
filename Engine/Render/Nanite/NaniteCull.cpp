@@ -1231,6 +1231,18 @@ bool NaniteCull::SetClusterBVH(std::span<const NaniteClusterRecord> clusters,
     m_ClusterDrawRanges.clear();
     m_BVHReady = false;
     const u32 slot = AppendAssetBVH(clusters, lodOffsets);
+    // 【T8 排查】打印几条 LODInfo，确认 ownError/parentError/lodLevel 与预期一致
+    if (!m_LODInfo.empty()) {
+        const auto dumpOne = [this](u32 idx, const char* tag) {
+            if (idx >= m_LODInfo.size()) return;
+            const NaniteClusterLODInfo& li = m_LODInfo[idx];
+            HE_CORE_INFO("[T8-LOD] {} 簇 {}：level={} ownError={:.4f} parentError={:.4f} flags={}",
+                         tag, idx, li.lodLevel, li.ownError, li.parentError, li.flags);
+        };
+        dumpOne(0u, "首簇");
+        if (lodOffsets.size() > 1u) dumpOne(lodOffsets[1], "L1 首簇");
+        dumpOne(6292u, "可见簇样本");
+    }
     m_BVHReady = (slot != 0xFFFFFFFFu) && !m_BVHData.Empty();
     m_BVHInstanceDomain = 0u;
     m_BVHClusterDepths.clear();
