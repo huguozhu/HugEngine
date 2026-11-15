@@ -166,7 +166,17 @@ public:
     [[nodiscard]] const NaniteSettings& GetNaniteSettings() const  { return m_Nanite.GetSettings(); }
 
     /// 【T10】阴影绘制路径开关（mesh / IA）；由样例从 cfg 读入后调用。
-    void SetShadowMeshEnabled(bool enable) { m_ShadowMeshEnabled = enable; if (m_ShadowSystem) m_ShadowSystem->SetMeshShadowEnabled(enable); }
+    void SetShadowMeshEnabled(bool enable) {
+        // 【T8 修复】Nanite 接管时阴影的 IA PSO 已被销毁（`SetRemoveIaPipeline`），
+        //   此时样例若把路径切回 IA（cfg `shadow_ms=0`，默认值），阴影通道会一条都不画
+        //   —— 日志表现为 `T11 已销毁阴影的 IA PSO` 之后紧跟 `T10 阴影绘制路径 → IA`，
+        //   画面因此失去全部投影、显得"发平"。这里在 IA 已销毁时强制保持 mesh 路径。
+        const NaniteSettings& ns = m_Nanite.GetSettings();
+        const bool msOk = m_Device != nullptr && m_Device->GetCaps().supportsMeshShaders;
+        const bool iaDestroyed = ns.enabled && ns.removeIaPso && msOk;
+        m_ShadowMeshEnabled = enable || iaDestroyed;
+        if (m_ShadowSystem) m_ShadowSystem->SetMeshShadowEnabled(m_ShadowMeshEnabled);
+    }
     [[nodiscard]] bool GetShadowMeshEnabled() const { return m_ShadowMeshEnabled; }
     /// 已注册的 GI Provider（帧图按注册表遍历构建 pass，而非手写门控）
     std::vector<std::unique_ptr<IGIProvider>>& GetGIProviders() { return m_GIProviders; }
