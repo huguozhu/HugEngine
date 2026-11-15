@@ -707,6 +707,15 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
                 !nanitePath.empty()) {
                 naniteSettings.offlinePath = nanitePath;
             }
+            if (naniteSettings.enabled && naniteSettings.offline && !naniteSettings.multiAsset) {
+                bool boundOne = false;
+                g.world.ForEach<MeshComponent>([&](Entity, MeshComponent& mesh) {
+                    if (boundOne) return;
+                    mesh.SetNaniteAssetIndex(0u);
+                    boundOne = true;
+                });
+            }
+
             g.pipeline->SetNaniteSettings(naniteSettings);
         // 【T10】阴影绘制路径（cfg `shadow_ms`，默认 IA）
         g.pipeline->SetShadowMeshEnabled(GetBool(cfg, "shadow_ms", false));

@@ -987,16 +987,11 @@ u32 NaniteCull::SetInstancesFromSnapshot(const FrameSceneSnapshot& snapshot,
             instance.boundsMin[axis] = item.object.boundsMin[axis];
             instance.boundsMax[axis] = item.object.boundsMax[axis];
         }
-        // 【T8 修复】合并资产（`granularity=mesh`）的网格在快照里常常没有世界包围盒
-        //   （boundsMin/boundsMax 全 0，甚至 min>max）⇒ 实例视锥测试必然判"不可见"，
-        //   整帧一条实例都进不了 Phase 2（实测：真实实例 1 条、可见簇 0 条）。
-        //   退化时给一个保守大盒；逐簇剔除仍在 Phase 2 里照常工作，只是少了整实例的精剔除。
-        if (!(instance.boundsMax[0] >= instance.boundsMin[0] &&
-              instance.boundsMax[1] >= instance.boundsMin[1] &&
-              instance.boundsMax[2] >= instance.boundsMin[2]) ||
-            (instance.boundsMax[0] - instance.boundsMin[0] < 1.0e-3f &&
-             instance.boundsMax[1] - instance.boundsMin[1] < 1.0e-3f &&
-             instance.boundsMax[2] - instance.boundsMin[2] < 1.0e-3f)) {
+        // 【T8 修复】绑定了离线资产的实例：快照里的包围盒往往是"该网格局部盒"甚至全 0，
+        //   而离线资产是**整场景合并**后的几何（世界空间已烘焙）⇒ 用它做实例级视锥测试会
+        //   把整个实例剔掉（实测：可见簇 0）。这里对资产实例一律给保守大盒，
+        //   逐簇剔除仍在 Phase 2 里按簇球正常进行（精度损失只体现在实例级粗剔除）。
+        if (item.naniteAssetIndex != 0xFFFFFFFFu) {
             for (u32 axis = 0u; axis < 3u; ++axis) {
                 instance.boundsMin[axis] = -1.0e6f;
                 instance.boundsMax[axis] =  1.0e6f;
@@ -1645,7 +1640,20 @@ bool NaniteCull::ReadLastCullStats(u32 out[kNaniteCullStatsU32]) const {
 
 void NaniteCull::RecordCullChainPass(rhi::IRHICommandList* cmd,
                                      rhi::IRHITexture* hizTexture, rhi::IRHITexture* depthTexture,
-                                     bool enableOcclusion, bool hizFlipY) {    if (!cmd) return;
+                                     bool enableOcclusion, bool hizFlipY) {
+    // 【T8 排查】打印资产基址表的前两条：真实实例路径若全 0，Phase 2 遍历会立即结束
+    {
+        static bool s_Logged = false;
+        if (!s_Logged && !m_AssetCullRanges.empty()) {
+            s_Logged = true;
+            const NaniteAssetCullRange& r0 = m_AssetCullRanges.front();
+            HE_CORE_INFO("[T8-RANGE] 资产基址[0]: nodeBase={} nodeCount={} leafBase={} leafCount={} "
+                         "clusterBase={} clusterCount={} allowed={}",
+                         r0.nodeBase, r0.nodeCount, r0.leafBase, r0.leafCount,
+                         r0.clusterBase, r0.clusterCount, (u32)m_AssetCullRanges.size());
+        }
+    }
+    if (!cmd) return;
 
     // 【T8 诊断】`HE_NANITE_CULL_DIAG=1` 时把"第一个实例 + 第一个簇球"的世界球与六个平面
     //   距离打出来：GPU 侧 `frustumPass=0` 而 CPU 参考认为实例可见时，这一行能直接指出

@@ -635,7 +635,10 @@ bool BuildNaniteClusterDAG(std::span<const float> positions,
             // 【2% 上限】此前 1.0（=100%）允许 meshopt 提前停下并报出巨大相对误差
             //   （Sponza 实测某级 ~988 单位）⇒ LOD 割瞬间跳到根、只画 200 多簇。
             //   收到 2% 后每级只做"温和一步"，误差量级与几何尺度相符。
-            targetIndexCount, /*target_error=*/0.02f, /*options=*/0u, &relativeError);
+            // 【0.2%】此前 2%（= 74 个单位）会让后几级的实测误差直接顶到上限，
+            //   误差链变成 0.5/1.9/6.2/74/74 ⇒ LOD 割停在第 3 级、只画 58 个簇（实测）。
+            //   收到 0.2% 后每级误差连续增长，割才会落到更细的级。
+            targetIndexCount, /*target_error=*/0.002f, /*options=*/0u, &relativeError);
 
         // ── 终止条件②：没能减少（或返回非法个数）⇒ 停，绝不空转 ──
         if (simplifiedCount == 0u || (simplifiedCount % kIndicesPerTriangle) != 0u ||
