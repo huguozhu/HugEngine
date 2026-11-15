@@ -434,6 +434,20 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
                 //   2..9=LOD 直方图，10=visited，11=drawTruncated
                 HE_CORE_INFO("[Nanite] cull3 读数 visited={} frustumPass={} occluded={} lod0={} drawTruncated={}",
                              stats[10], stats[0], stats[1], stats[2], stats[11]);
+                HE_CORE_INFO("[Nanite] cull3 上帧读数 可见簇={} 绘制条数={}",
+                             lastSeenRaw, lastDrawRaw);
+
+                // 【T8 排查】同一帧的 CPU 参考遍历：与 GPU 的可见簇数对照。
+                //   CPU≈GPU ⇒ 剔除端没问题（孔洞来自几何/解码）；
+                //   CPU≫GPU ⇒ GPU 侧遍历/写入丢失（剔除端 bug）。
+                {
+                    std::vector<NaniteVisibleClusterRef> cpuVisible;
+                    const auto cpuStats = m_Cull.RunCullChainCPUReference(cpuVisible);
+                    HE_CORE_INFO("[Nanite] CPU 参考遍历：可见簇={} 访问节点={} 过视锥={} LOD 拒绝={} 栈溢出={}",
+                                 (u32)cpuVisible.size(), cpuStats.visitedNodes,
+                                 cpuStats.frustumPassClusters, cpuStats.lodRejectedClusters,
+                                 cpuStats.stackOverflows);
+                }
                 // 【T8 诊断】Phase 1 的产物：可见实例计数 + 可见性掩码里非零条数。
                 // 【为什么要看它】掩码全 0 时 Phase 2 会逐实例早退 ⇒ 一条命令都不写（当前症状）。
                 u32 visInst = 0u, maskOn = 0u;
