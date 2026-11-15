@@ -138,6 +138,10 @@ HardRasterFragOut fragmentMain(HardRasterFragIn input) {
     } else if (albedoDebug == 6u) {
         dbgAlbedo = (input.clusterIndex == debugCluster) ? float4(1.0, 0.0, 0.0, 0.0)
                                                          : float4(0.0, 0.0, 0.0, 0.0);
+        // 把镜面也压掉：黑 albedo 仍会被环境镜面反射照白（实测画面仍是白色），
+        // 这里强制粗糙度 1、法线朝上，让"黑"真的黑下来，红色才看得清。
+        matRoughness = 1.0;
+        normal = float3(0.0, 0.0, 1.0);
     }
     // MRT2：Nanite 几何没有自发光 ⇒ 常规档写 0（避免残留别的 pass 写入的值）；
     // albedoDebug = 2/6 时改写调试色，得到**与光照无关**的覆盖/定位视图。
