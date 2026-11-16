@@ -195,11 +195,20 @@ HardRasterFragOut fragmentMain(HardRasterFragIn input) {
     // 【T8 修复】MRT1 的法线是 **[-1,1] 打包到 [0,1]**（GBuffer.frag 写 `N*0.5+0.5`，
     //   光照端按 `*2-1` 解包）。这里直接写原始法线 ⇒ 光照读到错方向，表现为
     //   强烈黑白硬阴影（实测）。必须与 GBuffer 同一约定。
-    output.normalRoughness = float4(normal * 0.5 + 0.5, matRoughness);
+    // 【T8 实验】albedoDebug=13：用**屏幕空间导数**从 worldPos 反算几何法线，
+    //   绕过资产里的法线。若光照立刻变得有立体感 ⇒ 资产法线是错的。
+    float3 normalOut = normal;
+    if (albedoDebug == 13u) {
+        normalOut = normalize(cross(ddx(input.worldPos), ddy(input.worldPos)));
+        if (dot(normalOut, normal) < 0.0) normalOut = -normalOut;   // 与存储法线同向
+    }
+    output.normalRoughness = float4(normalOut * 0.5 + 0.5, matRoughness);
     // 【不要动 worldPos】它驱动 SSGI/DDGI；清零会让光照整片变黑，反而掩盖了"几何是否覆盖"。
     output.worldPosition   = float4(input.worldPos, 1.0);
-    output.lightmapKey     = float4(input.uv,
-                                    (float)(kNaniteObjectIndexBegin + input.instanceIndex), 0.0);
+    // 【T8 实验】albedoDebug=12：把 lightmapKey 清零，验证它是否影响光照亮度
+    output.lightmapKey     = (albedoDebug == 12u) ? float4(0.0, 0.0, 0.0, 0.0)
+                                                  : float4(input.uv,
+                                                           (float)(kNaniteObjectIndexBegin + input.instanceIndex), 0.0);
 
     // ── ④ 读数：硬光栅的片元数 ──
     // 【语义】PSO 是 `depthWrite = true` 且没有 discard ⇒ 主流驱动都会做 early-Z，
