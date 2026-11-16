@@ -443,13 +443,15 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
                 : (std::filesystem::path(sponzaPath).parent_path() / mesh.baseColorTexture).string());
         });
         const u32 layerCount = (u32)baseColorPaths.size();
+        u32 loadedLayers = 0u, missingLayers = 0u;
         if (layerCount > 0u) {
             std::vector<u8> atlas((size_t)kLayerSize * kLayerSize * 4u * layerCount, 255u);
             for (u32 layer = 0u; layer < layerCount; ++layer) {
                 if (baseColorPaths[layer].empty()) continue;
                 int w = 0, h = 0, ch = 0;
                 u8* pixels = stbi_load(baseColorPaths[layer].c_str(), &w, &h, &ch, 4);
-                if (pixels == nullptr || w <= 0 || h <= 0) continue;
+                if (pixels == nullptr || w <= 0 || h <= 0) { ++missingLayers; continue; }
+                ++loadedLayers;
                 u8* dst = atlas.data() + (size_t)layer * kLayerSize * kLayerSize * 4u;
                 for (u32 y = 0u; y < kLayerSize; ++y) {
                     const u32 sy = (u32)((u64)y * (u64)h / kLayerSize);
@@ -474,9 +476,24 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
             sd.minFilter = sd.magFilter = rhi::FilterMode::Linear;
             sd.addressU = sd.addressV = rhi::AddressMode::Repeat;
             g.matArraySamp = g.device->CreateSampler(sd);
+            // 【T8 排查】打印每层贴图的平均色：与资产材质段的 baseColorFactor（= 贴图平均色）对照，
+            //   即可判断"层号 ↔ 材质"的映射对不对（错位时平均色会对不上）。
+            for (u32 layer = 0u; layer < layerCount && layer < 6u; ++layer) {
+                const u8* src = atlas.data() + (size_t)layer * kLayerSize * kLayerSize * 4u;
+                double r = 0.0, g = 0.0, b = 0.0;
+                for (size_t t = 0; t < (size_t)kLayerSize * kLayerSize; ++t) {
+                    r += src[t * 4u + 0u]; g += src[t * 4u + 1u]; b += src[t * 4u + 2u];
+                }
+                const double n = (double)kLayerSize * kLayerSize * 255.0;
+                HE_CORE_INFO("04.App: 层 {} 平均色=({:.3f},{:.3f},{:.3f}) 源={}",
+                             layer, r / n, g / n, b / n,
+                             baseColorPaths[layer].empty() ? "<none>" : baseColorPaths[layer]);
+            }
             g.matLayers.resize(layerCount);
             for (u32 i = 0u; i < layerCount; ++i) g.matLayers[i] = i;
             HE_CORE_INFO("04.App: 材质数组纹理就绪（{} 层 x {}）", layerCount, kLayerSize);
+            HE_CORE_INFO("04.App: 数组层加载统计 —— 成功 {} 层 / 缺失 {} 层（缺失层保持白色）",
+                         loadedLayers, missingLayers);
         }
     }
 

@@ -51,6 +51,7 @@ struct Options {
     bool        verbose = false;
     bool        verify = false;
     bool        benchmark = false;          ///< T7：打印加载/构建/BVH 的耗时与内存表
+    bool        bakeAverageColor = false;    ///< 【T8】把贴图平均色烘进 baseColorFactor（无纹理绑定能力的后端兜底）
     bool        printSettingsHash = false;   ///< 只打印 settingsHash/builderVersion（构建期脚本用）
     bool        valid = false;
     std::string error;
@@ -60,6 +61,7 @@ void PrintUsage() {
     std::printf(
         "用法: MeshPreprocess <in.gltf> <out-dir> [选项]\n"
         "  --granularity=primitive|mesh   资产粒度（默认 primitive）\n"
+        "  --bake-average                把 baseColor 贴图平均色烘进材质因子（无纹理绑定时的兜底）\n"
         "  --fallback-ratio=0.02          Fallback 低模的三角形比例\n"
         "  --verify                       读回文件并与内存资产逐字节比对\n"
         "  --benchmark                    T7：打印构建/加载/BVH 的耗时与内存表\n"
@@ -78,6 +80,7 @@ Options ParseArgs(int argc, char** argv) {
         if (arg == "--benchmark") { options.benchmark = true; continue; }
         if (arg == "--print-settings-hash") { options.printSettingsHash = true; continue; }
         if (arg.rfind("--granularity=", 0) == 0) { options.granularity = arg.substr(14); continue; }
+        if (arg == "--bake-average") { options.bakeAverageColor = true; continue; }
         if (arg.rfind("--fallback-ratio=", 0) == 0) {
             options.fallbackRatio = (float)std::atof(arg.substr(17).c_str());
             continue;
@@ -291,9 +294,13 @@ int main(int argc, char** argv) {
                 for (int c = 0; c < 4; ++c) rec.baseColorFactor[c] = d.baseColorFactor[c];
                 rec.metallicFactor  = d.metallicFactor;
                 rec.roughnessFactor = d.roughnessFactor;
-                // 【T8 纹理回退】把 baseColor 贴图的平均色乘进因子（没有贴图/读失败则不变）
+                // 【T8 纹理回退】把 baseColor 贴图的平均色乘进因子。
+                // 【默认关闭】运行时已经能通过 `Texture2DArray` 真正采样贴图了，
+                //   再乘一次平均色就是"同一张图算两遍" ⇒ albedo ≈ avg²，颜色发闷/发灰。
+                //   只在 `--bake-average` 显式要求时烘焙（给"没有任何纹理绑定能力"的后端兜底用）。
+                const bool bakeAverage = options.bakeAverageColor;
                 const u32 texIdx = d.textureImageIndex[0];   // 槽位 0 = baseColor
-                if (texIdx < scene.imageUris.size() && !scene.imageUris[texIdx].empty()) {
+                if (bakeAverage && texIdx < scene.imageUris.size() && !scene.imageUris[texIdx].empty()) {
                     const std::string imgPath =
                         (std::filesystem::path(options.inputPath).parent_path() /
                          scene.imageUris[texIdx]).string();

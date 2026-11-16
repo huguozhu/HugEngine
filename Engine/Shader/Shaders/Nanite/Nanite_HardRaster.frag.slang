@@ -155,7 +155,14 @@ HardRasterFragOut fragmentMain(HardRasterFragIn input) {
     // 【T8 修复】MRT2 的 alpha 是 **AO**（GBuffer 清屏值 = 1）。此前写 0 会把 AO 抹成 0，
     //   光照端按 AO 调制的项因此整体失真。Nanite 几何没有 AO 贴图 ⇒ 写 1（不遮挡）。
     float4 emissiveOut = float4(0.0, 0.0, 0.0, 1.0);
-    if (albedoDebug == 4u) {
+    if (albedoDebug == 10u) {
+        // 【T8 排查】用 **uv × 8** 采样：若画面出现明显重复纹理 ⇒ UV 有效、贴图有细节；
+        //   若仍是纯白/纯色 ⇒ UV 退化或贴图本身是白的。
+        uint layer10 = u_Materials[min(input.materialID, materialCount - 1u)].bindlessTextureBase;
+        emissiveOut = float4(u_MatArray.SampleLevel(u_MatArraySamp,
+                                                   float3(input.uv, (float)layer10), 0.0).rgb, 1.0);
+        dbgAlbedo = float4(0.0, 0.0, 0.0, 0.0);
+    } else if (albedoDebug == 4u) {
         // 法线可视化（绕过光照）：正确的法线应当随表面朝向呈现明显颜色分区
         emissiveOut = float4(normal * 0.5 + 0.5, 1.0);
         dbgAlbedo = float4(0.0, 0.0, 0.0, 0.0);

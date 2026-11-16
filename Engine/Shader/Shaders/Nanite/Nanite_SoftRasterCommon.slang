@@ -278,6 +278,7 @@ bool softRasterEvaluateMaterial(uint materialIndex, float2 uv,
     // ── 【T8 纹理】Texture2DArray 路径（binding 23/24）──
     //   `bindlessTextureBase` 在这次变身里承载**层号**（不是 bindless 下标）：
     //   整批 baseColor 贴图被打包成一张数组纹理 ⇒ 不需要写描述符数组（那条路会崩驱动）。
+    // 数组档启用且该材质有 baseColor 位时走数组采样（层号存在 bindlessTextureBase 里）
     if (matArrayEnabled != 0u && (material.textureMask & NANITE_TEXMASK_BASECOLOR) != 0u) {
         outAlbedo *= u_MatArray.SampleLevel(u_MatArraySamp,
                                            float3(uv, (float)material.bindlessTextureBase), 0.0).rgb;
