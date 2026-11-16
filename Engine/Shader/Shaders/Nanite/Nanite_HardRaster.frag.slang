@@ -204,7 +204,13 @@ HardRasterFragOut fragmentMain(HardRasterFragIn input) {
     }
     output.normalRoughness = float4(normalOut * 0.5 + 0.5, matRoughness);
     // 【不要动 worldPos】它驱动 SSGI/DDGI；清零会让光照整片变黑，反而掩盖了"几何是否覆盖"。
-    output.worldPosition   = float4(input.worldPos, 1.0);
+    // 【T8 修复】MRT4 的 **alpha 是电介质 F0**（标准路径写 `obj.dielectricF0`，典型 0.04）。
+    //   此前这里写 1.0 ⇒ 光照把每个表面当成"反射率 100% 的镜面"，
+    //   直接光/阴影的漫反射项被彻底压掉，画面只剩环境反射、看起来"发白发平"
+    //   （实测：开/关阴影画面均值完全一致 145.9 / 146.0）。
+    //   Nanite 材质段目前不携带 F0 ⇒ 用非金属的默认值 0.04。
+    const float naniteDielectricF0 = 0.04;
+    output.worldPosition   = float4(input.worldPos, naniteDielectricF0);
     // 【T8 实验】albedoDebug=12：把 lightmapKey 清零，验证它是否影响光照亮度
     output.lightmapKey     = (albedoDebug == 12u) ? float4(0.0, 0.0, 0.0, 0.0)
                                                   : float4(input.uv,
