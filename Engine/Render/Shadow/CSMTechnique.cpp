@@ -315,6 +315,7 @@ void CSMTechnique::RenderCascade(rhi::IRHICommandList* cmd,u32 ci,const FrameSce
     // 【T10】先收集本帧所有阴影投射者的**世界 AABB**，用本级的 lightViewProj 做一次剔除，
     //   只对可见的物体填对象数据并 DrawIndexed。级联之间只差裁剪矩阵，
     //   但物体集合应当随级联不同 ⇒ 这才是"逐光源/逐级联剔除"的意义。
+    static u32 s_DegenerateCasters = 0u;
     std::vector<ShadowCasterBounds> casterBounds;
     std::vector<u32>                casterDrawIndex;
     casterBounds.reserve(snapshot.draws.size());
@@ -325,6 +326,16 @@ void CSMTechnique::RenderCascade(rhi::IRHICommandList* cmd,u32 ci,const FrameSce
         ShadowCasterBounds b{};
         b.min[0] = it.object.boundsMin.x; b.min[1] = it.object.boundsMin.y; b.min[2] = it.object.boundsMin.z;
         b.max[0] = it.object.boundsMax.x; b.max[1] = it.object.boundsMax.y; b.max[2] = it.object.boundsMax.z;
+        // 【T8 修复】合并资产（`granularity=mesh`）的快照条目常常**没有世界包围盒**
+        //   （全 0 或 min>max）。用一个退化盒做级联视锥测试必然判"不可见"，
+        //   于是阴影级联一个投射者都没有 ⇒ 画面失去全部投影、显得发平。
+        //   退化时给保守大盒（只影响阴影剔除精度，不影响正确性）。
+        if (!(b.max[0] >= b.min[0] && b.max[1] >= b.min[1] && b.max[2] >= b.min[2]) ||
+            (b.max[0] - b.min[0] < 1.0e-3f && b.max[1] - b.min[1] < 1.0e-3f &&
+             b.max[2] - b.min[2] < 1.0e-3f)) {
+            for (u32 a = 0u; a < 3u; ++a) { b.min[a] = -1.0e6f; b.max[a] = 1.0e6f; }
+            ++s_DegenerateCasters;
+        }
         casterBounds.push_back(b);
         casterDrawIndex.push_back(di);
     }
@@ -414,6 +425,11 @@ void CSMTechnique::RenderCascade(rhi::IRHICommandList* cmd,u32 ci,const FrameSce
             s_CullLogged[ci] = true;
             HE_CORE_INFO("[CSMTechnique] T10 级联 {} 剔除后 {} / 全部 {}（绘制物体 {}）",
                          ci, visibleCount, (u32)casterBounds.size(), oi);
+            if (ci == 0u) {
+                HE_CORE_INFO("[CSMTechnique] 阴影投射者：{} 条，其中包围盒退化 {} 条（已按保守大盒处理）",
+                             (u32)casterBounds.size(), s_DegenerateCasters);
+                s_DegenerateCasters = 0u;
+            }
         }
     }
     cmd->EndOffscreenPass();
