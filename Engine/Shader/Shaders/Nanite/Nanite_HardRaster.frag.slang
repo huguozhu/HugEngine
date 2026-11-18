@@ -155,11 +155,18 @@ HardRasterFragOut fragmentMain(HardRasterFragIn input) {
     // 【T8 修复】MRT2 的 alpha 是 **AO**（GBuffer 清屏值 = 1）。此前写 0 会把 AO 抹成 0，
     //   光照端按 AO 调制的项因此整体失真。Nanite 几何没有 AO 贴图 ⇒ 写 1（不遮挡）。
     float4 emissiveOut = float4(0.0, 0.0, 0.0, 1.0);
-    if (albedoDebug == 18u) {
+    if (albedoDebug == 19u) {
+        // 【A2 排查】用 **v 翻转** 的 UV 采样 baseColor 数组：若地板从"绿"变成"米色"，
+        //   说明资产里的 UV 与标准路径的 v 方向相反。
+        uint layer19 = u_Materials[min(input.materialID, materialCount - 1u)].bindlessTextureBase;
+        emissiveOut = float4(u_MatArray.SampleLevel(u_MatArraySamp,
+                                                   float3(input.uv.x, 1.0 - input.uv.y, (float)layer19), 0.0).rgb, 1.0);
+        dbgAlbedo = float4(0.0, 0.0, 0.0, 0.0);
+    } else if (albedoDebug == 18u) {
         // 【A3 排查】把材质层号编码成颜色（layer/32），用于确认某个表面用的是哪一层贴图
         uint layer18 = u_Materials[min(input.materialID, materialCount - 1u)].bindlessTextureBase;
-        float enc = (float)layer18 / 32.0;
-        emissiveOut = float4(enc, fract(enc * 32.0 / 8.0), (layer18 & 1u) ? 1.0 : 0.0, 1.0);
+        // 编码：R = layer%32（/31）、G = layer/32（/4）⇒ 可无损表示 0..127
+        emissiveOut = float4((float)(layer18 % 32u) / 31.0, (float)(layer18 / 32u) / 4.0, 0.0, 1.0);
         dbgAlbedo = float4(0.0, 0.0, 0.0, 0.0);
     } else if (albedoDebug == 17u) {
         // 【A2 排查】把材质段的 baseColorFactor 直接当颜色输出（判定因子是否真的读到 0.588）
