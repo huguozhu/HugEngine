@@ -528,6 +528,12 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
                 if (!seen) g.matLayers.emplace_back(key, layer);
             }
             HE_CORE_INFO("04.App: 贴图哈希表 {} 条（网格 {} 个）", (u32)g.matLayers.size(), layerCount);
+            for (const auto& kv : g.matLayers) {
+                HE_CORE_INFO("04.App:   层 {} ← 哈希 0x{:08X}（URI {}）", kv.second, kv.first,
+                             (kv.second < baseColorPaths.size())
+                                 ? std::filesystem::path(baseColorPaths[kv.second]).filename().string()
+                                 : std::string("<oob>"));
+            }
             HE_CORE_INFO("04.App: 材质数组纹理就绪（{} 层 x {}）", layerCount, kLayerSize);
 
             // ── 【A3】金属度/粗糙度数组（与 baseColor **同层序**，材质只需一个层号）──
