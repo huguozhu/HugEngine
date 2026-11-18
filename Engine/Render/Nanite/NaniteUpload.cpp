@@ -448,10 +448,58 @@ bool BuildNaniteClusters(std::span<const float> positions,
 // 口径、终止条件、误差来源、哈希规范化都写在 `NaniteUpload.h` 的同名小节里，
 // 这里只留与代码逐句对应的短注释。
 // ============================================================
+namespace {
+
+/// 【T8·A2】按源网格区间分别聚类，再把各段的簇/顶点表/三角形表**拼接**成一份 L0 产物。
+///   `BuildNaniteClusters` 的 `vertexIndices` 记的是**全局网格顶点下标**（我们传同一份
+///   `positions`），所以拼接时只需按段基址平移 `vertexOffset` / `triangleOffset`。
+bool BuildLevel0ClustersByMesh(std::span<const float> positions,
+                               std::span<const u32>   indices,
+                               std::span<const NaniteSourceMeshRange> meshes,
+                               NaniteClusterBuild&    out) {
+    out = NaniteClusterBuild{};
+    for (const NaniteSourceMeshRange& range : meshes) {
+        const u64 firstIndex = (u64)range.firstTriangle * (u64)kNaniteIndicesPerTriangle;
+        const u64 indexCount = (u64)range.triangleCount * (u64)kNaniteIndicesPerTriangle;
+        if (indexCount == 0u) continue;
+        if (firstIndex + indexCount > (u64)indices.size()) return false;
+
+        NaniteClusterBuild part;
+        if (!BuildNaniteClusters(positions, indices.subspan((usize)firstIndex, (usize)indexCount), part)) {
+            return false;
+        }
+        if (part.Empty()) continue;
+
+        const u32 vertexBase   = (u32)out.vertexIndices.size();
+        const u32 triangleBase = (u32)out.triangles.size();
+        for (usize c = 0; c < part.clusters.size(); ++c) {
+            NaniteClusterRecord record = part.clusters[c];
+            record.vertexOffset   += vertexBase;
+            record.triangleOffset += triangleBase;
+            out.clusters.push_back(record);
+            out.clusterVertexCount.push_back(part.clusterVertexCount[c]);
+        }
+        out.vertexIndices.insert(out.vertexIndices.end(), part.vertexIndices.begin(), part.vertexIndices.end());
+        out.triangles.insert(out.triangles.end(), part.triangles.begin(), part.triangles.end());
+
+        out.stats.clusterCount           += part.stats.clusterCount;
+        out.stats.triangleCount          += part.stats.triangleCount;
+        out.stats.vertexCount            += part.stats.vertexCount;
+        out.stats.degenerateClusterCount += part.stats.degenerateClusterCount;
+        out.stats.noConeClusterCount     += part.stats.noConeClusterCount;
+        out.stats.maxClusterTriangles = std::max(out.stats.maxClusterTriangles, part.stats.maxClusterTriangles);
+        out.stats.maxClusterVertices  = std::max(out.stats.maxClusterVertices, part.stats.maxClusterVertices);
+    }
+    return !out.clusters.empty();
+}
+
+} // namespace
+
 bool BuildNaniteClusterDAG(std::span<const float> positions,
                            std::span<const float> normals,
                            std::span<const float> uvs,
                            std::span<const u32>   indices,
+                           std::span<const NaniteSourceMeshRange> meshes,
                            NaniteClusterDAG&      outResult) {
     // ── 输入校验：与任务 8 同口径；失败一律返回 false 且**不改写出参** ──
     if ((indices.size() % kIndicesPerTriangle) != 0u) return false;
@@ -494,7 +542,12 @@ bool BuildNaniteClusterDAG(std::span<const float> positions,
         const u32 level = (u32)result.levelClusterCount.size();
 
         NaniteClusterBuild levelBuild;
-        if (!BuildNaniteClusters(positions, levelIndices, levelBuild)) return false;
+        if (level == 0u && !meshes.empty()) {
+            // 【T8·A2】L0 按源网格分组切分 ⇒ L0 簇不跨材质
+            if (!BuildLevel0ClustersByMesh(positions, levelIndices, meshes, levelBuild)) return false;
+        } else if (!BuildNaniteClusters(positions, levelIndices, levelBuild)) {
+            return false;
+        }
         if (levelBuild.Empty()) return false;   // 非空输入却切不出簇 ⇒ 失败（任务 8 同口径）
 
         result.levelClusterOffset.push_back((u32)result.clusters.size());
@@ -802,7 +855,18 @@ bool BuildNaniteClusterDAG(std::span<const float> positions,
                            std::span<const u32>   indices,
                            NaniteClusterDAG&      outResult) {
     return BuildNaniteClusterDAG(positions, std::span<const float>{}, std::span<const float>{},
-                                 indices, outResult);
+                                 indices, std::span<const NaniteSourceMeshRange>{}, outResult);
+}
+
+/// 【T8·A2】五参数重载：不提供源网格区间 ⇒ L0 仍在整条合并索引上全局切分
+///   （保持既有调用方与单测的语义；只有多网格入口才传 `meshes`）。
+[[nodiscard]] bool BuildNaniteClusterDAG(std::span<const float> positions,
+                                         std::span<const float> normals,
+                                         std::span<const float> uvs,
+                                         std::span<const u32>   indices,
+                                         NaniteClusterDAG&      outResult) {
+    return BuildNaniteClusterDAG(positions, normals, uvs, indices,
+                                 std::span<const NaniteSourceMeshRange>{}, outResult);
 }
 
 // ============================================================
@@ -1443,7 +1507,8 @@ bool BuildNaniteAssetFromGeometry(std::span<const float>                  positi
     //    "每次出现 → 网格顶点"的映射才能落在与 `meshes[]` 相同的（原始合并）空间里；
     //    两步合起来与 6 参数重载逐字等价（那个重载内部就是这两次调用）。
     NaniteClusterDAG dag;
-    if (!BuildNaniteClusterDAG(positions, normals, uvs, indices, dag)) return false;
+    // 【T8·A2】把源网格区间交给 DAG ⇒ L0 簇按 primitive 分组切分（不再跨材质）
+    if (!BuildNaniteClusterDAG(positions, normals, uvs, indices, meshes, dag)) return false;
     NanitePackedAsset asset;
     if (!PackNaniteClusters(positions, normals, uvs, materials, dag, asset)) return false;
     if (meshes.empty() || asset.clusters.empty()) {

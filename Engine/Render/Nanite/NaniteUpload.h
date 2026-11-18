@@ -308,6 +308,8 @@ struct NaniteClusterDAG {
 ///   不传属性的调用方（`normals`/`uvs` 为空）不受影响 —— 那时属性词段是常量，等价关系与
 ///   任务 9 当时逐位相同。实测数字见 §14.27。
 /// 【重载】三参数版本 = 五参数版本传入空属性 span（保持既有调用方与单测的语义不变）。
+struct NaniteSourceMeshRange;   // 前向声明：下面 6 参重载只按 span 引用
+
 [[nodiscard]] bool BuildNaniteClusterDAG(std::span<const float> positions,
                                          std::span<const u32>   indices,
                                          NaniteClusterDAG&      outResult);
@@ -319,6 +321,20 @@ struct NaniteClusterDAG {
                                          std::span<const float> normals,
                                          std::span<const float> uvs,
                                          std::span<const u32>   indices,
+                                         NaniteClusterDAG&      outResult);
+
+/// 【T8·A2】带"源网格区间"的 DAG 构建：**L0 簇按源网格（primitive/材质）分组切分**，
+///   不再在整条合并索引上全局切分。
+///
+/// 【为什么必须分组】材质是按"簇"二选一的（`NaniteAssignClusterMaterialsByVertexOwner` 多数票）。
+///   全局切分时一个簇会跨 primitive 边界 ⇒ 大块表面被整片判成邻居的材质
+///   （实测：Sponza 地板被植物材质覆盖、整块发绿）。按源网格分组后，L0 簇永远只含单一材质。
+///   高层简化仍可跨组（远距离才用得到），配合"父簇取子簇多数材质"即可。
+[[nodiscard]] bool BuildNaniteClusterDAG(std::span<const float> positions,
+                                         std::span<const float> normals,
+                                         std::span<const float> uvs,
+                                         std::span<const u32>   indices,
+                                         std::span<const NaniteSourceMeshRange> meshes,
                                          NaniteClusterDAG&      outResult);
 
 // ============================================================
