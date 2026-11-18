@@ -131,7 +131,7 @@ struct App::Impl {
     // 【T8 纹理】材质 Texture2DArray（绕开描述符数组写）+ 每材质层号
     std::unique_ptr<rhi::IRHITexture> matArrayTex;
     std::unique_ptr<rhi::IRHISampler> matArraySamp;
-    std::vector<u32> matLayers;
+    std::vector<std::pair<u32, u32>> matLayers;   // (贴图 URI 的 FNV1a32, 数组层号)
     bool transformOnly = false;   // T8：只画变换验收件（cfg `nanite_transform_only`）
     u32  multiAssetCount = 8;     // T8：多资产档注册份数（cfg `nanite_multi_asset_count`）
     bool transformTest   = false; // T8：生成三个变换验收件（cfg `nanite_transform_test`）
@@ -437,10 +437,15 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
     {
         constexpr u32 kLayerSize = 256;
         std::vector<String> baseColorPaths;
+        std::vector<u32>    baseColorKeys;      // 与 baseColorPaths 同序：贴图 URI 的 FNV1a32
         g.world.ForEach<MeshComponent>([&](Entity, MeshComponent& mesh) {
             baseColorPaths.push_back(mesh.baseColorTexture.empty()
                 ? String{}
                 : (std::filesystem::path(sponzaPath).parent_path() / mesh.baseColorTexture).string());
+            // 【T8 纹理映射】与 `MeshPreprocess` 的 `Fnv1a32TextureKey` 逐字节同一算法
+            u32 h = 2166136261u;
+            for (unsigned char c : mesh.baseColorTexture) { h ^= (u32)c; h *= 16777619u; }
+            baseColorKeys.push_back(mesh.baseColorTexture.empty() ? 0xFFFFFFFFu : h);
         });
         const u32 layerCount = (u32)baseColorPaths.size();
         u32 loadedLayers = 0u, missingLayers = 0u;
@@ -491,8 +496,16 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
                              layer, r / n, g / n, b / n,
                              baseColorPaths[layer].empty() ? "<none>" : baseColorPaths[layer]);
             }
-            g.matLayers.resize(layerCount);
-            for (u32 i = 0u; i < layerCount; ++i) g.matLayers[i] = i;
+            // 同一张 URI 复用同一层（Sponza 有大量共享贴图，去重后层数更少）
+            g.matLayers.clear();
+            for (u32 layer = 0u; layer < layerCount; ++layer) {
+                const u32 key = baseColorKeys[layer];
+                if (key == 0xFFFFFFFFu) continue;
+                bool seen = false;
+                for (const auto& kv : g.matLayers) { if (kv.first == key) { seen = true; break; } }
+                if (!seen) g.matLayers.emplace_back(key, layer);
+            }
+            HE_CORE_INFO("04.App: 贴图哈希表 {} 条（网格 {} 个）", (u32)g.matLayers.size(), layerCount);
             HE_CORE_INFO("04.App: 材质数组纹理就绪（{} 层 x {}）", layerCount, kLayerSize);
             HE_CORE_INFO("04.App: 数组层加载统计 —— 成功 {} 层 / 缺失 {} 层（缺失层保持白色）",
                          loadedLayers, missingLayers);

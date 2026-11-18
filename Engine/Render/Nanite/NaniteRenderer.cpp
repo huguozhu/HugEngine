@@ -773,12 +773,12 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
 // ③ `NaniteScene::UploadPackedAsset` 建缓冲 + 上传 + 真实 GPU 读回逐字节比较（它打印那一行）。
 // ============================================================
 void NaniteRenderer::SetMaterialTextureArray(rhi::IRHITexture* array, rhi::IRHISampler* sampler,
-                                             std::vector<u32> layers) {
+                                             std::vector<std::pair<u32, u32>> hashToLayer) {
     m_MatArray     = array;
     m_MatArraySamp = sampler;
-    m_MatLayers    = std::move(layers);
+    m_MatLayers    = std::move(hashToLayer);
     m_Raster.SetMaterialTextureArray(array, sampler);
-    HE_CORE_INFO("NaniteRenderer: 材质 Texture2DArray 就绪（{} 层）", (u32)m_MatLayers.size());
+    HE_CORE_INFO("NaniteRenderer: 材质 Texture2DArray 就绪（{} 张贴图）", (u32)m_MatLayers.size());
 }
 
 void NaniteRenderer::EnsureAssetUploaded(const MeshBatcher& batcher) {
@@ -894,14 +894,6 @@ void NaniteRenderer::EnsureAssetUploaded(const MeshBatcher& batcher) {
                         NaniteFillMaterialsFromDesc(offlineAsset, info.materialDescs);
                         if (offlineAsset.materials.size() != before) {
                             // 【T8 纹理】数组档：bindlessTextureBase 承载层号，mask 只开 baseColor
-                        if (m_MatArray != nullptr) {
-                            HE_CORE_INFO("NaniteRenderer: 数组档应用层号（材质 {} 条 / 层表 {} 条）",
-                                         (u32)offlineAsset.materials.size(), (u32)m_MatLayers.size());
-                            for (usize mi = 0; mi < offlineAsset.materials.size() && mi < m_MatLayers.size(); ++mi) {
-                                offlineAsset.materials[mi].bindlessTextureBase = m_MatLayers[mi];
-                                offlineAsset.materials[mi].textureMask = 1u;   // baseColor
-                            }
-                        }
                         HE_CORE_INFO("NaniteRenderer: 从 MaterialDesc 恢复 {} 个材质记录（仅因子）",
                                          (u32)offlineAsset.materials.size());
                         }
@@ -927,12 +919,24 @@ void NaniteRenderer::EnsureAssetUploaded(const MeshBatcher& batcher) {
             // 【T8 纹理】数组档：无论材质是"从 MaterialDesc 恢复"还是"资产自带"，都统一写层号。
         //   之前这段放在 fill-from-desc 分支里，资产自带材质时整段不执行（实测：纹理没生效）。
         if (m_MatArray != nullptr && !offlineAsset.materials.empty()) {
-            const usize n = std::min(offlineAsset.materials.size(), m_MatLayers.size());
-            for (usize mi = 0; mi < n; ++mi) {
-                offlineAsset.materials[mi].bindlessTextureBase = m_MatLayers[mi];
-                offlineAsset.materials[mi].textureMask = 1u;   // baseColor
+            // 【T8 纹理映射】按"贴图哈希"把材质对到数组层号（不再依赖网格遍历顺序）。
+            usize matched = 0u;
+            for (NaniteMaterialRecord& rec : offlineAsset.materials) {
+                const u32 key = rec.bindlessTextureBase;
+                if (key == 0xFFFFFFFFu) { rec.textureMask = 0u; continue; }
+                u32 layer = 0xFFFFFFFFu;
+                for (const auto& kv : m_MatLayers) {
+                    if (kv.first == key) { layer = kv.second; break; }
+                }
+                if (layer != 0xFFFFFFFFu) {
+                    rec.bindlessTextureBase = layer;
+                    rec.textureMask = 1u;      // baseColor
+                    ++matched;
+                } else {
+                    rec.textureMask = 0u;      // 贴图不在数组里 ⇒ 只用因子
+                }
             }
-            HE_CORE_INFO("NaniteRenderer: 数组档写入层号 {} 条（材质共 {} 条）", (u32)n,
+            HE_CORE_INFO("NaniteRenderer: 材质按贴图哈希匹配层号 {}/{} 条", (u32)matched,
                          (u32)offlineAsset.materials.size());
             for (usize mi = 0; mi < offlineAsset.materials.size() && mi < 6u; ++mi) {
                 HE_CORE_INFO("NaniteRenderer: 材质[{}] baseColor=({:.3f},{:.3f},{:.3f}) metallic={:.2f} roughness={:.2f}",

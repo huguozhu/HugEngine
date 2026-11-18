@@ -132,7 +132,7 @@ public:
 
     /// 【T8 纹理】材质打包成一张 Texture2DArray：layers[i] = 第 i 个材质记录用的层号。
     void SetMaterialTextureArray(rhi::IRHITexture* array, rhi::IRHISampler* sampler,
-                                 std::vector<u32> layers);
+                                 std::vector<std::pair<u32, u32>> hashToLayer);
     void SetSettings(const NaniteSettings& settings) { m_Settings = settings; }
 
     /// 帧图接入点（在 `DeferredPipeline_FrameGraph.cpp` 的 GBuffer 段被调用）。
@@ -606,7 +606,7 @@ public:
     /// 【T8 纹理】材质数组纹理与"材质记录 -> 层号"表
     rhi::IRHITexture*  m_MatArray = nullptr;
     rhi::IRHISampler*  m_MatArraySamp = nullptr;
-    std::vector<u32>   m_MatLayers;
+    std::vector<std::pair<u32, u32>> m_MatLayers;   // (贴图 URI 的 FNV1a32, 数组层号)
     /// 【T8 排查】上一帧从 CPU 可见簇里挑出的调试簇号（-1 = 无）
     u32 m_DebugClusterCandidate = 0xFFFFFFFFu;
 };

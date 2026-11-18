@@ -151,6 +151,15 @@ bool AverageImageColor(const std::string& path, float outRgb[3]) {
     return true;
 }
 
+
+// 【T8 纹理映射】贴图 URI 的 32 位 FNV-1a 哈希：写进材质记录的 `bindlessTextureBase`，
+//   运行时按同一哈希把"材质 → 数组纹理层号"对上，避免依赖网格遍历顺序（那会错位）。
+u32 Fnv1a32TextureKey(const std::string& text) {
+    u32 h = 2166136261u;
+    for (unsigned char c : text) { h ^= (u32)c; h *= 16777619u; }
+    return h;
+}
+
 BuildUnit MergePrimitives(const std::vector<NaniteGltfPrimitive*>& primitives, const std::string& name) {
     BuildUnit unit;
     unit.name = name;
@@ -298,6 +307,14 @@ int main(int argc, char** argv) {
                 // 【默认关闭】运行时已经能通过 `Texture2DArray` 真正采样贴图了，
                 //   再乘一次平均色就是"同一张图算两遍" ⇒ albedo ≈ avg²，颜色发闷/发灰。
                 //   只在 `--bake-average` 显式要求时烘焙（给"没有任何纹理绑定能力"的后端兜底用）。
+                // 【T8 纹理映射】把 baseColor 贴图 URI 的哈希写进 `bindlessTextureBase`：
+                //   运行时会按同一哈希把"材质 → Texture2DArray 层号"对上。
+                //   没有贴图写 0xFFFFFFFF（运行时据此关闭该材质的 baseColor 位）。
+                rec.bindlessTextureBase = 0xFFFFFFFFu;
+                const u32 texKeyIdx = d.textureImageIndex[0];   // 槽位 0 = baseColor
+                if (texKeyIdx < scene.imageUris.size() && !scene.imageUris[texKeyIdx].empty()) {
+                    rec.bindlessTextureBase = Fnv1a32TextureKey(scene.imageUris[texKeyIdx]);
+                }
                 const bool bakeAverage = options.bakeAverageColor;
                 const u32 texIdx = d.textureImageIndex[0];   // 槽位 0 = baseColor
                 if (bakeAverage && texIdx < scene.imageUris.size() && !scene.imageUris[texIdx].empty()) {
