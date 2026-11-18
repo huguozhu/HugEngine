@@ -781,6 +781,12 @@ void NaniteRenderer::SetMaterialTextureArray(rhi::IRHITexture* array, rhi::IRHIS
     HE_CORE_INFO("NaniteRenderer: 材质 Texture2DArray 就绪（{} 张贴图）", (u32)m_MatLayers.size());
 }
 
+void NaniteRenderer::SetMaterialMetalRoughArray(rhi::IRHITexture* array, rhi::IRHISampler* sampler) {
+    m_MatMrArray = array;
+    m_Raster.SetMaterialMetalRoughArray(array, sampler);
+    HE_CORE_INFO("NaniteRenderer: MR 数组就绪（{}）", (void*)array);
+}
+
 void NaniteRenderer::EnsureAssetUploaded(const MeshBatcher& batcher) {
     // 【关闭 / 未就绪 ⇒ 一个资源都不建】§14.2 不变式 1：关闭档不产生新的 GPU 资源、不打日志。
     if (!m_Settings.enabled || !m_Ready) return;

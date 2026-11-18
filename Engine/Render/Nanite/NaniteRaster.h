@@ -270,6 +270,8 @@ public:
 
     /// 【T8 纹理】绑定材质 Texture2DArray（binding 23/24）——单张纹理，避免写描述符数组。
     void SetMaterialTextureArray(rhi::IRHITexture* array, rhi::IRHISampler* sampler);
+    /// 【A3】绑定金属度/粗糙度数组（binding 25/26；与 baseColor 同层序、共用采样器）
+    void SetMaterialMetalRoughArray(rhi::IRHITexture* array, rhi::IRHISampler* sampler);
 
     /// 【T8 排查】读回深度键缓冲的前 count 个像素（全 `0xFFFFFFFF` ⇒ 第 1 趟没写过键）。
     void ReadbackDepthKeys(u32* out, u32 count);
@@ -590,6 +592,7 @@ private:
     rhi::RHIBufferHandle m_WinnerID{};   // A-3
     /// 【T8 纹理】材质数组纹理（硬光栅集合是懒建的 ⇒ 每帧绑定一次）
     rhi::IRHITexture* m_MatArrayTex = nullptr;
+    rhi::IRHITexture* m_MatMrArrayTex = nullptr;   // 【A3】MR 数组
     rhi::IRHISampler* m_MatArraySamp = nullptr;
 
     /// 读数缓冲（扁平 u32，`kNaniteSoftStatsCapacity` 条）+ 每帧清零用的常驻 0 源

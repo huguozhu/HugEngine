@@ -130,6 +130,7 @@ struct App::Impl {
     // ---- 管线开关（面板 + 配置）----
     // 【T8 纹理】材质 Texture2DArray（绕开描述符数组写）+ 每材质层号
     std::unique_ptr<rhi::IRHITexture> matArrayTex;
+    std::unique_ptr<rhi::IRHITexture> matMrArrayTex;   // 【A3】金属度/粗糙度数组（同层序）
     std::unique_ptr<rhi::IRHISampler> matArraySamp;
     std::vector<std::pair<u32, u32>> matLayers;   // (贴图 URI 的 FNV1a32, 数组层号)
     bool transformOnly = false;   // T8：只画变换验收件（cfg `nanite_transform_only`）
@@ -437,11 +438,15 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
     {
         constexpr u32 kLayerSize = 256;
         std::vector<String> baseColorPaths;
+        std::vector<String> mrPaths;            // 与 baseColorPaths 同序：金属度/粗糙度贴图
         std::vector<u32>    baseColorKeys;      // 与 baseColorPaths 同序：贴图 URI 的 FNV1a32
         g.world.ForEach<MeshComponent>([&](Entity, MeshComponent& mesh) {
             baseColorPaths.push_back(mesh.baseColorTexture.empty()
                 ? String{}
                 : (std::filesystem::path(sponzaPath).parent_path() / mesh.baseColorTexture).string());
+            mrPaths.push_back(mesh.metallicRoughnessTexture.empty()
+                ? String{}
+                : (std::filesystem::path(sponzaPath).parent_path() / mesh.metallicRoughnessTexture).string());
             // 【T8 纹理映射】与 `MeshPreprocess` 的 `Fnv1a32TextureKey` 逐字节同一算法
             u32 h = 2166136261u;
             for (unsigned char c : mesh.baseColorTexture) { h ^= (u32)c; h *= 16777619u; }
@@ -457,40 +462,29 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
                 u8* pixels = stbi_load(baseColorPaths[layer].c_str(), &w, &h, &ch, 4);
                 if (pixels == nullptr || w <= 0 || h <= 0) { ++missingLayers; continue; }
                 ++loadedLayers;
-                // 【A2 修复】**在线性空间**做盒式平均，再编码回 sRGB 字节。
-                //   直接取最近邻（或在线性空间之外平均）会让缩略图系统性偏暗：
-                //   sRGB 传输函数是凸的 ⇒ L(avg) ≤ avg(L)，实测整体低约 20%，
-                //   与标准路径的 mip 链（GPU 在线性空间生成）对不上。
+                // 【A2 结论】按**sRGB 字节空间**做盒式平均（与标准路径 UNORM 纹理的 mip 链同口径）。
+                //   先前在"线性空间"平均反而与运行时的"不做解码"口径不一致（实测 R 通道低 9%）。
                 u8* dst = atlas.data() + (size_t)layer * kLayerSize * kLayerSize * 4u;
-                const auto srgbToLinear = [](float c) {
-                    return (c <= 0.04045f) ? (c / 12.92f) : std::pow((c + 0.055f) / 1.055f, 2.4f);
-                };
-                const auto linearToSrgb = [](float c) {
-                    return (c <= 0.0031308f) ? (c * 12.92f) : (1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f);
-                };
                 for (u32 y = 0u; y < kLayerSize; ++y) {
                     const u32 sy0 = (u32)((u64)y * (u64)h / kLayerSize);
                     const u32 sy1 = std::max(sy0 + 1u, (u32)((u64)(y + 1u) * (u64)h / kLayerSize));
                     for (u32 x = 0u; x < kLayerSize; ++x) {
                         const u32 sx0 = (u32)((u64)x * (u64)w / kLayerSize);
                         const u32 sx1 = std::max(sx0 + 1u, (u32)((u64)(x + 1u) * (u64)w / kLayerSize));
-                        float acc[3] = { 0.0f, 0.0f, 0.0f };
-                        u32   cnt = 0u;
+                        u32 acc[3] = { 0u, 0u, 0u };
+                        u32 cnt = 0u;
                         for (u32 yy = sy0; yy < sy1; ++yy) {
                             for (u32 xx = sx0; xx < sx1; ++xx) {
                                 const u8* src = pixels + ((size_t)yy * w + xx) * 4u;
-                                for (u32 c = 0u; c < 3u; ++c) {
-                                    acc[c] += srgbToLinear((float)src[c] / 255.0f);
-                                }
+                                acc[0] += src[0]; acc[1] += src[1]; acc[2] += src[2];
                                 ++cnt;
                             }
                         }
                         u8* outPx = dst + ((size_t)y * kLayerSize + x) * 4u;
-                        const float inv = (cnt > 0u) ? (1.0f / (float)cnt) : 0.0f;
-                        for (u32 c = 0u; c < 3u; ++c) {
-                            const float lin = acc[c] * inv;
-                            outPx[c] = (u8)std::lround(std::min(1.0f, std::max(0.0f, linearToSrgb(lin))) * 255.0f);
-                        }
+                        const u32 inv = (cnt > 0u) ? cnt : 1u;
+                        outPx[0] = (u8)(acc[0] / inv);
+                        outPx[1] = (u8)(acc[1] / inv);
+                        outPx[2] = (u8)(acc[2] / inv);
                         outPx[3] = 255u;
                     }
                 }
@@ -535,6 +529,47 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
             }
             HE_CORE_INFO("04.App: 贴图哈希表 {} 条（网格 {} 个）", (u32)g.matLayers.size(), layerCount);
             HE_CORE_INFO("04.App: 材质数组纹理就绪（{} 层 x {}）", layerCount, kLayerSize);
+
+            // ── 【A3】金属度/粗糙度数组（与 baseColor **同层序**，材质只需一个层号）──
+            //   没有 MR 贴图的层填中性值（g=1 不改粗糙度、b=0 非金属）。
+            {
+                std::vector<u8> mrAtlas((size_t)kLayerSize * kLayerSize * 4u * layerCount, 255u);
+                for (u32 layer = 0u; layer < layerCount; ++layer) {
+                    u8* dst = mrAtlas.data() + (size_t)layer * kLayerSize * kLayerSize * 4u;
+                    for (size_t t = 0; t < (size_t)kLayerSize * kLayerSize; ++t) {
+                        dst[t * 4u + 1u] = 255u;   // g = roughness 调制 1.0
+                        dst[t * 4u + 2u] = 0u;     // b = metallic 0
+                        dst[t * 4u + 3u] = 255u;
+                    }
+                    if (mrPaths[layer].empty()) continue;
+                    int mw = 0, mh = 0, mch = 0;
+                    u8* pixels = stbi_load(mrPaths[layer].c_str(), &mw, &mh, &mch, 4);
+                    if (pixels == nullptr || mw <= 0 || mh <= 0) continue;
+                    for (u32 y = 0u; y < kLayerSize; ++y) {
+                        const u32 sy = (u32)((u64)y * (u64)mh / kLayerSize);
+                        for (u32 x = 0u; x < kLayerSize; ++x) {
+                            const u32 sx = (u32)((u64)x * (u64)mw / kLayerSize);
+                            const u8* src = pixels + ((size_t)sy * mw + sx) * 4u;
+                            u8* outPx = dst + ((size_t)y * kLayerSize + x) * 4u;
+                            outPx[0] = src[0];
+                            outPx[1] = src[1];   // g = roughness
+                            outPx[2] = src[2];   // b = metallic
+                            outPx[3] = 255u;
+                        }
+                    }
+                    stbi_image_free(pixels);
+                }
+                rhi::TextureDesc mtd;
+                mtd.format      = rhi::Format::RGBA8_UNORM;
+                mtd.width       = kLayerSize;
+                mtd.height      = kLayerSize;
+                mtd.arrayLayers = layerCount;
+                mtd.mipLevels   = 1;
+                mtd.usage       = rhi::TextureUsage::ShaderResource;
+                mtd.initialData = mrAtlas.data();
+                g.matMrArrayTex = g.device->CreateTexture(mtd);
+                HE_CORE_INFO("04.App: MR 数组纹理就绪（{} 层 x {}）", layerCount, kLayerSize);
+            }
             HE_CORE_INFO("04.App: 数组层加载统计 —— 成功 {} 层 / 缺失 {} 层（缺失层保持白色）",
                          loadedLayers, missingLayers);
         }
@@ -749,6 +784,11 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
                 g.pipeline->GetNanite().SetMaterialTextureArray(g.matArrayTex.get(),
                                                                 g.matArraySamp.get(),
                                                                 g.matLayers);
+            }
+            // 【A3】MR 数组（与 baseColor 同层序、共用同一个采样器）
+            if (g.matMrArrayTex) {
+                g.pipeline->GetNanite().SetMaterialMetalRoughArray(g.matMrArrayTex.get(),
+                                                                   g.matArraySamp.get());
             }
             naniteSettings.enabled = GetBool(cfg, "nanite_enable", naniteSettings.enabled);
             naniteSettings.offline = GetBool(cfg, "nanite_offline", naniteSettings.offline);

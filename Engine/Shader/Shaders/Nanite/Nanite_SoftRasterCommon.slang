@@ -122,6 +122,9 @@ uint naniteRasterSlot(uint3 gid) { return gid.x + gid.y * kNaniteRasterDispatchW
 //   `u_MatArray` 的层号来自材质记录的 `bindlessTextureBase`；采样器单独绑定（binding 24）。
 [[vk::binding(23, 0)]] Texture2DArray<float4>                   u_MatArray;
 [[vk::binding(24, 0)]] SamplerState                             u_MatArraySamp;
+// ── 【A3】金属度/粗糙度数组（与 baseColor **同层序**，共用同一个层号）──
+[[vk::binding(25, 0)]] Texture2DArray<float4>                   u_MatMrArray;
+[[vk::binding(26, 0)]] SamplerState                             u_MatMrArraySamp;
 // ── 【T8】每簇量化尺度（float/cluster，binding 22）──
 // 【为什么需要】顶点是按**各自资产** bbox 的最大轴量化的；聚合视图里只有一个全局
 //   `meshMaxExtent`，把尺度差异大的资产混在一起时，小资产会被按大尺度解码而飞出视锥
@@ -280,24 +283,21 @@ bool softRasterEvaluateMaterial(uint materialIndex, float2 uv,
     //   整批 baseColor 贴图被打包成一张数组纹理 ⇒ 不需要写描述符数组（那条路会崩驱动）。
     // 数组档启用且该材质有 baseColor 位时走数组采样（层号存在 bindlessTextureBase 里）
     if (matArrayEnabled != 0u && (material.textureMask & NANITE_TEXMASK_BASECOLOR) != 0u) {
-        // 【A2】数组纹理存的是**原始 sRGB 字节**（UNORM）⇒ 这里显式解码到线性。
-        //   走硬件 SRGB 格式时实测整体偏暗 ~20%（与标准路径的 bindless 纹理不一致），
-        //   显式 pow 解码让行为确定、可与标准路径逐值对照。
-        float3 texSrgb = u_MatArray.SampleLevel(u_MatArraySamp,
-                                                float3(uv, (float)material.bindlessTextureBase), 0.0).rgb;
-        // sRGB→线性（精确传输函数，与缩略图生成端同一公式）
-        float3 s = saturate(texSrgb);
-        float3 texLinear = float3(
-            (s.r <= 0.04045f) ? (s.r / 12.92f) : pow((s.r + 0.055f) / 1.055f, 2.4f),
-            (s.g <= 0.04045f) ? (s.g / 12.92f) : pow((s.g + 0.055f) / 1.055f, 2.4f),
-            (s.b <= 0.04045f) ? (s.b / 12.92f) : pow((s.b + 0.055f) / 1.055f, 2.4f));
-        outAlbedo *= texLinear;
-        // 【T8 修复】数组档只带 baseColor，没有 MetallicRoughness 贴图：
-        //   材质段里的 `metallicFactor` 按 glTF 规范缺省是 1.0 ⇒ 全金属 + 镜面反射天空
-        //   ⇒ 画面整体过曝发白（实测 baseColor=(0.079,…) metallic=1 roughness=1 时最明显）。
-        //   没有 MR 贴图时按"非金属 + 较粗糙"处理，石头/灰泥才不会被当成镜子。
-        metallic  = 0.0;
-        roughness = max(material.roughnessFactor, 0.55);
+        // 【A2 结论】**不做 sRGB 解码**：标准路径的 bindless 采样拿到的就是**原始 texel 值**
+        //   （实测两条路径在固定 UV=(0.5,0.5) 处的 texel 逐值一致，比值 1.01/1.04/1.01），
+        //   而它在 GBuffer 里直接 `albedo = baseColorFactor * texel`。
+        //   我们此前把 texel 解码到线性，比标准路径暗 ~13%（全局比值 0.84）。
+        //   为了与既有路径**同一观感**，这里保持与它一致的"直接用 texel"口径。
+        outAlbedo *= u_MatArray.SampleLevel(u_MatArraySamp,
+                                            float3(uv, (float)material.bindlessTextureBase), 0.0).rgb;
+        // 【A3】金属度/粗糙度来自**同层序**的 MR 数组（g=roughness、b=metallic），再乘材质因子。
+        //   这与 GBuffer 路径的 `clamp(roughnessFactor * mr.g, 0.04, 1.0)` /
+        //   `metallicFactor * mr.b` 两条公式一致；MR 数组里没有贴图的层填中性值
+        //   （g=1、b=0），因此"没有 MR 贴图"的材质自然退化为"非金属 + 用因子当粗糙度"。
+        float4 mr = u_MatMrArray.SampleLevel(u_MatMrArraySamp,
+                                             float3(uv, (float)material.bindlessTextureBase), 0.0);
+        metallic  = saturate(material.metallicFactor * mr.b);
+        roughness = clamp(material.roughnessFactor * mr.g, 0.04, 1.0);
         return true;
     }
     if ((material.textureMask & NANITE_TEXMASK_BASECOLOR) != 0u) {
