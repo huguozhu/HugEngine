@@ -464,7 +464,9 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
                 stbi_image_free(pixels);
             }
             rhi::TextureDesc td;
-            td.format      = rhi::Format::RGBA8_UNORM;
+            // 【T8】贴图是 sRGB 编码的：与标准路径的 bindless 纹理（`RGBA8_SRGB`）同一格式，
+            //   否则颜色会被当成"已经是线性值"，albedo 整体偏亮且色温偏冷。
+            td.format      = rhi::Format::RGBA8_SRGB;
             td.width       = kLayerSize;
             td.height      = kLayerSize;
             td.arrayLayers = layerCount;
