@@ -122,7 +122,9 @@ TEST_CASE("NaniteMaterialMap(真实资产): Sponza 上 unmapped==0 且材质与�
 
     // ── ③ DAG：用来把簇的三角形还原成**原始合并**三角形（LOD0 的真值来源）──
     render::NaniteClusterDAG dag;
-    REQUIRE(render::BuildNaniteClusterDAG(g.positions, g.normals, g.uvs, g.indices, dag));
+    // 【T8·A2】必须用**带 meshes 的重载**：资产侧现在按源网格分组切分 L0，
+    //   若这里用不带 meshes 的五参版本，簇分布会与之不同（实测 8522 vs 8564）。
+    REQUIRE(render::BuildNaniteClusterDAG(g.positions, g.normals, g.uvs, g.indices, g.meshes, dag));
     REQUIRE(dag.clusters.size() == asset.clusters.size());
 
     std::unordered_map<u64, u32> origTriByKey;
