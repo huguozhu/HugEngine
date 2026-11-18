@@ -155,7 +155,11 @@ HardRasterFragOut fragmentMain(HardRasterFragIn input) {
     // 【T8 修复】MRT2 的 alpha 是 **AO**（GBuffer 清屏值 = 1）。此前写 0 会把 AO 抹成 0，
     //   光照端按 AO 调制的项因此整体失真。Nanite 几何没有 AO 贴图 ⇒ 写 1（不遮挡）。
     float4 emissiveOut = float4(0.0, 0.0, 0.0, 1.0);
-    if (albedoDebug == 19u) {
+    if (albedoDebug == 22u) {
+        // 【A2 排查】UV 直出（R=u、G=v）：与标准路径同像素对照，判定是否 UV 不一致
+        emissiveOut = float4(input.uv.x, input.uv.y, 0.0, 1.0);
+        dbgAlbedo = float4(0.0, 0.0, 0.0, 0.0);
+    } else if (albedoDebug == 19u) {
         // 【A2 排查】用 **v 翻转** 的 UV 采样 baseColor 数组：若地板从"绿"变成"米色"，
         //   说明资产里的 UV 与标准路径的 v 方向相反。
         uint layer19 = u_Materials[min(input.materialID, materialCount - 1u)].bindlessTextureBase;
