@@ -2672,11 +2672,16 @@ static_assert(kNaniteSizeBucketUpperBound[kNaniteSoftStatSizeBucketCount - 1u] =
 //   · `kNaniteHardRasterMaxPrimitives = kNaniteMaxClusterTriangles`。
 // ============================================================
 inline constexpr u32 kNaniteHardRasterThreads       = 128u;
-inline constexpr u32 kNaniteHardRasterMaxVertices   = 3u * kNaniteMaxClusterTriangles;
-inline constexpr u32 kNaniteHardRasterMaxPrimitives = kNaniteMaxClusterTriangles;
-static_assert(kNaniteHardRasterMaxVertices == 192u,
-              "硬光栅的 mesh 输出顶点数 = 3 × 簇三角形上限（逐角点展开，不做索引去重）");
-static_assert(kNaniteHardRasterMaxPrimitives == 64u, "硬光栅的 mesh 输出图元数 = 簇三角形上限");
+// 【T8 近平面裁剪】每个三角形最多被切成 4 个顶点（四边形），并以扇形三角化输出 2 个图元
+//   ⇒ 顶点上限 4 × 64 = 256、图元上限 2 × 64 = 128。
+//   本机 `maxMeshOutputVertices = 256`、`maxMeshOutputPrimitives ≥ 128`，恰好容得下；
+//   `NaniteRaster::EnsureHardRasterResources` 会按这两个常量核对 DeviceCaps。
+inline constexpr u32 kNaniteHardRasterMaxVertices   = 4u * kNaniteMaxClusterTriangles;
+inline constexpr u32 kNaniteHardRasterMaxPrimitives = 2u * kNaniteMaxClusterTriangles;
+static_assert(kNaniteHardRasterMaxVertices == 256u,
+              "硬光栅的 mesh 输出顶点数 = 4 × 簇三角形上限（裁剪后单三角形最多 4 顶点）");
+static_assert(kNaniteHardRasterMaxPrimitives == 128u,
+              "硬光栅的 mesh 输出图元数 = 2 × 簇三角形上限（裁剪后单三角形最多 2 图元）");
 
 /// 硬光栅读数槽位（模块**自持**的小缓冲，不与软光栅那 16 槽共用；与
 /// `Nanite_HardRaster.{mesh,frag}.slang` 的 `kHardStat*` 一一对应）
