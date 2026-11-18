@@ -457,21 +457,49 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
                 u8* pixels = stbi_load(baseColorPaths[layer].c_str(), &w, &h, &ch, 4);
                 if (pixels == nullptr || w <= 0 || h <= 0) { ++missingLayers; continue; }
                 ++loadedLayers;
+                // 【A2 修复】**在线性空间**做盒式平均，再编码回 sRGB 字节。
+                //   直接取最近邻（或在线性空间之外平均）会让缩略图系统性偏暗：
+                //   sRGB 传输函数是凸的 ⇒ L(avg) ≤ avg(L)，实测整体低约 20%，
+                //   与标准路径的 mip 链（GPU 在线性空间生成）对不上。
                 u8* dst = atlas.data() + (size_t)layer * kLayerSize * kLayerSize * 4u;
+                const auto srgbToLinear = [](float c) {
+                    return (c <= 0.04045f) ? (c / 12.92f) : std::pow((c + 0.055f) / 1.055f, 2.4f);
+                };
+                const auto linearToSrgb = [](float c) {
+                    return (c <= 0.0031308f) ? (c * 12.92f) : (1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f);
+                };
                 for (u32 y = 0u; y < kLayerSize; ++y) {
-                    const u32 sy = (u32)((u64)y * (u64)h / kLayerSize);
+                    const u32 sy0 = (u32)((u64)y * (u64)h / kLayerSize);
+                    const u32 sy1 = std::max(sy0 + 1u, (u32)((u64)(y + 1u) * (u64)h / kLayerSize));
                     for (u32 x = 0u; x < kLayerSize; ++x) {
-                        const u32 sx = (u32)((u64)x * (u64)w / kLayerSize);
-                        const u8* src = pixels + ((size_t)sy * w + sx) * 4u;
-                        std::memcpy(dst + ((size_t)y * kLayerSize + x) * 4u, src, 4u);
+                        const u32 sx0 = (u32)((u64)x * (u64)w / kLayerSize);
+                        const u32 sx1 = std::max(sx0 + 1u, (u32)((u64)(x + 1u) * (u64)w / kLayerSize));
+                        float acc[3] = { 0.0f, 0.0f, 0.0f };
+                        u32   cnt = 0u;
+                        for (u32 yy = sy0; yy < sy1; ++yy) {
+                            for (u32 xx = sx0; xx < sx1; ++xx) {
+                                const u8* src = pixels + ((size_t)yy * w + xx) * 4u;
+                                for (u32 c = 0u; c < 3u; ++c) {
+                                    acc[c] += srgbToLinear((float)src[c] / 255.0f);
+                                }
+                                ++cnt;
+                            }
+                        }
+                        u8* outPx = dst + ((size_t)y * kLayerSize + x) * 4u;
+                        const float inv = (cnt > 0u) ? (1.0f / (float)cnt) : 0.0f;
+                        for (u32 c = 0u; c < 3u; ++c) {
+                            const float lin = acc[c] * inv;
+                            outPx[c] = (u8)std::lround(std::min(1.0f, std::max(0.0f, linearToSrgb(lin))) * 255.0f);
+                        }
+                        outPx[3] = 255u;
                     }
                 }
                 stbi_image_free(pixels);
             }
             rhi::TextureDesc td;
-            // 【T8】贴图是 sRGB 编码的：与标准路径的 bindless 纹理（`RGBA8_SRGB`）同一格式，
-            //   否则颜色会被当成"已经是线性值"，albedo 整体偏亮且色温偏冷。
-            td.format      = rhi::Format::RGBA8_SRGB;
+            // 【A2】用 UNORM 存储原始 sRGB 字节，**在着色器里显式做 sRGB→线性解码**：
+            //   这样解码次数是确定的（1 次），不受 RHI 对 SRGB 格式的实现差异影响。
+            td.format      = rhi::Format::RGBA8_UNORM;
             td.width       = kLayerSize;
             td.height      = kLayerSize;
             td.arrayLayers = layerCount;

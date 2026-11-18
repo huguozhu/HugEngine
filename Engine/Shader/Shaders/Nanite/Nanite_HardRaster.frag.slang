@@ -155,7 +155,17 @@ HardRasterFragOut fragmentMain(HardRasterFragIn input) {
     // 【T8 修复】MRT2 的 alpha 是 **AO**（GBuffer 清屏值 = 1）。此前写 0 会把 AO 抹成 0，
     //   光照端按 AO 调制的项因此整体失真。Nanite 几何没有 AO 贴图 ⇒ 写 1（不遮挡）。
     float4 emissiveOut = float4(0.0, 0.0, 0.0, 1.0);
-    if (albedoDebug == 10u) {
+    if (albedoDebug == 17u) {
+        // 【A2 排查】把材质段的 baseColorFactor 直接当颜色输出（判定因子是否真的读到 0.588）
+        NaniteMaterialRecord m17 = u_Materials[min(input.materialID, materialCount - 1u)];
+        emissiveOut = float4(m17.baseColorFactor.rgb, 1.0);
+        dbgAlbedo = float4(0.0, 0.0, 0.0, 0.0);
+    } else if (albedoDebug == 16u) {
+        // 【A2 排查】固定 UV=(0.5,0.5) 采样：整屏按材质层号出现纯色块，便于与源 PNG 中心像素对照
+        uint layer16 = u_Materials[min(input.materialID, materialCount - 1u)].bindlessTextureBase;
+        emissiveOut = float4(u_MatArray.SampleLevel(u_MatArraySamp, float3(0.5, 0.5, (float)layer16), 0.0).rgb, 1.0);
+        dbgAlbedo = float4(0.0, 0.0, 0.0, 0.0);
+    } else if (albedoDebug == 10u) {
         // 【T8 排查】用 **uv × 8** 采样：若画面出现明显重复纹理 ⇒ UV 有效、贴图有细节；
         //   若仍是纯白/纯色 ⇒ UV 退化或贴图本身是白的。
         uint layer10 = u_Materials[min(input.materialID, materialCount - 1u)].bindlessTextureBase;

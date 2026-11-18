@@ -280,8 +280,18 @@ bool softRasterEvaluateMaterial(uint materialIndex, float2 uv,
     //   整批 baseColor 贴图被打包成一张数组纹理 ⇒ 不需要写描述符数组（那条路会崩驱动）。
     // 数组档启用且该材质有 baseColor 位时走数组采样（层号存在 bindlessTextureBase 里）
     if (matArrayEnabled != 0u && (material.textureMask & NANITE_TEXMASK_BASECOLOR) != 0u) {
-        outAlbedo *= u_MatArray.SampleLevel(u_MatArraySamp,
-                                           float3(uv, (float)material.bindlessTextureBase), 0.0).rgb;
+        // 【A2】数组纹理存的是**原始 sRGB 字节**（UNORM）⇒ 这里显式解码到线性。
+        //   走硬件 SRGB 格式时实测整体偏暗 ~20%（与标准路径的 bindless 纹理不一致），
+        //   显式 pow 解码让行为确定、可与标准路径逐值对照。
+        float3 texSrgb = u_MatArray.SampleLevel(u_MatArraySamp,
+                                                float3(uv, (float)material.bindlessTextureBase), 0.0).rgb;
+        // sRGB→线性（精确传输函数，与缩略图生成端同一公式）
+        float3 s = saturate(texSrgb);
+        float3 texLinear = float3(
+            (s.r <= 0.04045f) ? (s.r / 12.92f) : pow((s.r + 0.055f) / 1.055f, 2.4f),
+            (s.g <= 0.04045f) ? (s.g / 12.92f) : pow((s.g + 0.055f) / 1.055f, 2.4f),
+            (s.b <= 0.04045f) ? (s.b / 12.92f) : pow((s.b + 0.055f) / 1.055f, 2.4f));
+        outAlbedo *= texLinear;
         // 【T8 修复】数组档只带 baseColor，没有 MetallicRoughness 贴图：
         //   材质段里的 `metallicFactor` 按 glTF 规范缺省是 1.0 ⇒ 全金属 + 镜面反射天空
         //   ⇒ 画面整体过曝发白（实测 baseColor=(0.079,…) metallic=1 roughness=1 时最明显）。
