@@ -354,6 +354,30 @@ bool NaniteScene::BuildMergedBuffers() {
         return true;
     };
 
+    // 【T8·排查】聚合一致性自检：每条簇记录的 顶点/三角形/材质 区间必须落在聚合段内。
+    //   任一越界 ⇒ "asset 局部偏移没加基址"或"基址累计与合并顺序不一致"，
+    //   表现就是几何散乱/材质回退（多资产档曾长期这样）。
+    {
+        u32 badVertex = 0u, badTriangle = 0u, badMaterial = 0u;
+        u32 maxVertexEnd = 0u, maxTriangleEnd = 0u, maxMaterial = 0u;
+        for (const NaniteClusterRecord& r : m_MergedClusters) {
+            const u32 vEnd = r.vertexOffset + 128u;          // 簇顶点上限，'127' 为局部下标上限
+            const u32 tEnd = r.triangleOffset + r.triangleCount;
+            if ((usize)r.vertexOffset >= m_MergedVertices.size()) ++badVertex;
+            if ((usize)tEnd > m_MergedTriangles.size()) ++badTriangle;
+            if ((usize)r.materialID >= m_MergedMaterials.size()) ++badMaterial;
+            if (vEnd > maxVertexEnd) maxVertexEnd = vEnd;
+            if (tEnd > maxTriangleEnd) maxTriangleEnd = tEnd;
+            if (r.materialID > maxMaterial) maxMaterial = r.materialID;
+        }
+        HE_CORE_INFO("[Nanite] 聚合自检：簇 {} / 顶点 {} / 三角形 {} / 材质 {}；"
+                     "越界簇：顶点 {}、三角形 {}、材质 {}（最大 vertexEnd={} triangleEnd={} materialID={}）",
+                     (u32)m_MergedClusters.size(), (u32)m_MergedVertices.size(),
+                     (u32)m_MergedTriangles.size(), (u32)m_MergedMaterials.size(),
+                     badVertex, badTriangle, badMaterial,
+                     maxVertexEnd, maxTriangleEnd, maxMaterial);
+    }
+
     const bool ok =
         uploadSection(m_Merged.clusters, m_MergedClusters.data(),
                       m_MergedClusters.size() * sizeof(NaniteClusterRecord), "Nanite.MergedClusters") &&
