@@ -155,12 +155,17 @@ public:
         // 【T11】几何只走 Nanite 硬光栅 ⇒ 不再建 GBuffer 的 IA 管线。
         //   不满足（D3D11 / 无 MS 的移动端）⇒ 保持 IA 管线，回退路径不受影响。
         const bool msOk = m_Device != nullptr && m_Device->GetCaps().supportsMeshShaders;
+        // 【B 健壮性】Nanite 必须**至少有一条光栅路径**才允许让既有 IA 管线让位：
+        //   软/硬都关掉时模块根本不写 GBuffer（也不清屏），若此时还销毁 IA PSO，
+        //   会走进"没有任何几何路径"的配置 —— 实测在 NVIDIA 驱动里直接崩（`nvoglv64`）。
+        // 硬光栅是软光栅之上的叠加（它复用软光栅的 GBuffer 清屏与深度解析）
+        const bool naniteGeometryOn = s.enabled && s.softRaster;
         if (m_GBuffer) {
-            m_GBuffer->SetSkipIaPipeline(s.enabled && s.removeIaPso && msOk && s.hardRaster);
+            m_GBuffer->SetSkipIaPipeline(naniteGeometryOn && s.removeIaPso && msOk && s.hardRaster);
         }
         // 【T11】阴影侧同理：有 MS ⇒ 强制 mesh 并销毁 IA 阴影 PSO；无 MS ⇒ 内部保持 IA。
         if (m_ShadowSystem) {
-            m_ShadowSystem->SetRemoveIaPipeline(s.enabled && s.removeIaPso && msOk);
+            m_ShadowSystem->SetRemoveIaPipeline(naniteGeometryOn && s.removeIaPso && msOk);
         }
     }
     [[nodiscard]] const NaniteSettings& GetNaniteSettings() const  { return m_Nanite.GetSettings(); }
@@ -173,7 +178,7 @@ public:
         //   画面因此失去全部投影、显得"发平"。这里在 IA 已销毁时强制保持 mesh 路径。
         const NaniteSettings& ns = m_Nanite.GetSettings();
         const bool msOk = m_Device != nullptr && m_Device->GetCaps().supportsMeshShaders;
-        const bool iaDestroyed = ns.enabled && ns.removeIaPso && msOk;
+        const bool iaDestroyed = ns.enabled && ns.softRaster && ns.removeIaPso && msOk;
         m_ShadowMeshEnabled = enable || iaDestroyed;
         if (m_ShadowSystem) m_ShadowSystem->SetMeshShadowEnabled(m_ShadowMeshEnabled);
     }

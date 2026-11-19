@@ -158,6 +158,9 @@ void NaniteRenderer::AddPasses(RenderGraph& rg, const NaniteGBufferHandles& gb,
     // 门控在调用方（DeferredPipeline_FrameGraph.cpp）已经判过一次；这里再判一次是兜底，
     // 保证"关闭 ⇒ 本模块一个 pass 都不注册"这条不变式不依赖调用方的正确性。
     if (!m_Settings.enabled || !m_Ready) return;
+    // 【B 健壮性】软/硬光栅全关 ⇒ 本模块不写 GBuffer，连剔除链也不该跑：
+    //   资产按软光栅门控、根本不会上传，此时跑剔除链会带空缓冲/空描述符集进驱动。
+    if (!m_Settings.softRaster) return;
 
     // 唯一真值 → 模块内部：把本帧的假簇数量交给剔除段（cfg/面板只写 NaniteSettings）
     m_Cull.SetFakeClusterCount(m_Settings.fakeClusters);
@@ -409,6 +412,17 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
     // 保证"关闭 ⇒ 本模块一个 pass 都不注册"这条不变式不依赖调用方的正确性。
     // 【与 AddPasses 是同一个真值】不是新门控：`enabled`（独立开关）+ `IsReady()`（模块就绪）。
     if (!m_Settings.enabled || !m_Ready) return;
+    // 【B 健壮性】软/硬光栅**全关**时本模块不写 GBuffer，也不该跑剔除链：
+    //   资产不会被上传（`EnsureAssetUploaded` 按软光栅门控），此时还注册剔除/光栅 pass
+    //   会让它们带着空缓冲/空描述符集执行 —— 实测在 NVIDIA 驱动里直接崩（`nvoglv64`）。
+    if (!m_Settings.softRaster) {
+        static bool s_logged = false;
+        if (!s_logged) {
+            s_logged = true;
+            HE_CORE_WARN("[Nanite] 软光栅被关闭（硬光栅依赖它）⇒ 本模块不注册几何 pass（GBuffer 由既有 IA 路径负责）");
+        }
+        return;
+    }
 
     // ── 【任务 15】Nanite_CullChain3：Phase 1 → Phase 2（BVH + Hi-Z）→ Phase 3（LOD 选择）──
     // 【reads = {gbDepth}】**真的**读：Phase 2 的 Hi-Z 金字塔由本帧深度下采样得到（复用
