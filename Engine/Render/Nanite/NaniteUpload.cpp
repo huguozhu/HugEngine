@@ -950,7 +950,8 @@ bool PackNaniteClusters(std::span<const float>                positions,
     // 位置误差上界 = 半个量化步 = (meshMaxExtent / 1022) / 2
     stats.positionErrorBound = stats.meshMaxExtent / (2.0f * (float)kNaniteVertexQuantFullScale);
     stats.normalAngleErrorBoundDegrees = kNaniteNormalAngleErrorBoundDegrees;
-    stats.uvErrorBound = 1.0f / (float)kNaniteUVQuantMax;
+    // 编码域是 [-64,64] ⇒ 一个量化步 = 128/65535（旧口径 [0,1] 时是 1/65535）
+    stats.uvErrorBound = kNaniteUVEncodeRange / (float)kNaniteUVQuantMax;
 
     // ── ② 每个唯一内容的"**首次出现**"（内容哈希保证同形；取最小出现下标 ⇒ 确定）──
     //     量化原点与该份的属性来源都取首次出现：
@@ -1060,9 +1061,13 @@ bool PackNaniteClusters(std::span<const float>                positions,
             if (NaniteUVNeedsClamp(inputV)) ++stats.uvClampCount;
             vertex.packedUV = NanitePackUV(NaniteQuantizeUV(inputU), NaniteQuantizeUV(inputV));
 
-            // UV 误差实测：参考值取"clamp 到 [0,1] 后的输入"（在域内时它就是输入本身）
-            const float referenceU = inputU < 0.0f ? 0.0f : (inputU > 1.0f ? 1.0f : inputU);
-            const float referenceV = inputV < 0.0f ? 0.0f : (inputV > 1.0f ? 1.0f : inputV);
+            // UV 误差实测：参考值取"clamp 到编码域 [-64,64] 后的输入"（在域内时它就是输入本身）
+            const float referenceU = inputU < -kNaniteUVEncodeExtent
+                                         ? -kNaniteUVEncodeExtent
+                                         : (inputU > kNaniteUVEncodeExtent ? kNaniteUVEncodeExtent : inputU);
+            const float referenceV = inputV < -kNaniteUVEncodeExtent
+                                         ? -kNaniteUVEncodeExtent
+                                         : (inputV > kNaniteUVEncodeExtent ? kNaniteUVEncodeExtent : inputV);
             const float uvErrorU = std::fabs(NaniteDequantizeUV(NaniteUnpackUVU(vertex.packedUV)) - referenceU);
             const float uvErrorV = std::fabs(NaniteDequantizeUV(NaniteUnpackUVV(vertex.packedUV)) - referenceV);
             if (uvErrorU > stats.maxUVError) stats.maxUVError = uvErrorU;

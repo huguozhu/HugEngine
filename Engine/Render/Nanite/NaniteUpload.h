@@ -434,7 +434,7 @@ struct NanitePackStats {
 
     // ── UV：unorm16 ──
     float maxUVError   = 0.0f;  ///< UV 往返误差实测最大值（对 `[0,1]` 内的分量；越界分量单独计）
-    float uvErrorBound = 0.0f;  ///< UV 误差上界 = 1/65535（一个量化步，宽松版）
+    float uvErrorBound = 0.0f;  ///< UV 误差上界 = 128/65535（编码域 [-64,64] 的一个量化步）
     u32   uvClampCount = 0;     ///< 越出 `[0,1]` 被 clamp 的分量数（如实报告，测试网格实测 0）
 
     // ── DAG 衔接的如实读数 ──

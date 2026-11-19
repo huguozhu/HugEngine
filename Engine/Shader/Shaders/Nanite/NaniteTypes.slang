@@ -411,14 +411,20 @@ float3 naniteDecodeNormal(uint packedNormal) {
 // ============================================================
 
 // [0,1] → unorm16；NaN 取 0、越界 clamp（unorm16 表示不了平铺/负 UV）
+// 【T8·UV 平铺】编码域 [-64,64]（与 C++ 侧 `kNaniteUVEncodeExtent` 逐位一致）
+static const float NANITE_UV_ENCODE_EXTENT = 64.0;
+static const float NANITE_UV_ENCODE_RANGE  = 128.0;
+
 uint naniteQuantizeUV(float value) {
     if (isnan(value)) return 0;
-    return (uint)round(clamp(value, 0.0, 1.0) * (float)NANITE_UV_QUANT_MAX);
+    float t = (value + NANITE_UV_ENCODE_EXTENT) / NANITE_UV_ENCODE_RANGE;
+    return (uint)round(clamp(t, 0.0, 1.0) * (float)NANITE_UV_QUANT_MAX);
 }
 
-// unorm16 → [0,1]
+// unorm16 → [-64,64]
 float naniteDecodeUVComponent(uint raw) {
-    return (float)(raw & NANITE_UV_QUANT_MAX) / (float)NANITE_UV_QUANT_MAX;
+    float t = (float)(raw & NANITE_UV_QUANT_MAX) / (float)NANITE_UV_QUANT_MAX;
+    return t * NANITE_UV_ENCODE_RANGE - NANITE_UV_ENCODE_EXTENT;
 }
 
 // packedUV → float2（u 低 16 位、v 高 16 位）

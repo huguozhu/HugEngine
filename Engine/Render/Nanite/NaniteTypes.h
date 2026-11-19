@@ -426,7 +426,7 @@ inline constexpr u32 kNaniteMeshTestTargetSize = 1u;
 inline constexpr char kNaniteFileMagic[8] = { 'N', 'A', 'N', 'I', 'T', 'E', '0', '1' };
 
 /// 文件格式版本（T2 升到 2：头部保留区启用 + 扩展段表；固定五段布局一字未变）
-inline constexpr u32 kNaniteFileVersion = 2u;
+inline constexpr u32 kNaniteFileVersion = 3u;   // v3：UV 编码域改为 [-64,64]（支持平铺 UV）
 
 /// 读取器能接受的**最低**格式版本（v1 文件结构上可解析：扩展段数视为 0、哈希视为无效）
 inline constexpr u32 kNaniteMinReadableFileVersion = 1u;
@@ -1007,23 +1007,33 @@ inline void NaniteUnpackNormal(u32 packed, float& outX, float& outY, float& outZ
 /// unorm16 的满值（`packedUV` 每分量 16 位）
 inline constexpr u32 kNaniteUVQuantMax = 0xFFFFu;
 
-/// `[0,1] → unorm16`：`round(v × 65535)`；NaN 取 0、越界 clamp 到 `[0, 65535]`
+// ── 【T8·UV 平铺修复】编码域从 `[0,1]` 扩到 `[-64, 64]` ──
+//   【为什么必须改】Sponza 的 UV 实际范围是 u∈[-27.8, 32.3]、v∈[-5.0, 7.6]（实测），
+//   旧的 `[0,1]` unorm16 会把它们**全部 clamp 到 1**：整块地板/墙面因此采到同一个纹素，
+//   表现为"大面积纯色"（实测地板变成均匀深灰，而标准路径是米色砖纹）。
+//   纹理采样器是 Repeat，所以只要能把越界值**如实存下来**，平铺语义就正确。
+//   【精度】步长 = 128 / 65535 ≈ 0.00195（≈ 1/512），对 1024 贴图约 2 个纹素；
+//   数组纹理是 256²，折合半个纹素以内，可接受。
+inline constexpr float kNaniteUVEncodeExtent = 64.0f;                       ///< 编码域半宽
+inline constexpr float kNaniteUVEncodeRange  = 2.0f * kNaniteUVEncodeExtent; ///< 域宽 = 128
+
+/// `[-64,64] → unorm16`：`round(((v + 64) / 128) × 65535)`；NaN 取 0、越界 clamp 到端点
 [[nodiscard]] inline u32 NaniteQuantizeUV(float value) {
     if (!(value == value)) return 0u;                                  // NaN 兜底
-    const float scaled = value * (float)kNaniteUVQuantMax;
-    const float clamped = scaled < 0.0f ? 0.0f
-                        : (scaled > (float)kNaniteUVQuantMax ? (float)kNaniteUVQuantMax : scaled);
-    return (u32)std::lround(clamped) & kNaniteUVQuantMax;
+    const float t = (value + kNaniteUVEncodeExtent) / kNaniteUVEncodeRange;
+    const float clamped = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+    return (u32)std::lround(clamped * (float)kNaniteUVQuantMax) & kNaniteUVQuantMax;
 }
 
-/// `unorm16 → [0,1]`（与 `NaniteQuantizeUV` 互逆，误差 ≤ 1/131070 = 半个量化步）
+/// `unorm16 → [-64,64]`（与 `NaniteQuantizeUV` 互逆，误差 ≤ 半个量化步 = 64/65535）
 [[nodiscard]] inline float NaniteDequantizeUV(u32 raw) {
-    return (float)(raw & kNaniteUVQuantMax) / (float)kNaniteUVQuantMax;
+    const float t = (float)(raw & kNaniteUVQuantMax) / (float)kNaniteUVQuantMax;
+    return t * kNaniteUVEncodeRange - kNaniteUVEncodeExtent;
 }
 
-/// 该 UV 分量是否**越出 `[0,1]`**（打包时据此统计 clamp 数；NaN 也算越界）
+/// 该 UV 分量是否**越出编码域 `[-64,64]`**（打包时据此统计 clamp 数；NaN 也算越界）
 [[nodiscard]] inline bool NaniteUVNeedsClamp(float value) {
-    return !(value >= 0.0f && value <= 1.0f);
+    return !(value >= -kNaniteUVEncodeExtent && value <= kNaniteUVEncodeExtent);
 }
 
 // ── 三角形索引编码（8B/三角形）──
