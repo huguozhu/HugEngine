@@ -300,7 +300,11 @@ struct NaniteSettings {
     // ── LOD 阈值（像素；cfg 键 `nanite_lod_threshold`）──
     // 判据：`ownError × focal > threshold × distance` ⇒ 保留父簇（粗）。
     // 调大 ⇒ 更倾向一直细分到叶子（全细节，慢但正确）；默认 1 像素。
-    float lodThresholdPixels = 1.0f;
+    // 【T8 校准】默认 1.0 → **0.25**：我们的 `maxParentLODError` 是"每级简化误差上限"
+    //   （meshopt 给的是保证上界，不是该簇的真实误差）⇒ 按 1 像素判据会系统性选到更粗的级，
+    //   表现为"大块表面拿到邻居材质"（实测地板在 1.0 时是均匀深灰、0.25 时恢复米白砖纹，
+    //   与标准路径差 5% 以内）。代价：可见簇 520 → 1268、硬像素 2.5M → 3.5M。
+    float lodThresholdPixels = 0.25f;
 
     // ── LOD 选择开关（cfg 键 `nanite_lod_enabled`，默认 1）──
     // 0 ⇒ Phase 3 不做 DAG 割：**凡是过视锥/遮挡测试的簇都画**（最高细节，最慢）。

@@ -883,7 +883,10 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
             // 【T11】移除 GBuffer 的 IA 管线（几何只走 Nanite 硬光栅；无 MS 设备自动忽略）
             naniteSettings.removeIaPso = GetBool(cfg, "nanite_remove_ia_pso", naniteSettings.removeIaPso);
             // 【T8】LOD 阈值（像素）：调大 ⇒ 细分到叶子（全细节，慢）
-            naniteSettings.lodThresholdPixels = (float)GetInt(cfg, "nanite_lod_threshold", (int)naniteSettings.lodThresholdPixels);
+            // 【修复】阈值是**浮点**（像素）：此前用 GetInt 读取 ⇒ 0.1/0.25/0.02 全被截成 0，
+            //   而 cull 侧"<=0 取默认 1.0" ⇒ cfg 里怎么改都没反应（踩过）。
+            naniteSettings.lodThresholdPixels =
+                GetFloat(cfg, "nanite_lod_threshold", naniteSettings.lodThresholdPixels);
             naniteSettings.lodEnabled = GetBool(cfg, "nanite_lod_enabled", naniteSettings.lodEnabled);
             naniteSettings.lodMode = (u32)GetInt(cfg, "nanite_lod_mode", (int)naniteSettings.lodMode);
             naniteSettings.instanceIdentity = GetBool(cfg, "nanite_instance_identity", naniteSettings.instanceIdentity);
