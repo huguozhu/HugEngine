@@ -4,7 +4,7 @@
 //  T3/T4（《01.Nanite离线预处理与全Mesh管线方案》）：glTF → `.nanite` v2 离线工具。
 //
 //  用法：
-//    MeshPreprocess <in.gltf> <out-dir> [--granularity=primitive|mesh]
+//    MeshPreprocess <in.gltf> <out-dir> [--granularity=primitive|mesh|material]
 //                   [--fallback-ratio=0.02] [--stats] [--verbose] [--verify]
 //
 //  【资产粒度】
@@ -60,7 +60,7 @@ struct Options {
 void PrintUsage() {
     std::printf(
         "用法: MeshPreprocess <in.gltf> <out-dir> [选项]\n"
-        "  --granularity=primitive|mesh   资产粒度（默认 primitive）\n"
+        "  --granularity=primitive|mesh|material   资产粒度（默认 primitive）\n"
         "  --bake-average                把 baseColor 贴图平均色烘进材质因子（无纹理绑定时的兜底）\n"
         "  --fallback-ratio=0.02          Fallback 低模的三角形比例\n"
         "  --verify                       读回文件并与内存资产逐字节比对\n"
@@ -227,8 +227,9 @@ int main(int argc, char** argv) {
         PrintUsage();
         return 1;
     }
-    if (options.granularity != "primitive" && options.granularity != "mesh") {
-        std::fprintf(stderr, "错误: --granularity=%s 不支持（primitive | mesh）\n",
+    if (options.granularity != "primitive" && options.granularity != "mesh" &&
+        options.granularity != "material") {
+        std::fprintf(stderr, "错误: --granularity=%s 不支持（primitive | mesh | material）\n",
                      options.granularity.c_str());
         return 1;
     }
@@ -266,6 +267,18 @@ int main(int argc, char** argv) {
             std::vector<NaniteGltfPrimitive*> group{ &primitive };
             units.push_back(MergePrimitives(group, stem + "_" + std::to_string(primitive.meshIndex) +
                                                        "_" + std::to_string(primitive.primitiveIndex)));
+        }
+    } else if (options.granularity == "material") {
+        // 【T8·A2】按**材质**分组：同一材质的 primitive 合成一份资产。
+        //   目的：让"每条资产内部的簇"天然只含一种材质 —— 粗级簇再也不会跨材质，
+        //   而这正是"地板在 LOD>0 时拿到邻居材质"的根因（全局切分无法避免）。
+        //   运行时把这些资产各自绑定成一个实例（Sponza 是 25 个材质，远低于 64 实例上限）。
+        std::map<u32, std::vector<NaniteGltfPrimitive*>> byMaterial;
+        for (NaniteGltfPrimitive& primitive : scene.primitives) {
+            byMaterial[primitive.materialIndex].push_back(&primitive);
+        }
+        for (auto& entry : byMaterial) {
+            units.push_back(MergePrimitives(entry.second, stem + "_M" + std::to_string(entry.first)));
         }
     } else {
         // mesh 粒度：同一 mesh 的所有 primitive 合并成一份资产
