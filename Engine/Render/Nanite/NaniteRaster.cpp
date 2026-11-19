@@ -1335,11 +1335,12 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
     if (asset.materials) {
         m_Device->UpdateDescriptorSet(m_SoftColorSet, 12, rhi::DescriptorType::StorageBuffer,
                                       asset.materials);
-    // 【T8】每簇量化尺度（22）
+    }
+    // 【T8】每簇量化尺度（22）：**硬光栅集合也必须绑**（此前这条写在 `if (asset.materials)` 里面，
+    //   多资产档一旦材质段缺失就退回全局尺度 ⇒ 小资产顶点按大尺度解码、几何散架）。
     if (asset.clusterExtent) {
         m_Device->UpdateDescriptorSet(m_HardRasterSet, 22, rhi::DescriptorType::StorageBuffer,
                                       asset.clusterExtent);
-    }
     }
     // 【确定性赢家选择】binding 21 = 赢家候选号：**只写给第 2 趟的集合**（`m_SoftColorSet`）。
     //   【为什么必须在上面那个循环之外单独写】第 1 趟的布局（`m_SoftDepthLayout`）**根本没有 21**
