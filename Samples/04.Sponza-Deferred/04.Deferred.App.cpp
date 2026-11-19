@@ -437,7 +437,10 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
     //   一个纹理绑定 + 一个采样器，材质层号存在 NaniteMaterialRecord::bindlessTextureBase。
     //   统一缩到 256x256（原图 1024）控制显存：103 层 x 256^2 x 4B ≈ 27 MB。
     {
-        constexpr u32 kLayerSize = 256;
+        constexpr u32 kLayerSize = 256;   // MR / 法线数组的层尺寸
+        // 【A6】baseColor 是近景细节的主要来源 ⇒ 单独提到 512（103 层 × 512² × 4B ≈ 108 MB）；
+        //   MR/法线仍用 256（各约 27 MB），总量约 162 MB。
+        constexpr u32 kBaseSize  = 512;
         std::vector<String> baseColorPaths;
         std::vector<String> mrPaths;            // 与 baseColorPaths 同序：金属度/粗糙度贴图
         std::vector<String> normalPaths;        // 与 baseColorPaths 同序：法线贴图
@@ -460,7 +463,7 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
         const u32 layerCount = (u32)baseColorPaths.size();
         u32 loadedLayers = 0u, missingLayers = 0u;
         if (layerCount > 0u) {
-            std::vector<u8> atlas((size_t)kLayerSize * kLayerSize * 4u * layerCount, 255u);
+            std::vector<u8> atlas((size_t)kBaseSize * kBaseSize * 4u * layerCount, 255u);
             for (u32 layer = 0u; layer < layerCount; ++layer) {
                 if (baseColorPaths[layer].empty()) continue;
                 int w = 0, h = 0, ch = 0;
@@ -469,13 +472,13 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
                 ++loadedLayers;
                 // 【A2 结论】按**sRGB 字节空间**做盒式平均（与标准路径 UNORM 纹理的 mip 链同口径）。
                 //   先前在"线性空间"平均反而与运行时的"不做解码"口径不一致（实测 R 通道低 9%）。
-                u8* dst = atlas.data() + (size_t)layer * kLayerSize * kLayerSize * 4u;
-                for (u32 y = 0u; y < kLayerSize; ++y) {
-                    const u32 sy0 = (u32)((u64)y * (u64)h / kLayerSize);
-                    const u32 sy1 = std::max(sy0 + 1u, (u32)((u64)(y + 1u) * (u64)h / kLayerSize));
-                    for (u32 x = 0u; x < kLayerSize; ++x) {
-                        const u32 sx0 = (u32)((u64)x * (u64)w / kLayerSize);
-                        const u32 sx1 = std::max(sx0 + 1u, (u32)((u64)(x + 1u) * (u64)w / kLayerSize));
+                u8* dst = atlas.data() + (size_t)layer * kBaseSize * kBaseSize * 4u;
+                for (u32 y = 0u; y < kBaseSize; ++y) {
+                    const u32 sy0 = (u32)((u64)y * (u64)h / kBaseSize);
+                    const u32 sy1 = std::max(sy0 + 1u, (u32)((u64)(y + 1u) * (u64)h / kBaseSize));
+                    for (u32 x = 0u; x < kBaseSize; ++x) {
+                        const u32 sx0 = (u32)((u64)x * (u64)w / kBaseSize);
+                        const u32 sx1 = std::max(sx0 + 1u, (u32)((u64)(x + 1u) * (u64)w / kBaseSize));
                         u32 acc[3] = { 0u, 0u, 0u };
                         u32 cnt = 0u;
                         for (u32 yy = sy0; yy < sy1; ++yy) {
@@ -485,7 +488,7 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
                                 ++cnt;
                             }
                         }
-                        u8* outPx = dst + ((size_t)y * kLayerSize + x) * 4u;
+                        u8* outPx = dst + ((size_t)y * kBaseSize + x) * 4u;
                         const u32 inv = (cnt > 0u) ? cnt : 1u;
                         outPx[0] = (u8)(acc[0] / inv);
                         outPx[1] = (u8)(acc[1] / inv);
@@ -499,8 +502,8 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
             // 【A2】用 UNORM 存储原始 sRGB 字节，**在着色器里显式做 sRGB→线性解码**：
             //   这样解码次数是确定的（1 次），不受 RHI 对 SRGB 格式的实现差异影响。
             td.format      = rhi::Format::RGBA8_UNORM;
-            td.width       = kLayerSize;
-            td.height      = kLayerSize;
+            td.width       = kBaseSize;
+            td.height      = kBaseSize;
             td.arrayLayers = layerCount;
             td.mipLevels   = 1;
             td.usage       = rhi::TextureUsage::ShaderResource;
@@ -513,12 +516,12 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
             // 【T8 排查】打印每层贴图的平均色：与资产材质段的 baseColorFactor（= 贴图平均色）对照，
             //   即可判断"层号 ↔ 材质"的映射对不对（错位时平均色会对不上）。
             for (u32 layer = 0u; layer < layerCount && layer < 6u; ++layer) {
-                const u8* src = atlas.data() + (size_t)layer * kLayerSize * kLayerSize * 4u;
+                const u8* src = atlas.data() + (size_t)layer * kBaseSize * kBaseSize * 4u;
                 double r = 0.0, g = 0.0, b = 0.0;
-                for (size_t t = 0; t < (size_t)kLayerSize * kLayerSize; ++t) {
+                for (size_t t = 0; t < (size_t)kBaseSize * kBaseSize; ++t) {
                     r += src[t * 4u + 0u]; g += src[t * 4u + 1u]; b += src[t * 4u + 2u];
                 }
-                const double n = (double)kLayerSize * kLayerSize * 255.0;
+                const double n = (double)kBaseSize * kBaseSize * 255.0;
                 HE_CORE_INFO("04.App: 层 {} 平均色=({:.3f},{:.3f},{:.3f}) 源={}",
                              layer, r / n, g / n, b / n,
                              baseColorPaths[layer].empty() ? "<none>" : baseColorPaths[layer]);
@@ -539,7 +542,7 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
                                  ? std::filesystem::path(baseColorPaths[kv.second]).filename().string()
                                  : std::string("<oob>"));
             }
-            HE_CORE_INFO("04.App: 材质数组纹理就绪（{} 层 x {}）", layerCount, kLayerSize);
+            HE_CORE_INFO("04.App: 材质数组纹理就绪（{} 层 x {}）", layerCount, kBaseSize);
 
             // ── 【A3】金属度/粗糙度数组（与 baseColor **同层序**，材质只需一个层号）──
             //   没有 MR 贴图的层填中性值（g=1 不改粗糙度、b=0 非金属）。
