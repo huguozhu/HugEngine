@@ -370,6 +370,14 @@ bool NaniteScene::BuildMergedBuffers() {
             if (tEnd > maxTriangleEnd) maxTriangleEnd = tEnd;
             if (r.materialID > maxMaterial) maxMaterial = r.materialID;
         }
+        // 追加：三角形数为 0 的簇（这些簇在任何光栅路径里都会被跳过而不计数）
+        u32 zeroTris = 0u, zeroVerts = 0u;
+        for (const NaniteClusterRecord& r : m_MergedClusters) {
+            if (r.triangleCount == 0u) ++zeroTris;
+            if (r.vertexOffset == 0u && r.triangleOffset == 0u) ++zeroVerts;
+        }
+        HE_CORE_INFO("[Nanite] 聚合自检（补充）：triangleCount==0 的簇 {} 个；全零簇 {} 个",
+                     zeroTris, zeroVerts);
         HE_CORE_INFO("[Nanite] 聚合自检：簇 {} / 顶点 {} / 三角形 {} / 材质 {}；"
                      "越界簇：顶点 {}、三角形 {}、材质 {}（最大 vertexEnd={} triangleEnd={} materialID={}）",
                      (u32)m_MergedClusters.size(), (u32)m_MergedVertices.size(),

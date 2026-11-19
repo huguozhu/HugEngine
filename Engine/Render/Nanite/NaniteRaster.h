@@ -447,7 +447,10 @@ private:
     void RecordSoftStatsClear(rhi::IRHICommandList* cmd);
 
     /// 【任务 22】在命令缓冲内清**硬光栅**读数（模块自持的小缓冲；同一个 `CopyBuffer` 惯例）
+    /// 【诊断】硬光栅读数清零；**每帧**调用（pass 被跳过时也要清，否则读回是陈旧值）。
+public:
     void RecordHardStatsClear(rhi::IRHICommandList* cmd);
+private:
 
     /// 【任务 18】懒建清屏 compute 的 PSO + 描述符集布局（8 张颜色目标的 UAV）
     bool EnsureGBufferClearResources();
