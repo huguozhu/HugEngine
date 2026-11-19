@@ -1729,6 +1729,22 @@ u32 NaniteCull::ReadbackVisibleClusters(NaniteVisibleClusterRef* out, u32 count)
     return 0u;
 }
 
+u32 NaniteCull::ReadbackVisibleClustersAt(u32 offset, NaniteVisibleClusterRef* out, u32 count) {
+    if (out == nullptr || count == 0u) return 0u;
+    rhi::IRHIBuffer* buffer = GetVisibleClusterBuffer();
+    if (buffer == nullptr) return 0u;
+    const u32 total = std::min(ReadLastVisibleClusterCount(), GetVisibleRefBound());
+    if (offset >= total) return 0u;
+    const u32 limit = std::min(count, total - offset);
+    if (void* p = buffer->Map()) {
+        std::memcpy(out, static_cast<const u8*>(p) + (usize)offset * sizeof(NaniteVisibleClusterRef),
+                    sizeof(NaniteVisibleClusterRef) * limit);
+        buffer->Unmap();
+        return limit;
+    }
+    return 0u;
+}
+
 u32 NaniteCull::ReadLastVisibleClusterCount() const {
     if (!m_VisibleClusterCountBuf.IsValid()) return 0u;
     auto* buf = ResB(m_VisibleClusterCountBuf);
