@@ -990,6 +990,9 @@ bool NaniteRaster::EnsureSoftRasterResources(const GBufferTargets& targets) {
         d.cpuAccess = true;   // dump 帧读回
         m_SoftStats = m_Device->CreateBufferHandle(d);   // A-3
         if (!m_SoftStats.IsValid()) { HE_CORE_ERROR("NaniteRaster: 软光栅读数缓冲创建失败"); return false; }
+        // 【健壮性】主机侧先清零：首帧 GPU 还没写过这块内存时，读回会打出
+        //   859553070 / 3435973836 这类垃圾读数（曾出现在 cull3/光栅读数/参数回读各行）。
+        if (void* p = ResB(m_SoftStats)->Map()) { std::memset(p, 0, d.size); ResB(m_SoftStats)->Unmap(); }
     }
     if (!m_SoftStatsZeroSrc.IsValid()) {
         rhi::BufferDesc d;
@@ -1542,6 +1545,7 @@ bool NaniteRaster::EnsureHardRasterResources(const GBufferTargets& targets) {
         d.cpuAccess = true;   // dump 帧读回
         m_HardStats = m_Device->CreateBufferHandle(d);
         if (!m_HardStats.IsValid()) { HE_CORE_ERROR("NaniteRaster: 硬光栅读数缓冲创建失败"); return false; }
+        if (void* p = ResB(m_HardStats)->Map()) { std::memset(p, 0, d.size); ResB(m_HardStats)->Unmap(); }
 
         rhi::BufferDesc z;
         z.size      = d.size;
@@ -2203,6 +2207,11 @@ void NaniteRaster::LogHardRasterReadback() {
     ReadbackSoftStats(ss);
     const u32 hardPixels = hs[kNaniteHardStatPixels];
     const u32 softPixels = ss[kNaniteSoftStatPixels];
+    // 【健壮性】首帧（统计缓冲还没被 GPU 写过）会读到未初始化内容，日志里会出现
+    //   859553070 / 3435973836 这类垃圾值。像素数不可能超过屏幕像素的一个合理倍数
+    //   （960×540 的 4096 倍 ≈ 2.1e9 已经越过容量），超过就直接跳过这一行，不再打印垃圾。
+    constexpr u32 kMaxPlausiblePixels = 512u * 1024u * 1024u;
+    if (hardPixels > kMaxPlausiblePixels || softPixels > kMaxPlausiblePixels) return;
     const u64 totalPixels = (u64)hardPixels + (u64)softPixels;
     const u32 hardPermille = (totalPixels > 0u) ? (u32)((u64)hardPixels * 1000u / totalPixels) : 0u;
     const u32 softPermille = (totalPixels > 0u) ? (u32)((u64)softPixels * 1000u / totalPixels) : 0u;

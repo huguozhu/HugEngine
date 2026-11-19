@@ -181,6 +181,11 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         d.usage     = rhi::BufferUsage::Storage | rhi::BufferUsage::TransferDst;
         d.cpuAccess = true;   // 启动时写 0 + dump 帧读回可见计数
         m_VisibleInstanceCountBuf = m_Device->CreateBufferHandle(d);   // A-3
+        // 【健壮性】主机侧清零：首帧 GPU 未写过时读回会打出垃圾读数（859553070 一类）。
+        if (void* p = ResB(m_VisibleInstanceCountBuf)->Map()) {
+            std::memset(p, 0, d.size);
+            ResB(m_VisibleInstanceCountBuf)->Unmap();
+        }
         if (!m_VisibleInstanceCountBuf.IsValid()) { HE_CORE_ERROR("NaniteCull: 可见实例计数缓冲创建失败"); return false; }
     }
     {
@@ -378,6 +383,11 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         d.usage     = rhi::BufferUsage::Storage | rhi::BufferUsage::TransferDst;
         d.cpuAccess = true;   // dump 帧读回
         m_VisibleClusterCountBuf = m_Device->CreateBufferHandle(d);   // A-3
+        // 【健壮性】主机侧清零：首帧 GPU 未写过时读回会打出垃圾读数（859553070 一类）。
+        if (void* p = ResB(m_VisibleClusterCountBuf)->Map()) {
+            std::memset(p, 0, d.size);
+            ResB(m_VisibleClusterCountBuf)->Unmap();
+        }
         if (!m_VisibleClusterCountBuf.IsValid()) { HE_CORE_ERROR("NaniteCull: 可见簇计数缓冲创建失败"); return false; }
     }
     {
@@ -388,6 +398,11 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         d.usage     = rhi::BufferUsage::Storage | rhi::BufferUsage::TransferDst;
         d.cpuAccess = true;   // dump 帧读回（通过视锥/遮挡/级直方图/访问节点数）
         m_CullStatsBuf = m_Device->CreateBufferHandle(d);   // A-3
+        // 【健壮性】主机侧清零：首帧 GPU 未写过时读回会打出垃圾读数（859553070 一类）。
+        if (void* p = ResB(m_CullStatsBuf)->Map()) {
+            std::memset(p, 0, d.size);
+            ResB(m_CullStatsBuf)->Unmap();
+        }
         if (!m_CullStatsBuf.IsValid()) { HE_CORE_ERROR("NaniteCull: 三阶段读数缓冲创建失败"); return false; }
     }
     {
