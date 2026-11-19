@@ -1068,7 +1068,14 @@ u32 NaniteCull::SetInstancesFromSnapshot(const FrameSceneSnapshot& snapshot,
 u32 NaniteCull::SetAssetInstances(u32 assetCount, std::span<const float> bounds,
                                   std::span<const u32> assetSlots) {
     const u32 capacity = kNaniteMaxTestInstances;
-    if (assetCount > capacity) assetCount = capacity;
+    if (assetCount > capacity) {
+        // 【B4 健壮性】多出来的资产会被**静默丢弃**（历史教训：绑 103 个网格时可见计数变成
+        //   垃圾值 859553070）。这里显式告警，指明"少了多少份资产"。
+        HE_CORE_WARN("NaniteCull: 资产数 {} 超过实例域上限 {} ⇒ 只画前 {} 份，"
+                     "其余 {} 份不会被绘制（请减少资产份数或拆分场景）",
+                     assetCount, capacity, capacity, assetCount - capacity);
+        assetCount = capacity;
+    }
     if (bounds.size() < (usize)assetCount * 6u) return 0u;
     if (assetSlots.size() < (usize)assetCount) return 0u;
 
