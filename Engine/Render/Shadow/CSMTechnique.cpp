@@ -457,6 +457,29 @@ void CSMTechnique::RenderCascade(rhi::IRHICommandList* cmd,u32 ci,const FrameSce
             if (ci == 0u) {
                 HE_CORE_INFO("[CSMTechnique] 阴影投射者：{} 条，其中包围盒退化 {} 条（已按保守大盒处理）",
                              (u32)casterBounds.size(), s_DegenerateCasters);
+                // 【B·可观测】每 120 帧一条阴影链路汇总：投射者数、退化包围盒数、
+                //   以及**级联 0 覆盖的世界包围盒尺寸**（把灯视图矩阵的 NDC 立方体反变换回来算）。
+                //   作用：阴影"覆盖范围变小"这类回归会在这里直接暴露，而不是只能靠看图。
+                static u32 s_Frame = 0u;
+                if ((s_Frame++ % 120u) == 0u) {
+                    glm::vec3 lo(1e30f), hi(-1e30f);
+                    const glm::mat4 invLVP = glm::inverse(m_LightVPs[0]);
+                    for (u32 c = 0u; c < 8u; ++c) {
+                        const glm::vec4 ndc(((c & 1u) ? 1.0f : -1.0f),
+                                            ((c & 2u) ? 1.0f : -1.0f),
+                                            ((c & 4u) ? 1.0f : 0.0f), 1.0f);
+                        glm::vec4 w = invLVP * ndc;
+                        if (std::fabs(w.w) > 1.0e-12f) w /= w.w;
+                        for (u32 a = 0u; a < 3u; ++a) {
+                            lo[a] = std::min(lo[a], w[a]);
+                            hi[a] = std::max(hi[a], w[a]);
+                        }
+                    }
+                    HE_CORE_INFO("[CSMTechnique] 阴影汇总：投射者 {} / 退化 {} / 本帧绘制物体 {} / "
+                                 "级联0 世界尺寸 ({:.0f}, {:.0f}, {:.0f})",
+                                 (u32)casterBounds.size(), s_DegenerateCasters, oi,
+                                 hi.x - lo.x, hi.y - lo.y, hi.z - lo.z);
+                }
                 s_DegenerateCasters = 0u;
             }
         }
