@@ -150,6 +150,11 @@ public:
     bool BuildMergedBuffers();
     [[nodiscard]] u32 GetMergedClusterCount() const { return (u32)m_MergedClusters.size(); }
 
+    /// 【T8·排查】聚合后的 CPU 簇记录（与 GPU 读到的同一份，便于逐簇比对）
+    [[nodiscard]] const NaniteClusterRecord* GetMergedCluster(u32 index) const {
+        return index < m_MergedClusters.size() ? &m_MergedClusters[index] : nullptr;
+    }
+
 
     [[nodiscard]] u32 RegisterAsset(const NanitePackedAsset& asset, bool waitForReadbackVerify = true);
 

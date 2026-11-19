@@ -525,6 +525,15 @@ public:
         u32* outProjectedOffscreen) const;
     [[nodiscard]] u32 GetBVHNodeCount()    const { return (u32)m_BVHData.nodes.size(); }
     [[nodiscard]] u32 GetBVHDepth()        const { return m_BVHData.depth; }
+    /// 【T8·排查】资产剔除区间表（`AppendAssetBVH` 每追加一份就多一条）
+    struct AssetCullRange { u32 clusterBase, clusterCount, drawRangeBase; };
+    [[nodiscard]] u32 GetAssetCullRangeCount() const { return (u32)m_AssetCullRanges.size(); }
+    [[nodiscard]] AssetCullRange GetAssetCullRange(u32 i) const {
+        if (i >= m_AssetCullRanges.size()) return AssetCullRange{0u, 0u, 0u};
+        return AssetCullRange{ m_AssetCullRanges[i].clusterBase, m_AssetCullRanges[i].clusterCount,
+                               m_AssetCullRanges[i].drawRangeBase };
+    }
+
     [[nodiscard]] u32 GetBVHClusterCount() const { return m_BVHData.clusterCount; }
     [[nodiscard]] u32 GetBVHInstanceDomain() const { return m_BVHInstanceDomain; }
     [[nodiscard]] u32 GetBVHVisibleCapacity() const { return kNaniteMaxVisibleClusterRefs; }

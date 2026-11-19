@@ -579,6 +579,33 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
                         if (i + 1u < got) gpuStr += ",";
                     }
                     HE_CORE_INFO("[Nanite] GPU 可见列表前 {} 条簇号=[{}]", got, gpuStr);
+                    // 【T8·排查】逐条打印"引用 → 资产槽位 → 聚合簇记录"，用于定位
+                    //   "多资产几何散乱"：若 cluster 落在错误资产的区间，或记录里的
+                    //   vertexOffset/triangleOffset 越界，日志会直接暴露。
+                    //   **只在首帧打印一次**（否则每 30 帧 8 行会淹掉日志）。
+                    static bool s_refDumped = false;
+                    for (u32 i = 0u; s_refDumped ? false : (i < got); ++i) {
+                        const u32 cluster = gpuRefs[i].cluster;
+                        const u32 inst    = gpuRefs[i].instance;
+                        const u32 assetSlot = m_Cull.GetInstanceAssetIndex(inst);
+                        const NaniteCull::AssetCullRange range = m_Cull.GetAssetCullRange(assetSlot);
+                        const NaniteClusterRecord* rec = m_Scene.GetMergedCluster(cluster);
+                        const bool inRange = (cluster >= range.clusterBase &&
+                                              cluster < range.clusterBase + range.clusterCount);
+                        if (rec == nullptr) {
+                            HE_CORE_WARN("[Nanite] ref[{}] inst={} cluster={} asset={} 区间[{},+{}) 越界=1 记录=空",
+                                         i, inst, cluster, assetSlot, range.clusterBase,
+                                         range.clusterCount);
+                            continue;
+                        }
+                        HE_CORE_INFO("[Nanite] ref[{}] inst={} cluster={} asset={} 区间[{},+{}) 在区间={} | "
+                                     "triOff={} triCnt={} vtxOff={} mat={}",
+                                     i, inst, cluster, assetSlot, range.clusterBase,
+                                     range.clusterCount, inRange ? 1 : 0,
+                                     rec->triangleOffset, rec->triangleCount,
+                                     rec->vertexOffset, rec->materialID);
+                    }
+                    s_refDumped = true;
                 }
 
                 // 【T8 排查】软光栅赢家缓冲抽查：全 0xFFFFFFFF ⇒ 第 2.5 趟没写过
