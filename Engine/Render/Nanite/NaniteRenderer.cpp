@@ -695,6 +695,20 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
             const bool budgetKnown = (lastSeen > 0u);
             const bool hardRasterOverBudget =
                 budgetKnown && (dispatchBound > kNaniteHardRasterRefBudget);
+            // 【C·可观测降级】超预算时**不再整档关掉**，而是把派发上界钳到预算：
+            //   超出预算的簇本帧不画（画面变少是可见的降级），但代价被硬性钳住；
+            //   同时打印"按预算截断、约丢弃多少条簇引用"，让降级可观测而不是靠猜。
+            u32 hardDispatchBound = dispatchBound;
+            if (hardRasterOverBudget) {
+                hardDispatchBound = kNaniteHardRasterRefBudget;
+                static u32 s_degradeLog = 0u;
+                if ((s_degradeLog++ % 120u) == 0u) {
+                    HE_CORE_WARN("[Nanite] 硬光栅按预算降级：派发上界 {} → {}（上帧可见 {}，"
+                                 "本帧最多约 {} 条簇引用不画）；改 cfg `nanite_hard_raster_budget` 可放宽",
+                                 dispatchBound, hardDispatchBound, lastSeen,
+                                 dispatchBound - hardDispatchBound);
+                }
+            }
             {
                 static bool s_loggedBound = false;
                 if (!s_loggedBound) {
@@ -706,22 +720,7 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
                                  m_Cull.GetBVHInstanceDomain(),
                                  m_Cull.GetBVHVisibleCapacity());
                 }
-                // 【降级是**永久关掉这个档位**，不是"只跳过这一帧的录制"】
-                //   实测（07.Nanite，64 个重叠合成实例）：把 `hardRaster` 从 1 改成 0 让帧时间从
-                //   2.07 s 降到 0.04 s；而"只跳过 RecordHardRasterPass 的录制、PSO/资源照建"仍然
-                //   是 2.06 s 级的长帧 ⇒ 代价与这个档位**存在**这件事本身绑定，只跳录制不够。
-                //   因此这里直接把档位关掉（等价于 cfg 的 `nanite_hard_raster=0`），并只警告一次。
-                static bool s_degraded = false;
-                if (hardRasterOverBudget && !s_degraded) {
-                    s_degraded = true;
-                    m_Settings.hardRaster = false;
-                    HE_CORE_WARN("[Nanite] 硬光栅工作量超预算（上界 {} > {} 条可见簇引用）："
-                                 "**已自动关闭硬光栅档位**（大簇不画，软光栅与其余链路照旧），"
-                                 "以免每帧 0.2 s 以上的长帧。对照开关：cfg 的 nanite_hard_raster=0"
-                                 "（永久关闭）或降低 nanite_instance_test_count（当前 {} 个合成实例）",
-                                 dispatchBound, kNaniteHardRasterRefBudget,
-                                 m_Cull.GetBVHInstanceDomain());
-                }
+
             }
 
             NaniteRaster::AssetViews views;
@@ -751,12 +750,12 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
             //   软光栅先把颜色与深度写进既有附件，硬光栅再以 `LessEqual + depthWrite` 画上去 ⇒
             //   更近的硬片元通过测试并覆盖软颜色（硬遮软 ✓），更远的被丢弃、软颜色保留（软遮硬 ✓）。
             //   完整推导与三条已知边界写在 `NaniteRaster::RecordHardRasterPass` 的注释里。
-            if (hardRasterOn && !hardRasterOverBudget) {
+            if (hardRasterOn) {
                 m_Raster.RecordHardRasterPass(cmd, targets, views, m_SoftParams,
                                               m_Cull.GetVisibleClusterBuffer(),
                                               m_Cull.GetVisibleClusterCountBuffer(),
                                               m_Cull.GetInstanceBuffer(),
-                                              dispatchBound);   // 【A5】同上：上帧可见数×余量
+                                              hardDispatchBound);   // 【C】超预算时按预算截断
             }
         });
 
