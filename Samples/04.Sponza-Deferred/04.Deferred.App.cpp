@@ -905,6 +905,9 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
             naniteSettings.softRaster = GetBool(cfg, "nanite_soft_raster", naniteSettings.softRaster);
             // 【排查用】软光栅"大簇阈值"：调到 64 可让所有簇都走软光栅（用于区分软/硬路径问题）
             naniteSettings.softMaxTriangles = (u32)GetInt(cfg, "nanite_soft_max_triangles", (int)naniteSettings.softMaxTriangles);
+            // 【修复】硬光栅开关此前**没有接线**：cfg 里写 `nanite_hard_raster=0` 也一直是开着的，
+            //   导致多轮"关掉硬光栅"的对照实验（全软光栅档、软/硬分工排查）实际测的都是混合档。
+            naniteSettings.hardRaster = GetBool(cfg, "nanite_hard_raster", naniteSettings.hardRaster);
             // 【T8 排查】假簇链：绕开剔除，直接用 6 个假簇走同一条光栅路径。
             // 若假簇能出画面 ⇒ 光栅/呈现正常，问题在剔除到绘制的数据衔接。
             naniteSettings.fakeChain = GetBool(cfg, "nanite_fake_chain", naniteSettings.fakeChain);
