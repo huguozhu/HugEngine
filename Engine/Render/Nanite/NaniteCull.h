@@ -351,6 +351,8 @@ public:
     [[nodiscard]] u32 GetInstanceAssetIndex(u32 i) const {
         return i < m_RealInstanceCount ? m_RealAssetIndices[i] : 0xFFFFFFFFu;
     }
+    /// 【B 修复】当前真实实例数（0 ⇒ 仍在用合成实例）
+    [[nodiscard]] u32 GetRealInstanceCount() const { return m_RealInstanceCount; }
     /// 本帧是否在用真实实例（false ⇒ 仍是合成测试实例）
     [[nodiscard]] bool UsingRealInstances() const { return m_RealInstanceCount > 0u; }
 
@@ -456,6 +458,9 @@ public:
     /// 【T8 排查】读回可见簇列表的前 `count` 条（只 Map、不等待；调用方需先 WaitIdle）。
     /// 返回实际写入出参的条数（受 `count` 与可见计数同时限制）。
     u32 ReadbackVisibleClusters(NaniteVisibleClusterRef* out, u32 count);
+
+    /// 【T8·排查】从指定槽位开始读回可见簇引用（用于检查"计数 > 有效槽位"这类稀疏/垃圾槽位）。
+    u32 ReadbackVisibleClustersAt(u32 offset, NaniteVisibleClusterRef* out, u32 count);
     [[nodiscard]] rhi::IRHIBuffer* GetVisibleClusterCountBuffer() const { return m_Device->ResolveBuffer(m_VisibleClusterCountBuf); }
     /// 【任务 15】三阶段读数缓冲（扁平 u32，槽位见 `kNaniteCullStat*`）
     [[nodiscard]] rhi::IRHIBuffer* GetCullStatsBuffer()           const { return m_Device->ResolveBuffer(m_CullStatsBuf); }

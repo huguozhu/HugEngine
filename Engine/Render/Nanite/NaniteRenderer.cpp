@@ -206,8 +206,15 @@ void NaniteRenderer::AddPasses(RenderGraph& rg, const NaniteGBufferHandles& gb,
         m_SoftParams.screenWidth   = m_Width;
         m_SoftParams.screenHeight  = m_Height;
         m_SoftParams.maxTriangles  = m_Settings.softMaxTriangles;
-        m_SoftParams.instanceCount = std::min(m_Settings.instanceTestCount,
-                                              NaniteCull::MaxBVHInstances());
+        // 【B 修复：多资产几何缺失的根因之一】光栅端 `instanceCount` 此前**只取**
+        //   `settings.instanceTestCount`（合成实例档的设置值，样例默认 8）。而多资产/真实实例档的
+        //   实例数是"资产份数"（如 25）⇒ 着色器对 `ref.instance >= 8` 的引用直接 `return`，
+        //   且**不计入任何读数**（所以表现为"908 条可见引用只处理了 555 条"，画面缺一大半几何）。
+        //   这里改为：有真实实例用真实数量，合成档才用设置值。
+        const u32 realInstances = m_Cull.GetRealInstanceCount();
+        m_SoftParams.instanceCount =
+            (realInstances > 0u) ? std::min(realInstances, NaniteCull::MaxBVHInstances())
+                                 : std::min(m_Settings.instanceTestCount, NaniteCull::MaxBVHInstances());
         m_SoftParams.meshMaxExtent = m_MeshMaxExtent;
     m_SoftParams.debugView     = m_Settings.debugView;
     m_SoftParams.albedoDebug   = m_Settings.albedoDebug;
@@ -606,6 +613,26 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
                                      rec->vertexOffset, rec->materialID);
                     }
                     s_refDumped = true;
+                    // 【T8·排查】扫描整张可见列表：统计"无效引用"（簇号越界 / 实例号越界）。
+                    //   若存在大量无效槽位，就解释了"计数 1450 而光栅只处理 671"。
+                    if (m_Cull.ReadLastVisibleClusterCount() > 100u) {
+                        const u32 total = m_Cull.ReadLastVisibleClusterCount();
+                        const u32 mergedClusters = m_Scene.GetMergedClusterCount();
+                        const u32 instDomain = m_Cull.GetBVHInstanceDomain();
+                        u32 badCluster = 0u, badInstance = 0u, scanned = 0u;
+                        NaniteVisibleClusterRef buf[256]{};
+                        for (u32 base = 0u; base < total && scanned < 8192u; base += 256u) {
+                            const u32 got = m_Cull.ReadbackVisibleClustersAt(base, buf, 256u);
+                            if (got == 0u) break;
+                            for (u32 i = 0u; i < got; ++i) {
+                                if (buf[i].cluster >= mergedClusters) ++badCluster;
+                                if (buf[i].instance >= instDomain) ++badInstance;
+                            }
+                            scanned += got;
+                        }
+                        HE_CORE_INFO("[Nanite] 可见列表扫描：计数 {} 实读 {} | 簇号越界 {} | 实例号越界 {}（聚合簇 {}，实例域 {}）",
+                                     total, scanned, badCluster, badInstance, mergedClusters, instDomain);
+                    }
                 }
 
                 // 【T8 排查】软光栅赢家缓冲抽查：全 0xFFFFFFFF ⇒ 第 2.5 趟没写过
@@ -706,9 +733,11 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
                     // 槽位口径见 `Nanite_HardRaster.mesh.slang`：
                     //   0=硬光栅簇数、1=输出图元数、2=**硬光栅像素（写进 GBuffer）**、3=材质回退像素
                     HE_CORE_INFO("[Nanite] 光栅读数 软簇={} 跳过={} 三角形={} 退化={} 上屏像素={} | "
-                                 "硬簇={} 图元={} 硬像素={} 回退={}",
+                                 "硬簇={} 图元={} 硬像素={} 回退={} | 缺页={} 请求={}（不变式：软+跳过+缺页={}）",
                                  soft[0], soft[1], soft[2], soft[3], soft[4],
-                                 hard[0], hard[1], hard[2], hard[3]);
+                                 hard[0], hard[1], hard[2], hard[3],
+                                 soft[20], soft[21],
+                                 soft[0] + soft[1] + soft[20]);
                     // 【T8 诊断】一次性把 shader 侧"实际收到的参数"打出来：
                     // 若 screenW/H 或两个焦距为 0，说明 push constant 布局错位（不是几何问题）。
                     static bool s_ParamLogged = false;
@@ -793,6 +822,13 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
             //   不会再出现两种口径同时生效。
             views.stream = m_Stream.Views();
 
+            // 【诊断修复】硬光栅统计缓冲：pass **被跳过**时必须由这里清（否则读回是上一次的陈旧值，
+            //   曾把"可见簇 1450 / 只画 671"的排查带偏）。pass 真跑时它自己会在派发前清，
+            //   所以这里**只在跳过时**清 —— 无条件清会因"拷贝命令没有屏障到 mesh 派发"而被
+            //   驱动重排到派发之后，把刚写好的读数抹成 0（实测：硬簇恒 0）。
+            if (!hardRasterOn) {
+                m_Raster.RecordHardStatsClear(cmd);
+            }
             m_Raster.RecordSoftRasterPass(cmd, targets, views, m_SoftParams,
                                           m_Cull.GetVisibleClusterBuffer(),
                                           m_Cull.GetVisibleClusterCountBuffer(),
