@@ -25,6 +25,9 @@
 // 【§14.3 依赖禁令】只依赖 `NaniteTypes.slang` 与既有 GBuffer 契约。
 // ============================================================
 
+// 【A5 mip】本编译单元是**片元**：允许梯度采样 ⇒ 打开 mip 选择。
+//   compute 侧（软光栅）不定义此宏，继续按 mip0 取值。
+#define NANITE_USE_GRADIENTS 1
 #include "Nanite_SoftRasterCommon.slang"
 
 // objectIndex 分区：Nanite 段起点（与 C++ 的 `kNaniteObjectIndexBegin`、以及
@@ -91,8 +94,9 @@ HardRasterFragOut fragmentMain(HardRasterFragIn input) {
 #if !defined(HE_SHADER_D3D11)
     if (matArrayEnabled != 0u) {
         const uint nLayer = u_Materials[min(input.materialID, materialCount - 1u)].bindlessTextureBase;
-        float3 nTex = u_MatNormalArray.SampleLevel(u_MatNormalArraySamp,
-                                                   float3(input.uv, (float)nLayer), 0.0).rgb * 2.0 - 1.0;
+        float3 nTex = u_MatNormalArray.SampleGrad(u_MatNormalArraySamp,
+                                                  float3(input.uv, (float)nLayer),
+                                                  ddx(input.uv), ddy(input.uv)).rgb * 2.0 - 1.0;
         if (dot(nTex.xy, nTex.xy) > 1.0e-4f) {
             const float3 dpdx = ddx(input.worldPos);
             float3 T = dpdx - normal * dot(normal, dpdx);

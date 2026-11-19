@@ -437,6 +437,19 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
     //   一个纹理绑定 + 一个采样器，材质层号存在 NaniteMaterialRecord::bindlessTextureBase。
     //   统一缩到 256x256（原图 1024）控制显存：103 层 x 256^2 x 4B ≈ 27 MB。
     {
+        // 【A5】mip 开关（cfg `nanite_material_mips`，默认 0）：
+        //   0 ⇒ 数组只有 1 级 mip（片元用 SampleGrad 也只是取 level 0，行为与旧版一致）；
+        //   1 ⇒ 生成完整 mip 链（RHI 的 UploadInitialData 用 blit 逐级生成）。
+        //   【实测代价】开 mip 后远处纹理更稳（细节能量 7.88 → 7.04），
+        //   但帧时间 544 ms → ~728 ms（+33%），因此默认关闭、按需开启。
+        //   本函数这一段在 cfg 读入之前执行 ⇒ 直接自己读一次配置文件（只读一个键）。
+        bool materialMips = false;
+        {
+            const auto cfgMap = LoadConfigFile(ConfigPath());
+            materialMips = GetBool(cfgMap, "nanite_material_mips", false);
+        }
+        const u32  kBaseMips  = materialMips ? 10u : 1u;   // 512² → 10 级
+        const u32  kLayerMips = materialMips ? 9u  : 1u;   // 256² → 9 级
         constexpr u32 kLayerSize = 256;   // MR / 法线数组的层尺寸
         // 【A6】baseColor 是近景细节的主要来源 ⇒ 单独提到 512（103 层 × 512² × 4B ≈ 108 MB）；
         //   MR/法线仍用 256（各约 27 MB），总量约 162 MB。
@@ -505,7 +518,10 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
             td.width       = kBaseSize;
             td.height      = kBaseSize;
             td.arrayLayers = layerCount;
-            td.mipLevels   = 1;
+            // 【A5】RHI 的 `UploadInitialData` 在 mipLevels>1 时会用 blit 逐级生成 mip 链
+            //   （见 VulkanResources：level i-1 → i，layerCount 覆盖全部层），
+            //   所以这里只要声明级数即可；片元侧用 SampleGrad 才会真正吃到 mip。
+            td.mipLevels   = kBaseMips;
             td.usage       = rhi::TextureUsage::ShaderResource;
             td.initialData = atlas.data();
             g.matArrayTex = g.device->CreateTexture(td);
@@ -578,7 +594,7 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
                 mtd.width       = kLayerSize;
                 mtd.height      = kLayerSize;
                 mtd.arrayLayers = layerCount;
-                mtd.mipLevels   = 1;
+                mtd.mipLevels   = kLayerMips;
                 mtd.usage       = rhi::TextureUsage::ShaderResource;
                 mtd.initialData = mrAtlas.data();
                 g.matMrArrayTex = g.device->CreateTexture(mtd);
@@ -621,7 +637,7 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
                 ntd.width       = kLayerSize;
                 ntd.height      = kLayerSize;
                 ntd.arrayLayers = layerCount;
-                ntd.mipLevels   = 1;
+                ntd.mipLevels   = kLayerMips;
                 ntd.usage       = rhi::TextureUsage::ShaderResource;
                 ntd.initialData = nAtlas.data();
                 g.matNormalArrayTex = g.device->CreateTexture(ntd);

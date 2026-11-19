@@ -291,14 +291,29 @@ bool softRasterEvaluateMaterial(uint materialIndex, float2 uv,
         //   而它在 GBuffer 里直接 `albedo = baseColorFactor * texel`。
         //   我们此前把 texel 解码到线性，比标准路径暗 ~13%（全局比值 0.84）。
         //   为了与既有路径**同一观感**，这里保持与它一致的"直接用 texel"口径。
-        outAlbedo *= u_MatArray.SampleLevel(u_MatArraySamp,
-                                            float3(uv, (float)material.bindlessTextureBase), 0.0).rgb;
+        // 【A5 mip】片元路径用 `SampleGrad`（按屏幕空间 UV 梯度选 mip）；compute 路径无 quad 语义、
+        //   继续取 mip0（软光栅只处理少量小簇，视觉影响可忽略）。
+        const uint baseLayer = material.bindlessTextureBase;
+#ifdef NANITE_USE_GRADIENTS
+        const float3 baseTexel = u_MatArray.SampleGrad(u_MatArraySamp, float3(uv, (float)baseLayer),
+                                                       ddx(uv), ddy(uv)).rgb;
+#else
+        const float3 baseTexel = u_MatArray.SampleLevel(u_MatArraySamp,
+                                                        float3(uv, (float)baseLayer), 0.0).rgb;
+#endif
+        outAlbedo *= baseTexel;
         // 【A3】金属度/粗糙度来自**同层序**的 MR 数组（g=roughness、b=metallic），再乘材质因子。
         //   这与 GBuffer 路径的 `clamp(roughnessFactor * mr.g, 0.04, 1.0)` /
         //   `metallicFactor * mr.b` 两条公式一致；MR 数组里没有贴图的层填中性值
         //   （g=1、b=0），因此"没有 MR 贴图"的材质自然退化为"非金属 + 用因子当粗糙度"。
+#ifdef NANITE_USE_GRADIENTS
+        float4 mr = u_MatMrArray.SampleGrad(u_MatMrArraySamp,
+                                            float3(uv, (float)material.bindlessTextureBase),
+                                            ddx(uv), ddy(uv));
+#else
         float4 mr = u_MatMrArray.SampleLevel(u_MatMrArraySamp,
                                              float3(uv, (float)material.bindlessTextureBase), 0.0);
+#endif
         metallic  = saturate(material.metallicFactor * mr.b);
         roughness = clamp(material.roughnessFactor * mr.g, 0.04, 1.0);
         return true;
