@@ -139,6 +139,10 @@ public:
 
     /// 【A1】法线贴图数组（与 baseColor 同层序）
     void SetMaterialNormalArray(rhi::IRHITexture* array, rhi::IRHISampler* sampler);
+
+    /// 【T8·A2】把"贴图哈希 → 数组层号"的映射应用到一份资产的材质段（注册/上传之前调用）。
+    /// 多资产（按材质拆分的资产）由样例逐份注册，必须在这里先映射好层号。
+    void ApplyMaterialTextureLayers(NanitePackedAsset& asset) const;
     void SetSettings(const NaniteSettings& settings) { m_Settings = settings; }
 
     /// 帧图接入点（在 `DeferredPipeline_FrameGraph.cpp` 的 GBuffer 段被调用）。

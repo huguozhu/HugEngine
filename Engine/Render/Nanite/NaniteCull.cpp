@@ -1051,6 +1051,61 @@ u32 NaniteCull::SetInstancesFromSnapshot(const FrameSceneSnapshot& snapshot,
     return written;
 }
 
+// ============================================================
+// 【T8·A2】多资产：一份资产一个恒等实例
+//
+// 【为什么需要】按材质拆分的资产（`--granularity=material`）每份只含一种材质，
+//   于是"簇跨材质"从结构上消失。这些资产的几何**已经在世界空间烘焙**，
+//   所以实例矩阵取单位阵、包围盒取资产头部的 bbox —— 不再依赖 ECS 网格。
+//   这样也能绕开 64 条实例上限：Sponza 拆成 25 份材质资产 ⇒ 25 条实例。
+// ============================================================
+u32 NaniteCull::SetAssetInstances(u32 assetCount, std::span<const float> bounds) {
+    const u32 capacity = kNaniteMaxTestInstances;
+    if (assetCount > capacity) assetCount = capacity;
+    if (bounds.size() < (usize)assetCount * 6u) return 0u;
+
+    if (m_TestInstances.size() < capacity) m_TestInstances.resize(capacity);
+    if (m_TestSpheres.size() < capacity)    m_TestSpheres.resize(capacity);
+
+    const float identity[16] = { 1.0f, 0.0f, 0.0f, 0.0f,
+                                 0.0f, 1.0f, 0.0f, 0.0f,
+                                 0.0f, 0.0f, 1.0f, 0.0f,
+                                 0.0f, 0.0f, 0.0f, 1.0f };
+
+    u32 written = 0u;
+    for (u32 i = 0u; i < assetCount; ++i) {
+        const float* b = bounds.data() + (usize)i * 6u;
+        NaniteInstanceGpuObject& instance = m_TestInstances[written];
+        instance = NaniteInstanceGpuObject{};
+        std::memcpy(instance.localToWorld, identity, sizeof(identity));
+        for (u32 axis = 0u; axis < 3u; ++axis) {
+            instance.boundsMin[axis] = b[axis];
+            instance.boundsMax[axis] = b[axis + 3u];
+        }
+        // 实例级剔除对资产实例给保守大盒：逐簇剔除在 Phase 2 按簇球正常进行，
+        // 而资产 bbox 未必覆盖"该资产所有可见几何"（有的资产是局部壳）。
+        if (instance.boundsMin[0] >= instance.boundsMax[0]) {
+            for (u32 axis = 0u; axis < 3u; ++axis) {
+                instance.boundsMin[axis] = -1.0e6f;
+                instance.boundsMax[axis] =  1.0e6f;
+            }
+        }
+        instance.boundsMin[3]    = 0.0f;
+        instance.boundsMax[3]    = 0.0f;
+        instance.meshIndex       = i;      // 资产槽位（见头文件的字段复用契约）
+        instance.indexCount      = 1u;     // 只作"有几何"门控
+        instance.visibilityFlags = 1u;
+        m_TestSpheres[written]   = NaniteSphereFromInstanceBounds(instance);
+        m_RealAssetIndices[written] = i;
+        ++written;
+    }
+
+    m_RealInstanceCount = written;
+    if (written > 0u) m_TestInstanceCount = written;
+    HE_CORE_INFO("NaniteCull: 资产实例表就绪 —— {} 份资产 → {} 条恒等实例", assetCount, written);
+    return written;
+}
+
 void NaniteCull::ResetInstanceCullBuffers() {
     // 【只在 `Initialize` 调一次：这是**启动时的初值**，不是每帧的清零】
     // 每帧的清零必须走命令缓冲（见 `RecordInstanceCullPass` 里的 4B 拷贝），原因见那里的注释。

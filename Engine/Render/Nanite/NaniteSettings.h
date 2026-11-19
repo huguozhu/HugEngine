@@ -281,6 +281,13 @@ struct NaniteSettings {
     // 0 ⇒ 旧口径（单资产；离线/运行时构建各一条路径）。
     bool multiAsset = false;
 
+    // ── T8·A2：多资产"恒等实例"（cfg 键 `nanite_asset_instances`，默认 0）──
+    // 1 ⇒ 每份注册的资产各生成**一条恒等变换实例**（几何已在世界空间烘焙），
+    //     实例数 = 资产数。用于"按材质拆资产"（`--granularity=material`）：
+    //     每份资产只含一种材质 ⇒ 任意 LOD 层级的簇都不会跨材质。
+    // 0 ⇒ 沿用"按 ECS 网格绑定资产"的旧口径。
+    bool assetIdentityInstances = false;
+
     // ── T11：移除 GBuffer / 阴影的 IA PSO（cfg 键 `nanite_remove_ia_pso`，**默认 1**）──
     // 1 ⇒ 有资产 + 支持 MS 的设备上不再保留 IA 管线（几何只走 mesh：GBuffer 由 Nanite 硬光栅、
     //     阴影由 `Shadow.mesh` 写入）；

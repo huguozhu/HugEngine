@@ -699,8 +699,13 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
         // 默认关闭 ⇒ 单资产路径与 T9 完全一致。
         // 【只做前 N 份】注册会整体重建聚合缓冲（O(资产体积)），103 份全量在调试档下太慢；
         //   `nanite_multi_asset_count` 控制份数（默认 8），够验证"多资产剔除/实例表"。
+        const bool assetIdentity = GetBool(cfg, "nanite_asset_instances", false);
         if (GetBool(cfg, "nanite_multi_asset", false)) {
-            const String dir = vfs::Resolve("Processed/primitives");
+            // 【T8·A2】资产目录（cfg `nanite_asset_dir`）：默认按材质拆分的资产目录
+            const std::string assetDirCfg = (GetString(cfg, "nanite_asset_dir", "") != "")
+                ? GetString(cfg, "nanite_asset_dir", "")
+                : std::string("ProcessedMaterial");
+            const String dir = vfs::Resolve(assetDirCfg);
             std::error_code listEc;
             std::vector<String> files;
             for (const auto& entry : std::filesystem::directory_iterator(dir, listEc)) {
@@ -736,15 +741,21 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
                 }
                 // 【T8】每份资产的材质记录由 MaterialDesc 扩展段翻译（否则多资产档全部回退）
                 render::NaniteFillMaterialsFromDesc(asset, info.materialDescs);
+                // 【T8·A2】注册前把"贴图哈希 → 数组层号"映射到材质段（多资产档渲染器不代劳）
+                g.pipeline->GetNanite().ApplyMaterialTextureLayers(asset);
                 const u32 slot = g.pipeline->GetNanite().GetScene().RegisterAsset(asset);
                 if (slot == render::NaniteScene::kInvalidAssetIndex) continue;
 
-                // 按"网格创建顺序"绑定：第 bound 个 MeshComponent 用第 bound 个资产
-                u32 seen = 0u;
-                g.world.ForEach<MeshComponent>([&](Entity, MeshComponent& mesh) {
-                    if (seen++ != bound) return;
-                    mesh.SetNaniteAssetIndex(slot);
-                });
+                // 【T8·A2】恒等实例档：实例由渲染器按"一份资产一条"生成，这里**不绑网格**
+                //   （103 个网格会超 64 实例上限；材质拆分后每份资产已经是一整块几何）。
+                if (!assetIdentity) {
+                    // 按"网格创建顺序"绑定：第 bound 个 MeshComponent 用第 bound 个资产
+                    u32 seen = 0u;
+                    g.world.ForEach<MeshComponent>([&](Entity, MeshComponent& mesh) {
+                        if (seen++ != bound) return;
+                        mesh.SetNaniteAssetIndex(slot);
+                    });
+                }
                 ++bound;
             }
             HE_CORE_INFO("04.App: 多资产验收档启用 —— 已注册并绑定 {} 份 per-primitive 资产", bound);
@@ -853,6 +864,8 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
             naniteSettings.enabled = GetBool(cfg, "nanite_enable", naniteSettings.enabled);
             naniteSettings.offline = GetBool(cfg, "nanite_offline", naniteSettings.offline);
             naniteSettings.multiAsset = GetBool(cfg, "nanite_multi_asset", naniteSettings.multiAsset);
+            naniteSettings.assetIdentityInstances =
+                GetBool(cfg, "nanite_asset_instances", naniteSettings.assetIdentityInstances);
             // 【T8 验收】只画变换件时：**关掉离线 Sponza 资产**（否则 8287 簇的 Sponza 仍会
             //   被单资产路径画出来，验收件被淹没），并强制走多资产路径（立方体资产经注册表绘制）。
             if (g.transformOnly) {

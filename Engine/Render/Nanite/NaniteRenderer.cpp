@@ -787,6 +787,24 @@ void NaniteRenderer::SetMaterialMetalRoughArray(rhi::IRHITexture* array, rhi::IR
     HE_CORE_INFO("NaniteRenderer: MR 数组就绪（{}）", (void*)array);
 }
 
+void NaniteRenderer::ApplyMaterialTextureLayers(NanitePackedAsset& asset) const {
+    if (m_MatArray == nullptr || asset.materials.empty()) return;
+    for (NaniteMaterialRecord& rec : asset.materials) {
+        const u32 key = rec.bindlessTextureBase;
+        if (key == 0xFFFFFFFFu) { rec.textureMask = 0u; continue; }
+        u32 layer = 0xFFFFFFFFu;
+        for (const auto& kv : m_MatLayers) {
+            if (kv.first == key) { layer = kv.second; break; }
+        }
+        if (layer != 0xFFFFFFFFu) {
+            rec.bindlessTextureBase = layer;
+            rec.textureMask = 1u;      // baseColor
+        } else {
+            rec.textureMask = 0u;
+        }
+    }
+}
+
 void NaniteRenderer::SetMaterialNormalArray(rhi::IRHITexture* array, rhi::IRHISampler* sampler) {
     m_MatNormalArray = array;
     m_Raster.SetMaterialNormalArray(array, sampler);
@@ -860,6 +878,26 @@ void NaniteRenderer::EnsureAssetUploaded(const MeshBatcher& batcher) {
         HE_CORE_INFO("NaniteRenderer: 多资产模式就绪（{} 份资产 / 聚合 {} 簇 / 材质记录 {} 条；"
                      "占位索引上界 {}，量化尺度 {:.3f}）",
                      cullAssets, m_AssetClusterCount, matTotal, maxIndexCount, maxExtent);
+
+        // 【T8·A2】按材质拆分的资产：一份资产一条**恒等实例**（几何已在世界空间烘焙）。
+        //   这样"按材质拆资产"才能真正上屏：实例数 = 资产数（Sponza 25 份，远低于 64 上限），
+        //   不再依赖 ECS 网格绑定（103 个网格会超实例域）。
+        if (m_Settings.assetIdentityInstances) {
+            std::vector<float> bounds;
+            bounds.reserve((usize)m_Scene.GetAssetCount() * 6u);
+            u32 withBounds = 0u;
+            for (u32 i = 0u; i < m_Scene.GetAssetCount(); ++i) {
+                const NaniteScene::NaniteAssetEntry* entry = m_Scene.GetAssetEntry(i);
+                if (entry == nullptr) continue;
+                const auto& hdr = entry->cpu.header;
+                for (u32 a = 0u; a < 3u; ++a) bounds.push_back(hdr.bboxMin[a]);
+                for (u32 a = 0u; a < 3u; ++a) bounds.push_back(hdr.bboxMax[a]);
+                ++withBounds;
+            }
+            if (!bounds.empty()) {
+                m_Cull.SetAssetInstances(withBounds, bounds);
+            }
+        }
 
         return;
     }

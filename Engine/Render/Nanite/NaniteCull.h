@@ -337,6 +337,12 @@ public:
     /// @return 写入的实例数；0 表示没有任何绑定资产的实例 ⇒ 调用方应保留合成测试实例。
     u32 SetInstancesFromSnapshot(const FrameSceneSnapshot& snapshot, const MeshRegistry& registry);
 
+    /// 【T8·A2】多资产"一份资产一个恒等实例"：几何已在世界空间烘焙，实例矩阵取单位阵。
+    /// 用途：按材质拆分的资产（每份只含一种材质）各占一个实例槽，数量 = 资产数（Sponza 25）。
+    /// @param counts 资产数；`bounds` = 每份 6 个 float（min3, max3，世界空间 AABB）
+    /// @return 写入的实例数
+    u32 SetAssetInstances(u32 assetCount, std::span<const float> bounds);
+
     /// 第 i 个真实实例对应的离线资产槽位（仅 `SetInstancesFromSnapshot` 写过时有效）
     [[nodiscard]] u32 GetInstanceAssetIndex(u32 i) const {
         return i < m_RealInstanceCount ? m_RealAssetIndices[i] : 0xFFFFFFFFu;
