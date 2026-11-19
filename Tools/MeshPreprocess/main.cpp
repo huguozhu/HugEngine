@@ -352,6 +352,28 @@ int main(int argc, char** argv) {
             meshes.push_back(mesh);
         }
 
+        // 【T8·A2】按材质拆分时，本单元内**所有材质记录必须是同一个材质**：
+        //   工具是"一 range 一条记录"（同一材质的多 primitive 会各留一条），所以判据不是
+        //   "记录数 == 1"，而是"所有记录的 baseColor 贴图哈希一致"（这才是材质身份）。
+        if (options.granularity == "material" && materials.size() > 1u) {
+            const u32 firstKey = materials.front().bindlessTextureBase;
+            bool mixedMaterial = false;
+            for (usize mi = 1u; mi < materials.size(); ++mi) {
+                if (materials[mi].bindlessTextureBase != firstKey) {
+                    std::fprintf(stderr,
+                                 "警告: %s 内出现不同材质（贴图哈希 0x%08X vs 0x%08X），已跳过\n",
+                                 unit.name.c_str(), firstKey,
+                                 materials[mi].bindlessTextureBase);
+                    mixedMaterial = true;
+                    break;
+                }
+            }
+            if (mixedMaterial) {
+                ++failed;
+                continue;
+            }
+        }
+
         NanitePackedAsset asset;
         if (!BuildNaniteAssetFromGeometry(unit.positions, unit.normals, unit.uvs, unit.indices,
                                           materials, meshes, asset)) {
@@ -359,6 +381,7 @@ int main(int argc, char** argv) {
             ++failed;
             continue;
         }
+
         FinalizeRanges(unit, (u32)asset.clusters.size());
         // 【T8 排查】逐级三角形数：级 0 必须等于输入网格三角形数（否则 DAG 层级是"切分"而非"简化"）
         if (!asset.lodOffsets.empty()) {
