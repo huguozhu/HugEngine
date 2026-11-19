@@ -1008,6 +1008,56 @@ void NaniteRenderer::EnsureAssetUploaded(const MeshBatcher& batcher) {
     if (!offlineAsset.clusters.empty()) {
         const NanitePackedAsset& asset = offlineAsset;
 
+        // 【T8·排查】量化尺度诊断：用**头部 bbox 尺度**解码前若干簇的顶点，
+        //   检查它们是否落在各自簇的包围球内。若不落在球内，说明"打包时的量化尺度"
+        //   与"运行时用的头部 bbox 尺度"不是同一个 ⇒ 几何会整体缩放/偏移（实测
+        //   per-material 资产在单资产档就是这种表现）。同时报告用网格整体尺度解码的结果，
+        //   一眼就能看出到底该用哪个。
+        {
+            const auto& hdr = asset.header;
+            const float ex = hdr.bboxMax[0] - hdr.bboxMin[0];
+            const float ey = hdr.bboxMax[1] - hdr.bboxMin[1];
+            const float ez = hdr.bboxMax[2] - hdr.bboxMin[2];
+            const float extentHeader = std::max(ex, std::max(ey, ez));
+            const float extentGlobal = m_MeshMaxExtent > 0.0f ? m_MeshMaxExtent : extentHeader;
+            u32 outHeader = 0u, outGlobal = 0u, checked = 0u;
+            std::string firstBad;
+            for (const NaniteClusterRecord& rec : asset.clusters) {
+                if (checked >= 64u) break;
+                const u32 base = rec.vertexOffset;
+                if ((usize)base >= asset.vertices.size()) break;
+                const float cx = rec.boundsCenterRadius[0];
+                const float cy = rec.boundsCenterRadius[1];
+                const float cz = rec.boundsCenterRadius[2];
+                const float r  = rec.boundsCenterRadius[3];
+                const u32 word = asset.vertices[base].packedPosition;
+                const auto decodeMax = [&](float e) {
+                    float d2 = 0.0f;
+                    const float o[3] = { cx, cy, cz };
+                    for (u32 a = 0u; a < 3u; ++a) {
+                        const u32 raw = (word >> (10u * a)) & 0x3FFu;
+                        const float v = o[a] + ((float)((i32)raw - 512) / 1022.0f) * e;
+                        const float d = v - o[a];
+                        d2 += d * d;
+                    }
+                    return std::sqrt(d2);
+                };
+                if (decodeMax(extentHeader) > r * 1.5f + 1.0f) ++outHeader;
+                if (decodeMax(extentGlobal) > r * 1.5f + 1.0f) ++outGlobal;
+                if (outHeader > 0u && firstBad.empty()) {
+                    firstBad = "首簇越界：|p-c|=" + std::to_string(decodeMax(extentHeader)) +
+                               " 半径=" + std::to_string(r) +
+                               " 头尺度=" + std::to_string(extentHeader) +
+                               " 全局尺度=" + std::to_string(extentGlobal);
+                }
+                ++checked;
+            }
+            HE_CORE_INFO("[Nanite] 量化尺度诊断：检查 {} 簇；按**头 bbox 尺度**越界 {} 个，"
+                         "按**全局尺度({:.1f})**越界 {} 个（头尺度={:.1f}）{}",
+                         checked, outHeader, extentGlobal, outGlobal, extentHeader,
+                         firstBad.empty() ? "" : ("；" + firstBad));
+        }
+
             // 【T8 纹理】数组档：无论材质是"从 MaterialDesc 恢复"还是"资产自带"，都统一写层号。
         //   之前这段放在 fill-from-desc 分支里，资产自带材质时整段不执行（实测：纹理没生效）。
         if (m_MatArray != nullptr && !offlineAsset.materials.empty()) {
