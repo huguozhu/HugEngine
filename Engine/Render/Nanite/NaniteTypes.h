@@ -429,7 +429,10 @@ inline constexpr char kNaniteFileMagic[8] = { 'N', 'A', 'N', 'I', 'T', 'E', '0',
 inline constexpr u32 kNaniteFileVersion = 3u;   // v3：UV 编码域改为 [-64,64]（支持平铺 UV）
 
 /// 读取器能接受的**最低**格式版本（v1 文件结构上可解析：扩展段数视为 0、哈希视为无效）
-inline constexpr u32 kNaniteMinReadableFileVersion = 1u;
+// 【T8·UV 平铺】最小可读版本 = **3**：v1/v2 的 UV 编码域是 [0,1]，而 v3 改成 [-64,64]。
+//   若继续接受旧版本，读取端会按新域解码旧数据 ⇒ UV 全错（贴图整体错位），且**不会报错**。
+//   宁可让旧资产显式失败（日志提示"格式版本不匹配"、回退运行时构建），也不静默出错图。
+inline constexpr u32 kNaniteMinReadableFileVersion = 3u;
 
 /// 构建器版本：**算法/实现变化但字节布局不变时也必须 +1**，否则旧缓存不会失效。
 /// 与 `kNaniteFileVersion` 的分工：后者管"字节布局"，前者管"同样输入会不会产出同样字节"。

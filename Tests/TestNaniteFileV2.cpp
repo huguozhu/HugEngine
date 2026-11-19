@@ -230,33 +230,32 @@ TEST_CASE("NaniteFileV2: 扩展段（MaterialDesc + SourceClusterRange）往返�
 // 3. v1 兼容
 // ============================================================
 
-TEST_CASE("NaniteFileV2: v1 文件可解析，元数据标记为无效、几何段不变") {
+TEST_CASE("NaniteFileV2: v1/v2 文件被拒（UV 编码域不同，禁止静默错图）") {
     NanitePackedAsset asset;
     REQUIRE(BuildAsset(MakeGrid(4), asset));
 
     NaniteFileWriteOptions options;
     options.extSections.push_back({ NaniteExtSectionType::MaterialDesc, MakeMaterialDescPayload(1) });
-    std::vector<u8> v2Bytes;
-    REQUIRE(WriteNaniteFile(asset, options, v2Bytes));
+    std::vector<u8> v3Bytes;
+    REQUIRE(WriteNaniteFile(asset, options, v3Bytes));
 
-    const std::vector<u8> v1Bytes = MakeV1BytesFromV2(v2Bytes);
-
+    // 【为什么必须拒绝】v1/v2 的 UV 是 [0,1] 的 unorm16，v3 把编码域改成 [-64,64] 以支持平铺 UV。
+    //   若继续接受旧版本，读取端会按新域解码旧数据 ⇒ 贴图整体错位且**不报错**。
+    //   现在的最低可读版本是 3（`kNaniteMinReadableFileVersion`）。
+    std::vector<u8> v1Bytes = MakeV1BytesFromV2(v3Bytes);
     NaniteFileImage image;
-    REQUIRE(ReadNaniteFile(v1Bytes.data(), v1Bytes.size(), image) == NaniteFileError::None);
-    CHECK(image.header.version == 1u);
-    CHECK(image.layout.extSectionCount == 0u);
-    CHECK(image.extEntries.empty());
-    CHECK(NaniteHeaderBuilderVersion(image.header) == 0u);   // 0 = 无版本信息
-    bool settingsValid = true, sourceValid = true;
-    CHECK(NaniteHeaderSettingsHash(image.header, &settingsValid) == 0u);
-    CHECK(NaniteHeaderSourceHash(image.header, &sourceValid) == 0u);
-    CHECK_FALSE(settingsValid);
-    CHECK_FALSE(sourceValid);
+    CHECK(ReadNaniteFile(v1Bytes.data(), v1Bytes.size(), image) == NaniteFileError::BadVersion);
 
-    // 几何段与 v2 文件里的同一段逐字节相等（兼容的实质）
-    CHECK(std::memcmp(image.bytes.data() + image.layout.clusterOffset,
-                      v2Bytes.data() + image.layout.clusterOffset,
-                      image.layout.clusterBytes) == 0);
+    std::vector<u8> v2Bytes = v3Bytes;
+    NaniteFileHeader header{};
+    std::memcpy(&header, v2Bytes.data(), sizeof(header));
+    header.version = 2u;
+    std::memcpy(v2Bytes.data(), &header, sizeof(header));
+    CHECK(ReadNaniteFile(v2Bytes.data(), v2Bytes.size(), image) == NaniteFileError::BadVersion);
+
+    // 对照：v3 本身仍可解析
+    CHECK(ReadNaniteFile(v3Bytes.data(), v3Bytes.size(), image) == NaniteFileError::None);
+    CHECK(image.header.version == kNaniteFileVersion);
 }
 
 // ============================================================

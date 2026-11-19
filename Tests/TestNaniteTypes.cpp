@@ -385,7 +385,7 @@ TEST_CASE("NaniteTypes: .nanite 文件头字段与尺寸（任务 7 定稿 96B�
     const NaniteFileHeader header{};
     // T2：格式升到 v2（头部保留区启用 + 扩展段表），可读下限仍是 v1
     CHECK(kNaniteFileVersion == 3u);   // v3：UV 编码域 [-64,64]
-    CHECK(kNaniteMinReadableFileVersion == 1u);
+    CHECK(kNaniteMinReadableFileVersion == 3u);   // v3 起 UV 编码域为 [-64,64]，旧版本必须被拒
     CHECK(header.version == 3u);
 
     // 魔数：恰好 8 字节 "NANITE01"，逐字节相等且**不带 NUL 结尾**
