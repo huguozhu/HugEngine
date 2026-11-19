@@ -125,6 +125,9 @@ uint naniteRasterSlot(uint3 gid) { return gid.x + gid.y * kNaniteRasterDispatchW
 // ── 【A3】金属度/粗糙度数组（与 baseColor **同层序**，共用同一个层号）──
 [[vk::binding(25, 0)]] Texture2DArray<float4>                   u_MatMrArray;
 [[vk::binding(26, 0)]] SamplerState                             u_MatMrArraySamp;
+// ── 【A1】法线贴图数组（与 baseColor **同层序**；无贴图的层为中性 (0.5,0.5,1)）──
+[[vk::binding(27, 0)]] Texture2DArray<float4>                   u_MatNormalArray;
+[[vk::binding(28, 0)]] SamplerState                             u_MatNormalArraySamp;
 // ── 【T8】每簇量化尺度（float/cluster，binding 22）──
 // 【为什么需要】顶点是按**各自资产** bbox 的最大轴量化的；聚合视图里只有一个全局
 //   `meshMaxExtent`，把尺度差异大的资产混在一起时，小资产会被按大尺度解码而飞出视锥

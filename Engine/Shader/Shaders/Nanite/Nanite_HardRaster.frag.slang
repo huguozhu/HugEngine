@@ -83,6 +83,31 @@ HardRasterFragOut fragmentMain(HardRasterFragIn input) {
     // ── ② 法线：硬件插值后归一化（与软光栅 `normalize(softRasterAttribute(...))` 同一口径）──
     float3 normal = normalize(input.normal);
 
+    // ── 【A1】法线贴图扰动 ──
+    //   资产里没有切线属性（Nanite 顶点只存位置/法线/UV），因此用**屏幕空间导数**构造切线帧：
+    //     T = normalize(ddx(P) − N·(N·ddx(P)))、B = cross(N, T)
+    //   这是无切线的常见近似；中性贴图 (0.5,0.5,1) 解出的 nTex = (0,0,1) ⇒ 原样返回 N。
+    //   compute 路径（软光栅）没有 quad 语义，故这里只在片元里做。
+#if !defined(HE_SHADER_D3D11)
+    if (matArrayEnabled != 0u) {
+        const uint nLayer = u_Materials[min(input.materialID, materialCount - 1u)].bindlessTextureBase;
+        float3 nTex = u_MatNormalArray.SampleLevel(u_MatNormalArraySamp,
+                                                   float3(input.uv, (float)nLayer), 0.0).rgb * 2.0 - 1.0;
+        if (dot(nTex.xy, nTex.xy) > 1.0e-4f) {
+            const float3 dpdx = ddx(input.worldPos);
+            float3 T = dpdx - normal * dot(normal, dpdx);
+            const float tLen2 = dot(T, T);
+            if (tLen2 > 1.0e-12f) {
+                T *= rsqrt(tLen2);
+                const float3 B = cross(normal, T);
+                const float3 perturbed = T * nTex.x + B * nTex.y + normal * nTex.z;
+                const float pLen2 = dot(perturbed, perturbed);
+                if (pLen2 > 1.0e-12f) normal = perturbed * rsqrt(pLen2);
+            }
+        }
+    }
+#endif
+
     // ── 【T8 排查】debugView == 1：品红平涂 ──
     //   把 albedo 强制成纯黑（过光照后仍接近黑），画面里**任何明亮的区域**就是"没有几何"的孔洞
     //   （孔洞）。这比看白模截图可靠：材质/光照/纹理的差异都不会再干扰判断。

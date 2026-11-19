@@ -131,6 +131,7 @@ struct App::Impl {
     // 【T8 纹理】材质 Texture2DArray（绕开描述符数组写）+ 每材质层号
     std::unique_ptr<rhi::IRHITexture> matArrayTex;
     std::unique_ptr<rhi::IRHITexture> matMrArrayTex;   // 【A3】金属度/粗糙度数组（同层序）
+    std::unique_ptr<rhi::IRHITexture> matNormalArrayTex; // 【A1】法线贴图数组（同层序）
     std::unique_ptr<rhi::IRHISampler> matArraySamp;
     std::vector<std::pair<u32, u32>> matLayers;   // (贴图 URI 的 FNV1a32, 数组层号)
     bool transformOnly = false;   // T8：只画变换验收件（cfg `nanite_transform_only`）
@@ -439,6 +440,7 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
         constexpr u32 kLayerSize = 256;
         std::vector<String> baseColorPaths;
         std::vector<String> mrPaths;            // 与 baseColorPaths 同序：金属度/粗糙度贴图
+        std::vector<String> normalPaths;        // 与 baseColorPaths 同序：法线贴图
         std::vector<u32>    baseColorKeys;      // 与 baseColorPaths 同序：贴图 URI 的 FNV1a32
         g.world.ForEach<MeshComponent>([&](Entity, MeshComponent& mesh) {
             baseColorPaths.push_back(mesh.baseColorTexture.empty()
@@ -447,6 +449,9 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
             mrPaths.push_back(mesh.metallicRoughnessTexture.empty()
                 ? String{}
                 : (std::filesystem::path(sponzaPath).parent_path() / mesh.metallicRoughnessTexture).string());
+            normalPaths.push_back(mesh.normalTexture.empty()
+                ? String{}
+                : (std::filesystem::path(sponzaPath).parent_path() / mesh.normalTexture).string());
             // 【T8 纹理映射】与 `MeshPreprocess` 的 `Fnv1a32TextureKey` 逐字节同一算法
             u32 h = 2166136261u;
             for (unsigned char c : mesh.baseColorTexture) { h ^= (u32)c; h *= 16777619u; }
@@ -575,6 +580,50 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
                 mtd.initialData = mrAtlas.data();
                 g.matMrArrayTex = g.device->CreateTexture(mtd);
                 HE_CORE_INFO("04.App: MR 数组纹理就绪（{} 层 x {}）", layerCount, kLayerSize);
+
+            // ── 【A1】法线贴图数组（与 baseColor 同层序；无贴图的层填中性值 (128,128,255)）──
+            {
+                std::vector<u8> nAtlas((size_t)kLayerSize * kLayerSize * 4u * layerCount, 255u);
+                for (size_t t = 0; t < (size_t)kLayerSize * kLayerSize; ++t) {
+                    for (u32 layer = 0u; layer < layerCount; ++layer) {
+                        u8* dst = nAtlas.data() + (size_t)layer * kLayerSize * kLayerSize * 4u;
+                        dst[t * 4u + 0u] = 128u;   // x = 0
+                        dst[t * 4u + 1u] = 128u;   // y = 0
+                        dst[t * 4u + 2u] = 255u;   // z = 1（指向几何法线）
+                        dst[t * 4u + 3u] = 255u;
+                    }
+                }
+                for (u32 layer = 0u; layer < layerCount; ++layer) {
+                    if (normalPaths[layer].empty()) continue;
+                    int nw = 0, nh = 0, nch = 0;
+                    u8* pixels = stbi_load(normalPaths[layer].c_str(), &nw, &nh, &nch, 4);
+                    if (pixels == nullptr || nw <= 0 || nh <= 0) continue;
+                    u8* dst = nAtlas.data() + (size_t)layer * kLayerSize * kLayerSize * 4u;
+                    for (u32 y = 0u; y < kLayerSize; ++y) {
+                        const u32 sy = (u32)((u64)y * (u64)nh / kLayerSize);
+                        for (u32 x = 0u; x < kLayerSize; ++x) {
+                            const u32 sx = (u32)((u64)x * (u64)nw / kLayerSize);
+                            const u8* src = pixels + ((size_t)sy * nw + sx) * 4u;
+                            u8* outPx = dst + ((size_t)y * kLayerSize + x) * 4u;
+                            outPx[0] = src[0];
+                            outPx[1] = src[1];
+                            outPx[2] = src[2];
+                            outPx[3] = 255u;
+                        }
+                    }
+                    stbi_image_free(pixels);
+                }
+                rhi::TextureDesc ntd;
+                ntd.format      = rhi::Format::RGBA8_UNORM;
+                ntd.width       = kLayerSize;
+                ntd.height      = kLayerSize;
+                ntd.arrayLayers = layerCount;
+                ntd.mipLevels   = 1;
+                ntd.usage       = rhi::TextureUsage::ShaderResource;
+                ntd.initialData = nAtlas.data();
+                g.matNormalArrayTex = g.device->CreateTexture(ntd);
+                HE_CORE_INFO("04.App: 法线数组纹理就绪（{} 层 x {}）", layerCount, kLayerSize);
+            }
             }
             HE_CORE_INFO("04.App: 数组层加载统计 —— 成功 {} 层 / 缺失 {} 层（缺失层保持白色）",
                          loadedLayers, missingLayers);
@@ -795,6 +844,11 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
             if (g.matMrArrayTex) {
                 g.pipeline->GetNanite().SetMaterialMetalRoughArray(g.matMrArrayTex.get(),
                                                                    g.matArraySamp.get());
+            }
+            // 【A1】法线贴图数组（与 baseColor 同层序、共用采样器）
+            if (g.matNormalArrayTex) {
+                g.pipeline->GetNanite().SetMaterialNormalArray(g.matNormalArrayTex.get(),
+                                                               g.matArraySamp.get());
             }
             naniteSettings.enabled = GetBool(cfg, "nanite_enable", naniteSettings.enabled);
             naniteSettings.offline = GetBool(cfg, "nanite_offline", naniteSettings.offline);

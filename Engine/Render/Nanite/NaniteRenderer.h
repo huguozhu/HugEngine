@@ -136,6 +136,9 @@ public:
 
     /// 【A3】金属度/粗糙度数组（与 baseColor 同层序，材质共用一个层号）
     void SetMaterialMetalRoughArray(rhi::IRHITexture* array, rhi::IRHISampler* sampler);
+
+    /// 【A1】法线贴图数组（与 baseColor 同层序）
+    void SetMaterialNormalArray(rhi::IRHITexture* array, rhi::IRHISampler* sampler);
     void SetSettings(const NaniteSettings& settings) { m_Settings = settings; }
 
     /// 帧图接入点（在 `DeferredPipeline_FrameGraph.cpp` 的 GBuffer 段被调用）。
@@ -608,7 +611,8 @@ public:
 
     /// 【T8 纹理】材质数组纹理与"材质记录 -> 层号"表
     rhi::IRHITexture*  m_MatArray = nullptr;
-    rhi::IRHITexture*  m_MatMrArray = nullptr;   // 【A3】MR 数组
+    rhi::IRHITexture*  m_MatMrArray = nullptr;   // 【A3】
+    rhi::IRHITexture*  m_MatNormalArray = nullptr;   // 【A1】MR 数组
     rhi::IRHISampler*  m_MatArraySamp = nullptr;
     std::vector<std::pair<u32, u32>> m_MatLayers;   // (贴图 URI 的 FNV1a32, 数组层号)
     /// 【T8 排查】上一帧从 CPU 可见簇里挑出的调试簇号（-1 = 无）

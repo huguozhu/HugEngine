@@ -787,6 +787,12 @@ void NaniteRenderer::SetMaterialMetalRoughArray(rhi::IRHITexture* array, rhi::IR
     HE_CORE_INFO("NaniteRenderer: MR 数组就绪（{}）", (void*)array);
 }
 
+void NaniteRenderer::SetMaterialNormalArray(rhi::IRHITexture* array, rhi::IRHISampler* sampler) {
+    m_MatNormalArray = array;
+    m_Raster.SetMaterialNormalArray(array, sampler);
+    HE_CORE_INFO("NaniteRenderer: 法线数组就绪");
+}
+
 void NaniteRenderer::EnsureAssetUploaded(const MeshBatcher& batcher) {
     // 【关闭 / 未就绪 ⇒ 一个资源都不建】§14.2 不变式 1：关闭档不产生新的 GPU 资源、不打日志。
     if (!m_Settings.enabled || !m_Ready) return;

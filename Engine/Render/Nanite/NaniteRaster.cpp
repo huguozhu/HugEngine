@@ -745,6 +745,10 @@ bool NaniteRaster::EnsureSoftRasterResources(const GBufferTargets& targets) {
             {24, rhi::DescriptorType::Sampler,      1, rhi::kStageMaskCompute, false },
             {25, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskCompute, false },
             {26, rhi::DescriptorType::Sampler,      1, rhi::kStageMaskCompute, false },
+            {27, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskCompute, false },  // 法线数组
+            {28, rhi::DescriptorType::Sampler,      1, rhi::kStageMaskCompute, false },
+        {27, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskCompute, false },  // 法线数组
+        {28, rhi::DescriptorType::Sampler,      1, rhi::kStageMaskCompute, false },
         {25, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskCompute, false },  // MR 数组
         {26, rhi::DescriptorType::Sampler,      1, rhi::kStageMaskCompute, false },
         // 【T8 纹理】23/24 = 材质 Texture2DArray + 采样器（单张纹理，不走描述符数组）
@@ -1516,6 +1520,8 @@ bool NaniteRaster::EnsureHardRasterResources(const GBufferTargets& targets) {
             {24, rhi::DescriptorType::Sampler,      1,    kStages, false },
             {25, rhi::DescriptorType::SampledImage, 1,    kStages, false },  // MR 数组
             {26, rhi::DescriptorType::Sampler,      1,    kStages, false },
+            {27, rhi::DescriptorType::SampledImage, 1, kStages, false },  // 法线数组
+            {28, rhi::DescriptorType::Sampler,      1, kStages, false },
         };
         m_HardRasterLayout = m_Device->CreateDescriptorSetLayout(layout);
         if (m_HardRasterLayout == rhi::kInvalidLayout) {
@@ -1696,6 +1702,12 @@ void NaniteRaster::RecordHardRasterPass(rhi::IRHICommandList* cmd,
     rhi::IRHIBuffer* vertexSrc   = streamOn ? asset.stream.poolVertices  : asset.vertices;
     rhi::IRHIBuffer* triangleSrc = streamOn ? asset.stream.poolTriangles : asset.indices;
     // 【T8 纹理】硬光栅集合是懒建的（首帧才创建）⇒ 数组纹理必须每帧补绑，否则采样恒为 0
+    if (m_MatNormalArrayTex != nullptr && m_MatArraySamp != nullptr) {
+        m_Device->UpdateDescriptorSet(m_HardRasterSet, 27, rhi::DescriptorType::SampledImage,
+                                      m_MatNormalArrayTex, m_MatArraySamp);
+        m_Device->UpdateDescriptorSet(m_HardRasterSet, 28, rhi::DescriptorType::Sampler,
+                                      m_MatNormalArrayTex, m_MatArraySamp);
+    }
     if (m_MatMrArrayTex != nullptr && m_MatArraySamp != nullptr) {
         m_Device->UpdateDescriptorSet(m_HardRasterSet, 25, rhi::DescriptorType::SampledImage,
                                       m_MatMrArrayTex, m_MatArraySamp);
@@ -2105,6 +2117,17 @@ void NaniteRaster::SetMaterialMetalRoughArray(rhi::IRHITexture* array, rhi::IRHI
         m_Device->UpdateDescriptorSet(set, 26u, rhi::DescriptorType::Sampler, array, sampler);
     }
     HE_CORE_INFO("NaniteRaster: MR 数组已绑定（binding 25/26）");
+}
+
+void NaniteRaster::SetMaterialNormalArray(rhi::IRHITexture* array, rhi::IRHISampler* sampler) {
+    if (!m_Device || array == nullptr || sampler == nullptr) return;
+    m_MatNormalArrayTex = array;
+    for (rhi::DescriptorSetHandle set : { m_SoftDepthSet, m_SoftColorSet }) {
+        if (set == rhi::kInvalidSet) continue;
+        m_Device->UpdateDescriptorSet(set, 27u, rhi::DescriptorType::SampledImage, array, sampler);
+        m_Device->UpdateDescriptorSet(set, 28u, rhi::DescriptorType::Sampler, array, sampler);
+    }
+    HE_CORE_INFO("NaniteRaster: 法线数组已绑定（binding 27/28）");
 }
 
 void NaniteRaster::SetMaterialTextureArray(rhi::IRHITexture* array, rhi::IRHISampler* sampler) {
