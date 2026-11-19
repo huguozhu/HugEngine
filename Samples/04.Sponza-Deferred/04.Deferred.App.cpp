@@ -133,7 +133,8 @@ struct App::Impl {
     std::unique_ptr<rhi::IRHITexture> matMrArrayTex;   // 【A3】金属度/粗糙度数组（同层序）
     std::unique_ptr<rhi::IRHITexture> matNormalArrayTex; // 【A1】法线贴图数组（同层序）
     std::unique_ptr<rhi::IRHISampler> matArraySamp;
-    std::vector<std::pair<u32, u32>> matLayers;   // (贴图 URI 的 FNV1a32, 数组层号)
+    std::vector<std::pair<u32, u32>> matLayers;
+    std::vector<std::pair<u32, u32>> pendingMatLayers;   // 建 pipeline 前暂存（多资产档注册早于纹理绑定）   // (贴图 URI 的 FNV1a32, 数组层号)
     bool transformOnly = false;   // T8：只画变换验收件（cfg `nanite_transform_only`）
     u32  multiAssetCount = 8;     // T8：多资产档注册份数（cfg `nanite_multi_asset_count`）
     bool transformTest   = false; // T8：生成三个变换验收件（cfg `nanite_transform_test`）
@@ -552,6 +553,8 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
                 if (!seen) g.matLayers.emplace_back(key, layer);
             }
             HE_CORE_INFO("04.App: 贴图哈希表 {} 条（网格 {} 个）", (u32)g.matLayers.size(), layerCount);
+            g.pendingMatLayers = g.matLayers;   // 等 pipeline 建好后再交给渲染器（见下方）
+
             for (const auto& kv : g.matLayers) {
                 HE_CORE_INFO("04.App:   层 {} ← 哈希 0x{:08X}（URI {}）", kv.second, kv.first,
                              (kv.second < baseColorPaths.size())
@@ -651,6 +654,12 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
 
     // ---- 延迟管线 ----
     g.pipeline = std::make_unique<render::DeferredPipeline>();
+    // 【T8·A2】把"贴图哈希 → 数组层号"表在**资产注册之前**交给渲染器：
+    //   多资产档的资产注册早于 `SetMaterialTextureArray`，没有这张表时
+    //   `ApplyMaterialTextureLayers` 会把材质位全清掉 ⇒ 整片白灰（实测）。
+    if (!g.pendingMatLayers.empty()) {
+        g.pipeline->GetNanite().SetMaterialTextureLayerTable(g.pendingMatLayers);
+    }
     g.pipeline->Initialize(g.device.get());
     g.pipeline->SetSwapChain(g.swapchain.get());
     g.pipeline->OnResize(g.swapchain->GetWidth(), g.swapchain->GetHeight());

@@ -834,7 +834,10 @@ void NaniteRenderer::SetMaterialMetalRoughArray(rhi::IRHITexture* array, rhi::IR
 }
 
 void NaniteRenderer::ApplyMaterialTextureLayers(NanitePackedAsset& asset) const {
-    if (m_MatArray == nullptr || asset.materials.empty()) return;
+    // 【注意】这里**不能**要求 `m_MatArray != nullptr`：多资产档的资产注册/上传早于
+    //   `SetMaterialTextureArray`（纹理句柄那时还没创建），只要表在就能算出层号。
+    //   此前用 `m_MatArray == nullptr` 早退 ⇒ 材质位被清空 ⇒ 整片白灰（实测）。
+    if (m_MatLayers.empty() || asset.materials.empty()) return;
     for (NaniteMaterialRecord& rec : asset.materials) {
         const u32 key = rec.bindlessTextureBase;
         if (key == 0xFFFFFFFFu) { rec.textureMask = 0u; continue; }

@@ -143,6 +143,13 @@ public:
     /// 【T8·A2】把"贴图哈希 → 数组层号"的映射应用到一份资产的材质段（注册/上传之前调用）。
     /// 多资产（按材质拆分的资产）由样例逐份注册，必须在这里先映射好层号。
     void ApplyMaterialTextureLayers(NanitePackedAsset& asset) const;
+
+    /// 【T8·A2】**只**设置"贴图哈希 → 数组层号"表（不绑定纹理）。
+    ///   多资产档里资产在 `SetMaterialTextureArray` **之前**就注册/上传了，
+    ///   没有这张表时 `ApplyMaterialTextureLayers` 会把材质位全清掉 ⇒ 整片白灰。
+    void SetMaterialTextureLayerTable(std::vector<std::pair<u32, u32>> hashToLayer) {
+        m_MatLayers = std::move(hashToLayer);
+    }
     void SetSettings(const NaniteSettings& settings) { m_Settings = settings; }
 
     /// 帧图接入点（在 `DeferredPipeline_FrameGraph.cpp` 的 GBuffer 段被调用）。
