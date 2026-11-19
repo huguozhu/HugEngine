@@ -540,6 +540,34 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
                              stats[10], stats[0], stats[1], stats[2], stats[11]);
                 HE_CORE_INFO("[Nanite] cull3 上帧读数 可见簇={} 绘制条数={}",
                              lastSeenRaw, lastDrawRaw);
+                // 【C·可观测】遮挡剔除占比：`occluded / frustumPass`。
+                //   超过 90% 通常意味着 Hi-Z 过剔（历史上出现过"半屏天空"那次），
+                //   这里给一条一次性告警并指明对照开关，回归时一眼能看出遮挡是否又过剔。
+                {
+                    const u32 frustum = stats[0];
+                    const u32 occluded = stats[1];
+                    if (frustum > 0u) {
+                        const u32 permille = (u32)((u64)occluded * 1000ull / (u64)frustum);
+                        // 槽位 2..9 = 各 LOD 级被选中的簇数（直方图），求和即"选中的簇数"。
+                        u32 selected = 0u;
+                        for (u32 k = 2u; k <= 9u; ++k) selected += stats[k];
+                        const u32 lodRejected = (frustum > occluded + selected)
+                                                    ? (frustum - occluded - selected) : 0u;
+                        HE_CORE_INFO("[Nanite] 剔除占比：过视锥 {} / 遮挡 {}（{}‰）/ 选中 {} / "
+                                     "LOD 拒绝 {}；Hi-Z={}",
+                                     frustum, occluded, permille, selected, lodRejected,
+                                     m_Settings.hiz ? 1 : 0);
+                        if (permille > 900u) {
+                            static bool s_warned = false;
+                            if (!s_warned) {
+                                s_warned = true;
+                                HE_CORE_WARN("[Nanite] 遮挡占比 {}‰ 偏高（>90%）⇒ 疑似 Hi-Z 过剔；"
+                                             "对照 cfg `nanite_hiz=0` 复测，若画面明显变多则是过剔",
+                                             permille);
+                            }
+                        }
+                    }
+                }
 
                 // 【T8 排查】读回 GPU 可见列表前 8 条，与 CPU 参考集合对照
                 {
