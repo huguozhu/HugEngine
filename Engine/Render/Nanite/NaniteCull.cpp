@@ -998,9 +998,18 @@ u32 NaniteCull::SetInstancesFromSnapshot(const FrameSceneSnapshot& snapshot,
         //   把整个实例剔掉（实测：可见簇 0）。这里对资产实例一律给保守大盒，
         //   逐簇剔除仍在 Phase 2 里按簇球正常进行（精度损失只体现在实例级粗剔除）。
         if (item.naniteAssetIndex != 0xFFFFFFFFu) {
-            for (u32 axis = 0u; axis < 3u; ++axis) {
-                instance.boundsMin[axis] = -1.0e6f;
-                instance.boundsMax[axis] =  1.0e6f;
+            // 【B3】有该资产的真实 bbox 就用它；没有才退回保守大盒
+            const usize bOff = (usize)item.naniteAssetIndex * 6u;
+            if (bOff + 6u <= m_AssetBounds.size()) {
+                for (u32 axis = 0u; axis < 3u; ++axis) {
+                    instance.boundsMin[axis] = m_AssetBounds[bOff + axis];
+                    instance.boundsMax[axis] = m_AssetBounds[bOff + 3u + axis];
+                }
+            } else {
+                for (u32 axis = 0u; axis < 3u; ++axis) {
+                    instance.boundsMin[axis] = -1.0e6f;
+                    instance.boundsMax[axis] =  1.0e6f;
+                }
             }
         }
         instance.boundsMin[3]    = 0.0f;
@@ -1086,6 +1095,10 @@ u32 NaniteCull::SetAssetInstances(u32 assetCount, std::span<const float> bounds,
                                  0.0f, 1.0f, 0.0f, 0.0f,
                                  0.0f, 0.0f, 1.0f, 0.0f,
                                  0.0f, 0.0f, 0.0f, 1.0f };
+
+    // 【B3】留存每份资产的世界 AABB：快照路径给"绑定了资产的实例"设保守大盒时，
+    //   有真实 bbox 就用真实的（避免实例级视锥永远全通过、放大后续逐簇开销）。
+    m_AssetBounds.assign(bounds.begin(), bounds.begin() + (long)((usize)assetCount * 6u));
 
     u32 written = 0u;
     for (u32 i = 0u; i < assetCount; ++i) {

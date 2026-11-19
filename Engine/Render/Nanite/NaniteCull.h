@@ -669,6 +669,7 @@ private:
     std::array<u32, kNaniteMaxTestInstances> m_RealAssetIndices{};
     u32 m_RealInstanceCount = 0u;
     bool m_AssetInstancesActive = false;   // 【T8·A2】资产恒等实例表已生效
+    std::vector<float> m_AssetBounds;      // 【B3】每份资产的世界 AABB（6 float：min3,max3）
 
     // ── 四个自持缓冲（容量都是 `kNaniteMaxTestInstances`）──
     rhi::RHIBufferHandle m_InstanceBuf{};   // A-3             // 128B 实例表（Storage，CPU 每帧写）
