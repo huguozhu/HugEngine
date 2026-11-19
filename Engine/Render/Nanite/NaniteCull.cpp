@@ -915,6 +915,12 @@ void NaniteCull::BuildTestInstances() {
 // ============================================================
 u32 NaniteCull::SetInstancesFromSnapshot(const FrameSceneSnapshot& snapshot,
                                          const MeshRegistry& registry) {
+    // 【T8·A2】按材质拆分的资产用"一份资产一条恒等实例"（`SetAssetInstances`）。
+    //   此时**不能让快照实例覆盖**：快照里没有绑定资产的网格（样例跳过了网格绑定），
+    //   覆盖后 `m_RealInstanceCount` 会被清零，`BuildTestInstances` 随即用合成实例重写整张表
+    //   （实测：硬簇 0、只有 1 个软簇）。
+    if (m_AssetInstancesActive) return 0u;
+
     const u32 capacity = kNaniteMaxTestInstances;
     u32 written = 0u;
 
@@ -1059,10 +1065,12 @@ u32 NaniteCull::SetInstancesFromSnapshot(const FrameSceneSnapshot& snapshot,
 //   所以实例矩阵取单位阵、包围盒取资产头部的 bbox —— 不再依赖 ECS 网格。
 //   这样也能绕开 64 条实例上限：Sponza 拆成 25 份材质资产 ⇒ 25 条实例。
 // ============================================================
-u32 NaniteCull::SetAssetInstances(u32 assetCount, std::span<const float> bounds) {
+u32 NaniteCull::SetAssetInstances(u32 assetCount, std::span<const float> bounds,
+                                  std::span<const u32> assetSlots) {
     const u32 capacity = kNaniteMaxTestInstances;
     if (assetCount > capacity) assetCount = capacity;
     if (bounds.size() < (usize)assetCount * 6u) return 0u;
+    if (assetSlots.size() < (usize)assetCount) return 0u;
 
     if (m_TestInstances.size() < capacity) m_TestInstances.resize(capacity);
     if (m_TestSpheres.size() < capacity)    m_TestSpheres.resize(capacity);
@@ -1092,15 +1100,16 @@ u32 NaniteCull::SetAssetInstances(u32 assetCount, std::span<const float> bounds)
         }
         instance.boundsMin[3]    = 0.0f;
         instance.boundsMax[3]    = 0.0f;
-        instance.meshIndex       = i;      // 资产槽位（见头文件的字段复用契约）
+        instance.meshIndex       = assetSlots[i];   // 剔除区间表槽位（字段复用契约）
         instance.indexCount      = 1u;     // 只作"有几何"门控
         instance.visibilityFlags = 1u;
         m_TestSpheres[written]   = NaniteSphereFromInstanceBounds(instance);
-        m_RealAssetIndices[written] = i;
+        m_RealAssetIndices[written] = assetSlots[i];
         ++written;
     }
 
     m_RealInstanceCount = written;
+    m_AssetInstancesActive = (written > 0u);
     if (written > 0u) m_TestInstanceCount = written;
     HE_CORE_INFO("NaniteCull: 资产实例表就绪 —— {} 份资产 → {} 条恒等实例", assetCount, written);
     return written;

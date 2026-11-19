@@ -341,7 +341,11 @@ public:
     /// 用途：按材质拆分的资产（每份只含一种材质）各占一个实例槽，数量 = 资产数（Sponza 25）。
     /// @param counts 资产数；`bounds` = 每份 6 个 float（min3, max3，世界空间 AABB）
     /// @return 写入的实例数
-    u32 SetAssetInstances(u32 assetCount, std::span<const float> bounds);
+    /// @param assetSlots 每份资产在剔除区间表里的槽位（`AppendAssetBVH` 的返回值）。
+    ///   【为什么要单独传】场景侧 `RegisterAsset` 的槽位与剔除侧槽位可能不同（某份资产
+    ///   剔除注册失败时就会错位）；实例必须用**剔除槽位**，否则整份资产被剔错。
+    u32 SetAssetInstances(u32 assetCount, std::span<const float> bounds,
+                          std::span<const u32> assetSlots);
 
     /// 第 i 个真实实例对应的离线资产槽位（仅 `SetInstancesFromSnapshot` 写过时有效）
     [[nodiscard]] u32 GetInstanceAssetIndex(u32 i) const {
@@ -664,6 +668,7 @@ private:
     /// T8：真实实例的资产槽位表（与 `m_TestInstances` 同长同序）
     std::array<u32, kNaniteMaxTestInstances> m_RealAssetIndices{};
     u32 m_RealInstanceCount = 0u;
+    bool m_AssetInstancesActive = false;   // 【T8·A2】资产恒等实例表已生效
 
     // ── 四个自持缓冲（容量都是 `kNaniteMaxTestInstances`）──
     rhi::RHIBufferHandle m_InstanceBuf{};   // A-3             // 128B 实例表（Storage，CPU 每帧写）

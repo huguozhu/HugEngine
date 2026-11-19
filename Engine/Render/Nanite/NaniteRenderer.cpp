@@ -830,6 +830,8 @@ void NaniteRenderer::EnsureAssetUploaded(const MeshBatcher& batcher) {
         u32 triangleBase = 0u;
         u32 vertexBase   = 0u;
         u32 materialBase = 0u;
+        std::vector<u32>   registeredSlots;    // 剔除注册成功的资产槽位（按注册顺序）
+        std::vector<float> registeredBounds;   // 与上一行同序：每份 6 个 float（min3,max3）
         for (u32 i = 0u; i < m_Scene.GetAssetCount(); ++i) {
             const NaniteScene::NaniteAssetEntry* entry = m_Scene.GetAssetEntry(i);
             if (entry == nullptr) continue;
@@ -846,11 +848,17 @@ void NaniteRenderer::EnsureAssetUploaded(const MeshBatcher& batcher) {
                 maxIndexCount = std::max(maxIndexCount, hdr.indexCount);
             }
             if (entry->cpu.clusters.empty()) continue;
-            if (!m_Cull.AppendAssetBVH(entry->cpu.clusters, entry->cpu.lodOffsets,
-                                       triangleBase, vertexBase, materialBase)) {
+            const u32 cullSlot = m_Cull.AppendAssetBVH(entry->cpu.clusters, entry->cpu.lodOffsets,
+                                                       triangleBase, vertexBase, materialBase);
+            if (cullSlot == 0xFFFFFFFFu) {
                 HE_CORE_ERROR("NaniteRenderer: 多资产 —— 资产 {} 的剔除数据注册失败", i);
                 continue;
             }
+            // 【T8·A2】记录"注册成功"的剔除槽位与资产 bbox：恒等实例必须按这张表来编号，
+            //   否则某份资产失败后整条实例链的槽位都会错位（实测 24/25 时大片空洞）。
+            registeredSlots.push_back(cullSlot);
+            for (u32 a = 0u; a < 3u; ++a) registeredBounds.push_back(entry->cpu.header.bboxMin[a]);
+            for (u32 a = 0u; a < 3u; ++a) registeredBounds.push_back(entry->cpu.header.bboxMax[a]);
             triangleBase += (u32)entry->cpu.triangles.size();
             vertexBase   += (u32)entry->cpu.vertices.size();
             materialBase += (u32)entry->cpu.materials.size();
@@ -882,21 +890,9 @@ void NaniteRenderer::EnsureAssetUploaded(const MeshBatcher& batcher) {
         // 【T8·A2】按材质拆分的资产：一份资产一条**恒等实例**（几何已在世界空间烘焙）。
         //   这样"按材质拆资产"才能真正上屏：实例数 = 资产数（Sponza 25 份，远低于 64 上限），
         //   不再依赖 ECS 网格绑定（103 个网格会超实例域）。
-        if (m_Settings.assetIdentityInstances) {
-            std::vector<float> bounds;
-            bounds.reserve((usize)m_Scene.GetAssetCount() * 6u);
-            u32 withBounds = 0u;
-            for (u32 i = 0u; i < m_Scene.GetAssetCount(); ++i) {
-                const NaniteScene::NaniteAssetEntry* entry = m_Scene.GetAssetEntry(i);
-                if (entry == nullptr) continue;
-                const auto& hdr = entry->cpu.header;
-                for (u32 a = 0u; a < 3u; ++a) bounds.push_back(hdr.bboxMin[a]);
-                for (u32 a = 0u; a < 3u; ++a) bounds.push_back(hdr.bboxMax[a]);
-                ++withBounds;
-            }
-            if (!bounds.empty()) {
-                m_Cull.SetAssetInstances(withBounds, bounds);
-            }
+        if (m_Settings.assetIdentityInstances && !registeredSlots.empty()) {
+            m_Cull.SetAssetInstances((u32)registeredSlots.size(), registeredBounds,
+                                     registeredSlots);
         }
 
         return;
