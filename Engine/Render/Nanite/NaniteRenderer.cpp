@@ -675,7 +675,12 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
             // 【对照开关】`nanite_hard_raster=0` 永久关闭；`nanite_instance_test_count` 降低重叠实例数。
             const u32 kNaniteHardRasterRefBudget =
                 m_Settings.hardRasterRefBudget > 0u ? m_Settings.hardRasterRefBudget : 131072u;
-            const bool hardRasterOverBudget = (dispatchBound > kNaniteHardRasterRefBudget);
+            // 【C 修复】没有"上帧可见数"时 `dispatchBound` 退化成静态上界（簇数 × 实例域），
+            //   在按材质拆资产（8714 簇 × 25 实例 = 217850）等场景下**首帧就超预算**，
+            //   于是硬光栅被永久关掉（实测：大簇全不画）。改为"只有拿到实测可见数才判预算"。
+            const bool budgetKnown = (lastSeen > 0u);
+            const bool hardRasterOverBudget =
+                budgetKnown && (dispatchBound > kNaniteHardRasterRefBudget);
             {
                 static bool s_loggedBound = false;
                 if (!s_loggedBound) {
