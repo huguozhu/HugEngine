@@ -50,6 +50,7 @@ public:
                                void* depthImageView, u32 width, u32 height,
                                const ClearValue* clears, bool allowSecondary) override;
     void EndOffscreenPass() override;
+    void RenderPassDepthReadAfterWrite() override;
     void SetSwapChain(IRHISwapChain* swapchain) override;
     void SetPipeline(IRHIPipelineState* pso) override;
     void SetVertexBuffer(IRHIBuffer* buffer, u32 binding) override;
@@ -231,6 +232,7 @@ private:
     VkRenderPass        m_CurrentRenderPass = VK_NULL_HANDLE;
     VkRenderPass        m_LoadRenderPass = VK_NULL_HANDLE;
     VkRenderPass        m_CurrentFramebufferRP = VK_NULL_HANDLE;
+    void*               m_CurrentDepthView = nullptr;   // 【RHI 扩展】当前通道的深度视图
     VkPipelineBindPoint m_CurrentBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     VkBuffer         m_CurrentVB       = VK_NULL_HANDLE;
     u32              m_VBBinding       = 0;
