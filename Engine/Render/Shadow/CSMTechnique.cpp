@@ -273,6 +273,35 @@ void CSMTechnique::RenderCascade(rhi::IRHICommandList* cmd,u32 ci,const FrameSce
                          ci, (float)m_LightVPs[ci][0][0], (float)m_LightVPs[ci][1][1],
                          (float)m_LightVPs[ci][2][2], (float)m_LightVPs[ci][3][3]);
         }
+        // 【B·可观测】级联矩阵**有限性**校验：NaN/Inf 会让整个阴影贴图变成垃圾，
+        //   而画面表现只是"阴影怪怪的"，很难定位。这里逐级检查一次并显式告警。
+        {
+            bool finite = true;
+            float maxAbs = 0.0f;
+            for (u32 r = 0u; r < 4u && finite; ++r) {
+                for (u32 c = 0u; c < 4u; ++c) {
+                    const float v = (float)m_LightVPs[ci][r][c];
+                    if (!(v == v) || v > 1.0e30f || v < -1.0e30f) { finite = false; break; }
+                    const float a = v < 0.0f ? -v : v;
+                    if (a > maxAbs) maxAbs = a;
+                }
+            }
+            if (!finite) {
+                static bool s_warned = false;
+                if (!s_warned) {
+                    s_warned = true;
+                    HE_CORE_WARN("[CSMTechnique] 级联 {} 的光视图矩阵含 NaN/Inf ⇒ 该级阴影无效",
+                                 ci);
+                }
+            } else if (!(maxAbs > 1.0e-6f)) {
+                static bool s_zeroWarned = false;
+                if (!s_zeroWarned) {
+                    s_zeroWarned = true;
+                    HE_CORE_WARN("[CSMTechnique] 级联 {} 的光视图矩阵接近全 0（max|m|={:.3e}）"
+                                 "⇒ 阴影贴图不会覆盖任何几何", ci, maxAbs);
+                }
+            }
+        }
     }
     void*dv=ResT(m_ShadowMaps[m_FrameSlot][ci])->GetNativeHandle();
     if(!dv)return;
