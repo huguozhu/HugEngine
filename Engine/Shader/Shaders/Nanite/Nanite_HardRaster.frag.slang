@@ -180,7 +180,12 @@ HardRasterFragOut fragmentMain(HardRasterFragIn input) {
     // 【T8 修复】MRT2 的 alpha 是 **AO**（GBuffer 清屏值 = 1）。此前写 0 会把 AO 抹成 0，
     //   光照端按 AO 调制的项因此整体失真。Nanite 几何没有 AO 贴图 ⇒ 写 1（不遮挡）。
     float4 emissiveOut = float4(0.0, 0.0, 0.0, 1.0);
-    if (albedoDebug == 25u) {
+    if (albedoDebug == 29u) {
+        // 【A2 排查】世界坐标 Y 编码：(y + 50) / 200，用于判断"同像素画的是不是同一个面"
+        float y = (input.worldPos.y + 50.0) / 200.0;
+        emissiveOut = float4(y, y, y, 1.0);
+        dbgAlbedo = float4(0.0, 0.0, 0.0, 0.0);
+    } else if (albedoDebug == 25u) {
         // 【A5 排查】世界坐标直出（×0.05 压缩到可显示范围），与标准路径同像素对照
         emissiveOut = float4(input.worldPos * 0.05, 1.0);
         dbgAlbedo = float4(0.0, 0.0, 0.0, 0.0);
