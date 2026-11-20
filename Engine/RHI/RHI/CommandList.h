@@ -128,6 +128,16 @@ public:
     ) = 0;
     virtual void EndOffscreenPass() = 0;
 
+    // 【RHI 扩展】渲染通道内深度"写 → 读"自依赖。
+    //
+    // 【为什么需要】"先只写深度、再以 Equal 测试着色一遍"是压缩过绘制的标准手法，
+    //   但两趟在**同一个 render pass** 里：第一次的深度写必须对第二次的深度测试可见，
+    //   Vulkan 要求在通道内插一条**带 `VK_DEPENDENCY_BY_REGION_BIT` 的子通道自依赖**，
+    //   否则行为未定义（实测表现：第二趟的 `Equal` 全部不命中，硬像素 = 0）。
+    // 【默认实现】空操作：D3D11/D3D12 由驱动/PSO 在同一 render pass 内保证顺序，
+    //   不需要显式依赖（后端若需要可各自 override）。
+    virtual void RenderPassDepthReadAfterWrite() {}
+
     // SwapChain 关联（自动管理 Framebuffer + 同步 + 图像索引）
     virtual void SetSwapChain(IRHISwapChain* swapchain) = 0;
 

@@ -40,6 +40,7 @@ static_assert(offsetof(he::StaticVertex, normal)   == 16, "GBuffer.mesh 假设 n
 static_assert(offsetof(he::StaticVertex, uv)       == 32, "GBuffer.mesh 假设 uv 在偏移 32");
 
 bool GBufferRenderer::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
+    m_Device = device;   // T11：延迟移除 IA 管线用
     m_Width  = width;
     m_Height = height;
 
@@ -224,22 +225,11 @@ void GBufferRenderer::CreateTextures(rhi::IRHIDevice* device) {
     }
 }
 
-void GBufferRenderer::CreatePSO(rhi::IRHIDevice* device) {
-    // 描述符集布局：set=0 = per-frame GPUObjectData[] + bindless 纹理/采样器数组
-    // 【P9】另加两个网格着色器几何 SSBO（合并 VB/IB）：只有 `GBuffer.mesh.slang` 引用它们，
-    // 顶点/片元着色器不引用 ⇒ 不开网格路径时不写这两个描述符也不影响既有绘制。
-    const u32 kGeomStageMask = rhi::kStageMaskVertex | rhi::kStageMaskFragment | rhi::kStageMaskMesh;
-    rhi::DescriptorSetLayoutDesc gbLayout;
-    gbLayout.bindings = {
-        {kGPUBinding_ObjectData, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskVertex | rhi::kStageMaskFragment},
-        {kGPUBinding_BindlessTextures, rhi::DescriptorType::SampledImage, 4096, rhi::kStageMaskFragment, true},   // bindless 纹理
-        {kGPUBinding_BindlessSamplers, rhi::DescriptorType::Sampler, 4096, rhi::kStageMaskFragment, true},         // bindless 采样器
-        {kGPUBinding_BindlessSSBO, rhi::DescriptorType::StorageBuffer, 4096, rhi::kStageMaskVertex | rhi::kStageMaskFragment, true},  // u_SSBO[] bindless
-        // 【P9】网格着色器的几何来源（MeshBatcher 的合并 VB/IB）。写描述符在 GPU 路径每帧做。
-        {kGPUBinding_MeshVertices, rhi::DescriptorType::StorageBuffer, 1, kGeomStageMask},
-        {kGPUBinding_MeshIndices,  rhi::DescriptorType::StorageBuffer, 1, kGeomStageMask},
-    };
-    m_Layout = device->CreateDescriptorSetLayout(gbLayout);
+bool GBufferRenderer::CreateIaPso(rhi::IRHIDevice* device) {
+    // 【资源来源切换】只建 PSO：layout / 描述符集由 CreatePSO 在 Initialize 建过一次，
+    //   这里复用它们 ⇒ 运行时从 Nanite 切回 glTF 资源时可以安全重建。
+    if (device == nullptr || m_Layout == rhi::kInvalidLayout) return false;
+    if (m_SkipIaPipeline) return false;
 
     // 着色器
     rhi::ShaderBytecode gbVS, gbFS;
@@ -302,47 +292,49 @@ void GBufferRenderer::CreatePSO(rhi::IRHIDevice* device) {
     HE_ASSERT(m_PSO.IsValid(), "GBufferRenderer: PSO 句柄创建失败");
 
     // ============================================================
-    // 【P9】网格着色器版 GBuffer 管线（`HE_GBUFFER_MESH=1`）
-    //
-    // 与上面那条 PSO 的**唯一区别**是几何段：`meshShader` 非空 ⇒ 走网格管线
-    //（无输入装配、无顶点缓冲）；片元着色器仍是同一个 `GBuffer.frag`，8 个颜色附件 /
-    // 深度 / push constant / 描述符集布局全部沿用，所以两条路径的像素结果可以直接对比。
-    //
-    // 【后端范围】只看设备能力，不再按后端白名单：
-    //   `supportsMeshShaders` 本身就是后端无关的能力位 —— D3D11 永远为 false
-    //   （`Types.h` 默认值 + D3D11 从不设置），D3D12 按 mesh tier、Vulkan 按
-    //   `VK_EXT_mesh_shader` 设置。因此"有 mesh 能力"等价于"能建这条 PSO"，
-    //   D3D11 之类自然被下面这一处判断挡掉，不需要再按后端重复排除。
+    // T9：GBuffer 的 mesh 版路线已收敛到 Nanite 硬光栅（`Nanite_HardRaster.mesh`）。
+    // 此处不再创建 `GBufferMesh` PSO —— 引擎里只剩一条 mesh 几何入口，
+    // 避免"两条路线都写 GBuffer、覆盖率口径却不同"的历史问题（详见 GBufferMeshMode.h）。
     // ============================================================
-    const bool wantMesh = GBufferMeshPathEnabled();
-    if (!wantMesh) return;
-    if (!device->GetCaps().supportsMeshShaders) {
-        HE_CORE_WARN("GBufferRenderer: HE_GBUFFER_MESH=1 但设备不支持网格着色器，跳过网格版 GBuffer 管线");
+
+    return m_PSO.IsValid();
+}
+
+void GBufferRenderer::CreatePSO(rhi::IRHIDevice* device) {
+    // 【T11】几何只走 Nanite 硬光栅时**不建**这条 IA 管线：少一条与 MS 路线并行的入口，
+    //   也就少一处"两条路径都能写 GBuffer、覆盖率口径却不同"的隐患。
+    //   回退设备（D3D11 / 无 MS）不会走到这里 —— 门面按 `supported + asset` 决定是否置位。
+    if (m_SkipIaPipeline) {
+        HE_CORE_INFO("GBufferRenderer: T11 —— 跳过 GBuffer 的 IA PSO 创建（几何由 Nanite 硬光栅写入）");
         return;
     }
 
-    rhi::ShaderBytecode gbMS;
-    gbMS.stage      = rhi::ShaderStage::Mesh;
-    gbMS.spirv      = k_GBuffer_mesh_spv;   // Vulkan 侧不使用，但字节码字段必须合法（空指针会崩）
-    gbMS.dxil.assign(std::begin(k_GBuffer_mesh_dxil), std::end(k_GBuffer_mesh_dxil));
-    gbMS.entryPoint = "main";
+    if (m_Layout == rhi::kInvalidLayout) {
+    // 描述符集布局：set=0 = per-frame GPUObjectData[] + bindless 纹理/采样器数组
+    // 【P9】另加两个网格着色器几何 SSBO（合并 VB/IB）：只有 `GBuffer.mesh.slang` 引用它们，
+    // 顶点/片元着色器不引用 ⇒ 不开网格路径时不写这两个描述符也不影响既有绘制。
+    const u32 kGeomStageMask = rhi::kStageMaskVertex | rhi::kStageMaskFragment | rhi::kStageMaskMesh;
+    rhi::DescriptorSetLayoutDesc gbLayout;
+    gbLayout.bindings = {
+        {kGPUBinding_ObjectData, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskVertex | rhi::kStageMaskFragment},
+        {kGPUBinding_BindlessTextures, rhi::DescriptorType::SampledImage, 4096, rhi::kStageMaskFragment, true},   // bindless 纹理
+        {kGPUBinding_BindlessSamplers, rhi::DescriptorType::Sampler, 4096, rhi::kStageMaskFragment, true},         // bindless 采样器
+        {kGPUBinding_BindlessSSBO, rhi::DescriptorType::StorageBuffer, 4096, rhi::kStageMaskVertex | rhi::kStageMaskFragment, true},  // u_SSBO[] bindless
+        // 【P9】网格着色器的几何来源（MeshBatcher 的合并 VB/IB）。写描述符在 GPU 路径每帧做。
+        {kGPUBinding_MeshVertices, rhi::DescriptorType::StorageBuffer, 1, kGeomStageMask},
+        {kGPUBinding_MeshIndices,  rhi::DescriptorType::StorageBuffer, 1, kGeomStageMask},
+    };
+    m_Layout = device->CreateDescriptorSetLayout(gbLayout);
 
-    rhi::PipelineStateDesc meshDesc = gbDesc;   // 深度/混合/目标格式/描述符布局逐项继承
-    meshDesc.vertexShader   = nullptr;          // 网格管线没有 VS
-    meshDesc.meshShader     = &gbMS;            // ← 走 InitializeMeshPso（管线状态流）
-    meshDesc.vertexLayout   = {};               // 无输入装配
-    // push constant 必须覆盖 **Mesh** 阶段：D3D12 的根签名可见性是 ALL（不区分阶段），
-    // Vulkan 侧 PipelinePipeline 会自动补 Mesh|Task 位（见 VulkanPipeline.cpp 的 mesh 分支）。
-    meshDesc.pushConstantRanges = {pc};
-    meshDesc.debugName      = "GBufferMesh";
-
-    m_MeshPSO = device->CreatePipelineStateHandle(meshDesc);   // A-3
-    if (!m_MeshPSO.IsValid()) {
-        HE_CORE_ERROR("GBufferRenderer: 网格版 GBuffer 管线创建失败（HE_GBUFFER_MESH=1），本帧回退 IA 路径");
-        return;
     }
-    HE_CORE_INFO("GBufferRenderer: 网格版 GBuffer 管线就绪 name=GBufferMesh（{} 三角形/工作组）",
-                 kGBufferMeshTrianglesPerGroup);
+
+    CreateIaPso(device);
+}
+
+bool GBufferRenderer::EnsureIaPipeline() {
+    if (m_SkipIaPipeline) return false;
+    if (m_PSO.IsValid()) return true;
+    return CreateIaPso(m_Device);
 }
 
 void GBufferRenderer::CreateDescriptorSet(rhi::IRHIDevice* device) {

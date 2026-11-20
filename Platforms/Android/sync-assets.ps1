@@ -1,4 +1,6 @@
-﻿# ============================================================
+﻿    # T13：Nanite 离线产物（Content/Processed/*.nanite；缺失时仅告警，运行时回退）
+    'Processed'
+# ============================================================
 #  Platforms/Android/sync-assets.ps1
 #
 #  把仓库 Content/ 里移动端样例需要的资产同步到 APK 的 assets/content。
@@ -33,7 +35,9 @@ $files = @(
 
 # ---- 03/04：Sponza glTF（整目录，含贴图）----
 $dirs = @(
-    'gltf\Sponza'
+    'gltf\Sponza',
+    # T13：Nanite 离线产物（Content/Processed/*.nanite；缺失时仅告警，运行时回退）
+    'Processed'
 )
 
 foreach ($rel in $files) {

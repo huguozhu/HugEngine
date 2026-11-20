@@ -308,6 +308,8 @@ struct NaniteClusterDAG {
 ///   不传属性的调用方（`normals`/`uvs` 为空）不受影响 —— 那时属性词段是常量，等价关系与
 ///   任务 9 当时逐位相同。实测数字见 §14.27。
 /// 【重载】三参数版本 = 五参数版本传入空属性 span（保持既有调用方与单测的语义不变）。
+struct NaniteSourceMeshRange;   // 前向声明：下面 6 参重载只按 span 引用
+
 [[nodiscard]] bool BuildNaniteClusterDAG(std::span<const float> positions,
                                          std::span<const u32>   indices,
                                          NaniteClusterDAG&      outResult);
@@ -319,6 +321,20 @@ struct NaniteClusterDAG {
                                          std::span<const float> normals,
                                          std::span<const float> uvs,
                                          std::span<const u32>   indices,
+                                         NaniteClusterDAG&      outResult);
+
+/// 【T8·A2】带"源网格区间"的 DAG 构建：**L0 簇按源网格（primitive/材质）分组切分**，
+///   不再在整条合并索引上全局切分。
+///
+/// 【为什么必须分组】材质是按"簇"二选一的（`NaniteAssignClusterMaterialsByVertexOwner` 多数票）。
+///   全局切分时一个簇会跨 primitive 边界 ⇒ 大块表面被整片判成邻居的材质
+///   （实测：Sponza 地板被植物材质覆盖、整块发绿）。按源网格分组后，L0 簇永远只含单一材质。
+///   高层简化仍可跨组（远距离才用得到），配合"父簇取子簇多数材质"即可。
+[[nodiscard]] bool BuildNaniteClusterDAG(std::span<const float> positions,
+                                         std::span<const float> normals,
+                                         std::span<const float> uvs,
+                                         std::span<const u32>   indices,
+                                         std::span<const NaniteSourceMeshRange> meshes,
                                          NaniteClusterDAG&      outResult);
 
 // ============================================================
@@ -418,7 +434,7 @@ struct NanitePackStats {
 
     // ── UV：unorm16 ──
     float maxUVError   = 0.0f;  ///< UV 往返误差实测最大值（对 `[0,1]` 内的分量；越界分量单独计）
-    float uvErrorBound = 0.0f;  ///< UV 误差上界 = 1/65535（一个量化步，宽松版）
+    float uvErrorBound = 0.0f;  ///< UV 误差上界 = 128/65535（编码域 [-64,64] 的一个量化步）
     u32   uvClampCount = 0;     ///< 越出 `[0,1]` 被 clamp 的分量数（如实报告，测试网格实测 0）
 
     // ── DAG 衔接的如实读数 ──
@@ -976,4 +992,115 @@ public:
     u32 m_Height = 0;
 };
 
+// ============================================================
+// T2：`.nanite` v2 的读写（纯内存 ↔ 字节；文件 I/O 由调用方经 IVfs 完成）
+//
+// 【为什么放在这里】这两个函数和 `BuildNaniteAssetFromGeometry` 同属"字节镜像"的
+//   生产者/消费者，都必须是 RHI-free 的纯函数（工具、单测、运行时共用同一份实现）。
+//   于是 `Tools/MeshPreprocess` 与 `NaniteAssetLoader` 不会各写一份格式代码。
+//
+// 【与 `NanitePackedAsset::bytes` 的关系】那个字段是**固定五段**的镜像（头部计数推导）；
+//   落盘文件在它之后还要追加 v2 的扩展段表与载荷，所以写文件不能直接 `bytes` 存盘。
+// ============================================================
+
+/// 扩展段载荷（写入用）：类型 + 原始字节（结构体数组的内存镜像）
+struct NaniteExtSectionBlob {
+    NaniteExtSectionType type = NaniteExtSectionType::None;
+    std::vector<u8>      payload;   ///< 载荷字节（长度不必 16B 对齐，写入时自动补齐）
+};
+
+/// 写文件时填充的 v2 元数据
+struct NaniteFileWriteOptions {
+    u32 builderVersion = kNaniteBuilderVersion;  ///< 构建器版本（算法变更即 +1）
+    u64 settingsHash   = 0;                      ///< 构建参数哈希（0 = 未知，运行时按过期处理）
+    u64 sourceHash     = 0;                      ///< 源几何/材质哈希（0 = 未知）
+    std::vector<NaniteExtSectionBlob> extSections;  ///< 扩展段（可为空）
+};
+
+/// 读取产物：头部 + 段表 + 完整镜像 + 扩展段表条目
+struct NaniteFileImage {
+    NaniteFileHeader                  header{};      ///< 头部（v1 文件的 v2 字段为 0）
+    NaniteFileLayout                  layout{};      ///< 段表（含扩展段表位置）
+    std::vector<u8>                   bytes;         ///< 文件字节镜像（长度 = 输入 size）
+    std::vector<NaniteExtSectionEntry> extEntries;   ///< 扩展段表条目（v1 为空）
+};
+
+/// 把资产（固定五段）连同 v2 元数据与扩展段写成 `.nanite` 文件字节。
+/// @return 失败表示段表/载荷不自洽（此时 `outBytes` 不被修改）
+[[nodiscard]] bool WriteNaniteFile(const NanitePackedAsset& asset,
+                                   const NaniteFileWriteOptions& options,
+                                   std::vector<u8>& outBytes);
+
+/// 【T8】把 `MaterialDesc` 扩展段的描述**翻译**成光栅端使用的材质记录。
+///
+/// 【为什么需要】打包器当前只写 `MaterialDesc` 扩展段，资产自带的 `materials` 段是空的；
+///   光栅端按 `materials[cluster.materialID]` 取材质，空段会让每个像素走中性回退
+///   （实测 `回退 == 硬像素`，画面全白）。这里做一次纯数据翻译（只取因子，纹理留 0），
+///   单资产与多资产两条注册路径共用。
+/// 【幂等】`asset.materials` 非空或 `descs` 为空时什么都不做。
+void NaniteFillMaterialsFromDesc(NanitePackedAsset& asset,
+                                 const std::vector<NaniteMaterialDesc>& descs);
+
+/// 解析并校验 `.nanite`（接受 v1 / v2），成功返回 `NaniteFileError::None`。
+/// 【v1 语义】无扩展段表、哈希与构建器版本为 0 ⇒ 调用方应视为"元数据无效、需回退或重建"。
+[[nodiscard]] NaniteFileError ReadNaniteFile(const void* data, usize size, NaniteFileImage& out);
+// ============================================================
+// T4：Fallback 低模（v2 扩展段的 `FallbackMesh` 载荷）
+//
+// 【用途】无网格着色器 / IA 回退路径与 RT 代理几何：不占簇流水线，直接给一低模。
+// 【比例】`ratio` 是"目标三角形数 / 原始三角形数"，默认 0.02（方案 §4.2）。
+// 【确定性】只依赖输入与 `ratio`，布局固定（头 + 位置 + 法线 + 索引）。
+// ============================================================
+
+/// Fallback 低模数据（序列化前进内存里的形态）
+struct NaniteFallbackMeshData {
+    NaniteFallbackMeshHeader header{};
+    std::vector<float> positions;   ///< 3 float / 顶点
+    std::vector<float> normals;     ///< 3 float / 顶点（缺失补 0）
+    std::vector<u32>   indices;     ///< 三角形列表
+};
+
+/// 用 meshopt_simplify 生成低模。`ratio` 越界会被夹到 [0,1]；退化输入返回 false。
+[[nodiscard]] bool BuildNaniteFallbackMesh(std::span<const float> positions,
+                                           std::span<const float> normals,
+                                           std::span<const u32>   indices,
+                                           float                  ratio,
+                                           NaniteFallbackMeshData& out);
+
+/// 序列化成扩展段载荷字节（头 16B + 位置 + 法线 + 索引，索引起点 4B 对齐）
+void SerializeNaniteFallbackMesh(const NaniteFallbackMeshData& data, std::vector<u8>& outBytes);
+// ============================================================
+// T5：把 `.nanite` 字节镜像解析回强类型资产（运行时加载用）
+//
+// 【与 `ReadNaniteFile` 的分工】后者只做"格式校验 + 段表 + 原始字节"；
+//   本函数把五段解析成 `NanitePackedAsset` 的强类型向量，并取出 v2 元数据与扩展段，
+//   供 `NaniteRenderer` 直接交给 `NaniteScene::UploadPackedAsset`。
+// ============================================================
+
+/// 加载结果元数据（v1 文件里哈希/构建器版本为 0 = 无效）
+struct NaniteAssetLoadInfo {
+    u32  formatVersion    = 0;
+    u32  builderVersion   = 0;
+    u64  settingsHash     = 0;
+    u64  sourceHash       = 0;
+    bool hasHashes        = false;   ///< v2 且哈希非零时为 true
+    u32  extSectionCount  = 0;
+    std::vector<NaniteExtSectionEntry>  extEntries;
+    std::vector<NaniteMaterialDesc>     materialDescs;   ///< `MaterialDesc` 扩展段（若存在）
+};
+
+/// 解析状态（`VersionMismatch` / `BuilderMismatch` 都属于"过期 ⇒ 回退运行时构建"）
+enum class NaniteAssetLoadStatus : u32 {
+    Ok = 0,
+    BadFile          = 1,   ///< 魔数/段表/越界等格式错误
+    VersionMismatch  = 2,   ///< 格式版本超出可读范围
+    BuilderMismatch  = 3,   ///< `builderVersion` 与当前构建器不一致（旧缓存）
+};
+
+/// 解析 `.nanite` 字节为强类型资产。
+/// @param expectedBuilderVersion 0 = 不校验构建器版本
+[[nodiscard]] NaniteAssetLoadStatus ParseNaniteAsset(const void* data, usize size,
+                                                     u32 expectedBuilderVersion,
+                                                     NanitePackedAsset& out,
+                                                     NaniteAssetLoadInfo* info = nullptr);
 } // namespace he::render

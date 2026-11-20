@@ -71,6 +71,15 @@ if(WIN32)
     endif()
 endif()
 
+# --- cgltf（单头文件 glTF 解析器）实现单元 ---
+# 【为什么抽成库】实现体原先只在 Engine/Asset/Asset/glTFLoader.cpp 里展开，
+# 离线工具与 Nanite 的最小几何读取器若不链接 HugEngineAsset 就没有符号；
+# 链接 Asset 又会拖入 ECS。独立成静态库后两边共用同一份实现（且全工程唯一）。
+add_library(cgltf STATIC
+    cgltf/cgltf_impl.cpp
+)
+target_include_directories(cgltf PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/meshoptimizer/extern)
+set_target_properties(cgltf PROPERTIES FOLDER "External")
 # --- meshoptimizer v0.22 ---
 add_subdirectory(meshoptimizer)
 

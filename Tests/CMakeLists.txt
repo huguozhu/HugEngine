@@ -99,12 +99,19 @@ add_executable(HugEngineTests
     # 以及与真实 `BuildNaniteClusterBVH` 报出的 `depth` 的交叉核对。
     # 单独一文件：与上面三个 Nanite 测试文件同一个理由（避免单文件无限膨胀）。
     TestNaniteBvhDepth.cpp
-    # §14.8 任务 8：离线簇切分的实现落在 Engine/Render/Nanite/NaniteUpload.cpp。
-    # 该翻译单元（连同 NaniteUpload.h）是 RHI-free 的（只前置声明 rhi::IRHIDevice），
-    # 所以单测可以**直接编译它**，而不必链接 HugEngineRender（后者会拉入 RHI/Vulkan/SPV）。
-    # 这同时是一条纪律钉子：任何 RHI 依赖闯进 NaniteUpload.cpp 都会让单测目标编译失败。
-    ${CMAKE_SOURCE_DIR}/Engine/Render/Nanite/NaniteUpload.cpp
+    TestNaniteMultiAsset.cpp
+    TestShadowCasterCull.cpp
+    # T2（Nanite 离线预处理方案）：`.nanite` v2 读写、扩展段往返、v1 兼容与构建器确定性。
+    # 单独一文件：与前四个 Nanite 测试文件同一个理由（避免单文件无限膨胀）。
+    TestNaniteFileV2.cpp
+    # T3（Nanite 离线预处理方案）：最小 glTF 几何读取器（与离线工具共用；资产缺失时跳过）。
+    TestNaniteGltfReader.cpp
 )
+
+# T1（Nanite 离线预处理方案）：离线簇切分已包成静态库 `HugEngineNaniteBuild`，
+# 单测改为**链接该库**，不再直接编译 NaniteUpload.cpp（工具与测试共用同一份实现）。
+# 纪律钉子依然成立且更强：该库不链接任何 RHI 目标，RHI 头一旦闯入就会编译失败。
+target_link_libraries(HugEngineTests PRIVATE HugEngineNaniteBuild)
 
 target_include_directories(HugEngineTests PRIVATE
     ${CMAKE_SOURCE_DIR}/Engine/External/doctest
@@ -127,6 +134,8 @@ target_include_directories(HugEngineTests PRIVATE
 
 target_compile_definitions(HugEngineTests PRIVATE
     HUGE_CONTENT_DIR="${CMAKE_SOURCE_DIR}/Content/"
+    # T6：入库的小型测试 glTF（Content/gltf 不入库，CI 靠它验证离线通路）
+    HUGE_TEST_ASSETS_DIR="${CMAKE_SOURCE_DIR}/Tests/Assets/"
 )
 
 target_link_libraries(HugEngineTests PRIVATE
@@ -139,4 +148,13 @@ target_link_libraries(HugEngineTests PRIVATE
     # §14.8 任务 8：meshopt_buildMeshlets / optimizeMeshlet / computeMeshletBounds 的符号与
     # <meshoptimizer.h> 的包含路径都由这个 target 提供（v0.22，Engine/External/meshoptimizer）。
     meshoptimizer
+)
+
+# T14：注册到 CTest，CI 用 `ctest --output-on-failure` 就能跑全部用例。
+# 【为什么单独一条】此前测试只作为可执行文件存在，CI 得记住 exe 路径与参数；
+# 注册后 `ctest` 与 IDE 的测试面板都能直接发现/运行。
+add_test(NAME HugEngineTests COMMAND HugEngineTests)
+set_tests_properties(HugEngineTests PROPERTIES
+    TIMEOUT 1800
+    WORKING_DIRECTORY "$<TARGET_FILE_DIR:HugEngineTests>"
 )

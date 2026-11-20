@@ -118,6 +118,31 @@ uint naniteRasterSlot(uint3 gid) { return gid.x + gid.y * kNaniteRasterDispatchW
 // 反馈环（读写）：[0] = 本帧写入的请求条数（原子取号）、[1] = 环满丢弃数（原子）、
 // [2, 2 + kNanitePageRequestSlots) = 环形缓冲本体。**GPU 只追加，去重在 CPU 读回侧做**。
 [[vk::binding(20, 0)]] RWStructuredBuffer<uint>               u_PageFeedback;
+// ── 【T8 纹理】材质打包成一张 Texture2DArray（绕开"写描述符数组会崩驱动"）──
+//   `u_MatArray` 的层号来自材质记录的 `bindlessTextureBase`；采样器单独绑定（binding 24）。
+[[vk::binding(23, 0)]] Texture2DArray<float4>                   u_MatArray;
+[[vk::binding(24, 0)]] SamplerState                             u_MatArraySamp;
+// ── 【A3】金属度/粗糙度数组（与 baseColor **同层序**，共用同一个层号）──
+[[vk::binding(25, 0)]] Texture2DArray<float4>                   u_MatMrArray;
+[[vk::binding(26, 0)]] SamplerState                             u_MatMrArraySamp;
+// ── 【A1】法线贴图数组（与 baseColor **同层序**；无贴图的层为中性 (0.5,0.5,1)）──
+[[vk::binding(27, 0)]] Texture2DArray<float4>                   u_MatNormalArray;
+[[vk::binding(28, 0)]] SamplerState                             u_MatNormalArraySamp;
+// ── 【T8】每簇量化尺度（float/cluster，binding 22）──
+// 【为什么需要】顶点是按**各自资产** bbox 的最大轴量化的；聚合视图里只有一个全局
+//   `meshMaxExtent`，把尺度差异大的资产混在一起时，小资产会被按大尺度解码而飞出视锥
+//   （实测"实例可见、有簇、零片元"）。这张表让解码按簇取正确尺度。
+// 【回退】表为空（单资产档 / 未启用该表）⇒ 用调用方给的全局 `meshMaxExtent`，
+//   因此关闭档与既有行为逐位一致。
+[[vk::binding(22, 0)]] StructuredBuffer<float>                u_ClusterExtent;
+
+/// 取第 `clusterIndex` 个簇的量化尺度；表缺失时回退 `fallback`
+float naniteClusterExtent(uint clusterIndex, float fallback) {
+    uint count = 0u;
+    uint stride = 0u;
+    u_ClusterExtent.GetDimensions(count, stride);
+    return (clusterIndex < count) ? u_ClusterExtent[clusterIndex] : fallback;
+}
 
 // ── 【确定性赢家选择】赢家候选号（binding 21；读写；R32_UINT，与深度键**同尺寸同格式**）──
 // 【为什么不在本文件里声明】它只被第 2.5 趟（`Nanite_SoftRasterWinner.comp.slang`，做原子最小）
@@ -229,6 +254,10 @@ static uint softRasterSizeBucket(uint triangleCount) {
     uint   vertexStride;      // 偏移 100：池内一个槽占多少条量化顶点
     uint   triangleStride;    // 偏移 104：池内一个槽占多少条打包三角形
     uint   assetClusterCount; // 偏移 108：资产的簇出现总数（页映射的索引空间上界）
+    uint   debugView;         // 偏移 112：【T8 排查】1 = 品红平涂（几何孔洞判定）
+    uint   matArrayEnabled;   // 偏移 116：1 = 从 Texture2DArray 采样材质（binding 23/24）
+    uint   debugCluster;      // 偏移 120：albedoDebug=6 时涂红的簇号
+    uint   albedoDebug;       // 偏移 124：albedo 调试档（0=关 2=黄 6=簇红）
 };
 
 // ── 【任务 19】按**资产材质段** + bindless 纹理算一个像素的 albedo/metallic/roughness ──
@@ -252,6 +281,43 @@ bool softRasterEvaluateMaterial(uint materialIndex, float2 uv,
     float mrG = 1.0;   // 无 MetallicRough 纹理：g（粗糙度）不调制
     float mrB = 0.0;   // 无 MetallicRough 纹理：b（金属度）为 0（与 GBuffer 路径的中性值一致）
 #if !defined(HE_SHADER_D3D11)
+    // ── 【T8 纹理】Texture2DArray 路径（binding 23/24）──
+    //   `bindlessTextureBase` 在这次变身里承载**层号**（不是 bindless 下标）：
+    //   整批 baseColor 贴图被打包成一张数组纹理 ⇒ 不需要写描述符数组（那条路会崩驱动）。
+    // 数组档启用且该材质有 baseColor 位时走数组采样（层号存在 bindlessTextureBase 里）
+    if (matArrayEnabled != 0u && (material.textureMask & NANITE_TEXMASK_BASECOLOR) != 0u) {
+        // 【A2 结论】**不做 sRGB 解码**：标准路径的 bindless 采样拿到的就是**原始 texel 值**
+        //   （实测两条路径在固定 UV=(0.5,0.5) 处的 texel 逐值一致，比值 1.01/1.04/1.01），
+        //   而它在 GBuffer 里直接 `albedo = baseColorFactor * texel`。
+        //   我们此前把 texel 解码到线性，比标准路径暗 ~13%（全局比值 0.84）。
+        //   为了与既有路径**同一观感**，这里保持与它一致的"直接用 texel"口径。
+        // 【A5 mip】片元路径用 `SampleGrad`（按屏幕空间 UV 梯度选 mip）；compute 路径无 quad 语义、
+        //   继续取 mip0（软光栅只处理少量小簇，视觉影响可忽略）。
+        const uint baseLayer = material.bindlessTextureBase;
+#ifdef NANITE_USE_GRADIENTS
+        const float3 baseTexel = u_MatArray.SampleGrad(u_MatArraySamp, float3(uv, (float)baseLayer),
+                                                       ddx(uv), ddy(uv)).rgb;
+#else
+        const float3 baseTexel = u_MatArray.SampleLevel(u_MatArraySamp,
+                                                        float3(uv, (float)baseLayer), 0.0).rgb;
+#endif
+        outAlbedo *= baseTexel;
+        // 【A3】金属度/粗糙度来自**同层序**的 MR 数组（g=roughness、b=metallic），再乘材质因子。
+        //   这与 GBuffer 路径的 `clamp(roughnessFactor * mr.g, 0.04, 1.0)` /
+        //   `metallicFactor * mr.b` 两条公式一致；MR 数组里没有贴图的层填中性值
+        //   （g=1、b=0），因此"没有 MR 贴图"的材质自然退化为"非金属 + 用因子当粗糙度"。
+#ifdef NANITE_USE_GRADIENTS
+        float4 mr = u_MatMrArray.SampleGrad(u_MatMrArraySamp,
+                                            float3(uv, (float)material.bindlessTextureBase),
+                                            ddx(uv), ddy(uv));
+#else
+        float4 mr = u_MatMrArray.SampleLevel(u_MatMrArraySamp,
+                                             float3(uv, (float)material.bindlessTextureBase), 0.0);
+#endif
+        metallic  = saturate(material.metallicFactor * mr.b);
+        roughness = clamp(material.roughnessFactor * mr.g, 0.04, 1.0);
+        return true;
+    }
     if ((material.textureMask & NANITE_TEXMASK_BASECOLOR) != 0u) {
         uint slot = material.bindlessTextureBase + NANITE_TEXSLOT_BASECOLOR;
         // 【为什么是 `SampleLevel(..., 0)` 而不是 `Sample`】compute 入口没有导数（quad）语义：
@@ -317,6 +383,7 @@ float2 softRasterNdcToPixel(float2 ndc) {
 // ============================================================
 struct SoftRasterClusterView {
     NaniteCluster cluster;   // 簇记录（来自资产段或页池，取决于档位）
+    uint index;              // 本簇的**下标**（资产簇下标；取每簇量化尺度用）
     uint vertexBase;         // 顶点取址基（页池内的**绝对**元素下标；关闭档 = 簇记录里的偏移）
     uint triangleBase;       // 三角形取址基
     uint page;               // 该簇所在页（0xFFFFFFFF = 关闭档，无页语义）
@@ -331,6 +398,7 @@ SoftRasterClusterView softRasterResolveCluster(uint clusterIndex) {
     v.page = 0xFFFFFFFFu;
     v.resident = false;
     v.valid = false;
+    v.index = clusterIndex;
     if (pagesEnabled == 0u) {
         // 关闭档：直读资产段（与任务 23 的代码路径逐字相同）
         v.cluster = u_Clusters[clusterIndex];
@@ -403,7 +471,7 @@ struct SoftRasterTriangle {
 // 【任务 24】取址经 `SoftRasterClusterView`：关闭档 = 资产段（与任务 23 逐字相同），
 //   开启档 = 页池段（基址已由页表换算）。**函数体只有一份** ⇒ 两档不可能分叉。
 SoftRasterTriangle softRasterFetchTriangle(SoftRasterClusterView view, uint triLocal,
-                                           float3 instanceTranslation) {
+                                           NaniteInstanceBasis instanceBasis) {
     SoftRasterTriangle tri;
     tri.valid = false;
     tri.p0 = tri.p1 = tri.p2 = float2(0.0, 0.0);
@@ -421,9 +489,11 @@ SoftRasterTriangle softRasterFetchTriangle(SoftRasterClusterView view, uint triL
         uint li = (k == 0u) ? local.x : ((k == 1u) ? local.y : local.z);
         if (!naniteIsValidClusterLocalVertexIndex(li)) return tri;
         NaniteVertex v = u_Vertices[base + li];
-        // 位置：簇内局部量化 + **本簇球心** + 网格最大范围（§14.19 硬约束①）+ 实例平移
-        float3 meshPos = naniteDecodeVertexPosition(v, cluster, meshMaxExtent);
-        world[k] = meshPos + instanceTranslation;
+        // 位置：簇内局部量化 + **本簇球心** + **本簇所属资产的**网格最大范围（§14.19 硬约束①）
+        float3 meshPos = naniteDecodeVertexPosition(
+            v, cluster, naniteClusterExtent(view.index, meshMaxExtent));
+        // 【T8】完整实例变换（3×3 的旋转/缩放 + 平移）：只加平移会让旋转与非均匀缩放失效
+        world[k] = naniteApplyInstanceBasis(instanceBasis, meshPos);
         clip[k] = softRasterProjectWorld(world[k]);
         if (!(clip[k].w > 1.0e-6)) return tri;          // 跨越/落在相机平面后 ⇒ 丢弃
     }

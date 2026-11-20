@@ -11,6 +11,7 @@
 #include "Core/Platform.h"
 #include "Core/Log.h"
 #include "Core/Engine.h"
+#include "Core/CrashHandler.h"
 #include "Platform/IWindow.h"
 #include "Platform/IVfs.h"
 #include "Platform/IInput.h"
@@ -42,6 +43,7 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#include "Scene/CubeComponent.h"   // T8：多网格变换验收用的立方体
 
 namespace he::samples::sponza04 {
 
@@ -85,6 +87,20 @@ bool GetBool(const std::unordered_map<String, String>& m, const String& key, boo
     return GetFloat(m, key, def ? 1.0f : 0.0f) != 0.0f;
 }
 
+// T8 ④-b：整数型 cfg 值（多资产份数）
+static int GetInt(const std::unordered_map<String, String>& m,
+                  const String& key, int def = 0) {
+    auto it = m.find(key);
+    return (it != m.end()) ? std::stoi(it->second) : def;
+}
+
+// T9：字符串型 cfg 值（Nanite 离线资产路径）
+static String GetString(const std::unordered_map<String, String>& m,
+                        const String& key, const String& def = String{}) {
+    auto it = m.find(key);
+    return (it != m.end()) ? it->second : def;
+}
+
 } // namespace
 
 struct App::Impl {
@@ -112,6 +128,53 @@ struct App::Impl {
     SkyboxComponent* skybox = nullptr;
 
     // ---- 管线开关（面板 + 配置）----
+    // 【T8 纹理】材质 Texture2DArray（绕开描述符数组写）+ 每材质层号
+    std::unique_ptr<rhi::IRHITexture> matArrayTex;
+    std::unique_ptr<rhi::IRHITexture> matMrArrayTex;   // 【A3】金属度/粗糙度数组（同层序）
+    std::unique_ptr<rhi::IRHITexture> matNormalArrayTex; // 【A1】法线贴图数组（同层序）
+    std::unique_ptr<rhi::IRHISampler> matArraySamp;
+    std::vector<std::pair<u32, u32>> matLayers;
+    std::vector<std::pair<u32, u32>> pendingMatLayers;   // 建 pipeline 前暂存（多资产档注册早于纹理绑定）   // (贴图 URI 的 FNV1a32, 数组层号)
+    // ---- 【资源来源】面板最上方的二选一：glTF 原始资源 / Nanite 离线预处理资产 ----
+    //   true  ⇒ `nanite_enable=1` 的语义：几何由 Nanite 硬光栅从 `.nanite` 资产绘制；
+    //   false ⇒ 回到标准 IA 管线，直接画 glTF 加载出的 `MeshComponent`。
+    //   两者共用同一个场景（glTF 网格始终在 ECS 里，阴影/回退都要用）。
+    bool assetSourceNanite = true;
+
+    /// 切换资源来源（面板单选 / 自动化钩子共用）。
+    /// 【注意】切回 glTF 时，T11 可能已经销毁 GBuffer 与阴影的 IA PSO —— 重建发生在
+    ///   `DeferredPipeline::SetNaniteSettings` → `SetSkipIaPipeline(false)` / `SetRemoveIaPipeline(false)`。
+    void ApplyAssetSource(bool useNanite) {
+        render::NaniteSettings s = pipeline->GetNaniteSettings();
+        if (s.enabled == useNanite) return;
+        s.enabled = useNanite;
+        if (useNanite) {
+            s.offline = true;      // "Nanite 预处理资产"⇒ 走离线 `.nanite`
+            if (s.offlinePath.empty()) s.offlinePath = "Processed/Sponza_0.nanite";
+        }
+        pipeline->SetNaniteSettings(s);
+        // 【切换时必须丢掉 DGC 上下文】DGC 执行集里存着**旧 PSO**（T11 销毁的那条 IA 管线）：
+        //   切回 glTF 后执行集仍指向已销毁的 PSO ⇒ 驱动内崩溃（实测 nvoglv64）。
+        //   清空后下一帧会按新 PSO 重建执行集（或走 DrawIndexedIndirectCount 回退）。
+        if (auto* gb = pipeline->GetGBuffer()) gb->ClearDGCContext();
+        // 单资产离线档按"第一个网格绑定资产槽位 0"的既有口径（与初始化一致）
+        if (useNanite && !s.multiAsset) {
+            bool bound = false;
+            world.ForEach<MeshComponent>([&](Entity, MeshComponent& mesh) {
+                if (bound) return;
+                mesh.SetNaniteAssetIndex(0u);
+                bound = true;
+            });
+        }
+        assetSourceNanite = useNanite;
+        HE_CORE_INFO("04.App: 资源来源切换 → {}（enabled={} offline={} path={}）",
+                     useNanite ? "Nanite 离线资产" : "glTF 原始资源",
+                     s.enabled ? 1 : 0, s.offline ? 1 : 0, s.offlinePath);
+    }
+
+    bool transformOnly = false;   // T8：只画变换验收件（cfg `nanite_transform_only`）
+    u32  multiAssetCount = 8;     // T8：多资产档注册份数（cfg `nanite_multi_asset_count`）
+    bool transformTest   = false; // T8：生成三个变换验收件（cfg `nanite_transform_test`）
     bool clustered = true;
     bool gpuCull   = true;    // 与旧完整版一致：默认开启 GPU 视锥剔除
     bool skyboxOn  = true;
@@ -150,7 +213,9 @@ struct App::Impl {
             while (maxDim > 1) { maxDim >>= 1; ++mipLevels; }
 
             rhi::TextureDesc td;
-            td.format      = rhi::Format::RGBA8_UNORM;
+            // 【T8 修复】贴图是 **sRGB** 编码的（标准路径的纹理按 sRGB 采样会自动解码到线性）；
+            //   这里若用 UNORM，颜色会被当成已经是线性值 ⇒ albedo 整体偏亮（实测画面发白）。
+            td.format      = rhi::Format::RGBA8_SRGB;
             td.width       = static_cast<u32>(w);
             td.height      = static_cast<u32>(h);
             td.mipLevels   = mipLevels;
@@ -210,15 +275,32 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
 
     // ---- 场景 ----
     g.sceneGraph = std::make_unique<SceneGraph>(g.world);
+    // 【T8 验收开关】`nanite_transform_only=1` 时**不加载 Sponza**，场景只剩 3 个变换验收件，
+    //   截图才能干净地看出"平移 / 旋转 / 非均匀缩放"是否真的作用到了 Nanite 资产上。
     const String sponzaPath = vfs::Resolve("gltf/Sponza/glTF/Sponza.gltf");
-    HE_CORE_INFO("04.App: 加载 Sponza: {}", sponzaPath);
-    auto loadResult = asset::LoadGLTF(g.world, *g.sceneGraph, sponzaPath);
-    if (!loadResult.success) {
-        HE_CORE_ERROR("04.App: Sponza 加载失败: {}", loadResult.error);
-        return false;
+    // 【为什么用环境变量而不是 cfg】cfg 在**场景加载之后**才解析（`LoadConfig` 在
+    //   `Init` 的后段），而 Sponza 的加载在这里 ⇒ 用 cfg 开关永远是 false。
+    const bool transformOnly = std::getenv("HE_NANITE_TRANSFORM_ONLY") != nullptr;
+    g.transformOnly = transformOnly;
+    // 【不污染 cfg】验收档的机位在这里**硬写**：之前是手工改 cfg 的 cam_*，退出时被样例回写，
+    //   下次正常启动仍停在"相机在建筑外、只看到天空盒"的机位（实测踩过）。
+    if (transformOnly) {
+        g.camera.GetCamera().position  = float3(0.0f, 200.0f, -2000.0f);
+        g.camera.SetOrientation(0.0f, 0.0f);
+
     }
-    HE_CORE_INFO("04.App: Sponza 加载完成: {} 实体, {} 网格图元",
-                 loadResult.entities.size(), loadResult.meshCount);
+    if (transformOnly) {
+        HE_CORE_INFO("04.App: nanite_transform_only=1 —— 跳过 Sponza，仅保留变换验收件");
+    } else {
+        HE_CORE_INFO("04.App: 加载 Sponza: {}", sponzaPath);
+        auto loadResult = asset::LoadGLTF(g.world, *g.sceneGraph, sponzaPath);
+        if (!loadResult.success) {
+            HE_CORE_ERROR("04.App: Sponza 加载失败: {}", loadResult.error);
+            return false;
+        }
+        HE_CORE_INFO("04.App: Sponza 加载完成: {} 实体, {} 网格图元",
+                     loadResult.entities.size(), loadResult.meshCount);
+    }
 
     // ---- 灯光 ----
     {
@@ -372,8 +454,249 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
     });
     HE_CORE_INFO("04.App: 纹理注册完成: {} 张", g.texCache.size());
 
+    // 【T8 排查】打印引擎侧（标准路径）网格的合并世界包围盒，与离线资产头部 bbox 对照，
+    //   用来判断"资产与场景是否同一空间"。
+    {
+        float lo[3] = {  1.0e30f,  1.0e30f,  1.0e30f };
+        float hi[3] = { -1.0e30f, -1.0e30f, -1.0e30f };
+        g.world.ForEach<MeshComponent>([&](Entity, MeshComponent& mesh) {
+            const AABB b = mesh.GetBounds();
+            for (u32 a = 0u; a < 3u; ++a) {
+                lo[a] = std::min(lo[a], b.min[a]);
+                hi[a] = std::max(hi[a], b.max[a]);
+            }
+        });
+        HE_CORE_INFO("04.App: 引擎侧网格世界包围盒 min=({:.1f},{:.1f},{:.1f}) max=({:.1f},{:.1f},{:.1f})",
+                     lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]);
+    }
+
+    // ── 【T8 纹理】把 baseColor 贴图打包成一张 Texture2DArray ──
+    //   描符数组写（UpdateDescriptorSet 13/14）在本机 NVIDIA 驱动上必崩；数组纹理只用
+    //   一个纹理绑定 + 一个采样器，材质层号存在 NaniteMaterialRecord::bindlessTextureBase。
+    //   统一缩到 256x256（原图 1024）控制显存：103 层 x 256^2 x 4B ≈ 27 MB。
+    {
+        // 【A5】mip 开关（cfg `nanite_material_mips`，默认 0）：
+        //   0 ⇒ 数组只有 1 级 mip（片元用 SampleGrad 也只是取 level 0，行为与旧版一致）；
+        //   1 ⇒ 生成完整 mip 链（RHI 的 UploadInitialData 用 blit 逐级生成）。
+        //   【实测代价】开 mip 后远处纹理更稳（细节能量 7.88 → 7.04），
+        //   但帧时间 544 ms → ~728 ms（+33%），因此默认关闭、按需开启。
+        //   本函数这一段在 cfg 读入之前执行 ⇒ 直接自己读一次配置文件（只读一个键）。
+        bool materialMips = false;
+        {
+            const auto cfgMap = LoadConfigFile(ConfigPath());
+            materialMips = GetBool(cfgMap, "nanite_material_mips", false);
+        }
+        const u32  kBaseMips  = materialMips ? 10u : 1u;   // 512² → 10 级
+        const u32  kLayerMips = materialMips ? 9u  : 1u;   // 256² → 9 级
+        constexpr u32 kLayerSize = 256;   // MR / 法线数组的层尺寸
+        // 【A6】baseColor 是近景细节的主要来源 ⇒ 单独提到 512（103 层 × 512² × 4B ≈ 108 MB）；
+        //   MR/法线仍用 256（各约 27 MB），总量约 162 MB。
+        constexpr u32 kBaseSize  = 512;
+        std::vector<String> baseColorPaths;
+        std::vector<String> mrPaths;            // 与 baseColorPaths 同序：金属度/粗糙度贴图
+        std::vector<String> normalPaths;        // 与 baseColorPaths 同序：法线贴图
+        std::vector<u32>    baseColorKeys;      // 与 baseColorPaths 同序：贴图 URI 的 FNV1a32
+        g.world.ForEach<MeshComponent>([&](Entity, MeshComponent& mesh) {
+            baseColorPaths.push_back(mesh.baseColorTexture.empty()
+                ? String{}
+                : (std::filesystem::path(sponzaPath).parent_path() / mesh.baseColorTexture).string());
+            mrPaths.push_back(mesh.metallicRoughnessTexture.empty()
+                ? String{}
+                : (std::filesystem::path(sponzaPath).parent_path() / mesh.metallicRoughnessTexture).string());
+            normalPaths.push_back(mesh.normalTexture.empty()
+                ? String{}
+                : (std::filesystem::path(sponzaPath).parent_path() / mesh.normalTexture).string());
+            // 【T8 纹理映射】与 `MeshPreprocess` 的 `Fnv1a32TextureKey` 逐字节同一算法
+            u32 h = 2166136261u;
+            for (unsigned char c : mesh.baseColorTexture) { h ^= (u32)c; h *= 16777619u; }
+            baseColorKeys.push_back(mesh.baseColorTexture.empty() ? 0xFFFFFFFFu : h);
+        });
+        const u32 layerCount = (u32)baseColorPaths.size();
+        u32 loadedLayers = 0u, missingLayers = 0u;
+        if (layerCount > 0u) {
+            std::vector<u8> atlas((size_t)kBaseSize * kBaseSize * 4u * layerCount, 255u);
+            for (u32 layer = 0u; layer < layerCount; ++layer) {
+                if (baseColorPaths[layer].empty()) continue;
+                int w = 0, h = 0, ch = 0;
+                u8* pixels = stbi_load(baseColorPaths[layer].c_str(), &w, &h, &ch, 4);
+                if (pixels == nullptr || w <= 0 || h <= 0) { ++missingLayers; continue; }
+                ++loadedLayers;
+                // 【A2 结论】按**sRGB 字节空间**做盒式平均（与标准路径 UNORM 纹理的 mip 链同口径）。
+                //   先前在"线性空间"平均反而与运行时的"不做解码"口径不一致（实测 R 通道低 9%）。
+                u8* dst = atlas.data() + (size_t)layer * kBaseSize * kBaseSize * 4u;
+                for (u32 y = 0u; y < kBaseSize; ++y) {
+                    const u32 sy0 = (u32)((u64)y * (u64)h / kBaseSize);
+                    const u32 sy1 = std::max(sy0 + 1u, (u32)((u64)(y + 1u) * (u64)h / kBaseSize));
+                    for (u32 x = 0u; x < kBaseSize; ++x) {
+                        const u32 sx0 = (u32)((u64)x * (u64)w / kBaseSize);
+                        const u32 sx1 = std::max(sx0 + 1u, (u32)((u64)(x + 1u) * (u64)w / kBaseSize));
+                        u32 acc[3] = { 0u, 0u, 0u };
+                        u32 cnt = 0u;
+                        for (u32 yy = sy0; yy < sy1; ++yy) {
+                            for (u32 xx = sx0; xx < sx1; ++xx) {
+                                const u8* src = pixels + ((size_t)yy * w + xx) * 4u;
+                                acc[0] += src[0]; acc[1] += src[1]; acc[2] += src[2];
+                                ++cnt;
+                            }
+                        }
+                        u8* outPx = dst + ((size_t)y * kBaseSize + x) * 4u;
+                        const u32 inv = (cnt > 0u) ? cnt : 1u;
+                        outPx[0] = (u8)(acc[0] / inv);
+                        outPx[1] = (u8)(acc[1] / inv);
+                        outPx[2] = (u8)(acc[2] / inv);
+                        outPx[3] = 255u;
+                    }
+                }
+                stbi_image_free(pixels);
+            }
+            rhi::TextureDesc td;
+            // 【A2】用 UNORM 存储原始 sRGB 字节，**在着色器里显式做 sRGB→线性解码**：
+            //   这样解码次数是确定的（1 次），不受 RHI 对 SRGB 格式的实现差异影响。
+            td.format      = rhi::Format::RGBA8_UNORM;
+            td.width       = kBaseSize;
+            td.height      = kBaseSize;
+            td.arrayLayers = layerCount;
+            // 【A5】RHI 的 `UploadInitialData` 在 mipLevels>1 时会用 blit 逐级生成 mip 链
+            //   （见 VulkanResources：level i-1 → i，layerCount 覆盖全部层），
+            //   所以这里只要声明级数即可；片元侧用 SampleGrad 才会真正吃到 mip。
+            td.mipLevels   = kBaseMips;
+            td.usage       = rhi::TextureUsage::ShaderResource;
+            td.initialData = atlas.data();
+            g.matArrayTex = g.device->CreateTexture(td);
+            rhi::SamplerDesc sd;
+            sd.minFilter = sd.magFilter = rhi::FilterMode::Linear;
+            sd.addressU = sd.addressV = rhi::AddressMode::Repeat;
+            g.matArraySamp = g.device->CreateSampler(sd);
+            // 【T8 排查】打印每层贴图的平均色：与资产材质段的 baseColorFactor（= 贴图平均色）对照，
+            //   即可判断"层号 ↔ 材质"的映射对不对（错位时平均色会对不上）。
+            for (u32 layer = 0u; layer < layerCount && layer < 6u; ++layer) {
+                const u8* src = atlas.data() + (size_t)layer * kBaseSize * kBaseSize * 4u;
+                double r = 0.0, g = 0.0, b = 0.0;
+                for (size_t t = 0; t < (size_t)kBaseSize * kBaseSize; ++t) {
+                    r += src[t * 4u + 0u]; g += src[t * 4u + 1u]; b += src[t * 4u + 2u];
+                }
+                const double n = (double)kBaseSize * kBaseSize * 255.0;
+                HE_CORE_INFO("04.App: 层 {} 平均色=({:.3f},{:.3f},{:.3f}) 源={}",
+                             layer, r / n, g / n, b / n,
+                             baseColorPaths[layer].empty() ? "<none>" : baseColorPaths[layer]);
+            }
+            // 同一张 URI 复用同一层（Sponza 有大量共享贴图，去重后层数更少）
+            g.matLayers.clear();
+            for (u32 layer = 0u; layer < layerCount; ++layer) {
+                const u32 key = baseColorKeys[layer];
+                if (key == 0xFFFFFFFFu) continue;
+                bool seen = false;
+                for (const auto& kv : g.matLayers) { if (kv.first == key) { seen = true; break; } }
+                if (!seen) g.matLayers.emplace_back(key, layer);
+            }
+            HE_CORE_INFO("04.App: 贴图哈希表 {} 条（网格 {} 个）", (u32)g.matLayers.size(), layerCount);
+            g.pendingMatLayers = g.matLayers;   // 等 pipeline 建好后再交给渲染器（见下方）
+
+            for (const auto& kv : g.matLayers) {
+                HE_CORE_INFO("04.App:   层 {} ← 哈希 0x{:08X}（URI {}）", kv.second, kv.first,
+                             (kv.second < baseColorPaths.size())
+                                 ? std::filesystem::path(baseColorPaths[kv.second]).filename().string()
+                                 : std::string("<oob>"));
+            }
+            HE_CORE_INFO("04.App: 材质数组纹理就绪（{} 层 x {}）", layerCount, kBaseSize);
+
+            // ── 【A3】金属度/粗糙度数组（与 baseColor **同层序**，材质只需一个层号）──
+            //   没有 MR 贴图的层填中性值（g=1 不改粗糙度、b=0 非金属）。
+            {
+                std::vector<u8> mrAtlas((size_t)kLayerSize * kLayerSize * 4u * layerCount, 255u);
+                for (u32 layer = 0u; layer < layerCount; ++layer) {
+                    u8* dst = mrAtlas.data() + (size_t)layer * kLayerSize * kLayerSize * 4u;
+                    for (size_t t = 0; t < (size_t)kLayerSize * kLayerSize; ++t) {
+                        dst[t * 4u + 1u] = 255u;   // g = roughness 调制 1.0
+                        dst[t * 4u + 2u] = 0u;     // b = metallic 0
+                        dst[t * 4u + 3u] = 255u;
+                    }
+                    if (mrPaths[layer].empty()) continue;
+                    int mw = 0, mh = 0, mch = 0;
+                    u8* pixels = stbi_load(mrPaths[layer].c_str(), &mw, &mh, &mch, 4);
+                    if (pixels == nullptr || mw <= 0 || mh <= 0) continue;
+                    for (u32 y = 0u; y < kLayerSize; ++y) {
+                        const u32 sy = (u32)((u64)y * (u64)mh / kLayerSize);
+                        for (u32 x = 0u; x < kLayerSize; ++x) {
+                            const u32 sx = (u32)((u64)x * (u64)mw / kLayerSize);
+                            const u8* src = pixels + ((size_t)sy * mw + sx) * 4u;
+                            u8* outPx = dst + ((size_t)y * kLayerSize + x) * 4u;
+                            outPx[0] = src[0];
+                            outPx[1] = src[1];   // g = roughness
+                            outPx[2] = src[2];   // b = metallic
+                            outPx[3] = 255u;
+                        }
+                    }
+                    stbi_image_free(pixels);
+                }
+                rhi::TextureDesc mtd;
+                mtd.format      = rhi::Format::RGBA8_UNORM;
+                mtd.width       = kLayerSize;
+                mtd.height      = kLayerSize;
+                mtd.arrayLayers = layerCount;
+                mtd.mipLevels   = kLayerMips;
+                mtd.usage       = rhi::TextureUsage::ShaderResource;
+                mtd.initialData = mrAtlas.data();
+                g.matMrArrayTex = g.device->CreateTexture(mtd);
+                HE_CORE_INFO("04.App: MR 数组纹理就绪（{} 层 x {}）", layerCount, kLayerSize);
+
+            // ── 【A1】法线贴图数组（与 baseColor 同层序；无贴图的层填中性值 (128,128,255)）──
+            {
+                std::vector<u8> nAtlas((size_t)kLayerSize * kLayerSize * 4u * layerCount, 255u);
+                for (size_t t = 0; t < (size_t)kLayerSize * kLayerSize; ++t) {
+                    for (u32 layer = 0u; layer < layerCount; ++layer) {
+                        u8* dst = nAtlas.data() + (size_t)layer * kLayerSize * kLayerSize * 4u;
+                        dst[t * 4u + 0u] = 128u;   // x = 0
+                        dst[t * 4u + 1u] = 128u;   // y = 0
+                        dst[t * 4u + 2u] = 255u;   // z = 1（指向几何法线）
+                        dst[t * 4u + 3u] = 255u;
+                    }
+                }
+                for (u32 layer = 0u; layer < layerCount; ++layer) {
+                    if (normalPaths[layer].empty()) continue;
+                    int nw = 0, nh = 0, nch = 0;
+                    u8* pixels = stbi_load(normalPaths[layer].c_str(), &nw, &nh, &nch, 4);
+                    if (pixels == nullptr || nw <= 0 || nh <= 0) continue;
+                    u8* dst = nAtlas.data() + (size_t)layer * kLayerSize * kLayerSize * 4u;
+                    for (u32 y = 0u; y < kLayerSize; ++y) {
+                        const u32 sy = (u32)((u64)y * (u64)nh / kLayerSize);
+                        for (u32 x = 0u; x < kLayerSize; ++x) {
+                            const u32 sx = (u32)((u64)x * (u64)nw / kLayerSize);
+                            const u8* src = pixels + ((size_t)sy * nw + sx) * 4u;
+                            u8* outPx = dst + ((size_t)y * kLayerSize + x) * 4u;
+                            outPx[0] = src[0];
+                            outPx[1] = src[1];
+                            outPx[2] = src[2];
+                            outPx[3] = 255u;
+                        }
+                    }
+                    stbi_image_free(pixels);
+                }
+                rhi::TextureDesc ntd;
+                ntd.format      = rhi::Format::RGBA8_UNORM;
+                ntd.width       = kLayerSize;
+                ntd.height      = kLayerSize;
+                ntd.arrayLayers = layerCount;
+                ntd.mipLevels   = kLayerMips;
+                ntd.usage       = rhi::TextureUsage::ShaderResource;
+                ntd.initialData = nAtlas.data();
+                g.matNormalArrayTex = g.device->CreateTexture(ntd);
+                HE_CORE_INFO("04.App: 法线数组纹理就绪（{} 层 x {}）", layerCount, kLayerSize);
+            }
+            }
+            HE_CORE_INFO("04.App: 数组层加载统计 —— 成功 {} 层 / 缺失 {} 层（缺失层保持白色）",
+                         loadedLayers, missingLayers);
+        }
+    }
+
     // ---- 延迟管线 ----
     g.pipeline = std::make_unique<render::DeferredPipeline>();
+    // 【T8·A2】把"贴图哈希 → 数组层号"表在**资产注册之前**交给渲染器：
+    //   多资产档的资产注册早于 `SetMaterialTextureArray`，没有这张表时
+    //   `ApplyMaterialTextureLayers` 会把材质位全清掉 ⇒ 整片白灰（实测）。
+    if (!g.pendingMatLayers.empty()) {
+        g.pipeline->GetNanite().SetMaterialTextureLayerTable(g.pendingMatLayers);
+    }
     g.pipeline->Initialize(g.device.get());
     g.pipeline->SetSwapChain(g.swapchain.get());
     g.pipeline->OnResize(g.swapchain->GetWidth(), g.swapchain->GetHeight());
@@ -418,6 +741,9 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
         g.camera.GetCamera().farPlane  = GetFloat(cfg, "cam_far", 2000.0f);
 
         g.clustered = GetBool(cfg, "clustered", true);
+        // 【不要覆盖环境变量】场景加载阶段已按 `HE_NANITE_TRANSFORM_ONLY` 置过 true，这里只能"或"上去
+        g.transformOnly = g.transformOnly || GetBool(cfg, "nanite_transform_only", false);
+        g.transformTest = GetBool(cfg, "nanite_transform_test", false);
         g.gpuCull   = GetBool(cfg, "gpu_cull", true);
         g.skyboxOn  = GetBool(cfg, "skybox", true);
         g.ssgi      = GetBool(cfg, "ssgi_enabled", false);
@@ -431,6 +757,250 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
         if (g.pipeline->GetDDGI()) g.pipeline->GetDDGI()->SetEnabled(g.ddgi);
         if (g.pipeline->GetSSR())  g.pipeline->GetSSR()->SetEnabled(g.ssr);
         g.pipeline->GetSSAO().enabled = g.ssao;
+
+        // ── T8 ④-b：多资产验收档（cfg `nanite_multi_asset=1`）──
+        // 把 `Content/Processed/primitives/*.nanite`（按 primitive 产出的离线资产）逐个注册进
+        // `NaniteScene` 的资产注册表，并按**网格创建顺序**把资产槽位绑到各网格上。
+        // 默认关闭 ⇒ 单资产路径与 T9 完全一致。
+        // 【只做前 N 份】注册会整体重建聚合缓冲（O(资产体积)），103 份全量在调试档下太慢；
+        //   `nanite_multi_asset_count` 控制份数（默认 8），够验证"多资产剔除/实例表"。
+        const bool assetIdentity = GetBool(cfg, "nanite_asset_instances", false);
+        if (GetBool(cfg, "nanite_multi_asset", false)) {
+            // 【T8·A2】资产目录（cfg `nanite_asset_dir`）：默认按材质拆分的资产目录
+            const std::string assetDirCfg = (GetString(cfg, "nanite_asset_dir", "") != "")
+                ? GetString(cfg, "nanite_asset_dir", "")
+                : std::string("ProcessedMaterial");
+            const String dir = vfs::Resolve(assetDirCfg);
+            std::error_code listEc;
+            std::vector<String> files;
+            for (const auto& entry : std::filesystem::directory_iterator(dir, listEc)) {
+                if (entry.is_regular_file() && entry.path().extension() == ".nanite") {
+                    files.push_back(entry.path().string());
+                }
+            }
+            std::sort(files.begin(), files.end());
+            const int limit = std::max(1, GetInt(cfg, "nanite_multi_asset_count", 8));
+        g.multiAssetCount = (u32)limit;
+            if ((int)files.size() > limit) files.resize((usize)limit);
+            // 【T8 诊断】只画变换验收件时**不注册 Sponza primitive**：多资产档的量化尺度取
+            //   各资产 bbox 最大轴的最大值，Sponza 是 3720、立方体是 2 ⇒ 立方体顶点会按 1860×
+            //   的错误尺度解码，直接飞出视锥（表现为"实例可见、簇也取到、但零片元"）。
+            //   清空后只剩立方体，量化尺度 = 2.0，可用于验证这条判断。
+            if (g.transformOnly) files.clear();
+
+            u32 bound = 0u;
+            for (const String& file : files) {
+                std::ifstream in(file, std::ios::binary | std::ios::ate);
+                if (!in) continue;
+                const std::streamsize size = in.tellg();
+                in.seekg(0, std::ios::beg);
+                std::vector<u8> bytes((usize)size);
+                if (!in.read(reinterpret_cast<char*>(bytes.data()), size)) continue;
+
+                render::NanitePackedAsset asset;
+                render::NaniteAssetLoadInfo info;
+                if (render::ParseNaniteAsset(bytes.data(), bytes.size(),
+                                             render::kNaniteBuilderVersion, asset, &info) !=
+                    render::NaniteAssetLoadStatus::Ok) {
+                    continue;
+                }
+                // 【T8】每份资产的材质记录由 MaterialDesc 扩展段翻译（否则多资产档全部回退）
+                render::NaniteFillMaterialsFromDesc(asset, info.materialDescs);
+                // 【T8·A2】注册前把"贴图哈希 → 数组层号"映射到材质段（多资产档渲染器不代劳）
+                g.pipeline->GetNanite().ApplyMaterialTextureLayers(asset);
+                const u32 slot = g.pipeline->GetNanite().GetScene().RegisterAsset(asset);
+                if (slot == render::NaniteScene::kInvalidAssetIndex) continue;
+
+                // 【T8·A2】恒等实例档：实例由渲染器按"一份资产一条"生成，这里**不绑网格**
+                //   （103 个网格会超 64 实例上限；材质拆分后每份资产已经是一整块几何）。
+                if (!assetIdentity) {
+                    // 按"网格创建顺序"绑定：第 bound 个 MeshComponent 用第 bound 个资产
+                    u32 seen = 0u;
+                    g.world.ForEach<MeshComponent>([&](Entity, MeshComponent& mesh) {
+                        if (seen++ != bound) return;
+                        mesh.SetNaniteAssetIndex(slot);
+                    });
+                }
+                ++bound;
+            }
+            HE_CORE_INFO("04.App: 多资产验收档启用 —— 已注册并绑定 {} 份 per-primitive 资产", bound);
+
+            // ── T8 ④-b：多网格变换验收（cfg `nanite_transform_test=1`）──
+            // 生成 3 个立方体，分别带：纯平移 / 旋转 + 平移 / 非均匀缩放 + 平移，
+            // 各绑一份离线资产。它们覆盖第 4 步"完整 localToWorld + 最大轴缩放半径"的三条分支，
+            // 也覆盖第 5 步"多资产同帧绘制"。
+            // 【T8 验收】三件改用**单位立方体资产**（`Processed/cube_0.nanite`）：
+            //   Sponza 的 primitive 资产顶点在建筑坐标系里（离原点数百单位），缩放后仍会跑到
+            //   画面外，截图无法验收；立方体资产以原点为中心，三种变换一眼可辨。
+            u32 cubeAssetSlot = render::NaniteScene::kInvalidAssetIndex;
+            if (GetBool(cfg, "nanite_transform_test", false)) {
+                const String cubePath = vfs::Resolve("Processed/cube_0.nanite");
+                std::ifstream cubeFile(std::filesystem::path(cubePath), std::ios::binary);
+                if (cubeFile) {
+                    // 【为什么要单独取文件大小】`tellg()` 在刚打开的流上不保证返回文件长度
+                    //   （实测返回 0 ⇒ 读到 0 字节、解析失败、验收件根本没被创建）。
+                    std::error_code sizeEc;
+                    const u64 n = (u64)std::filesystem::file_size(std::filesystem::path(cubePath), sizeEc);
+                    cubeFile.seekg(0, std::ios::beg);
+                    std::vector<u8> bytes((size_t)n);
+                    if (cubeFile.read(reinterpret_cast<char*>(bytes.data()), n)) {
+                        render::NanitePackedAsset cubeAsset;
+                        render::NaniteAssetLoadInfo cubeInfo;
+                        if (render::ParseNaniteAsset(bytes.data(), bytes.size(),
+                                                     render::kNaniteBuilderVersion,
+                                                     cubeAsset, &cubeInfo) ==
+                            render::NaniteAssetLoadStatus::Ok) {
+                            render::NaniteFillMaterialsFromDesc(cubeAsset, cubeInfo.materialDescs);
+                            cubeAssetSlot = g.pipeline->GetNanite().GetScene().RegisterAsset(cubeAsset);
+                            HE_CORE_INFO("04.App: 变换验收件资产已注册（cube_0.nanite → 槽位 {}）",
+                                         cubeAssetSlot);
+                        } else {
+                            HE_CORE_WARN("04.App: cube_0.nanite 解析失败（{} 字节）", (u64)bytes.size());
+                        }
+                    } else {
+                        HE_CORE_WARN("04.App: cube_0.nanite 读取失败");
+                    }
+                } else {
+                    HE_CORE_WARN("04.App: cube_0.nanite 打开失败：{}", cubePath);
+                }
+            }
+
+            if (GetBool(cfg, "nanite_transform_test", false) &&
+                cubeAssetSlot != render::NaniteScene::kInvalidAssetIndex) {
+                struct CubeSpec { const char* name; float3 pos; float3 eulerDeg; float3 scale; };
+                // 【T8 验收】三件放在 Sponza 建筑**之外**（y=300、z=-2600 一线）：在建筑内部会被
+                //   墙体遮住，截图看不出变换是否正确。资产是 Sponza 的原始尺寸（数百单位），
+                //   用 0.02 缩放缩成"小块"；第三件用 (0.06, 0.01, 0.02) 覆盖"包围球半径按
+                //   最大轴放大"这条分支。
+                const CubeSpec specs[3] = {
+                    { "NaniteCube_Translate", float3(-600.0f, 200.0f, -3500.0f), float3(0.0f,  0.0f, 0.0f), float3(25.0f, 25.0f, 25.0f) },
+                    { "NaniteCube_Rotate",    float3(   0.0f, 200.0f, -3500.0f), float3(0.0f, 45.0f, 0.0f), float3(25.0f, 25.0f, 25.0f) },
+                    { "NaniteCube_NonUniform",float3( 600.0f, 200.0f, -3500.0f), float3(30.0f,20.0f, 0.0f), float3(40.0f, 8.0f, 25.0f) },
+                };
+                for (u32 i = 0u; i < 3u; ++i) {
+                    Entity e = g.world.CreateEntity(specs[i].name);
+                    g.world.AddComponent<TransformComponent>(e);
+                    auto* cube = g.world.AddComponent<CubeComponent>(e);
+                    cube->halfExtent = 40.0f;
+                    cube->OnCreate();
+                    cube->SetNaniteAssetIndex(cubeAssetSlot);   // 同一份立方体资产，靠变换区分
+                    if (auto* tf = g.world.GetComponent<TransformComponent>(e)) {
+                        tf->position = specs[i].pos;
+                        tf->rotation = float3(glm::radians(specs[i].eulerDeg.x),
+                                              glm::radians(specs[i].eulerDeg.y),
+                                              glm::radians(specs[i].eulerDeg.z));
+                        tf->scale    = specs[i].scale;
+                    }
+                    g.sceneGraph->SetParent(e, Entity{kInvalidEntity});
+                }
+                HE_CORE_INFO("04.App: 多网格变换验收 —— 已生成 3 个立方体（平移 / 旋转 / 非均匀缩放），"
+                             "共用立方体资产槽位 {}", cubeAssetSlot);
+
+            }
+            u32 boundCheck = 0u;
+            g.world.ForEach<MeshComponent>([&](Entity, MeshComponent& mesh) {
+                if (mesh.GetNaniteAssetIndex() != 0xFFFFFFFFu) ++boundCheck;
+            });
+            HE_CORE_INFO("04.App: 多资产绑定自检 —— 已写入资产槽位的网格 {} 个", boundCheck);
+        }
+
+        // ── T9：Nanite 开关（cfg → 真值）──
+        // 验收要求能在 04 里用 nanite_enable=1 验证「GBuffer 让位给 Nanite」，
+        // 因此这三个键与 07 同口径（硬件不支持 / 资产缺失时模块自己回退，见 NaniteRenderer）。
+        {
+            auto naniteSettings = g.pipeline->GetNaniteSettings();
+            // 【不要在这里硬写 0】此前为排查把开关写死成关闭，cfg 的 `nanite_enable` 因此完全失效；
+            // 【T8 纹理】把材质数组纹理交给 Nanite（层号写进材质记录，走 binding 23/24）
+            if (g.matArrayTex) {
+                g.pipeline->GetNanite().SetMaterialTextureArray(g.matArrayTex.get(),
+                                                                g.matArraySamp.get(),
+                                                                g.matLayers);
+            }
+            // 【A3】MR 数组（与 baseColor 同层序、共用同一个采样器）
+            if (g.matMrArrayTex) {
+                g.pipeline->GetNanite().SetMaterialMetalRoughArray(g.matMrArrayTex.get(),
+                                                                   g.matArraySamp.get());
+            }
+            // 【A1】法线贴图数组（与 baseColor 同层序、共用采样器）
+            if (g.matNormalArrayTex) {
+                g.pipeline->GetNanite().SetMaterialNormalArray(g.matNormalArrayTex.get(),
+                                                               g.matArraySamp.get());
+            }
+            naniteSettings.enabled = GetBool(cfg, "nanite_enable", naniteSettings.enabled);
+            naniteSettings.offline = GetBool(cfg, "nanite_offline", naniteSettings.offline);
+            naniteSettings.multiAsset = GetBool(cfg, "nanite_multi_asset", naniteSettings.multiAsset);
+            naniteSettings.assetIdentityInstances =
+                GetBool(cfg, "nanite_asset_instances", naniteSettings.assetIdentityInstances);
+            // 【T8 验收】只画变换件时：**关掉离线 Sponza 资产**（否则 8287 簇的 Sponza 仍会
+            //   被单资产路径画出来，验收件被淹没），并强制走多资产路径（立方体资产经注册表绘制）。
+            if (g.transformOnly) {
+                naniteSettings.offline = false;
+                naniteSettings.multiAsset = true;
+            }
+            // 【T8 验收】多资产档可单独关软光栅：软光栅的资源创建路径与多资产偶发冲突，
+            // 硬光栅（T9 默认）已能覆盖多资产绘制验收。
+            naniteSettings.softRaster = GetBool(cfg, "nanite_soft_raster", naniteSettings.softRaster);
+            // 【排查用】软光栅"大簇阈值"：调到 64 可让所有簇都走软光栅（用于区分软/硬路径问题）
+            naniteSettings.softMaxTriangles = (u32)GetInt(cfg, "nanite_soft_max_triangles", (int)naniteSettings.softMaxTriangles);
+            // 【修复】硬光栅开关此前**没有接线**：cfg 里写 `nanite_hard_raster=0` 也一直是开着的，
+            //   导致多轮"关掉硬光栅"的对照实验（全软光栅档、软/硬分工排查）实际测的都是混合档。
+            naniteSettings.hardRaster = GetBool(cfg, "nanite_hard_raster", naniteSettings.hardRaster);
+            // 【T8 排查】假簇链：绕开剔除，直接用 6 个假簇走同一条光栅路径。
+            // 若假簇能出画面 ⇒ 光栅/呈现正常，问题在剔除到绘制的数据衔接。
+            naniteSettings.fakeChain = GetBool(cfg, "nanite_fake_chain", naniteSettings.fakeChain);
+            // 【T11】移除 GBuffer 的 IA 管线（几何只走 Nanite 硬光栅；无 MS 设备自动忽略）
+            naniteSettings.removeIaPso = GetBool(cfg, "nanite_remove_ia_pso", naniteSettings.removeIaPso);
+            // 【资源来源切换】本样例面板最上方允许**运行时**在"glTF 原始资源 / Nanite 离线资产"
+            //   之间切换 ⇒ 不能销毁另一条路径的 IA PSO：T11 的销毁会连带 RenderPass 一起销毁，
+            //   而 GBuffer 的并行录制（次级命令缓冲继承 RenderPass）与 DGC 执行集都会指向旧对象，
+            //   切回来时重建 PSO 会在 `vkCmdBeginRenderPass` 内崩在驱动（实测）。
+            //   ⇒ 本样例强制保留 IA 管线；T11 的"销毁 IA"能力仍在 07.Nanite 等档位可用。
+            if (naniteSettings.removeIaPso) {
+                HE_CORE_INFO("04.App: 为支持面板运行时切换资源来源，保留 IA 管线（忽略 cfg nanite_remove_ia_pso=1）");
+                naniteSettings.removeIaPso = false;
+            }
+            // 【T8】LOD 阈值（像素）：调大 ⇒ 细分到叶子（全细节，慢）
+            // 【修复】阈值是**浮点**（像素）：此前用 GetInt 读取 ⇒ 0.1/0.25/0.02 全被截成 0，
+            //   而 cull 侧"<=0 取默认 1.0" ⇒ cfg 里怎么改都没反应（踩过）。
+            naniteSettings.lodThresholdPixels =
+                GetFloat(cfg, "nanite_lod_threshold", naniteSettings.lodThresholdPixels);
+            naniteSettings.lodEnabled = GetBool(cfg, "nanite_lod_enabled", naniteSettings.lodEnabled);
+            naniteSettings.lodMode = (u32)GetInt(cfg, "nanite_lod_mode", (int)naniteSettings.lodMode);
+            naniteSettings.instanceIdentity = GetBool(cfg, "nanite_instance_identity", naniteSettings.instanceIdentity);
+            naniteSettings.debugView = (u32)GetInt(cfg, "nanite_debug_view", (int)naniteSettings.debugView);
+            naniteSettings.albedoDebug = (u32)GetInt(cfg, "nanite_albedo_debug", (int)naniteSettings.albedoDebug);
+            naniteSettings.hardRasterRefBudget = (u32)GetInt(cfg, "nanite_hard_raster_budget", (int)naniteSettings.hardRasterRefBudget);
+            // 【T8】合成实例数：硬光栅的派发上界 = 簇数 × 实例域，太大就会被预算判为超限
+            naniteSettings.instanceTestCount = (u32)GetInt(cfg, "nanite_instance_test_count", (int)naniteSettings.instanceTestCount);
+            // 【T8】Hi-Z 遮挡剔除（Phase 2 后半）：关掉会让过绘制飙升
+            naniteSettings.hiz = GetBool(cfg, "nanite_hiz", naniteSettings.hiz);
+            if (const String nanitePath = GetString(cfg, "nanite_offline_path", naniteSettings.offlinePath);
+                !nanitePath.empty()) {
+                naniteSettings.offlinePath = nanitePath;
+            }
+            if (naniteSettings.enabled && naniteSettings.offline && !naniteSettings.multiAsset) {
+                bool boundOne = false;
+                g.world.ForEach<MeshComponent>([&](Entity, MeshComponent& mesh) {
+                    if (boundOne) return;
+                    mesh.SetNaniteAssetIndex(0u);
+                    boundOne = true;
+                });
+            }
+
+            g.pipeline->SetNaniteSettings(naniteSettings);
+            g.assetSourceNanite = naniteSettings.enabled;   // 面板单选初始值 = cfg 决定
+        // 【T10】阴影绘制路径（cfg `shadow_ms`，默认 IA）
+        g.pipeline->SetShadowMeshEnabled(GetBool(cfg, "shadow_ms", false));
+            if (naniteSettings.enabled) {
+                HE_CORE_INFO("04.App: Nanite 已启用（hardRaster={} offline={} path={}）",
+                             naniteSettings.hardRaster ? 1 : 0, naniteSettings.offline ? 1 : 0,
+                             naniteSettings.offlinePath);
+            }
+        }
+        // 【验收】相机动画开关（cfg `cam_anim`，默认保持 true）：关掉后相机固定在 cfg 位姿，
+        //   便于逐像素对照"glTF 原始资源 vs Nanite 离线资产"两种来源的画面。
+        g.animCameraMode = GetBool(cfg, "cam_anim", g.animCameraMode);
+
         if (g.skybox) g.skybox->enabled = g.skyboxOn;
 
         if (auto* dl = g.world.GetComponent<DirectionalLight>(g.mainLightEntity)) {
@@ -514,6 +1084,21 @@ bool App::BeginFrame(f32 deltaTime, const InputState& input) {
         g.camInput.Reset();   // 切换时丢弃过期光标坐标，避免视角跳一帧
     }
     g.frameDt = deltaTime;
+
+    // ── 【T8 验收钩子】资源来源切换的自动化（`HE_ASSET_SOURCE_FLIP=1` 时启用）──
+    //   第 40 帧切到 glTF 原始资源、第 80 帧切回 Nanite 离线资产，
+    //   用于脚本验证"运行时双向切换不崩、IA PSO 能被重建"。默认关闭。
+    if (std::getenv("HE_ASSET_SOURCE_FLIP") != nullptr) {
+        static u32 s_FlipFrame = 0u;
+        ++s_FlipFrame;
+        if (s_FlipFrame == 40u) {
+            HE_CORE_INFO("04.App: [自动化] 第 40 帧 → 切到 glTF 原始资源");
+            g.ApplyAssetSource(false);
+        } else if (s_FlipFrame == 80u) {
+            HE_CORE_INFO("04.App: [自动化] 第 80 帧 → 切回 Nanite 离线资产");
+            g.ApplyAssetSource(true);
+        }
+    }
     return true;
 }
 
@@ -548,6 +1133,19 @@ bool App::RecordScene() {
 
 void App::RecordUIAndPresent() {
     Impl& g = *m_Impl;
+
+    // 【T8 验收钩子】`HE_CAPTURE_FRAME=N` 时在第 N 帧抓一张 PNG（默认关闭；与 01 的口径一致）。
+    // 路径写进当前工作目录，便于脚本对比"单资产 vs 多资产"两张图。
+    if (const char* captureEnv = std::getenv("HE_CAPTURE_FRAME")) {
+        static u32 s_Frame = 0u;
+        const int target = std::atoi(captureEnv);
+        if (++s_Frame == (u32)(target > 0 ? target : 0)) {
+            const char* outName = std::getenv("HE_CAPTURE_PATH");
+            RequestScreenshot(outName != nullptr ? outName : "capture_04.png");
+            HE_CORE_INFO("04.App: 已请求截图（第 {} 帧 → {}）", s_Frame,
+                         outName != nullptr ? outName : "capture_04.png");
+        }
+    }
     if (g.imgui && g.imgui->IsInitialized()) {
         g.imgui->BeginFrame();
         ImGui::SetNextWindowPos({10, 10}, ImGuiCond_Once);
@@ -558,6 +1156,25 @@ void App::RecordUIAndPresent() {
             ImGui::TextColored({0.3f, 1.0f, 0.3f, 1.0f}, "FPS: %.0f", fps);
             ImGui::SameLine(120);
             ImGui::TextColored({0.6f, 0.6f, 0.6f, 1.0f}, "(%.2f ms)", g.frameDt * 1000.0f);
+
+            // ── 【资源来源】面板最上方：glTF 原始资源 / Nanite 离线预处理资产 ──
+            ImGui::SeparatorText("资源来源");
+            {
+                const bool naniteSrc = g.assetSourceNanite;
+                if (ImGui::RadioButton("glTF 原始资源##assetsource", !naniteSrc)) {
+                    g.ApplyAssetSource(false);
+                }
+                ImGui::SameLine();
+                if (ImGui::RadioButton("Nanite 离线资产 (.nanite)##assetsource", naniteSrc)) {
+                    g.ApplyAssetSource(true);
+                }
+                ImGui::SameLine();
+                if (naniteSrc) {
+                    ImGui::TextColored({0.4f, 1.0f, 0.5f, 1.0f}, "→ Nanite 接管几何");
+                } else {
+                    ImGui::TextColored({0.7f, 0.8f, 1.0f, 1.0f}, "→ 标准 IA 管线");
+                }
+            }
 
             ImGui::SeparatorText("延迟渲染管线");
             ImGui::Text("GBuffer + Lighting Pass (全屏 PBR)");
@@ -1024,6 +1641,9 @@ void App::Shutdown() {
     // ---- 保存配置（相机 + 灯光 + 管线开关）----
     {
         std::unordered_map<String, String> out;
+        // 【不要污染用户的机位】变换验收档用的是代码里硬写的试验机位，
+        //   若照常回写，下次正常启动会停在"建筑外、只看到天空盒"。
+        if (!g.transformOnly) {
         out["cam_pos_x"] = std::to_string(g.camera.GetCamera().position.x);
         out["cam_pos_y"] = std::to_string(g.camera.GetCamera().position.y);
         out["cam_pos_z"] = std::to_string(g.camera.GetCamera().position.z);
@@ -1032,9 +1652,31 @@ void App::Shutdown() {
         out["cam_near"]  = std::to_string(g.camera.GetCamera().nearPlane);
         out["cam_far"]   = std::to_string(g.camera.GetCamera().farPlane);
         out["clustered"] = std::to_string(g.clustered ? 1 : 0);
+        }
         out["gpu_cull"]  = std::to_string(g.gpuCull ? 1 : 0);
         out["skybox"]    = std::to_string(g.skyboxOn ? 1 : 0);
         out["ssgi_enabled"] = std::to_string(g.ssgi ? 1 : 0);
+        // T8：Nanite 开关与离线资产路径（必须回写，否则下一次运行丢配置）
+        {
+            const auto& nanite = g.pipeline->GetNaniteSettings();
+            out["nanite_enable"]      = std::to_string(nanite.enabled ? 1 : 0);
+            out["nanite_offline"]     = std::to_string(nanite.offline ? 1 : 0);
+            out["nanite_offline_path"] = nanite.offlinePath;
+            out["nanite_soft_raster"] = std::to_string(nanite.softRaster ? 1 : 0);
+            out["nanite_fake_chain"] = std::to_string(nanite.fakeChain ? 1 : 0);
+            out["nanite_remove_ia_pso"] = std::to_string(nanite.removeIaPso ? 1 : 0);
+            out["shadow_ms"] = std::to_string(g.pipeline->GetShadowMeshEnabled() ? 1 : 0);
+            out["nanite_multi_asset"] = std::to_string(nanite.multiAsset ? 1 : 0);
+            // 【修正】这几个键此前只读不写 ⇒ 样例退出时回写 cfg 会把它们**抹掉**，
+            //   下次启动就回到默认值（实例域 64 会让 Sponza 的硬光栅上界超预算而被自动关闭）。
+            out["nanite_multi_asset_count"] = std::to_string(g.multiAssetCount);
+            out["nanite_transform_test"] = std::to_string(g.transformTest ? 1 : 0);
+            out["nanite_transform_only"] = std::to_string(g.transformOnly ? 1 : 0);
+            out["nanite_hiz"] = std::to_string(nanite.hiz ? 1 : 0);
+            out["nanite_lod_threshold"] = std::to_string((int)nanite.lodThresholdPixels);
+            out["nanite_hard_raster_budget"] = std::to_string(nanite.hardRasterRefBudget);
+            out["nanite_instance_test_count"] = std::to_string(nanite.instanceTestCount);
+        }
         out["ddgi_enabled"] = std::to_string(g.ddgi ? 1 : 0);
         out["ssr_enabled"]  = std::to_string(g.ssr ? 1 : 0);
         out["ssao_enabled"] = std::to_string(g.ssao ? 1 : 0);
@@ -1130,6 +1772,9 @@ void App::Shutdown() {
 #include "DesktopHost.h"
 
 int main() {
+    // 【T8 诊断】装崩溃处理器：多资产档异常时把模块/偏移/调用栈落到 Content/Config 下，
+    // 比"窗口只是说 stopped working"更容易定位（06/07 已有同款做法）。
+    he::InstallCrashHandler("Content/Config/04_Sponza-Deferred_crash.log", nullptr);
     he::samples::desktop::HostConfig cfg;
     cfg.title  = "HugEngine — 04.Sponza-Deferred";
     cfg.width  = 960;

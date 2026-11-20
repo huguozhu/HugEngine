@@ -1345,7 +1345,12 @@ TEST_CASE("NanitePack: 段布局、总字节数与字节镜像（任务 7 契约
     CHECK(asset.header.bboxMin[0] == 0.0f);
     CHECK(asset.header.bboxMax[0] == 6.0f);
     CHECK(asset.header.maxLODError == dag.stats.maxLODError);
-    for (u32 i = 0; i < kNaniteFileHeaderReservedU32; ++i) CHECK(asset.header._reserved[i] == 0u);
+    // T2 起保留区不再全 0：`_reserved[0]` = 构建器版本（其余仍为 0，扩展段数在写入文件时才填）
+    CHECK(NaniteHeaderBuilderVersion(asset.header) == kNaniteBuilderVersion);
+    for (u32 i = 0; i < kNaniteFileHeaderReservedU32; ++i) {
+        if (i == kNaniteReservedSlotBuilderVersion) continue;
+        CHECK(asset.header._reserved[i] == 0u);
+    }
 
     // ── 各段条数与强类型分段一致 ──
     CHECK(asset.clusters.size() == asset.header.clusterCount);
@@ -1471,7 +1476,7 @@ TEST_CASE("NanitePack: 量化误差实测（位置/法线/UV）与无 clamp") {
     CHECK(stats.maxNormalAngleErrorDegrees <= stats.normalAngleErrorBoundDegrees);
     // ④ UV：unorm16 的往返误差 ≤ 1/65535，且本网格的 UV 全在 [0,1] 内（没有 clamp）
     CHECK(stats.maxUVError > 0.0f);
-    CHECK(stats.maxUVError <= stats.uvErrorBound);
+    CHECK(stats.maxUVError <= stats.uvErrorBound);   // bound 已随编码域改为 128/65535
     CHECK(stats.uvClampCount == 0u);
     // ⑤ 该网格没有重复内容（去重率 0）⇒ 每个唯一内容只有一个出现 ⇒ 不可能有属性冲突
     CHECK(dag.stats.dedupRate == 0.0f);
@@ -1873,8 +1878,9 @@ TEST_CASE("NanitePack: 可复现性与失败路径（空 DAG / 非法输入）")
         REQUIRE(PackNaniteClusters(mesh.positions, {}, {}, materials, dag, asset));
         CHECK(asset.stats.vertexCount > 0u);
         CHECK(asset.stats.uvClampCount == 0u);
-        // 默认 UV = (0,0) ⇒ 每个顶点的 packedUV 都是 0
-        for (const NaniteVertex& vertex : asset.vertices) CHECK(vertex.packedUV == 0u);
+        // 默认 UV = (0,0)：编码域是 [-64,64]，0 的编码值是 32768（不再是 0）
+        const u32 defaultUvWord = NanitePackUV(NaniteQuantizeUV(0.0f), NaniteQuantizeUV(0.0f));
+        for (const NaniteVertex& vertex : asset.vertices) CHECK(vertex.packedUV == defaultUvWord);
         // 默认法线 = +Z ⇒ 解码角误差极小（八面体 10 位的量化误差，不超过阈值）
         CHECK(asset.stats.maxNormalAngleErrorDegrees <= asset.stats.normalAngleErrorBoundDegrees);
         // 位置/索引段与带属性时完全一致（法线/UV 不影响位置与拓扑）

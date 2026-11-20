@@ -40,8 +40,8 @@
 //   · `kNaniteHardRasterMaxPrimitives` = kNaniteMaxClusterTriangles
 //   · 读数槽位 `kNaniteHardStat*`（C++ 侧同名常量，见下面的 static const）
 static const uint kHardNumThreads     = 128u;
-static const uint kHardMaxVertices    = 192u;   // 3 × 64
-static const uint kHardMaxPrimitives  = 64u;    // NANITE_MAX_CLUSTER_TRIANGLES
+static const uint kHardMaxVertices    = 256u;   // 4 × 64（近平面裁剪后单三角形最多 4 顶点）
+static const uint kHardMaxPrimitives  = 128u;   // 2 × 64（裁剪后单三角形最多 2 图元）
 
 // 【任务 22 的硬光栅读数槽位】与 C++ 侧 `kNaniteHardStat*` 一一对应。
 // 【为什么另开一个缓冲而不是复用软光栅的 16 槽】软光栅那 16 槽里 0..14 全部已占用，
@@ -87,6 +87,9 @@ struct HardRasterVertexOut {
     //   `nointerpolation` 取 provoking vertex 的值。
     nointerpolation uint materialID     : TEXCOORD3;
     nointerpolation uint instanceIndex  : TEXCOORD4;
+    /// 【T8 排查】簇号（全局簇下标）：`debugView==3` 时用它着色，
+    ///   用来区分"是哪些簇在画"与"哪些区域一个簇都没有"。
+    nointerpolation uint clusterIndex   : TEXCOORD5;
 };
 
 // 取簇与分流判据：返回本工作组要输出的三角形数，0 表示"没有图元"（多派发的组、越界引用、
@@ -97,11 +100,11 @@ struct HardRasterVertexOut {
 //   multiple times"。这里把所有早退判据收拢成返回值，入口按它统一调用一次。
 //   所有判据只依赖 gid（工作组一致），满足 Vulkan "所有线程调用且参数一致" 的要求。
 uint hardRasterSelectCluster(uint slot, out ClusterRef ref, out SoftRasterClusterView view,
-                             out float3 translation)
+                             out NaniteInstanceBasis basis)
 {
     ref = (ClusterRef)0;
     view = (SoftRasterClusterView)0;
-    translation = float3(0.0, 0.0, 0.0);
+    basis = naniteInstanceBasisIdentity();
 
     uint visibleCount = u_VisibleClusterCount[0];
     if (slot >= visibleCount) return 0u;                    // 多派发的组（dispatch 按容量取整）
@@ -121,7 +124,11 @@ uint hardRasterSelectCluster(uint slot, out ClusterRef ref, out SoftRasterCluste
 
     InstanceObject instance = u_Instances[ref.instance];
     if (instance.indexCount == 0u) return 0u;               // 空实例：与剔除链的规则一致
-    translation = instance.ltw3.xyz;
+    // 【T8】完整实例基（旋转 + 缩放 + 平移）：只加平移会让旋转/非均匀缩放失效
+    basis.cx = instance.ltw0.xyz;
+    basis.cy = instance.ltw1.xyz;
+    basis.cz = instance.ltw2.xyz;
+    basis.t  = instance.ltw3.xyz;
 
     // ── 【任务 24】页解析（与软光栅两趟逐字相同的口径）──
     //   缺页的簇在软光栅两趟里已被跳过（没有颜色也没有深度）⇒ 硬光栅也必须跳过它，
@@ -146,7 +153,7 @@ uint hardRasterSelectCluster(uint slot, out ClusterRef ref, out SoftRasterCluste
 groupshared uint                  gsTriangleCount;
 groupshared ClusterRef            gsRef;
 groupshared SoftRasterClusterView gsView;
-groupshared float3                gsTranslation;
+groupshared NaniteInstanceBasis     gsBasis;
 
 [numthreads(128, 1, 1)]
 [outputtopology("triangle")]
@@ -186,25 +193,26 @@ void main(
     if (tid == 0u) {
         ClusterRef            ref0;
         SoftRasterClusterView view0;
-        float3                translation0;
-        gsTriangleCount = hardRasterSelectCluster(naniteRasterSlot(gid), ref0, view0, translation0);
+        NaniteInstanceBasis   basis0;
+        gsTriangleCount = hardRasterSelectCluster(naniteRasterSlot(gid), ref0, view0, basis0);
         gsRef           = ref0;
         gsView          = view0;
-        gsTranslation   = translation0;
+        gsBasis         = basis0;
     }
     GroupMemoryBarrierWithGroupSync();
 
     const uint                  triangleCount = gsTriangleCount;
     const ClusterRef            ref           = gsRef;
     const SoftRasterClusterView view          = gsView;
-    const float3                translation   = gsTranslation;
+    const NaniteInstanceBasis   basis         = gsBasis;
     NaniteCluster cluster = view.cluster;
 
     // 逐**角点**展开：三角形 `t` 用输出顶点 `3t / 3t+1 / 3t+2`。整个入口只调用这一次
     //（triangleCount 为 0 时即"没有图元"，下面 `tid >= triangleCount` 对所有线程成立而返回）。
     // 【不要紧跟一个 `if (triangleCount == 0u) return;`】dxc 优化时会按该分支把本调用复制成
     //   两份（0 与非 0 各一份），DXIL 校验报 "cannot be called multiple times"
-    SetMeshOutputCounts(3u * triangleCount, triangleCount);
+    // 【近平面裁剪】每个三角形最多产出 4 个顶点 / 2 个图元（三角形或四边形扇）
+    SetMeshOutputCounts(4u * triangleCount, 2u * triangleCount);
 
     // 读数：本簇真的被硬光栅接手 + 它输出了多少图元（只由 0 号线程记，避免重复计数）
     if (tid == 0u && triangleCount != 0u) {
@@ -224,65 +232,107 @@ void main(
     uint3 local = naniteDecodeTriangle(packed);
     uint base = view.vertexBase;
 
-    // ── ④ 解码三个顶点（与 `softRasterFetchTriangle` 逐字一致）──
-    float3 world[3];
-    float4 clip[3];
-    bool valid = true;
+    // ── ④ 解码三个顶点（位置 + 属性一并取出，裁剪时要插值）──
+    HardRasterVertexOut vtx[3];
+    bool badTri = false;
     for (uint k = 0u; k < 3u; ++k) {
         uint li = (k == 0u) ? local.x : ((k == 1u) ? local.y : local.z);
-        // 越界下标：软光栅把它当作"整个三角形无效"（`naniteIsValidClusterLocalVertexIndex`）
-        if (!naniteIsValidClusterLocalVertexIndex(li)) { valid = false; break; }
+        // 越界下标：整个三角形无效（与软光栅 `naniteIsValidClusterLocalVertexIndex` 同口径）
+        if (!naniteIsValidClusterLocalVertexIndex(li)) { badTri = true; break; }
         NaniteVertex v = u_Vertices[base + li];
-        // 位置：簇内局部量化 + **本簇球心** + 网格最大范围（§14.19 硬约束①）+ 实例平移
-        float3 meshPos = naniteDecodeVertexPosition(v, cluster, meshMaxExtent);
-        world[k] = meshPos + translation;
-        // 投影：与软光栅用**同一个** `softRasterProjectWorld`（4 次显式点积，不是矩阵乘法）
-        // ⇒ 两条路径的顶点位置逐位同源，任务 22 的 A/B 相关系数才不会掉。
-        clip[k] = softRasterProjectWorld(world[k]);
-        // 跨越/落在相机平面后 ⇒ 丢弃（软光栅的同一条简单口径：不做近平面裁剪）
-        if (!(clip[k].w > 1.0e-6)) { valid = false; break; }
-        if (any(isnan(clip[k]))) { valid = false; break; }
+        // 位置：簇内局部量化 + 本簇球心 + 网格最大范围 + 实例变换
+        float3 meshPos = naniteDecodeVertexPosition(
+            v, cluster, naniteClusterExtent(view.index, meshMaxExtent));
+        float3 wp = naniteApplyInstanceBasis(basis, meshPos);
+        vtx[k].position      = softRasterProjectWorld(wp);   // 未除 w（硬件做透视校正）
+        vtx[k].worldPos      = wp;
+        vtx[k].normal        = naniteDecodeNormal(v.packedNormal);
+        vtx[k].uv            = naniteDecodeUV(v.packedUV);
+        vtx[k].materialID    = cluster.materialID;
+        vtx[k].instanceIndex = ref.instance;
+        vtx[k].clusterIndex  = ref.cluster;
+        if (any(isnan(vtx[k].position))) badTri = true;
     }
 
-    // ── ⑤ 无效三角形 ⇒ 退化图元 ──
-    // 【为什么用一个"深度在远平面之外"的公共顶点】硬件没有"丢掉这个图元"的接口：
-    //   `SetMeshOutputCounts` 报的图元数是**统一值**，不能逐图元跳过（跳过就要在工作组内做
-    //   前缀压缩，成本与复杂度都不划算）。替代做法是输出一个**保证不产生片元**的图元：
-    //   三个顶点取同一个位置（面积恒为 0）且深度 2.0 > w=1（超出 [0,1] 深度范围被裁剪）。
-    //   两道保险任一都足以让光栅器一个片元都不产生。
-    if (!valid) {
-        HardRasterVertexOut degenerate;
-        degenerate.position    = float4(0.0, 0.0, 2.0, 1.0);
-        degenerate.worldPos    = float3(0.0, 0.0, 0.0);
-        degenerate.normal      = float3(0.0, 0.0, 1.0);
-        degenerate.uv          = float2(0.0, 0.0);
-        degenerate.materialID  = 0u;
-        degenerate.instanceIndex = ref.instance;
-        verts[3u * triLocal + 0u] = degenerate;
-        verts[3u * triLocal + 1u] = degenerate;
-        verts[3u * triLocal + 2u] = degenerate;
-        prims[triLocal] = uint3(3u * triLocal + 0u, 3u * triLocal + 1u, 3u * triLocal + 2u);
+    const uint vBase = 4u * triLocal;    // 本三角形的顶点槽起点（固定 4 个）
+    const uint pBase = 2u * triLocal;    // 本三角形的图元槽起点（固定 2 个）
+
+    // ── ⑤ 退化三角形：输出零面积图元（不产生片元）──
+    if (badTri) {
+        HardRasterVertexOut deg = (HardRasterVertexOut)0;
+        deg.position      = float4(0.0, 0.0, 2.0, 1.0);   // 深度越界 + 面积 0，双保险
+        deg.worldPos      = float3(0.0, 0.0, 0.0);
+        deg.normal        = float3(0.0, 0.0, 1.0);
+        deg.uv            = float2(0.0, 0.0);
+        deg.materialID    = cluster.materialID;
+        deg.instanceIndex = ref.instance;
+        deg.clusterIndex  = ref.cluster;
+        for (uint i = 0u; i < 4u; ++i) verts[vBase + i] = deg;
+        prims[pBase + 0u] = uint3(vBase, vBase, vBase);
+        prims[pBase + 1u] = uint3(vBase, vBase, vBase);
         return;
     }
 
-    // ── ⑥ 三个角点的属性（法线 / UV 按**簇内局部下标**取，与软光栅同一口径）──
-    for (uint c = 0u; c < 3u; ++c) {
-        uint li = (c == 0u) ? local.x : ((c == 1u) ? local.y : local.z);
-        NaniteVertex v = u_Vertices[base + li];
-        HardRasterVertexOut outVert;
-        outVert.position      = clip[c];                       // 保留原始 w ⇒ 硬件做透视校正插值
-        outVert.worldPos      = world[c];
-        outVert.normal        = naniteDecodeNormal(v.packedNormal);
-        outVert.uv            = naniteDecodeUV(v.packedUV);
-        // 【任务 19 口径】材质下标来自簇记录（三角形多数票映射写下的 `materialID`），
-        //   片元里用 `softRasterEvaluateMaterial` 求值 —— 与软光栅**同一个函数、同一份材质段**。
-        outVert.materialID    = cluster.materialID;
-        // objectIndex 分区：Nanite 段起点 + 实例下标（MRT7 的页号，与软光栅同一编码）
-        outVert.instanceIndex = ref.instance;
-        verts[3u * triLocal + c] = outVert;
+    // ── ⑥ 近平面裁剪（裁剪空间 w > eps）──
+    // 【为什么必须做】此前的做法是"任一顶点 w<=eps ⇒ 整三角形退化成零面积图元"，
+    //   于是贴着相机的大三角形会整块消失 —— 这正是画面轮廓上那圈**细缝/缺块**的来源。
+    //   正确的做法是在裁剪空间做多边形裁剪：三角形被近平面切成 3 顶点或 4 顶点，
+    //   再以扇形三角化（最多 2 个图元）。
+    const float kNearEps = 1.0e-6f;
+    float d[3];
+    for (uint k2 = 0u; k2 < 3u; ++k2) d[k2] = vtx[k2].position.w - kNearEps;
+
+    HardRasterVertexOut poly[4];
+    uint polyN = 0u;
+    if (d[0] > 0.0f && d[1] > 0.0f && d[2] > 0.0f) {
+        // 全部在前方：原样输出
+        poly[0] = vtx[0]; poly[1] = vtx[1]; poly[2] = vtx[2];
+        polyN = 3u;
+    } else if (d[0] > 0.0f || d[1] > 0.0f || d[2] > 0.0f) {
+        // 部分在前方：沿三条边收集"内部点 + 交点"（三角形最多 4 个顶点）
+        for (uint i = 0u; i < 3u; ++i) {
+            uint j = (i + 1u) % 3u;
+            const float di = d[i];
+            const float dj = d[j];
+            if (di > 0.0f) {
+                poly[polyN++] = vtx[i];
+            }
+            if ((di > 0.0f) != (dj > 0.0f)) {
+                const float t = di / (di - dj);                 // d 在边上是线性的 ⇒ 交点参数
+                HardRasterVertexOut mv;
+                mv.position      = lerp(vtx[i].position,  vtx[j].position,  t);
+                mv.worldPos      = lerp(vtx[i].worldPos,  vtx[j].worldPos,  t);
+                mv.normal        = lerp(vtx[i].normal,    vtx[j].normal,    t);
+                mv.uv            = lerp(vtx[i].uv,        vtx[j].uv,        t);
+                mv.materialID    = cluster.materialID;
+                mv.instanceIndex = ref.instance;
+                mv.clusterIndex  = ref.cluster;
+                poly[polyN++] = mv;
+            }
+        }
     }
 
-    // 图元索引（每个三角形只被一个线程写 ⇒ 无竞态）
-    prims[triLocal] = uint3(3u * triLocal + 0u, 3u * triLocal + 1u, 3u * triLocal + 2u);
-}
+    // ── ⑦ 输出：扇形三角化（polyN == 3 或 4；0 表示完全在相机背后）──
+    if (polyN < 3u) {
+        HardRasterVertexOut deg = (HardRasterVertexOut)0;
+        deg.position      = float4(0.0, 0.0, 2.0, 1.0);
+        deg.worldPos      = float3(0.0, 0.0, 0.0);
+        deg.normal        = float3(0.0, 0.0, 1.0);
+        deg.uv            = float2(0.0, 0.0);
+        deg.materialID    = cluster.materialID;
+        deg.instanceIndex = ref.instance;
+        deg.clusterIndex  = ref.cluster;
+        for (uint i2 = 0u; i2 < 4u; ++i2) verts[vBase + i2] = deg;
+        prims[pBase + 0u] = uint3(vBase, vBase, vBase);
+        prims[pBase + 1u] = uint3(vBase, vBase, vBase);
+        return;
+    }
 
+    for (uint vi = 0u; vi < polyN; ++vi) verts[vBase + vi] = poly[vi];
+    // 未使用的顶点槽写 poly[0]（避免读未初始化；这些槽不会被图元引用）
+    for (uint vj = polyN; vj < 4u; ++vj) verts[vBase + vj] = poly[0];
+
+    prims[pBase + 0u] = uint3(vBase + 0u, vBase + 1u, vBase + 2u);
+    prims[pBase + 1u] = (polyN >= 4u) ? uint3(vBase + 0u, vBase + 2u, vBase + 3u)
+                                      : uint3(vBase, vBase, vBase);   // 零面积占位
+}

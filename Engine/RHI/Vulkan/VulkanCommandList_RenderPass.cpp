@@ -416,7 +416,23 @@ void VulkanCommandList::BeginOffscreenPass(
     fbInfo.width           = width;
     fbInfo.height          = height;
     fbInfo.layers          = 1;
-    vkCreateFramebuffer(m_Device, &fbInfo, nullptr, &offscreenFB);
+    // 【必须检查返回值】此前没查：一旦 `vkCreateFramebuffer` 失败（附件已失效、
+    //   render pass 与附件不匹配、宽高为 0 等），`offscreenFB` 保持 VK_NULL_HANDLE，
+    //   随后 `vkCmdBeginRenderPass` 把空 framebuffer 交给驱动 ⇒ 在 nvoglv64 内访问违例
+    //   （实测 02 关闭窗口时正是这条路径，栈顶 `vkGetInstanceProcAddr` 只是驱动内部符号）。
+    const VkResult fbResult = vkCreateFramebuffer(m_Device, &fbInfo, nullptr, &offscreenFB);
+    if (fbResult != VK_SUCCESS || offscreenFB == VK_NULL_HANDLE) {
+        static bool s_Logged = false;
+        if (!s_Logged) {
+            s_Logged = true;
+            HE_CORE_ERROR("BeginOffscreenPass: 帧缓冲创建失败（result={} rp={} color={} depth={} {}x{}）"
+                          " ⇒ 跳过本 pass（不再让空 framebuffer 进驱动）",
+                          (int)fbResult, (void*)m_CurrentRenderPass, colorImageView, depthImageView,
+                          width, height);
+        }
+        m_CurrentOffscreenFB = VK_NULL_HANDLE;
+        return;
+    }
     TraceFramebuffer("create(offscreen)", offscreenFB, CurrentFrameOf(m_VulkanDevice), UINT64_MAX);
     m_CurrentOffscreenFB = offscreenFB;
 
@@ -445,6 +461,8 @@ void VulkanCommandList::BeginOffscreenPass(
     rpBegin.clearValueCount   = clearCount;
     rpBegin.pClearValues      = vkClearValues;
 
+    // 【RHI 扩展】记下当前深度视图：`RenderPassDepthReadAfterWrite` 需要它定位 VkImage。
+    m_CurrentDepthView = depthImageView;
     // 开始 pass 前：把深度附件的真实布局修正到本 pass 期望的 ATTACHMENT
     EnsureDepthAttachmentLayout(depthImageView);
 
@@ -591,6 +609,52 @@ void VulkanCommandList::BeginOffscreenPassMRT(
     if (m_CurrentPipeline != VK_NULL_HANDLE && m_CurrentBindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS) {
         vkCmdBindPipeline(m_CmdBuffers[m_FrameIndex], VK_PIPELINE_BIND_POINT_GRAPHICS, m_CurrentPipeline);
     }
+}
+
+void VulkanCommandList::RenderPassDepthReadAfterWrite() {
+    // 【RHI 扩展】通道内深度"写 → 读"自依赖。详见 `IRHICommandList` 的同名声明。
+    //   Vulkan 规范允许在 render pass 内发**带 BY_REGION** 的子通道自依赖；
+    //   不带 BY_REGION 的通道内屏障是未定义的（校验层会报 VUID-vkCmdPipelineBarrier-...）。
+    if (m_StreamMode) {
+        // 流式录制模式下不允许直接发命令（命令会被回放打乱顺序）⇒ 只提示一次。
+        static bool s_warned = false;
+        if (!s_warned) {
+            s_warned = true;
+            HE_CORE_WARN("RenderPassDepthReadAfterWrite: 流式命令录制模式不支持通道内深度自依赖"
+                         "（本次已跳过；如需该优化请关闭命令流式录制）");
+        }
+        return;
+    }
+    if (!m_InOffscreenPass || m_CurrentDepthView == nullptr) return;
+
+    VkImage depthImage = VK_NULL_HANDLE;
+    u32 mips = 1u, layers = 1u;
+    if (!QueryViewImage(m_CurrentDepthView, reinterpret_cast<void*&>(depthImage), mips, layers) ||
+        depthImage == VK_NULL_HANDLE) {
+        return;
+    }
+
+    VkImageMemoryBarrier barrier{};
+    barrier.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.oldLayout           = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    barrier.newLayout           = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image               = depthImage;
+    barrier.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_DEPTH_BIT;
+    barrier.subresourceRange.baseMipLevel   = 0u;
+    barrier.subresourceRange.levelCount     = 1u;
+    barrier.subresourceRange.baseArrayLayer = 0u;
+    barrier.subresourceRange.layerCount     = 1u;
+    // 第一趟（深度写）与第二趟（深度读）都在 fragment tests 阶段完成：
+    //   src = LATE_FRAGMENT_TESTS（写），dst = EARLY_FRAGMENT_TESTS（读）。
+    barrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
+    vkCmdPipelineBarrier(m_CmdBuffers[m_FrameIndex],
+                         VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                         VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+                         VK_DEPENDENCY_BY_REGION_BIT,
+                         0u, nullptr, 0u, nullptr, 1u, &barrier);
 }
 
 void VulkanCommandList::EndOffscreenPass() {

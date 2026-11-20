@@ -211,6 +211,15 @@ public:
                                                   DescriptorType type,
                                                   IRHITexture** textures, IRHISampler** samplers,
                                                   u32 count) override;
+
+    /// 【T8 修复】数组区间写入：`firstElement` 指定 `dstArrayElement`。
+    /// 【为什么需要】bindless 堆一次写整条 4096 长数组时，驱动在 `vkUpdateDescriptorSets`
+    ///   内部崩溃（实测栈在 nvoglv64）。改成"按 64 一档分段写"可绕开这条驱动路径。
+    void                      UpdateDescriptorSetArrayRange(DescriptorSetHandle set, u32 binding,
+                                                             DescriptorType type,
+                                                             IRHITexture** textures,
+                                                             IRHISampler** samplers,
+                                                             u32 firstElement, u32 count);
     void                      UpdateDescriptorSet(DescriptorSetHandle set, u32 binding,
                                                   DescriptorType type,
                                                   IRHIBuffer** buffers, u32 count) override;

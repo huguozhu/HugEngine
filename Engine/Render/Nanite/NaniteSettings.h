@@ -140,7 +140,11 @@ struct NaniteSettings {
     ///   阈值 16 下覆盖极少（这正是"覆盖范围差异"的来源，见实施记录）；把它调到 64 就能让
     ///   软光栅吃下全部可见簇，用于"同相机对照"里对照软光栅自身的正确性（而不是覆盖率）。
     /// 配置层 = cfg 键 `nanite_soft_max_triangles`（默认 16，钳到 [1, 64]），样例负责解析/序列化。
-    u32 softMaxTriangles = 16u;
+    // 【C 性能结论（2026-11-20 实测）】**默认改为 0：所有簇都走硬光栅（mesh shader）**。
+    //   软光栅的三趟全屏 compute + 深度解析是固定开销：默认档 545 ms 里约 320 ms 花在这里，
+    //   而全部走硬光栅后默认档 **208 ms**（标准路径 220 ms），画面结构完全一致。
+    //   只有当硬件没有 mesh shader、或需要软光栅作为回退时才把它调大。
+    u32 softMaxTriangles = 0u;
 
     /// 【§14.8 任务 22】**硬光栅分流**开关（默认 **false**）。
     ///
@@ -170,7 +174,7 @@ struct NaniteSettings {
     ///       `enabled=1 + hardRaster=1`      ⇒ 任务 22 的新路径（软硬分流真正发生）。
     ///
     /// 配置层 = cfg 键 `nanite_hard_raster`（默认 0），样例负责解析/序列化 + 面板勾选框。
-    bool hardRaster = false;
+    bool hardRaster = true;    // T9：大簇默认改走 mesh 硬光栅（此前默认 0，仅软光栅清屏）
 
     // ============================================================
     // 【§14.8 任务 24】LOD 流式（反馈 + 页池）—— 阶段一
@@ -259,6 +263,76 @@ struct NaniteSettings {
     //   配置层 = cfg 键 `nanite_debug_view`（默认 0，钳到 [0, kNaniteDebugViewMaxMode]），
     //   样例负责解析/序列化 + 面板勾选框。
     u32 debugView = 0u;
+    // ── 【T8 排查】LOD 割模式（cfg `nanite_lod_mode`，默认 0）──
+    // 0 = 正常判据；1 = **不筛**（所有过视锥/遮挡的簇都画 = 覆盖率上界）；
+    // 2 = **只选叶子层**（L0）。用来区分"割判据不闭合"与"几何数据缺三角形"。
+    u32 lodMode = 0u;
+    // ── 【T8 排查】实例变换档（cfg `nanite_instance_identity`，默认 0）──
+    // 1 = 实例用**单位矩阵**（只保留平移）。
+    // 【为什么要这一档】`--granularity=mesh` 的离线资产是按 **glTF 世界空间**烘焙的
+    //   （节点变换已烘进顶点）；若运行时再乘一次对象的 `worldMatrix`，几何会被**变换两次**
+    //   ⇒ 画面表现为"建筑缩小/偏移、只剩天空"。
+    bool instanceIdentity = false;
+    // ── 【T8 排查】albedo 调试档（cfg `nanite_albedo_debug`，默认 0）──
+    // 【为什么不复用 `debugView`】`debugView` 是模块既有的"簇统计面板"档位（0..4）且会被钳到
+    //   该范围；拿它当 albedo 调试开关时 5/6 会被钳掉，表现为"改了没反应"（踩过）。
+    //   0 = 关；2 = 黄涂（几何覆盖）；6 = 指定簇红、其余黑（与 CPU 投影对照）。
+    u32 albedoDebug = 0u;
+
+    // ── T8：多资产模式（cfg 键 `nanite_multi_asset`，默认 0）──
+    // 1 ⇒ 场景资产由样例逐份 `NaniteScene::RegisterAsset` 注册，渲染器**不再**上传
+    // "整场景一份"的资产，而是逐资产注册剔除数据（`AppendAssetBVH`）。
+    // 0 ⇒ 旧口径（单资产；离线/运行时构建各一条路径）。
+    bool multiAsset = false;
+
+    // ── T8·A2：多资产"恒等实例"（cfg 键 `nanite_asset_instances`，默认 0）──
+    // 1 ⇒ 每份注册的资产各生成**一条恒等变换实例**（几何已在世界空间烘焙），
+    //     实例数 = 资产数。用于"按材质拆资产"（`--granularity=material`）：
+    //     每份资产只含一种材质 ⇒ 任意 LOD 层级的簇都不会跨材质。
+    // 0 ⇒ 沿用"按 ECS 网格绑定资产"的旧口径。
+    bool assetIdentityInstances = false;
+
+    // ── T11：移除 GBuffer / 阴影的 IA PSO（cfg 键 `nanite_remove_ia_pso`，**默认 1**）──
+    // 1 ⇒ 有资产 + 支持 MS 的设备上不再保留 IA 管线（几何只走 mesh：GBuffer 由 Nanite 硬光栅、
+    //     阴影由 `Shadow.mesh` 写入）；
+    // 0 ⇒ 保留 IA（对照实验用）。
+    // 【为什么默认改成 1】T11 的验收口径是"有资产 + 支持 MS 的设备**不再建** IA PSO"，
+    //   默认 0 等于"机制具备但从不生效"。回退条件仍由 `supportsMeshShaders` 把住：
+    //   D3D11 / 无 MS 的移动端自动继续走 IA，不受影响。
+    bool removeIaPso = true;
+
+    // ── LOD 阈值（像素；cfg 键 `nanite_lod_threshold`）──
+    // 判据：`ownError × focal > threshold × distance` ⇒ 保留父簇（粗）。
+    // 调大 ⇒ 更倾向一直细分到叶子（全细节，慢但正确）；默认 1 像素。
+    // 【T8 校准（2026-11-20 固定机位复测更正）】默认 **0.05**（此前 0.25）。
+    //   · 0.25 在固定机位下会系统性选到**粗级簇**：整场景合并资产的粗级簇跨材质/是简化代理，
+    //     画面表现为大片错误颜色 + 整体偏暗（实测与 glTF 基准平均差 **52.4**、中位数 115/136/116）；
+    //   · 0.05 时同一机位平均差 **15.3**、中位数 143/140/144，帧时间几乎不变（203.6 → 205.3 ms）；
+    //   · 0.02 / 1e-6 与 0.05 画面完全一致（15.31）⇒ 再低无额外收益，0.05 已足够把割放到细级。
+    //   根因不在阈值本身：`maxParentLODError` 是"每级简化误差上限"（保证上界，不是真实误差），
+    //   按 1 像素判据会系统性偏粗；真根治要"LOD≥1 也按源 mesh/材质分组"（预处理侧）。
+    float lodThresholdPixels = 0.05f;
+
+    // ── LOD 选择开关（cfg 键 `nanite_lod_enabled`，默认 1）──
+    // 0 ⇒ Phase 3 不做 DAG 割：**凡是过视锥/遮挡测试的簇都画**（最高细节，最慢）。
+    // 【为什么需要】排查"画面有孔洞"时，先关掉 LOD 割：若孔洞还在，说明几何数据/剔除
+    //   本身有问题；若孔洞消失，说明是 DAG 割（父/子覆盖）的问题。
+    bool lodEnabled = true;
+
+
+    // ── 硬光栅的工作量预算（可见簇引用条数上界；cfg 键 `nanite_hard_raster_budget`）──
+    // 超过它 ⇒ 自动关掉硬光栅档位（大簇不画），以免长帧。默认 131072。
+    // 【为什么可配】Sponza 规模（8287 簇 × 64 实例 = 53 万上界）会被默认值直接判为超预算，
+    //   于是大簇永远不画、画面只剩小簇 —— 这与"能出画面"的验收冲突，必须能按资产规模调。
+    u32 hardRasterRefBudget = 131072u;
+
+    // ── T5：离线资产（方案 §5.2）──
+    /// 优先读离线 `.nanite`（cfg 键 `nanite_offline`，默认 1 = 优先离线）。
+    /// 文件缺失 / 校验失败 / 版本或构建器过期 ⇒ 自动回退运行时构建并告警。
+    bool offline = true;
+    /// 离线资产路径（相对 Content/，如 `Processed/Sponza_0.nanite`；空 = 不做离线加载）。
+    /// 配置层 = cfg 键 `nanite_offline_path`。
+    String offlinePath;
 };
 
 } // namespace he::render

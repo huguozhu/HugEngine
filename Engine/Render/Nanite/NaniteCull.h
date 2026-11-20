@@ -89,6 +89,7 @@
 #include "RHI/RHI.h"
 #include "Math/Math.h"   // 【任务 13】float3 / float4x4（相机视锥与合成实例网格的输入类型）
 
+#include <array>     // T8：真实实例的资产槽位表
 #include <functional>   // 【任务 15】`NaniteRenderer` 的 Hi-Z 源回调（纹理/深度）经这里传递
 // 【顺手修掉的一处既有笔误】本行过去是 `#include <memory>#include <vector>`（两条指令挤在同一
 //   行 ⇒ MSVC 只处理第一条并给出 C4067，`<vector>` 从未真正被包含，一直靠传递包含碰巧编过）。
@@ -98,6 +99,9 @@
 #include <span>   // 【任务 14】SetClusterBVH 的簇记录视图
 
 namespace he::render {
+struct FrameSceneSnapshot;   // T8：真实实例表的来源（Threading/FrameSceneSnapshot.h）
+class  MeshRegistry;        // T8：网格 → 离线资产绑定
+
 
 /// Nanite_Cull.comp.slang 的 push constant（逐字段对应；static_assert 钉住 8 字节）
 struct alignas(4) NaniteCullParams {
@@ -164,9 +168,14 @@ struct alignas(16) NaniteCullChainParams {
     u32   lodEnabled;     // 偏移 100：1 = 打开 LOD 选择（与 focalPixels > 0 同时成立才算）
     u32   _pad1;          // 偏移 104：绘制容量（`misc.z`；任务 16 的截断门）
     u32   hizFlip;        // 偏移 108：【P0】1 = Hi-Z 采样 UV 的 y 翻转（负高度视口的正确约定）
+    // ── 【T8 排查】LOD 割模式（偏移 112）：0=正常，1=不筛（全画），2=只选叶子层 ──
+    u32   lodMode;        // 偏移 112
+    u32   _padMode1;      // 偏移 116
+    u32   _padMode2;      // 偏移 120
+    u32   _padMode3;      // 偏移 124
 };
-static_assert(sizeof(NaniteCullChainParams) == 112,
-              "NaniteCullChainParams 必须与 Slang 结构体一致（4×float4 + float4 + float4 + uint4）");
+static_assert(sizeof(NaniteCullChainParams) == 128,
+              "NaniteCullChainParams 必须与 Slang 结构体一致（4×float4 + float4 + float4 + uint4 + uint4）");
 static_assert(offsetof(NaniteCullChainParams, vpRows)      == 0,   "vpRows 必须在偏移 0");
 static_assert(offsetof(NaniteCullChainParams, cameraPos)   == 64,  "cameraPos 必须在偏移 64");
 static_assert(offsetof(NaniteCullChainParams, focalPixels) == 80,  "focalPixels 必须在偏移 80");
@@ -288,9 +297,13 @@ public:
     ///   （`focalPixels = 0.5 × screenH / tan(fovY/2)`，见 `NaniteClusterLODFocalPixels`）。
     ///   取"相机 fov + 屏幕高度"而不是"反解 viewProj 的 m11"：view-proj 是 `P×V`，
     ///   它的 (1,1) 元素被视图旋转污染，反解出来的焦距在相机有俯仰/偏航时是错的。
+    /// 【T8 排查】实例变换档（见 cfg `nanite_instance_identity`）
+    void SetInstanceIdentity(bool identity) { m_InstanceIdentity = identity; }
+
     void SetCullChainFrame(const float4x4& viewProj, const float3& cameraPosition,
                            u32 screenWidth, u32 screenHeight, float fovYDegrees,
-                           u32 testInstanceCount);
+                           u32 testInstanceCount, float lodThresholdPixels = kNaniteLODThresholdPixels,
+                           bool lodEnabled = true, u32 lodMode = 0u);
 
     /// 录制 `Nanite_InstanceCull` pass：
     ///   ① 上传合成实例表 + 包围球（主机可见缓冲，与任务 3 同款）；
@@ -312,6 +325,37 @@ public:
     [[nodiscard]] const std::vector<u32>& GetCpuVisibleInstances() const { return m_CpuVisibleInstances; }
     /// 本帧合成实例条数（= 最近一次 `SetInstanceCullFrame` 的钳制后入参）
     [[nodiscard]] u32 GetTestInstanceCount() const { return m_TestInstanceCount; }
+    // ── T8：真实实例表（来自场景快照，取代合成测试实例）──
+    //
+    // 【字段复用契约】Nanite 实例表的 `meshIndex` 承载**资产槽位**（`assetIndex`）：
+    // Nanite 的 shader 不读 meshIndex / materialIndex / objectID（它们只是 128B 布局占位），
+    // 因此不需要新增绑定槽，也不动 `GPUSceneObject` 契约。
+    /// 用快照里的真实实例覆盖合成测试实例：只收"网格绑定了离线资产"
+    /// （`MeshRegistryEntry::naniteAssetIndex != 0xFFFFFFFF`）的条目，
+    /// 每个条目写一条 `NaniteInstanceGpuObject`（`localToWorld` = 快照的世界矩阵，
+    /// `boundsMin/Max` = 快照里的**世界空间** AABB）。
+    /// @return 写入的实例数；0 表示没有任何绑定资产的实例 ⇒ 调用方应保留合成测试实例。
+    u32 SetInstancesFromSnapshot(const FrameSceneSnapshot& snapshot, const MeshRegistry& registry);
+
+    /// 【T8·A2】多资产"一份资产一个恒等实例"：几何已在世界空间烘焙，实例矩阵取单位阵。
+    /// 用途：按材质拆分的资产（每份只含一种材质）各占一个实例槽，数量 = 资产数（Sponza 25）。
+    /// @param counts 资产数；`bounds` = 每份 6 个 float（min3, max3，世界空间 AABB）
+    /// @return 写入的实例数
+    /// @param assetSlots 每份资产在剔除区间表里的槽位（`AppendAssetBVH` 的返回值）。
+    ///   【为什么要单独传】场景侧 `RegisterAsset` 的槽位与剔除侧槽位可能不同（某份资产
+    ///   剔除注册失败时就会错位）；实例必须用**剔除槽位**，否则整份资产被剔错。
+    u32 SetAssetInstances(u32 assetCount, std::span<const float> bounds,
+                          std::span<const u32> assetSlots);
+
+    /// 第 i 个真实实例对应的离线资产槽位（仅 `SetInstancesFromSnapshot` 写过时有效）
+    [[nodiscard]] u32 GetInstanceAssetIndex(u32 i) const {
+        return i < m_RealInstanceCount ? m_RealAssetIndices[i] : 0xFFFFFFFFu;
+    }
+    /// 【B 修复】当前真实实例数（0 ⇒ 仍在用合成实例）
+    [[nodiscard]] u32 GetRealInstanceCount() const { return m_RealInstanceCount; }
+    /// 本帧是否在用真实实例（false ⇒ 仍是合成测试实例）
+    [[nodiscard]] bool UsingRealInstances() const { return m_RealInstanceCount > 0u; }
+
     [[nodiscard]] static constexpr u32 MaxTestInstances() { return kNaniteMaxTestInstances; }
 
     // ============================================================
@@ -336,6 +380,33 @@ public:
 
     /// 本 pass 是否可用（BVH 已入库 + PSO/描述符集就绪）
     [[nodiscard]] bool IsClusterBVHReady() const { return m_BVHReady; }
+    // ── T8：多资产剔除数据（共享缓冲 + 每资产基址表）──
+    /// 一份资产在"共享剔除缓冲"里的区间（全部是**元素下标**，不是字节偏移）
+    struct NaniteAssetCullRange {
+        u32 nodeBase      = 0;   ///< `Nanite.BVHNodes` 起始下标
+        u32 nodeCount     = 0;
+        u32 leafBase      = 0;   ///< `Nanite.BVHLeafClusters` 起始下标
+        u32 leafCount     = 0;
+        u32 clusterBase   = 0;   ///< 簇球 / LOD / 绘制参数三张表的统一起始下标
+        u32 clusterCount  = 0;
+        u32 lodInfoBase   = 0;   ///< 与 `clusterBase` 同值（保留独立字段便于将来拆分）
+        u32 drawRangeBase = 0;
+    };
+
+    /// 追加一份资产的剔除数据（建 BVH + LOD 元数据 + 绘制参数，写进共享缓冲的尾部）
+    /// @return 资产槽位下标；容量不足 / 构建失败返回 `0xFFFFFFFF`
+    /// @param triangleBase  该资产在**聚合几何**里的三角形起始下标（多资产绘制参数用）
+    /// @param vertexBase    顶点起始下标
+    /// @param materialBase  材质起始下标
+    /// 单资产时三者都是 0，行为与旧实现一致。
+    u32 AppendAssetBVH(std::span<const NaniteClusterRecord> clusters,
+                       std::span<const u32>                 lodOffsets,
+                       u32 triangleBase = 0u, u32 vertexBase = 0u, u32 materialBase = 0u);
+
+    /// 已注册资产的剔除区间表（`SetClusterBVH` / `AppendAssetBVH` 之后有效）
+    [[nodiscard]] const std::vector<NaniteAssetCullRange>& GetAssetCullRanges() const {
+        return m_AssetCullRanges;
+    }
 
     /// 【§14.8 任务 15】把 Phase 1 与 Phase 2/3 录制进**同一个命令缓冲**（同一个帧图 pass 体内）：
     ///   ① Phase 1：`RecordInstanceCullPass`（清零 → 上传 → 派发 → 屏障；含可见性掩码）；
@@ -383,6 +454,13 @@ public:
 
     // ── 任务 14/15 的读回访问（`NaniteRenderer::LogCull3Readback` 使用）──
     [[nodiscard]] rhi::IRHIBuffer* GetVisibleClusterBuffer()      const { return m_Device->ResolveBuffer(m_VisibleClusterBuf); }
+
+    /// 【T8 排查】读回可见簇列表的前 `count` 条（只 Map、不等待；调用方需先 WaitIdle）。
+    /// 返回实际写入出参的条数（受 `count` 与可见计数同时限制）。
+    u32 ReadbackVisibleClusters(NaniteVisibleClusterRef* out, u32 count);
+
+    /// 【T8·排查】从指定槽位开始读回可见簇引用（用于检查"计数 > 有效槽位"这类稀疏/垃圾槽位）。
+    u32 ReadbackVisibleClustersAt(u32 offset, NaniteVisibleClusterRef* out, u32 count);
     [[nodiscard]] rhi::IRHIBuffer* GetVisibleClusterCountBuffer() const { return m_Device->ResolveBuffer(m_VisibleClusterCountBuf); }
     /// 【任务 15】三阶段读数缓冲（扁平 u32，槽位见 `kNaniteCullStat*`）
     [[nodiscard]] rhi::IRHIBuffer* GetCullStatsBuffer()           const { return m_Device->ResolveBuffer(m_CullStatsBuf); }
@@ -452,6 +530,15 @@ public:
         u32* outProjectedOffscreen) const;
     [[nodiscard]] u32 GetBVHNodeCount()    const { return (u32)m_BVHData.nodes.size(); }
     [[nodiscard]] u32 GetBVHDepth()        const { return m_BVHData.depth; }
+    /// 【T8·排查】资产剔除区间表（`AppendAssetBVH` 每追加一份就多一条）
+    struct AssetCullRange { u32 clusterBase, clusterCount, drawRangeBase; };
+    [[nodiscard]] u32 GetAssetCullRangeCount() const { return (u32)m_AssetCullRanges.size(); }
+    [[nodiscard]] AssetCullRange GetAssetCullRange(u32 i) const {
+        if (i >= m_AssetCullRanges.size()) return AssetCullRange{0u, 0u, 0u};
+        return AssetCullRange{ m_AssetCullRanges[i].clusterBase, m_AssetCullRanges[i].clusterCount,
+                               m_AssetCullRanges[i].drawRangeBase };
+    }
+
     [[nodiscard]] u32 GetBVHClusterCount() const { return m_BVHData.clusterCount; }
     [[nodiscard]] u32 GetBVHInstanceDomain() const { return m_BVHInstanceDomain; }
     [[nodiscard]] u32 GetBVHVisibleCapacity() const { return kNaniteMaxVisibleClusterRefs; }
@@ -463,6 +550,16 @@ public:
     /// 滞后一帧统计同一口径）。光栅端用它当派发上界 —— 详见 `NaniteRenderer` 里的使用处。
     /// 缓冲未就绪时返回 0（调用方退回静态上界）。
     [[nodiscard]] u32 ReadLastVisibleClusterCount() const;
+
+    /// 【T8 诊断】上一帧写进间接命令缓冲的**绘制条数**（= 绘制计数缓冲的值）。
+    /// 【为什么需要】可见簇数 > 0 但绘制条数 = 0 说明"算出来了却没翻译成命令"；
+    /// 两者都 > 0 仍空屏，问题就在光栅/呈现而不是剔除。
+    [[nodiscard]] u32 ReadLastDrawCount() const;
+
+    /// 【T8 诊断】三阶段读数（`visited / frustumPass / occluded / lodRejected / 直方图…`）。
+    /// 全部为 0 ⇒ Phase 2/3 的派发根本没写（不是"全被剔除"）：那就得查 PVS/域/绑定；
+    /// 只有 visited > 0 而 frustumPass = 0 ⇒ 是判据把簇全剔了（球/视锥口径问题）。
+    [[nodiscard]] bool ReadLastCullStats(u32 out[kNaniteCullStatsU32]) const;
 
     /// 【A5】可见簇引用数的 **CPU 可算上界** = 簇数 × 实例域（本帧元数据，与 GPU 写出的可见数无关）
     ///
@@ -582,6 +679,11 @@ private:
 
     /// 本帧合成实例条数（`SetInstanceCullFrame` 的钳制后入参；默认 0 = 尚未设置）
     u32 m_TestInstanceCount = 0;
+    /// T8：真实实例的资产槽位表（与 `m_TestInstances` 同长同序）
+    std::array<u32, kNaniteMaxTestInstances> m_RealAssetIndices{};
+    u32 m_RealInstanceCount = 0u;
+    bool m_AssetInstancesActive = false;   // 【T8·A2】资产恒等实例表已生效
+    std::vector<float> m_AssetBounds;      // 【B3】每份资产的世界 AABB（6 float：min3,max3）
 
     // ── 四个自持缓冲（容量都是 `kNaniteMaxTestInstances`）──
     rhi::RHIBufferHandle m_InstanceBuf{};   // A-3             // 128B 实例表（Storage，CPU 每帧写）
@@ -610,6 +712,12 @@ private:
     float m_FrameViewProjRows[16] = { 0.0f };
     float m_FrameFocalPixels  = 0.0f;   ///< 像素焦距（0 ⇒ 关闭 LOD 选择）
     float m_FrameLODThreshold = kNaniteLODThresholdPixels;
+    /// 【排查】本帧是否做 LOD 割（false ⇒ 所有过视锥/遮挡的簇都画）
+    bool  m_FrameLodEnabled = true;
+    /// 【T8 排查】LOD 割模式：0=正常，1=不筛（全画），2=只选叶子层
+    u32   m_FrameLodMode = 0u;
+    /// 【T8 排查】true = 实例用单位变换（资产已在世界空间烘焙，见 cfg `nanite_instance_identity`）
+    bool  m_InstanceIdentity = false;
     u32   m_FrameScreenW = 0u;          ///< 屏幕宽（Hi-Z 选层）
     u32   m_FrameScreenH = 0u;          ///< 屏幕高
     bool  m_FrameHiZRequested = false;  ///< 本帧调用方是否请求了 Hi-Z（cfg `nanite_hiz`）
@@ -638,6 +746,10 @@ private:
     /// CPU 侧 BVH 镜像（节点/叶子簇表/簇球/读数）——GPU 侧三个只读缓冲由它上传；
     /// 同时是 CPU 参考遍历的输入 ⇒ **GPU 与 CPU 读的是同一份比特**。
     NaniteClusterBVH m_BVHData;
+    /// T8：多资产剔除区间表（与 `m_BVHData` 的聚合视图一一对应）
+    std::vector<NaniteAssetCullRange> m_AssetCullRanges;
+    /// T8：资产区间表（GPU 只读；shader 用 `instance.meshIndex` 索引它取基址）
+    rhi::RHIBufferHandle m_AssetRangeBuf;
 
     /// 【任务 15】CPU 侧 LOD 元数据镜像（与 `m_BVHData.clusterSpheres` 同序、同长度）
     std::vector<NaniteClusterLODInfo> m_LODInfo;

@@ -383,8 +383,10 @@ TEST_CASE("NaniteTypes: .nanite 文件头字段与尺寸（任务 7 定稿 96B�
 
     // 逐字段默认值
     const NaniteFileHeader header{};
-    CHECK(kNaniteFileVersion == 1u);
-    CHECK(header.version == 1u);
+    // T2：格式升到 v2（头部保留区启用 + 扩展段表），可读下限仍是 v1
+    CHECK(kNaniteFileVersion == 3u);   // v3：UV 编码域 [-64,64]
+    CHECK(kNaniteMinReadableFileVersion == 3u);   // v3 起 UV 编码域为 [-64,64]，旧版本必须被拒
+    CHECK(header.version == 3u);
 
     // 魔数：恰好 8 字节 "NANITE01"，逐字节相等且**不带 NUL 结尾**
     const char expectedMagic[8] = { 'N', 'A', 'N', 'I', 'T', 'E', '0', '1' };
@@ -552,7 +554,7 @@ TEST_CASE("NaniteTypes: 位置量化往返（任务 10 基准：盒心 + 吃满 
         CHECK_FALSE(NanitePositionQuantizeClamps(v, origin, range));
         const float error = std::fabs(NaniteDequantizePositionAxis(raw, origin, range) - v);
         if (error > maxError) maxError = error;
-        CHECK(error <= halfStep + 1.0e-6f);
+        CHECK(error <= halfStep + 1.0e-5f);
     }
     MESSAGE("位置量化：range=4 实测最大往返误差=" << maxError
             << "  上界 range/2044=" << halfStep);
@@ -730,34 +732,37 @@ TEST_CASE("NaniteTypes: 法线八面体编码往返（10+10 位，角误差 ≤ 
 TEST_CASE("NaniteTypes: UV unorm16 量化往返（≤ 1/65535）与越界 clamp") {
     CHECK(kNaniteUVQuantMax == 0xFFFFu);
 
-    // 端点与 clamp（unorm16 表示不了越界 UV，按 §8.4 的口径夹到 [0,1]）
-    CHECK(NaniteQuantizeUV(0.0f) == 0u);
-    CHECK(NaniteQuantizeUV(1.0f) == 0xFFFFu);
-    CHECK(NaniteQuantizeUV(0.5f) == 32768u);      // round(0.5 × 65535) = round(32767.5) = 32768
-    CHECK(NaniteQuantizeUV(-0.5f) == 0u);
-    CHECK(NaniteQuantizeUV(2.0f) == 0xFFFFu);
+    // 端点与 clamp（编码域 [-64,64]：支持平铺/负 UV；越界夹到端点）
+    CHECK(NaniteQuantizeUV(-kNaniteUVEncodeExtent) == 0u);
+    CHECK(NaniteQuantizeUV(kNaniteUVEncodeExtent) == 0xFFFFu);
+    CHECK(NaniteQuantizeUV(0.0f) == 32768u);      // round(((0+64)/128) × 65535) = round(32767.5) = 32768
+    CHECK(NaniteQuantizeUV(-65.0f) == 0u);        // 越界 clamp
+    CHECK(NaniteQuantizeUV(65.0f) == 0xFFFFu);
     CHECK(NaniteQuantizeUV(std::nanf("")) == 0u);
-    CHECK(NaniteUVNeedsClamp(-0.001f));
-    CHECK(NaniteUVNeedsClamp(1.001f));
+    CHECK(NaniteUVNeedsClamp(-65.0f));
+    CHECK(NaniteUVNeedsClamp(65.0f));
     CHECK(NaniteUVNeedsClamp(std::nanf("")));
+    CHECK_FALSE(NaniteUVNeedsClamp(-kNaniteUVEncodeExtent));
     CHECK_FALSE(NaniteUVNeedsClamp(0.0f));
-    CHECK_FALSE(NaniteUVNeedsClamp(0.5f));
-    CHECK_FALSE(NaniteUVNeedsClamp(1.0f));
+    CHECK_FALSE(NaniteUVNeedsClamp(32.0f));       // Sponza 的 u 实测最大值 32.3 落在域内
+    CHECK_FALSE(NaniteUVNeedsClamp(kNaniteUVEncodeExtent));
 
-    // 往返误差 ≤ 1/65535（**一个量化步**；半个步是 1/131070）
-    const float bound    = 1.0f / (float)kNaniteUVQuantMax;
+    // 往返误差 ≤ 半个量化步 = 64/65535
+    const float bound    = kNaniteUVEncodeRange / (float)kNaniteUVQuantMax;
     const float halfStep = 0.5f * bound;
     float maxError = 0.0f;
     for (u32 i = 0; i <= 4096u; ++i) {
-        const float v   = (float)i / 4096.0f;
+        const float v   = -kNaniteUVEncodeExtent + kNaniteUVEncodeRange * ((float)i / 4096.0f);
         const u32   raw = NaniteQuantizeUV(v);
         const float back = NaniteDequantizeUV(raw);
         const float error = std::fabs(back - v);
         if (error > maxError) maxError = error;
-        CHECK(error <= halfStep + 1.0e-7f);
+        // 容差：半个量化步 + 1e-6（编码域放大到 128 后，`(v+64)/128` 的浮点舍入会吃掉
+        //   约千分之一步，实测最大 0.000984 vs 半步 0.000977）
+        CHECK(error <= halfStep + 1.0e-5f);
     }
-    MESSAGE("UV unorm16：4097 点实测最大往返误差=" << maxError
-            << "  半个量化步=1/131070=" << halfStep << "  阈值 1/65535=" << bound);
+    MESSAGE("UV unorm16（域 [-64,64]）：4097 点实测最大往返误差=" << maxError
+            << "  半个量化步=" << halfStep << "  阈值=" << bound);
     CHECK(maxError <= bound);
 
     // 位序：R16G16_UNORM（u 低 16 位、v 高 16 位），u/v 不互相污染
@@ -1109,7 +1114,8 @@ TEST_CASE("NaniteTypes: .nanite 校验函数的正例与反例") {
     {
         std::vector<u8> bad = buffer;
         NaniteFileHeader wrongVersion = header;
-        wrongVersion.version = 2u;
+        // T2 起 1..2 都可读，所以「版本错」要用超范围值
+        wrongVersion.version = kNaniteFileVersion + 1u;
         std::memcpy(bad.data(), &wrongVersion, sizeof(wrongVersion));
         CHECK(ValidateNaniteFile(bad.data(), bad.size()) == NaniteFileError::BadVersion);
     }

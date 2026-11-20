@@ -68,6 +68,18 @@ u64 RunSingleThreaded(Engine& engine, IApp& app, IBackendSwitchApp* switchable,
         if (!app.Frame(dt, in)) continue;
         ++frameIndex;
 
+        // 【T8 取证】`HE_CAPTURE_FRAME=N` → 第 N 帧请求**引擎侧**截图（swapchain 抓取）。
+        // 【为什么不用窗口抓屏】实测 `CopyFromScreen` 在 Vulkan 交换链窗口上只能抓到纯白，
+        // 会得出"渲染失败"的错误结论；引擎自己的 `RequestScreenshot` 才是可信口径。
+        if (const char* capEnv = std::getenv("HE_CAPTURE_FRAME")) {
+            static u32 s_CapFrame = 0u;
+            const int target = std::atoi(capEnv);
+            if (++s_CapFrame == static_cast<u32>(target > 0 ? target : 0)) {
+                const char* path = std::getenv("HE_CAPTURE_PATH");
+                app.RequestScreenshot(path != nullptr ? path : "capture_host.png");
+            }
+        }
+
         if (!cfg.backendSwitch || !switchable) continue;
 
         // ---- 无人值守验证热切换：第 60 帧切走、第 90 帧切回（环境变量给目标后端名）----
@@ -140,6 +152,8 @@ u64 RunWithRenderThread(Engine& engine, IRenderThreadApp& app, const HostConfig&
         submit([&] { acquireFailed = !app.RecordScene(); });
         if (acquireFailed) continue;
 
+        // 【T8 取证】多线程路径的截图由应用自己在 `RecordUIAndPresent` 里做
+        // （`IRenderThreadApp` 没有 `RequestScreenshot`；游戏线程的 `IApp` 才有）。
         submit([&] { app.RecordUIAndPresent(); });
         ++frameIndex;
     }

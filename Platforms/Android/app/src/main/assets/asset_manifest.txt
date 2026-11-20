@@ -72,6 +72,10 @@ content/gltf/Sponza/glTF/Sponza.gltf
 content/gltf/Sponza/glTF/white.png
 content/gltf/Sponza/screenshot/large.jpg
 content/gltf/Sponza/screenshot/screenshot.jpg
+content/Processed/.process_manifest.json
+content/Processed/.process_stamp
+content/Processed/cube_0.nanite
+content/Processed/Sponza_0.nanite
 content/Textures/skybox.hdr
 content/Textures/skybox/daylight0.png
 content/Textures/skybox/daylight1.png

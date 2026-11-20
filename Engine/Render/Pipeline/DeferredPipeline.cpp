@@ -469,7 +469,11 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
     m_ShadowSystem->CreateShadowPSO();
 
     // ── DGC 初始化（通过 RHI 统一接口，后端透明）──
-    if (device->GetCaps().supportsDGC) {
+    // 【T11】DGC 需要一条"初始管线"；若 GBuffer 的 IA 管线已被移除（几何只走 Nanite 硬光栅），
+    //   DGC 初始化没有可用管线 ⇒ 直接跳过（构建期就已经决定，不在这里补建）。
+    if (device->GetCaps().supportsDGC && m_GBuffer->GetPSO() == nullptr) {
+        HE_CORE_INFO("DeferredPipeline: T11 —— GBuffer IA 管线已移除，跳过 DGC 初始化");
+    } else if (device->GetCaps().supportsDGC) {
         bool dgcOK = device->InitializeDGC(m_GBuffer->GetPSO(),
             GPUCulling::kMaxObjects, GPUCulling::kMaxObjects);
         if (dgcOK) {

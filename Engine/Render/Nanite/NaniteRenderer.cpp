@@ -46,6 +46,9 @@
 #include <cstdio>      // std::snprintf（实例剔除读回的 first= 样本串）
 #include <cstdlib>     // 【任务 23】std::getenv（perf 行复用既有的 HE_CPU_PASSES 开关）
 #include <cstring>     // 【任务 15】std::memcpy（三阶段读数整块读回）
+#include <fstream>    // T5：读离线 `.nanite`（路径经 IVfs 解析）
+
+#include "Platform/IVfs.h"   // T5：`vfs::Resolve` 把相对路径解析到资产根
 #include <vector>      // 任务 12：SoA 转换的临时数组（positions / normals / uvs）
 
 // CVar: Nanite 独立开关（§14.4 的"配置"层，默认 0）。
@@ -155,6 +158,9 @@ void NaniteRenderer::AddPasses(RenderGraph& rg, const NaniteGBufferHandles& gb,
     // 门控在调用方（DeferredPipeline_FrameGraph.cpp）已经判过一次；这里再判一次是兜底，
     // 保证"关闭 ⇒ 本模块一个 pass 都不注册"这条不变式不依赖调用方的正确性。
     if (!m_Settings.enabled || !m_Ready) return;
+    // 【B 健壮性】软/硬光栅全关 ⇒ 本模块不写 GBuffer，连剔除链也不该跑：
+    //   资产按软光栅门控、根本不会上传，此时跑剔除链会带空缓冲/空描述符集进驱动。
+    if (!m_Settings.softRaster) return;
 
     // 唯一真值 → 模块内部：把本帧的假簇数量交给剔除段（cfg/面板只写 NaniteSettings）
     m_Cull.SetFakeClusterCount(m_Settings.fakeClusters);
@@ -175,9 +181,16 @@ void NaniteRenderer::AddPasses(RenderGraph& rg, const NaniteGBufferHandles& gb,
     //   "GPU 与 CPU 参考逐项一致"这条可判定的等价性），并用 **fov + 屏幕高**算 Phase 3 的像素焦距。
     // 【pass 注册点不在本函数】三阶段链（Phase 1 → Phase 2/3）必须在 `GB_Clear` **之后**注册
     //   （Phase 2 要采样本帧深度建出来的 Hi-Z 金字塔）⇒ 见 `AddPostGBufferPasses`。
+    // 【T8】帧边界的 bindless 落地已停用：它会写全量纹理数组并在驱动内崩溃。
+    //   保留调用点与接口，等材质绑定方案改为"按需小批量"后再启用。
+
+    m_Cull.SetInstanceIdentity(m_Settings.instanceIdentity);
     m_Cull.SetCullChainFrame(camera.GetViewProjMatrix(), camera.position,
                              m_Width, m_Height, camera.fov,
-                             m_Settings.instanceTestCount);
+                             m_Settings.instanceTestCount,
+                             m_Settings.lodThresholdPixels,
+                             m_Settings.lodEnabled,
+                             m_Settings.lodMode);
 
     // ── 【任务 18】软光栅两趟的 push constant（本帧算一次；执行期推给 GPU）──
     // 【view-proj 拆成 4 个"行"】与任务 15 同一口径：`vpRows[r*4+c] = viewProj[c][r]`
@@ -193,9 +206,104 @@ void NaniteRenderer::AddPasses(RenderGraph& rg, const NaniteGBufferHandles& gb,
         m_SoftParams.screenWidth   = m_Width;
         m_SoftParams.screenHeight  = m_Height;
         m_SoftParams.maxTriangles  = m_Settings.softMaxTriangles;
-        m_SoftParams.instanceCount = std::min(m_Settings.instanceTestCount,
-                                              NaniteCull::MaxBVHInstances());
+        // 【B 修复：多资产几何缺失的根因之一】光栅端 `instanceCount` 此前**只取**
+        //   `settings.instanceTestCount`（合成实例档的设置值，样例默认 8）。而多资产/真实实例档的
+        //   实例数是"资产份数"（如 25）⇒ 着色器对 `ref.instance >= 8` 的引用直接 `return`，
+        //   且**不计入任何读数**（所以表现为"908 条可见引用只处理了 555 条"，画面缺一大半几何）。
+        //   这里改为：有真实实例用真实数量，合成档才用设置值。
+        const u32 realInstances = m_Cull.GetRealInstanceCount();
+        m_SoftParams.instanceCount =
+            (realInstances > 0u) ? std::min(realInstances, NaniteCull::MaxBVHInstances())
+                                 : std::min(m_Settings.instanceTestCount, NaniteCull::MaxBVHInstances());
         m_SoftParams.meshMaxExtent = m_MeshMaxExtent;
+    m_SoftParams.debugView     = m_Settings.debugView;
+    m_SoftParams.albedoDebug   = m_Settings.albedoDebug;
+    // 【T8 排查】打印 Nanite 用的相机位置与视图矩阵首行，供与标准路径对照
+    {
+        static u32 s_Seq = 0u;
+        if ((s_Seq++ % 30u) == 0u) {
+            HE_CORE_INFO("[T8-CAM] Nanite 相机=({:.3f},{:.3f},{:.3f}) vpRow0=({:.4f},{:.4f},{:.4f},{:.4f})",
+                         camera.position.x, camera.position.y, camera.position.z,
+                         m_SoftParams.vpRows[0], m_SoftParams.vpRows[1],
+                         m_SoftParams.vpRows[2], m_SoftParams.vpRows[3]);
+        }
+    }
+    m_SoftParams.matArrayEnabled = (m_MatArray != nullptr) ? 1u : 0u;
+    // 【T8 排查】CPU 侧把 0 号簇的中心投影到屏幕并打印（与 debugView=6 的实拍像素对照）
+    if (m_Settings.albedoDebug == 6u && m_Scene.HasAssetCPUCopy()) {
+        static bool s_Logged = false;
+        if (!s_Logged) {
+            s_Logged = true;
+            const auto& asset = m_Scene.GetAssetCPUCopy();
+            if (!asset.clusters.empty()) {
+                const float cx = asset.clusters[0].boundsCenterRadius[0];
+                const float cy = asset.clusters[0].boundsCenterRadius[1];
+                const float cz = asset.clusters[0].boundsCenterRadius[2];
+                const float* vp = m_SoftParams.vpRows;
+                const float hp[4] = { cx, cy, cz, 1.0f };
+                const float clipX = vp[0]*hp[0] + vp[1]*hp[1] + vp[2]*hp[2] + vp[3]*hp[3];
+                const float clipY = vp[4]*hp[0] + vp[5]*hp[1] + vp[6]*hp[2] + vp[7]*hp[3];
+                const float clipW = vp[12]*hp[0] + vp[13]*hp[1] + vp[14]*hp[2] + vp[15]*hp[3];
+                // 【挑一个"确实在视锥里"的簇】0 号簇在这台机位可能落在相机背面，那样没法对照。
+                //   这里从头扫，取第一个 w>0.1 且 NDC 在 [-1,1] 内的簇，把它作为涂红目标。
+                // 【T8 排查】优先用上一帧从**可见列表**里挑出的簇（保证它真的被画）；
+                //   只有在没有候选时才退回全表扫描。
+                u32 picked = m_DebugClusterCandidate;
+                float pickedPx = 0.0f, pickedPy = 0.0f, pickedW = 0.0f;
+                for (u32 ci = 0; picked == 0xFFFFFFFFu && ci < (u32)asset.clusters.size(); ++ci) {
+                    const float* br = asset.clusters[ci].boundsCenterRadius;
+                    const float q[4] = { br[0], br[1], br[2], 1.0f };
+                    const float wx = vp[0]*q[0] + vp[1]*q[1] + vp[2]*q[2] + vp[3]*q[3];
+                    const float wy = vp[4]*q[0] + vp[5]*q[1] + vp[6]*q[2] + vp[7]*q[3];
+                    const float ww = vp[12]*q[0] + vp[13]*q[1] + vp[14]*q[2] + vp[15]*q[3];
+                    if (ww <= 0.1f) continue;
+                    const float nx = wx / ww, ny = wy / ww;
+                    // 【挑右侧可见区】界面面板占了左半边：只挑投影落在右半屏、且避开面板的簇，
+                    //   否则"涂红的簇被 UI 盖住"会让人误以为没画。
+                    const float sxTest = (0.5f + 0.5f * nx) * (float)m_Width;
+                    const float syTest = (0.5f - 0.5f * ny) * (float)m_Height;
+                    // 取屏幕中右部（避开左半屏的 UI 面板），保证涂红的簇一定可见
+                    if (sxTest < 620.0f || sxTest > 900.0f ||
+                        syTest < 200.0f || syTest > 420.0f) continue;
+                    picked  = ci;
+                    pickedPx = (0.5f + 0.5f * nx) * (float)m_Width;
+                    pickedPy = (0.5f - 0.5f * ny) * (float)m_Height;
+                    pickedW  = ww;
+                    break;
+                }
+                m_SoftParams.debugCluster = (picked != 0xFFFFFFFFu) ? picked : 0u;
+                {
+                    static u32 s_LastLogged = 0xFFFFFFFFu;
+                    if (s_LastLogged != m_SoftParams.debugCluster) {
+                        s_LastLogged = m_SoftParams.debugCluster;
+                        HE_CORE_INFO("[Nanite] 调试簇更新：debugCluster={}", s_LastLogged);
+                    }
+                }
+                if (picked != 0xFFFFFFFFu) {
+                    HE_CORE_INFO("[Nanite] CPU 投影：{} 号簇中心=({:.1f},{:.1f},{:.1f}) → 像素=({:.1f},{:.1f}) w={:.1f}",
+                                 picked, asset.clusters[picked].boundsCenterRadius[0],
+                                 asset.clusters[picked].boundsCenterRadius[1],
+                                 asset.clusters[picked].boundsCenterRadius[2],
+                                 pickedPx, pickedPy, pickedW);
+                } else {
+                    HE_CORE_INFO("[Nanite] CPU 投影：没有落在视锥内的簇中心（对照不可用）");
+                }
+            }
+        }
+    }
+    {
+        static bool s_Logged = false;
+        if (!s_Logged && m_MatArray != nullptr) {
+            s_Logged = true;
+            HE_CORE_INFO("[Nanite] 数组档参数：matArrayEnabled={} array={} sampler={} 层表={}",
+                         m_SoftParams.matArrayEnabled, (void*)m_MatArray, (void*)m_MatArraySamp,
+                         (u32)m_MatLayers.size());
+        }
+    }
+    {
+        static u32 s_Logged = 0xFFFFFFFFu;
+        if (s_Logged != m_Settings.debugView) { s_Logged = m_Settings.debugView; HE_CORE_INFO("[Nanite] debugView={}（写入光栅 push constant）", s_Logged); }
+    }
         m_SoftParams.depthKeyEpsilon = 0.0f;   // 两趟的等值复检实测严格逐位相等即可
         // 【任务 19】材质段条数（资产构建时记下；0 ⇒ shader 走中性兜底并把像素计进 fallback_pixels）
         m_SoftParams.materialCount = m_MaterialCount;
@@ -311,6 +419,17 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
     // 保证"关闭 ⇒ 本模块一个 pass 都不注册"这条不变式不依赖调用方的正确性。
     // 【与 AddPasses 是同一个真值】不是新门控：`enabled`（独立开关）+ `IsReady()`（模块就绪）。
     if (!m_Settings.enabled || !m_Ready) return;
+    // 【B 健壮性】软/硬光栅**全关**时本模块不写 GBuffer，也不该跑剔除链：
+    //   资产不会被上传（`EnsureAssetUploaded` 按软光栅门控），此时还注册剔除/光栅 pass
+    //   会让它们带着空缓冲/空描述符集执行 —— 实测在 NVIDIA 驱动里直接崩（`nvoglv64`）。
+    if (!m_Settings.softRaster) {
+        static bool s_logged = false;
+        if (!s_logged) {
+            s_logged = true;
+            HE_CORE_WARN("[Nanite] 软光栅被关闭（硬光栅依赖它）⇒ 本模块不注册几何 pass（GBuffer 由既有 IA 路径负责）");
+        }
+        return;
+    }
 
     // ── 【任务 15】Nanite_CullChain3：Phase 1 → Phase 2（BVH + Hi-Z）→ Phase 3（LOD 选择）──
     // 【reads = {gbDepth}】**真的**读：Phase 2 的 Hi-Z 金字塔由本帧深度下采样得到（复用
@@ -347,6 +466,16 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
         {{gb.depth, ResourceAccess::Read}},
         std::move(cullWrites),
         [this, hiz, drawFromVisibleChain, softRasterOn, hardRasterOn, gb](rhi::IRHICommandList* cmd) {
+            // 【T8 诊断】一次性确认"这个 pass 体真的被执行了"：若日志里一次都不出现，
+            //   说明问题在帧图（pass 未被执行），而不是剔除/光栅本身。
+            {
+                // 【T8 排序排查】每 30 帧打印一次：与 LightingPass 的同序号日志按时间戳对照，
+                //   就能看出"纳尼特写入"和"光照读取"在命令流里的先后。
+                static u32 s_Seq = 0u;
+                if ((s_Seq++ % 30u) == 0u) {
+                    HE_CORE_INFO("[T8-ORDER] Nanite_CullChain3 执行 seq={}", s_Seq / 30u);
+                }
+            }
             rhi::IRHITexture* hizTexture = hiz.texture ? hiz.texture() : nullptr;
             rhi::IRHITexture* depthTex   = hiz.depth ? hiz.depth() : nullptr;
             m_Cull.RecordCullChainPass(cmd, hizTexture, depthTex, m_Settings.hiz,
@@ -376,7 +505,12 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
             //   的 pass 按 LIFO 处理 —— 任务 15/16 的教训）。录进同一个 pass 体 + 命令缓冲里的
             //   显式屏障，是唯一稳的写法（任务 16 的间接绘制同理）。
             if (!softRasterOn) return;
-            const NaniteScene::AssetBuffers& asset = m_Scene.GetAssetBuffers();
+            // 【T8 修复】聚合视图没建好时退回单资产段组：单资产离线档若只注册未构建聚合，
+            //   光栅端会直接早退（实测：`软簇/硬簇` 读数是垃圾值、一条绘制都没有）。
+            const NaniteScene::AssetBuffers& mergedAsset = m_Scene.GetMergedAssetBuffers();
+            const NaniteScene::AssetBuffers& asset =
+                (mergedAsset.clusters && mergedAsset.vertices && mergedAsset.indices)
+                    ? mergedAsset : m_Scene.GetAssetBuffers();
             if (!asset.clusters || !asset.vertices || !asset.indices) return;   // 资产未入库
 
             NaniteRaster::GBufferTargets targets;
@@ -400,6 +534,224 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
             //   突发增加时最多丢一帧的少量大簇（下一帧自动收敛）。
             const u32 refBound    = m_Cull.GetVisibleRefBound();
             const u32 lastSeenRaw = m_Cull.ReadLastVisibleClusterCount();
+    const u32 lastDrawRaw = m_Cull.ReadLastDrawCount();   // 【T8】上帧真实写出的绘制条数
+    // 【T8 诊断】每 120 帧打一次三阶段读数（判断"没派发"还是"全剔掉"）
+    {
+        static u32 s_Frame = 0u;
+        if ((s_Frame++ % 30u) == 0u) {
+            u32 stats[he::render::kNaniteCullStatsU32]{};
+            if (m_Cull.ReadLastCullStats(stats)) {
+                // 槽位口径见 `Nanite_ClusterBVH.comp.slang`：0=frustumPass，1=occluded，
+                //   2..9=LOD 直方图，10=visited，11=drawTruncated
+                HE_CORE_INFO("[Nanite] cull3 读数 visited={} frustumPass={} occluded={} lod0={} drawTruncated={}",
+                             stats[10], stats[0], stats[1], stats[2], stats[11]);
+                HE_CORE_INFO("[Nanite] cull3 上帧读数 可见簇={} 绘制条数={}",
+                             lastSeenRaw, lastDrawRaw);
+                // 【C·可观测】遮挡剔除占比：`occluded / frustumPass`。
+                //   超过 90% 通常意味着 Hi-Z 过剔（历史上出现过"半屏天空"那次），
+                //   这里给一条一次性告警并指明对照开关，回归时一眼能看出遮挡是否又过剔。
+                {
+                    const u32 frustum = stats[0];
+                    const u32 occluded = stats[1];
+                    if (frustum > 0u) {
+                        const u32 permille = (u32)((u64)occluded * 1000ull / (u64)frustum);
+                        // 槽位 2..9 = 各 LOD 级被选中的簇数（直方图），求和即"选中的簇数"。
+                        u32 selected = 0u;
+                        for (u32 k = 2u; k <= 9u; ++k) selected += stats[k];
+                        const u32 lodRejected = (frustum > occluded + selected)
+                                                    ? (frustum - occluded - selected) : 0u;
+                        HE_CORE_INFO("[Nanite] 剔除占比：过视锥 {} / 遮挡 {}（{}‰）/ 选中 {} / "
+                                     "LOD 拒绝 {}；Hi-Z={}",
+                                     frustum, occluded, permille, selected, lodRejected,
+                                     m_Settings.hiz ? 1 : 0);
+                        if (permille > 900u) {
+                            static bool s_warned = false;
+                            if (!s_warned) {
+                                s_warned = true;
+                                HE_CORE_WARN("[Nanite] 遮挡占比 {}‰ 偏高（>90%）⇒ 疑似 Hi-Z 过剔；"
+                                             "对照 cfg `nanite_hiz=0` 复测，若画面明显变多则是过剔",
+                                             permille);
+                            }
+                        }
+                    }
+                }
+
+                // 【T8 排查】读回 GPU 可见列表前 8 条，与 CPU 参考集合对照
+                {
+                    NaniteVisibleClusterRef gpuRefs[8]{};
+                    const u32 got = m_Cull.ReadbackVisibleClusters(gpuRefs, 8u);
+                    std::string gpuStr;
+                    for (u32 i = 0u; i < got; ++i) {
+                        gpuStr += std::to_string(gpuRefs[i].cluster);
+                        if (i + 1u < got) gpuStr += ",";
+                    }
+                    HE_CORE_INFO("[Nanite] GPU 可见列表前 {} 条簇号=[{}]", got, gpuStr);
+                    // 【T8·排查】逐条打印"引用 → 资产槽位 → 聚合簇记录"，用于定位
+                    //   "多资产几何散乱"：若 cluster 落在错误资产的区间，或记录里的
+                    //   vertexOffset/triangleOffset 越界，日志会直接暴露。
+                    //   **只在首帧打印一次**（否则每 30 帧 8 行会淹掉日志）。
+                    static bool s_refDumped = false;
+                    for (u32 i = 0u; s_refDumped ? false : (i < got); ++i) {
+                        const u32 cluster = gpuRefs[i].cluster;
+                        const u32 inst    = gpuRefs[i].instance;
+                        const u32 assetSlot = m_Cull.GetInstanceAssetIndex(inst);
+                        const NaniteCull::AssetCullRange range = m_Cull.GetAssetCullRange(assetSlot);
+                        const NaniteClusterRecord* rec = m_Scene.GetMergedCluster(cluster);
+                        const bool inRange = (cluster >= range.clusterBase &&
+                                              cluster < range.clusterBase + range.clusterCount);
+                        if (rec == nullptr) {
+                            HE_CORE_WARN("[Nanite] ref[{}] inst={} cluster={} asset={} 区间[{},+{}) 越界=1 记录=空",
+                                         i, inst, cluster, assetSlot, range.clusterBase,
+                                         range.clusterCount);
+                            continue;
+                        }
+                        HE_CORE_INFO("[Nanite] ref[{}] inst={} cluster={} asset={} 区间[{},+{}) 在区间={} | "
+                                     "triOff={} triCnt={} vtxOff={} mat={}",
+                                     i, inst, cluster, assetSlot, range.clusterBase,
+                                     range.clusterCount, inRange ? 1 : 0,
+                                     rec->triangleOffset, rec->triangleCount,
+                                     rec->vertexOffset, rec->materialID);
+                    }
+                    s_refDumped = true;
+                    // 【T8·排查】扫描整张可见列表：统计"无效引用"（簇号越界 / 实例号越界）。
+                    //   若存在大量无效槽位，就解释了"计数 1450 而光栅只处理 671"。
+                    if (m_Cull.ReadLastVisibleClusterCount() > 100u) {
+                        const u32 total = m_Cull.ReadLastVisibleClusterCount();
+                        const u32 mergedClusters = m_Scene.GetMergedClusterCount();
+                        const u32 instDomain = m_Cull.GetBVHInstanceDomain();
+                        u32 badCluster = 0u, badInstance = 0u, scanned = 0u;
+                        NaniteVisibleClusterRef buf[256]{};
+                        for (u32 base = 0u; base < total && scanned < 8192u; base += 256u) {
+                            const u32 got = m_Cull.ReadbackVisibleClustersAt(base, buf, 256u);
+                            if (got == 0u) break;
+                            for (u32 i = 0u; i < got; ++i) {
+                                if (buf[i].cluster >= mergedClusters) ++badCluster;
+                                if (buf[i].instance >= instDomain) ++badInstance;
+                            }
+                            scanned += got;
+                        }
+                        HE_CORE_INFO("[Nanite] 可见列表扫描：计数 {} 实读 {} | 簇号越界 {} | 实例号越界 {}（聚合簇 {}，实例域 {}）",
+                                     total, scanned, badCluster, badInstance, mergedClusters, instDomain);
+                    }
+                }
+
+                // 【T8 排查】软光栅赢家缓冲抽查：全 0xFFFFFFFF ⇒ 第 2.5 趟没写过
+                {
+                    u32 winners[16]{};
+                    m_Raster.ReadbackWinnerId(winners, 16u);
+                    u32 written = 0u;
+                    for (u32 i = 0u; i < 16u; ++i) if (winners[i] != 0xFFFFFFFFu) ++written;
+                    HE_CORE_INFO("[Nanite] 赢家缓冲前 16 像素：已写 {} 个（首个=0x{:08X}）",
+                                 written, winners[0]);
+                    u32 keys[16]{};
+                    m_Raster.ReadbackDepthKeys(keys, 16u);
+                    u32 keyWritten = 0u;
+                    for (u32 i = 0u; i < 16u; ++i) if (keys[i] != 0xFFFFFFFFu) ++keyWritten;
+                    HE_CORE_INFO("[Nanite] 深度键前 16 像素：已写 {} 个（首个=0x{:08X}）",
+                                 keyWritten, keys[0]);
+                }
+
+                // 【T8 排查】同一帧的 CPU 参考遍历：与 GPU 的可见簇数对照。
+                //   CPU≈GPU ⇒ 剔除端没问题（孔洞来自几何/解码）；
+                //   CPU≫GPU ⇒ GPU 侧遍历/写入丢失（剔除端 bug）。
+                {
+                    std::vector<NaniteVisibleClusterRef> cpuVisible;
+                    const auto cpuStats = m_Cull.RunCullChainCPUReference(cpuVisible);
+                    HE_CORE_INFO("[Nanite] CPU 参考遍历：可见簇={} 访问节点={} 过视锥={} LOD 拒绝={} 栈溢出={}",
+                                 (u32)cpuVisible.size(), cpuStats.visitedNodes,
+                                 cpuStats.frustumPassClusters, cpuStats.lodRejectedClusters,
+                                 cpuStats.stackOverflows);
+
+                    // 【T8 排查】把 CPU 参考的可见簇中心投影到屏幕，统计覆盖范围：
+                    //   范围铺满 ⇒ 可见几何本身是全屏的（问题在解码/绘制）；
+                    //   只占一小块 ⇒ 可见集合在几何上就是小的（问题在剔除/资产）。
+                    if (!cpuVisible.empty() && m_Scene.HasAssetCPUCopy()) {
+                        const auto& assetCpu = m_Scene.GetAssetCPUCopy();
+                        const float* vp2 = m_SoftParams.vpRows;
+                        float minX = 1.0e9f, minY = 1.0e9f, maxX = -1.0e9f, maxY = -1.0e9f;
+                        u32 inside = 0u;
+                        for (const NaniteVisibleClusterRef& ref : cpuVisible) {
+                            if (ref.cluster >= assetCpu.clusters.size()) continue;
+                            const float* br = assetCpu.clusters[ref.cluster].boundsCenterRadius;
+                            const float p4[4] = { br[0], br[1], br[2], 1.0f };
+                            const float ax = vp2[0]*p4[0] + vp2[1]*p4[1] + vp2[2]*p4[2] + vp2[3]*p4[3];
+                            const float ay = vp2[4]*p4[0] + vp2[5]*p4[1] + vp2[6]*p4[2] + vp2[7]*p4[3];
+                            const float aw = vp2[12]*p4[0] + vp2[13]*p4[1] + vp2[14]*p4[2] + vp2[15]*p4[3];
+                            if (aw <= 0.1f) continue;
+                            const float sx = (0.5f + 0.5f * (ax / aw)) * (float)m_Width;
+                            const float sy = (0.5f - 0.5f * (ay / aw)) * (float)m_Height;
+                            minX = std::min(minX, sx); maxX = std::max(maxX, sx);
+                            minY = std::min(minY, sy); maxY = std::max(maxY, sy);
+                            if (sx >= 0.0f && sx < (float)m_Width && sy >= 0.0f && sy < (float)m_Height) ++inside;
+                        }
+                        // 【T8 排查】从可见列表里挑一个投影落在屏幕中部的簇，作为 debugCluster 候选
+                        m_DebugClusterCandidate = 0xFFFFFFFFu;
+                        for (const NaniteVisibleClusterRef& ref : cpuVisible) {
+                            if (ref.cluster >= assetCpu.clusters.size()) continue;
+                            const float* br = assetCpu.clusters[ref.cluster].boundsCenterRadius;
+                            const float p4b[4] = { br[0], br[1], br[2], 1.0f };
+                            const float bx = vp2[0]*p4b[0] + vp2[1]*p4b[1] + vp2[2]*p4b[2] + vp2[3]*p4b[3];
+                            const float by = vp2[4]*p4b[0] + vp2[5]*p4b[1] + vp2[6]*p4b[2] + vp2[7]*p4b[3];
+                            const float bw = vp2[12]*p4b[0] + vp2[13]*p4b[1] + vp2[14]*p4b[2] + vp2[15]*p4b[3];
+                            if (bw <= 0.1f) continue;
+                            const float bxPix = (0.5f + 0.5f * (bx / bw)) * (float)m_Width;
+                            const float byPix = (0.5f - 0.5f * (by / bw)) * (float)m_Height;
+                            if (bxPix < 620.0f || bxPix > 900.0f || byPix < 200.0f || byPix > 420.0f) continue;
+                            m_DebugClusterCandidate = ref.cluster;
+                            break;
+                        }
+
+                        if (maxX > minX) {
+                            HE_CORE_INFO("[Nanite] CPU 可见簇屏幕范围 x=[{:.0f},{:.0f}] y=[{:.0f},{:.0f}]（落在屏内 {} / {}）",
+                                         minX, maxX, minY, maxY, inside, (u32)cpuVisible.size());
+                        }
+                    }
+                }
+                // 【T8 诊断】Phase 1 的产物：可见实例计数 + 可见性掩码里非零条数。
+                // 【为什么要看它】掩码全 0 时 Phase 2 会逐实例早退 ⇒ 一条命令都不写（当前症状）。
+                u32 visInst = 0u, maskOn = 0u;
+                if (auto* buf = m_Cull.GetVisibleInstanceCountBuffer()) {
+                    if (void* p = buf->Map()) { visInst = *static_cast<u32*>(p); buf->Unmap(); }
+                }
+                if (auto* mask = m_Cull.GetVisibleMaskBuffer()) {
+                    if (void* p = mask->Map()) {
+                        const u32* m32 = static_cast<const u32*>(p);
+                        for (u32 i = 0u; i < 64u; ++i) if (m32[i] != 0u) ++maskOn;
+                        mask->Unmap();
+                    }
+                }
+                HE_CORE_INFO("[Nanite] phase1 读数 可见实例={} 掩码非零={}/64（域 {}）",
+                             visInst, maskOn, m_Cull.GetBVHInstanceDomain());
+                // 【T8 诊断】软/硬光栅的原子读数：判断"光栅有没有被调用/有没有写出颜色"。
+                // 【为什么需要】假簇链绕开剔除仍看不到几何 ⇒ 必须区分"没画"与"画了没进 GBuffer"。
+                {
+                    u32 soft[he::render::kNaniteSoftStatsCapacity]{};
+                    u32 hard[he::render::kNaniteHardStatsCapacity]{};
+                    m_Raster.ReadbackSoftStats(soft);
+                    m_Raster.ReadbackHardStats(hard);
+                    // 槽位口径见 `Nanite_SoftRasterCommon.slang`：0=簇数 1=跳过 2=三角形 3=退化 4=**上屏像素**
+                    // 槽位口径见 `Nanite_HardRaster.mesh.slang`：
+                    //   0=硬光栅簇数、1=输出图元数、2=**硬光栅像素（写进 GBuffer）**、3=材质回退像素
+                    HE_CORE_INFO("[Nanite] 光栅读数 软簇={} 跳过={} 三角形={} 退化={} 上屏像素={} | "
+                                 "硬簇={} 图元={} 硬像素={} 回退={} | 缺页={} 请求={}（不变式：软+跳过+缺页={}）",
+                                 soft[0], soft[1], soft[2], soft[3], soft[4],
+                                 hard[0], hard[1], hard[2], hard[3],
+                                 soft[20], soft[21],
+                                 soft[0] + soft[1] + soft[20]);
+                    // 【T8 诊断】一次性把 shader 侧"实际收到的参数"打出来：
+                    // 若 screenW/H 或两个焦距为 0，说明 push constant 布局错位（不是几何问题）。
+                    static bool s_ParamLogged = false;
+                    if (!s_ParamLogged) {
+                        s_ParamLogged = true;
+                        HE_CORE_INFO("[Nanite] 软光栅参数回读 screenW={} screenH={} maxTri={} "
+                                     "instanceCount={} [6..11]={},{},{},{},{},{}",
+                                     soft[6], soft[7], soft[8], soft[9],
+                                     soft[10], soft[11], soft[12], soft[13], soft[14], soft[15]);
+                    }
+                }
+            }
+        }
+    }
             // 计数缓冲每帧开头会被 GPU 命令清 0（4B 拷贝）⇒ 主机偶尔会读到"清零后的 0"。
             // 读到 0 时**保留上一次的非零值**（不把上界打回静态上界）。
             if (lastSeenRaw > 0u) m_LastSeenVisibleClusters = lastSeenRaw;
@@ -419,35 +771,40 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
             //   打一条一次性 HE_CORE_WARN 说明原因与对照开关。跳过意味着"大簇（>maxTriangles）
             //   本帧不画"—— 这是明确的画面降级，而不是把错误画面当真。
             // 【对照开关】`nanite_hard_raster=0` 永久关闭；`nanite_instance_test_count` 降低重叠实例数。
-            constexpr u32 kNaniteHardRasterRefBudget = 131072u;
-            const bool hardRasterOverBudget = (dispatchBound > kNaniteHardRasterRefBudget);
+            const u32 kNaniteHardRasterRefBudget =
+                m_Settings.hardRasterRefBudget > 0u ? m_Settings.hardRasterRefBudget : 131072u;
+            // 【C 修复】没有"上帧可见数"时 `dispatchBound` 退化成静态上界（簇数 × 实例域），
+            //   在按材质拆资产（8714 簇 × 25 实例 = 217850）等场景下**首帧就超预算**，
+            //   于是硬光栅被永久关掉（实测：大簇全不画）。改为"只有拿到实测可见数才判预算"。
+            const bool budgetKnown = (lastSeen > 0u);
+            const bool hardRasterOverBudget =
+                budgetKnown && (dispatchBound > kNaniteHardRasterRefBudget);
+            // 【C·可观测降级】超预算时**不再整档关掉**，而是把派发上界钳到预算：
+            //   超出预算的簇本帧不画（画面变少是可见的降级），但代价被硬性钳住；
+            //   同时打印"按预算截断、约丢弃多少条簇引用"，让降级可观测而不是靠猜。
+            u32 hardDispatchBound = dispatchBound;
+            if (hardRasterOverBudget) {
+                hardDispatchBound = kNaniteHardRasterRefBudget;
+                static u32 s_degradeLog = 0u;
+                if ((s_degradeLog++ % 120u) == 0u) {
+                    HE_CORE_WARN("[Nanite] 硬光栅按预算降级：派发上界 {} → {}（上帧可见 {}，"
+                                 "本帧最多约 {} 条簇引用不画）；改 cfg `nanite_hard_raster_budget` 可放宽",
+                                 dispatchBound, hardDispatchBound, lastSeen,
+                                 dispatchBound - hardDispatchBound);
+                }
+            }
             {
                 static bool s_loggedBound = false;
                 if (!s_loggedBound) {
                     s_loggedBound = true;
-                    HE_CORE_INFO("[Nanite] 光栅派发上界 dispatch_bound={}（上帧可见 {}；静态上界 "
+                    HE_CORE_INFO("[Nanite] 光栅派发上界 dispatch_bound={}（上帧可见 {} / 上帧绘制 {}；静态上界 "
                                  "{} = 簇数 {} × 实例域 {}；表容量 {}）",
-                                 dispatchBound, lastSeen, refBound,
+                                 dispatchBound, lastSeen, lastDrawRaw, refBound,
                                  m_Cull.GetBVHClusterCount(),
                                  m_Cull.GetBVHInstanceDomain(),
                                  m_Cull.GetBVHVisibleCapacity());
                 }
-                // 【降级是**永久关掉这个档位**，不是"只跳过这一帧的录制"】
-                //   实测（07.Nanite，64 个重叠合成实例）：把 `hardRaster` 从 1 改成 0 让帧时间从
-                //   2.07 s 降到 0.04 s；而"只跳过 RecordHardRasterPass 的录制、PSO/资源照建"仍然
-                //   是 2.06 s 级的长帧 ⇒ 代价与这个档位**存在**这件事本身绑定，只跳录制不够。
-                //   因此这里直接把档位关掉（等价于 cfg 的 `nanite_hard_raster=0`），并只警告一次。
-                static bool s_degraded = false;
-                if (hardRasterOverBudget && !s_degraded) {
-                    s_degraded = true;
-                    m_Settings.hardRaster = false;
-                    HE_CORE_WARN("[Nanite] 硬光栅工作量超预算（上界 {} > {} 条可见簇引用）："
-                                 "**已自动关闭硬光栅档位**（大簇不画，软光栅与其余链路照旧），"
-                                 "以免每帧 0.2 s 以上的长帧。对照开关：cfg 的 nanite_hard_raster=0"
-                                 "（永久关闭）或降低 nanite_instance_test_count（当前 {} 个合成实例）",
-                                 dispatchBound, kNaniteHardRasterRefBudget,
-                                 m_Cull.GetBVHInstanceDomain());
-                }
+
             }
 
             NaniteRaster::AssetViews views;
@@ -465,6 +822,13 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
             //   不会再出现两种口径同时生效。
             views.stream = m_Stream.Views();
 
+            // 【诊断修复】硬光栅统计缓冲：pass **被跳过**时必须由这里清（否则读回是上一次的陈旧值，
+            //   曾把"可见簇 1450 / 只画 671"的排查带偏）。pass 真跑时它自己会在派发前清，
+            //   所以这里**只在跳过时**清 —— 无条件清会因"拷贝命令没有屏障到 mesh 派发"而被
+            //   驱动重排到派发之后，把刚写好的读数抹成 0（实测：硬簇恒 0）。
+            if (!hardRasterOn) {
+                m_Raster.RecordHardStatsClear(cmd);
+            }
             m_Raster.RecordSoftRasterPass(cmd, targets, views, m_SoftParams,
                                           m_Cull.GetVisibleClusterBuffer(),
                                           m_Cull.GetVisibleClusterCountBuffer(),
@@ -477,12 +841,12 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
             //   软光栅先把颜色与深度写进既有附件，硬光栅再以 `LessEqual + depthWrite` 画上去 ⇒
             //   更近的硬片元通过测试并覆盖软颜色（硬遮软 ✓），更远的被丢弃、软颜色保留（软遮硬 ✓）。
             //   完整推导与三条已知边界写在 `NaniteRaster::RecordHardRasterPass` 的注释里。
-            if (hardRasterOn && !hardRasterOverBudget) {
+            if (hardRasterOn) {
                 m_Raster.RecordHardRasterPass(cmd, targets, views, m_SoftParams,
                                               m_Cull.GetVisibleClusterBuffer(),
                                               m_Cull.GetVisibleClusterCountBuffer(),
                                               m_Cull.GetInstanceBuffer(),
-                                              dispatchBound);   // 【A5】同上：上帧可见数×余量
+                                              hardDispatchBound);   // 【C】超预算时按预算截断
             }
         });
 
@@ -517,6 +881,48 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
 // 三步：① 读一次合并几何并转扁平 SoA；② RHI-free 的 `BuildNaniteAssetFromGeometry` 出字节镜像；
 // ③ `NaniteScene::UploadPackedAsset` 建缓冲 + 上传 + 真实 GPU 读回逐字节比较（它打印那一行）。
 // ============================================================
+void NaniteRenderer::SetMaterialTextureArray(rhi::IRHITexture* array, rhi::IRHISampler* sampler,
+                                             std::vector<std::pair<u32, u32>> hashToLayer) {
+    m_MatArray     = array;
+    m_MatArraySamp = sampler;
+    m_MatLayers    = std::move(hashToLayer);
+    m_Raster.SetMaterialTextureArray(array, sampler);
+    HE_CORE_INFO("NaniteRenderer: 材质 Texture2DArray 就绪（{} 张贴图）", (u32)m_MatLayers.size());
+}
+
+void NaniteRenderer::SetMaterialMetalRoughArray(rhi::IRHITexture* array, rhi::IRHISampler* sampler) {
+    m_MatMrArray = array;
+    m_Raster.SetMaterialMetalRoughArray(array, sampler);
+    HE_CORE_INFO("NaniteRenderer: MR 数组就绪（{}）", (void*)array);
+}
+
+void NaniteRenderer::ApplyMaterialTextureLayers(NanitePackedAsset& asset) const {
+    // 【注意】这里**不能**要求 `m_MatArray != nullptr`：多资产档的资产注册/上传早于
+    //   `SetMaterialTextureArray`（纹理句柄那时还没创建），只要表在就能算出层号。
+    //   此前用 `m_MatArray == nullptr` 早退 ⇒ 材质位被清空 ⇒ 整片白灰（实测）。
+    if (m_MatLayers.empty() || asset.materials.empty()) return;
+    for (NaniteMaterialRecord& rec : asset.materials) {
+        const u32 key = rec.bindlessTextureBase;
+        if (key == 0xFFFFFFFFu) { rec.textureMask = 0u; continue; }
+        u32 layer = 0xFFFFFFFFu;
+        for (const auto& kv : m_MatLayers) {
+            if (kv.first == key) { layer = kv.second; break; }
+        }
+        if (layer != 0xFFFFFFFFu) {
+            rec.bindlessTextureBase = layer;
+            rec.textureMask = 1u;      // baseColor
+        } else {
+            rec.textureMask = 0u;
+        }
+    }
+}
+
+void NaniteRenderer::SetMaterialNormalArray(rhi::IRHITexture* array, rhi::IRHISampler* sampler) {
+    m_MatNormalArray = array;
+    m_Raster.SetMaterialNormalArray(array, sampler);
+    HE_CORE_INFO("NaniteRenderer: 法线数组就绪");
+}
+
 void NaniteRenderer::EnsureAssetUploaded(const MeshBatcher& batcher) {
     // 【关闭 / 未就绪 ⇒ 一个资源都不建】§14.2 不变式 1：关闭档不产生新的 GPU 资源、不打日志。
     if (!m_Settings.enabled || !m_Ready) return;
@@ -524,6 +930,282 @@ void NaniteRenderer::EnsureAssetUploaded(const MeshBatcher& batcher) {
     if (m_AssetUploaded) return;
     m_AssetUploaded = true;
 
+    // ── T8：多资产模式 ──
+    // 样例已把各资产注册进 `NaniteScene`；这里只做"逐资产注册剔除数据 + 取最坏情况上界"，
+    // 不走单资产上传（`UploadPackedAsset` 会 `ClearAssets()`，会清掉多资产注册表）。
+    if (m_Settings.multiAsset && m_Scene.GetAssetCount() > 0u) {
+        u32 maxIndexCount = 0u;
+        f32 maxExtent     = 0.0f;
+        u32 cullAssets    = 0u;
+        // 【T8】聚合几何基址：`NaniteScene::RegisterAsset` 按注册顺序把五段首尾相接，
+        // 这里按**同一顺序**累加，得到每份资产的三角形/顶点/材质起始下标。
+        u32 triangleBase = 0u;
+        u32 vertexBase   = 0u;
+        u32 materialBase = 0u;
+        std::vector<u32>   registeredSlots;    // 剔除注册成功的资产槽位（按注册顺序）
+        std::vector<float> registeredBounds;   // 与上一行同序：每份 6 个 float（min3,max3）
+        for (u32 i = 0u; i < m_Scene.GetAssetCount(); ++i) {
+            const NaniteScene::NaniteAssetEntry* entry = m_Scene.GetAssetEntry(i);
+            if (entry == nullptr) continue;
+            // 【顺序很重要】量化尺度 / 索引上界只看**头部**，不看 `cpu.clusters`：
+            //   `cpu` 在某些路径下会被裁（只留页池要用的段），此时按 `clusters.empty()`
+            //   提前 continue 会把 `maxExtent` 算成 0 ⇒ 顶点解码范围 0 ⇒ 全部塌到簇心、
+            //   光栅一个片元都不出（实测"实例可见、硬簇 22、硬像素 0、量化尺度 0.000"）。
+            {
+                const auto& hdr = entry->cpu.header;
+                const float ext[3] = { hdr.bboxMax[0] - hdr.bboxMin[0],
+                                       hdr.bboxMax[1] - hdr.bboxMin[1],
+                                       hdr.bboxMax[2] - hdr.bboxMin[2] };
+                maxExtent = std::max(maxExtent, std::max(ext[0], std::max(ext[1], ext[2])));
+                maxIndexCount = std::max(maxIndexCount, hdr.indexCount);
+            }
+            if (entry->cpu.clusters.empty()) continue;
+            const u32 cullSlot = m_Cull.AppendAssetBVH(entry->cpu.clusters, entry->cpu.lodOffsets,
+                                                       triangleBase, vertexBase, materialBase);
+            if (cullSlot == 0xFFFFFFFFu) {
+                HE_CORE_ERROR("NaniteRenderer: 多资产 —— 资产 {} 的剔除数据注册失败", i);
+                continue;
+            }
+            // 【T8·A2】记录"注册成功"的剔除槽位与资产 bbox：恒等实例必须按这张表来编号，
+            //   否则某份资产失败后整条实例链的槽位都会错位（实测 24/25 时大片空洞）。
+            registeredSlots.push_back(cullSlot);
+            for (u32 a = 0u; a < 3u; ++a) registeredBounds.push_back(entry->cpu.header.bboxMin[a]);
+            for (u32 a = 0u; a < 3u; ++a) registeredBounds.push_back(entry->cpu.header.bboxMax[a]);
+            triangleBase += (u32)entry->cpu.triangles.size();
+            vertexBase   += (u32)entry->cpu.vertices.size();
+            materialBase += (u32)entry->cpu.materials.size();
+            ++cullAssets;
+        }
+        // 【T8】所有资产的剔除数据都注册完之后，再**一次性**建聚合 GPU 缓冲。
+        // 顺序不能反：先建缓冲再注册第二份资产，光栅端缓存的描述符会指向已销毁的 VkBuffer。
+        if (!m_Scene.BuildMergedBuffers()) {
+            HE_CORE_ERROR("NaniteRenderer: 多资产聚合缓冲创建失败");
+        }
+        m_Raster.SetPlaceholderIndexCapacity(maxIndexCount);
+        m_MeshMaxExtent     = maxExtent;
+        m_AssetClusterCount = m_Scene.GetMergedClusterCount();
+        // 【T8】材质段是否真的带上了（空 ⇒ 光栅会全走回退，画面纯白）
+        u32 matTotal = 0u;
+        for (u32 i = 0u; i < m_Scene.GetAssetCount(); ++i) {
+            if (const NaniteScene::NaniteAssetEntry* e = m_Scene.GetAssetEntry(i)) {
+                matTotal += (u32)e->cpu.materials.size();
+            }
+        }
+        // 【T8 修复】光栅端的"材质条数"必须同步：多资产分支此前没设 `m_MaterialCount`，
+        //   着色器把每个像素都判成 `materialID >= materialCount` ⇒ 全走中性回退
+        //   （实测 `回退 == 硬像素` ≈ 99.7 万）。
+        m_MaterialCount = matTotal;
+        HE_CORE_INFO("NaniteRenderer: 多资产模式就绪（{} 份资产 / 聚合 {} 簇 / 材质记录 {} 条；"
+                     "占位索引上界 {}，量化尺度 {:.3f}）",
+                     cullAssets, m_AssetClusterCount, matTotal, maxIndexCount, maxExtent);
+
+        // 【T8·A2】按材质拆分的资产：一份资产一条**恒等实例**（几何已在世界空间烘焙）。
+        //   这样"按材质拆资产"才能真正上屏：实例数 = 资产数（Sponza 25 份，远低于 64 上限），
+        //   不再依赖 ECS 网格绑定（103 个网格会超实例域）。
+        if (m_Settings.assetIdentityInstances && !registeredSlots.empty()) {
+            m_Cull.SetAssetInstances((u32)registeredSlots.size(), registeredBounds,
+                                     registeredSlots);
+        }
+
+        return;
+    }
+
+    // ── T5：优先加载离线 `.nanite`（方案 §5.2）──
+    // 命中条件：`offline` 打开、路径非空、文件可读、格式/构建器校验通过。
+    // 任何一种失败都**回退运行时构建**（不是放弃渲染）：打一行告警说明原因。
+    NanitePackedAsset offlineAsset;
+    if (m_Settings.offline && !m_Settings.offlinePath.empty()) {
+        const String resolved = vfs::Resolve(m_Settings.offlinePath);
+        std::ifstream file(resolved, std::ios::binary | std::ios::ate);
+        if (!file) {
+            HE_CORE_WARN("NaniteRenderer: 离线资产不存在（{}），回退运行时构建", resolved);
+        } else {
+            const std::streamsize size = file.tellg();
+            file.seekg(0, std::ios::beg);
+            std::vector<u8> bytes((size_t)size);
+            if (!file.read(reinterpret_cast<char*>(bytes.data()), size)) {
+                HE_CORE_WARN("NaniteRenderer: 离线资产读取失败（{}），回退运行时构建", resolved);
+            } else {
+                NaniteAssetLoadInfo info;
+                const NaniteAssetLoadStatus status =
+                    ParseNaniteAsset(bytes.data(), bytes.size(), kNaniteBuilderVersion,
+                                     offlineAsset, &info);
+                if (status == NaniteAssetLoadStatus::Ok) {
+                    // 【T8 排查】打印 LOD 级偏移：确认 level 0 是最细（簇多）还是最粗（簇少）。
+                    {
+                        std::string lodStr;
+                        for (usize li = 0; li < offlineAsset.lodOffsets.size(); ++li) {
+                            lodStr += std::to_string(offlineAsset.lodOffsets[li]);
+                            if (li + 1u < offlineAsset.lodOffsets.size()) lodStr += ",";
+                        }
+                        HE_CORE_INFO("NaniteRenderer: LOD 级偏移 [{}]（共 {} 簇）",
+                                     lodStr, (u32)offlineAsset.clusters.size());
+                    }
+                    HE_CORE_INFO("NaniteRenderer: 离线资产加载成功（{}，格式 v{}，构建器 v{}，{} 簇 / {} 三角形，扩展段 {}）",
+                                 m_Settings.offlinePath, info.formatVersion, info.builderVersion,
+                                 offlineAsset.clusters.size(), offlineAsset.triangles.size(),
+                                 info.extSectionCount);
+
+                    // 【T8】把 `MaterialDesc` 扩展段翻译成光栅端的材质记录（公共辅助，单/多资产共用）
+                    {
+                        const usize before = offlineAsset.materials.size();
+                        NaniteFillMaterialsFromDesc(offlineAsset, info.materialDescs);
+                        if (offlineAsset.materials.size() != before) {
+                            // 【T8 纹理】数组档：bindlessTextureBase 承载层号，mask 只开 baseColor
+                        HE_CORE_INFO("NaniteRenderer: 从 MaterialDesc 恢复 {} 个材质记录（仅因子）",
+                                         (u32)offlineAsset.materials.size());
+                        }
+                    }
+
+                } else {
+                    const char* reason = status == NaniteAssetLoadStatus::VersionMismatch
+                                             ? "格式版本不匹配"
+                                             : (status == NaniteAssetLoadStatus::BuilderMismatch
+                                                    ? "构建器版本过期" : "文件损坏");
+                    HE_CORE_WARN("NaniteRenderer: 离线资产不可用（{}，{}），回退运行时构建",
+                                 m_Settings.offlinePath, reason);
+                    offlineAsset = NanitePackedAsset{};
+                }
+            }
+        }
+    }
+
+    // 离线命中时跳过"合并几何 → 构建"，直接把资产交给上传（读回校验照常做）。
+    if (!offlineAsset.clusters.empty()) {
+        const NanitePackedAsset& asset = offlineAsset;
+
+        // 【T8·排查】量化尺度诊断：用**头部 bbox 尺度**解码前若干簇的顶点，
+        //   检查它们是否落在各自簇的包围球内。若不落在球内，说明"打包时的量化尺度"
+        //   与"运行时用的头部 bbox 尺度"不是同一个 ⇒ 几何会整体缩放/偏移（实测
+        //   per-material 资产在单资产档就是这种表现）。同时报告用网格整体尺度解码的结果，
+        //   一眼就能看出到底该用哪个。
+        {
+            const auto& hdr = asset.header;
+            const float ex = hdr.bboxMax[0] - hdr.bboxMin[0];
+            const float ey = hdr.bboxMax[1] - hdr.bboxMin[1];
+            const float ez = hdr.bboxMax[2] - hdr.bboxMin[2];
+            const float extentHeader = std::max(ex, std::max(ey, ez));
+            const float extentGlobal = m_MeshMaxExtent > 0.0f ? m_MeshMaxExtent : extentHeader;
+            u32 outHeader = 0u, outGlobal = 0u, checked = 0u;
+            std::string firstBad;
+            for (const NaniteClusterRecord& rec : asset.clusters) {
+                if (checked >= 64u) break;
+                const u32 base = rec.vertexOffset;
+                if ((usize)base >= asset.vertices.size()) break;
+                const float cx = rec.boundsCenterRadius[0];
+                const float cy = rec.boundsCenterRadius[1];
+                const float cz = rec.boundsCenterRadius[2];
+                const float r  = rec.boundsCenterRadius[3];
+                const u32 word = asset.vertices[base].packedPosition;
+                const auto decodeMax = [&](float e) {
+                    float d2 = 0.0f;
+                    const float o[3] = { cx, cy, cz };
+                    for (u32 a = 0u; a < 3u; ++a) {
+                        const u32 raw = (word >> (10u * a)) & 0x3FFu;
+                        const float v = o[a] + ((float)((i32)raw - 512) / 1022.0f) * e;
+                        const float d = v - o[a];
+                        d2 += d * d;
+                    }
+                    return std::sqrt(d2);
+                };
+                if (decodeMax(extentHeader) > r * 1.5f + 1.0f) ++outHeader;
+                if (decodeMax(extentGlobal) > r * 1.5f + 1.0f) ++outGlobal;
+                if (outHeader > 0u && firstBad.empty()) {
+                    firstBad = "首簇越界：|p-c|=" + std::to_string(decodeMax(extentHeader)) +
+                               " 半径=" + std::to_string(r) +
+                               " 头尺度=" + std::to_string(extentHeader) +
+                               " 全局尺度=" + std::to_string(extentGlobal);
+                }
+                ++checked;
+            }
+            HE_CORE_INFO("[Nanite] 量化尺度诊断：检查 {} 簇；按**头 bbox 尺度**越界 {} 个，"
+                         "按**全局尺度({:.1f})**越界 {} 个（头尺度={:.1f}）{}",
+                         checked, outHeader, extentGlobal, outGlobal, extentHeader,
+                         firstBad.empty() ? "" : ("；" + firstBad));
+        }
+
+            // 【T8 纹理】数组档：无论材质是"从 MaterialDesc 恢复"还是"资产自带"，都统一写层号。
+        //   之前这段放在 fill-from-desc 分支里，资产自带材质时整段不执行（实测：纹理没生效）。
+        if (m_MatArray != nullptr && !offlineAsset.materials.empty()) {
+            // 【T8 纹理映射】按"贴图哈希"把材质对到数组层号（不再依赖网格遍历顺序）。
+            usize matched = 0u;
+            for (NaniteMaterialRecord& rec : offlineAsset.materials) {
+                const u32 key = rec.bindlessTextureBase;
+                if (key == 0xFFFFFFFFu) { rec.textureMask = 0u; continue; }
+                u32 layer = 0xFFFFFFFFu;
+                for (const auto& kv : m_MatLayers) {
+                    if (kv.first == key) { layer = kv.second; break; }
+                }
+                if (layer != 0xFFFFFFFFu) {
+                    rec.bindlessTextureBase = layer;
+                    rec.textureMask = 1u;      // baseColor
+                    ++matched;
+                } else {
+                    rec.textureMask = 0u;      // 贴图不在数组里 ⇒ 只用因子
+                }
+            }
+            HE_CORE_INFO("NaniteRenderer: 材质按贴图哈希匹配层号 {}/{} 条", (u32)matched,
+                         (u32)offlineAsset.materials.size());
+            for (usize mi = 0; mi < offlineAsset.materials.size() && mi < 6u; ++mi) {
+                HE_CORE_INFO("NaniteRenderer: 材质[{}] baseColor=({:.3f},{:.3f},{:.3f}) metallic={:.2f} roughness={:.2f}",
+                             (u32)mi,
+                             offlineAsset.materials[mi].baseColorFactor[0],
+                             offlineAsset.materials[mi].baseColorFactor[1],
+                             offlineAsset.materials[mi].baseColorFactor[2],
+                             offlineAsset.materials[mi].metallicFactor,
+                             offlineAsset.materials[mi].roughnessFactor);
+            }
+            HE_CORE_INFO("NaniteRenderer: 材质[0] baseColor=({:.3f},{:.3f},{:.3f}) metallic={:.3f} roughness={:.3f}",
+                         offlineAsset.materials[0].baseColorFactor[0],
+                         offlineAsset.materials[0].baseColorFactor[1],
+                         offlineAsset.materials[0].baseColorFactor[2],
+                         offlineAsset.materials[0].metallicFactor,
+                         offlineAsset.materials[0].roughnessFactor);
+            HE_CORE_INFO("NaniteRenderer: 材质[0] mask=0x{:X} base={}（层号应 < {})",
+                         offlineAsset.materials[0].textureMask,
+                         offlineAsset.materials[0].bindlessTextureBase, (u32)m_MatLayers.size());
+        }
+    if (m_Scene.UploadPackedAsset(asset)) {
+            m_MaterialCount     = (u32)asset.materials.size();
+            m_MultiMeshClusters = asset.stats.multiMeshClusters;
+            // 【T8 修复】离线路径也必须走完"上传之后"的接线，否则：
+            //   · 簇 BVH / LOD 元数据不注册 ⇒ 剔除 Phase 2/3 永远跳过（画面只剩 Phase 1）；
+            //   · 占位索引容量与量化尺度缺失 ⇒ 硬光栅/软光栅解码口径不对；
+            //   · 资产 CPU 副本不保留 ⇒ 流式（若开启）退化为 no_asset。
+            // 这段与下面运行时构建分支的 ⑤⑥⑦⑧ 逐项对应（T5 引入离线分支时漏掉了）。
+            HE_CORE_INFO("[Nanite][step] 上传完成，开始注册剔除数据");
+            if (!m_Cull.SetClusterBVH(asset.clusters, asset.lodOffsets)) {
+                HE_CORE_ERROR("NaniteRenderer: 离线资产的 cluster BVH / LOD 元数据注册失败");
+            }
+            HE_CORE_INFO("[Nanite][step] 剔除数据注册完成，开始建聚合缓冲");
+            if (!m_Scene.BuildMergedBuffers()) {
+                HE_CORE_ERROR("NaniteRenderer: 离线资产的聚合缓冲创建失败");
+            }
+            HE_CORE_INFO("[Nanite][step] 聚合缓冲完成，开始建占位索引");
+            m_Raster.SetPlaceholderIndexCapacity(asset.header.indexCount);
+            HE_CORE_INFO("[Nanite][step] 占位索引完成");
+            // 【T8 修复】量化尺度必须与打包器一致：解析层不填 `stats`，原值 0 ⇒ 解码范围 0 ⇒
+            //   顶点全塌到簇心（实测："巨大三角形 + 全回退材质"）。改用头部 bbox 最大轴长。
+            {
+                const auto& hdr = asset.header;
+                const float ex = hdr.bboxMax[0] - hdr.bboxMin[0];
+                const float ey = hdr.bboxMax[1] - hdr.bboxMin[1];
+                const float ez = hdr.bboxMax[2] - hdr.bboxMin[2];
+                const float bboxExtent = std::max(ex, std::max(ey, ez));
+                m_MeshMaxExtent = (bboxExtent > 0.0f) ? bboxExtent : asset.stats.meshMaxExtent;
+            }
+            m_AssetClusterCount = (u32)asset.clusters.size();
+            NanitePackedAsset cpuCopy = asset;   // 离线资产是 const&，留存需要一份可移动的副本
+            if (!m_Scene.StoreAssetCPUCopy(std::move(cpuCopy), m_Settings.materialBin)) {
+                HE_CORE_WARN("NaniteRenderer: 离线资产 CPU 留存为空 ⇒ 流式（若开启）会退化为 no_asset");
+            }
+            return;
+        }
+        // 【失败也回退】离线资产上传/读回校验失败时继续走运行时构建，
+        // 保证"离线通路出问题不导致几何消失"（方案 §5.2 的回退语义）。
+        HE_CORE_WARN("NaniteRenderer: 离线资产上传失败 ⇒ 回退运行时构建");
+        offlineAsset = NanitePackedAsset{};
+    }
     // ── ① 合并几何只读一次（§14.3：MeshBatcher 只当一次性输入）──
     // 两个 getter 都是 `MeshBatcher.h:60-61` 上**已有**的 const 访问器 ⇒ 本任务没有为几何来源
     // 改过 `MeshBatcher` 一行。索引在合批时已经加过 baseVertex（`MeshBatcher.cpp:53`），
@@ -700,7 +1382,7 @@ void NaniteRenderer::EnsureSoftRasterReady(const NaniteGBufferHandles& gb) {
     //   与 `GB_Clear` 的 lambda 里（都按同一个开关门控）。
     if (!m_Settings.enabled || !m_Ready || !m_Settings.softRaster) return;
     if (!gb.HasFullGBufferTextures()) return;
-    const NaniteScene::AssetBuffers& asset = m_Scene.GetAssetBuffers();
+    const NaniteScene::AssetBuffers& asset = m_Scene.GetMergedAssetBuffers();   // T8：光栅端消费聚合视图
     if (!asset.clusters || !asset.vertices || !asset.indices) return;   // 资产未入库
 
     NaniteRaster::GBufferTargets targets;
@@ -728,7 +1410,7 @@ void NaniteRenderer::EnsureHardRasterReady(const NaniteGBufferHandles& gb) {
     if (!m_Settings.softRaster || !m_Settings.hardRaster) return;
     if (!m_Raster.IsHardRasterSupported()) return;
     if (!gb.HasFullGBufferTextures()) return;
-    const NaniteScene::AssetBuffers& asset = m_Scene.GetAssetBuffers();
+    const NaniteScene::AssetBuffers& asset = m_Scene.GetMergedAssetBuffers();   // T8：光栅端消费聚合视图
     if (!asset.clusters || !asset.vertices || !asset.indices) return;   // 资产未入库
 
     NaniteRaster::GBufferTargets targets;
@@ -759,7 +1441,7 @@ void NaniteRenderer::EnsureDebugViewReady() {
     if (m_Settings.debugView == kNaniteDebugViewOff) return;   // 默认档：一个资源都不建
     if (m_Settings.debugView > kNaniteDebugViewMaxMode) return; // 防御：越界档位不建（cfg 已钳）
 
-    const NaniteScene::AssetBuffers& asset = m_Scene.GetAssetBuffers();
+    const NaniteScene::AssetBuffers& asset = m_Scene.GetMergedAssetBuffers();   // T8：光栅端消费聚合视图
     if (!asset.clusters) return;                       // 资产未入库：没有数据可可视化
     rhi::IRHIBuffer* spheres = m_Cull.GetBVHSphereBuffer();
     rhi::IRHIBuffer* lodInfo = m_Cull.GetLODInfoBuffer();
@@ -825,7 +1507,21 @@ void NaniteRenderer::EnsureStreamReady() {
     // 【返回值必须消费】`Setup` 是 `[[nodiscard]]`，而且 `m_StreamSetupTried` 已经置位 ⇒
     //   失败就是**永久不重试**（阶段一的资源只在资产入库后建一次）。所以这里显式告警一条：
     //   失败原因同时也由 `LogStreamReadback` 的 `stream=off reason=…` 打印（不静默）。
-    if (!m_Stream.Setup(m_Scene.GetAssetCPUCopy(), cfg)) {
+    // 【T12】离线资产档把**文件路径**交给流式：页数据按需读盘，不再从整份 CPU 副本拷。
+    //   非离线档（运行时构建）没有文件，路径为空 ⇒ 维持内存副本路径。
+    // 【T12】路径必须**解析成绝对路径**再交给流式：`std::ifstream` 只认进程 CWD，
+    //   而引擎的资产路径是相对 `Content/` 的（`vfs::Resolve` 负责拼接与大小写探测）。
+    const String streamPageFile = m_Settings.offline ? vfs::Resolve(m_Settings.offlinePath) : String{};
+    HE_CORE_INFO("[Nanite] 流式页文件候选: offline={} path={}", m_Settings.offline ? 1 : 0, streamPageFile);
+    const bool streamOk = m_Stream.Setup(m_Scene.GetAssetCPUCopy(), cfg, streamPageFile);
+    if (streamOk && m_Stream.UsesFileSource()) {
+        // 【T12 的内存收益】页数据已改为按需读文件 ⇒ 释放常驻的几何 CPU 副本
+        //   （Sponza 实测 13.4 MB）。头部/材质段保留：材质 bin 与查询还要用。
+        HE_CORE_INFO("[Nanite] 流式页数据改为文件读取 ⇒ 释放资产几何 CPU 副本（省 {} 字节）",
+                     (unsigned long long)m_Scene.GeometryCPUBytes());
+        m_Scene.ReleaseAssetGeometry();
+    }
+    if (!streamOk) {
         HE_CORE_WARN("[Nanite] 流式初始化失败（本档起退化为整段常驻）：reason={}；"
                      "页池 {} 槽 / 每页 {} 份内容 —— 画面仍是整段常驻的正确结果，"
                      "只是没有按需驻留",
@@ -838,6 +1534,10 @@ void NaniteRenderer::StepStreaming() {
     //   不会发生任何 GPU 同步、也不会读任何缓冲。
     if (!m_Stream.IsReady()) return;
     m_Stream.BeginFrame(m_FrameIndex);
+    // 【T12 可观测性】`LogStreamReadback` 此前**从未被调用** ⇒ 流式在运行时没有任何读数
+    //   （页总数/驻留/上传/淘汰/缺页都看不到，§5.6 的量化目标无法验收）。
+    //   每 60 帧打一行（含一次 GPU 驻留页读回），代价可忽略。
+    if ((m_FrameIndex % 60u) == 0u) LogStreamReadback();
     ++m_FrameIndex;
 }
 

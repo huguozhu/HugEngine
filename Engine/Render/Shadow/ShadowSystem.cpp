@@ -17,6 +17,9 @@ bool ShadowSystem::Initialize(rhi::IRHIDevice* device,u32,u32){
         rhi::DescriptorSetLayoutDesc shadowLayoutDesc;
         shadowLayoutDesc.bindings = {
             { rhi::kBindingShadowObjects, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskVertex },
+            // 【T10】MS 变体要按 SRV 读顶点/索引（IA 版不用这两条；多出来的绑定对 IA 管线无害）
+            { 27, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskVertex },
+            { 28, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskVertex },
         };
         m_ShadowObjLayout = device->CreateDescriptorSetLayout(shadowLayoutDesc);
         for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i)
@@ -53,6 +56,18 @@ void ShadowSystem::CreateShadowPSO(){
         if(auto* pt=dynamic_cast<PointShadowTechnique*>(t.get())) pt->CreatePSO(m_ShadowObjLayout);
         if(auto* spot=dynamic_cast<SpotShadowTechnique*>(t.get())) spot->CreatePSO(m_ShadowObjLayout);
         if(auto* rect=dynamic_cast<RectLightShadowTechnique*>(t.get())) rect->CreatePSO(m_ShadowObjLayout);
+    }
+}
+
+void ShadowSystem::SetMeshShadowEnabled(bool enable){
+    for(auto& t:m_Techniques){
+        if(auto* csm=dynamic_cast<CSMTechnique*>(t.get())) csm->SetMeshShadowEnabled(enable);
+    }
+}
+
+void ShadowSystem::SetRemoveIaPipeline(bool remove){
+    for(auto& t:m_Techniques){
+        if(auto* csm=dynamic_cast<CSMTechnique*>(t.get())) csm->SetRemoveIaPipeline(remove);
     }
 }
 
@@ -115,6 +130,16 @@ void ShadowSystem::Update(const SubsystemContext& ctx){
     for(auto& t:m_Techniques){
         u32 n=t->CollectLights(*ctx.snapshot,*ctx.camera,m_AllShadowData,m_AllEntities);
         m_PerTechniqueCounts.push_back(n);
+        {
+            // 【T10 诊断】一次性打印每个技术本帧收集到的光源数
+            static bool s_Logged = false;
+            if (!s_Logged) {
+                s_Logged = true;
+                HE_CORE_INFO("[ShadowSystem] 技术 {} 收集光源 {} 个（累计 {}）",
+                             m_Techniques.size() > 0 ? (u32)(&t - m_Techniques.data()) : 0u,
+                             n, (u32)m_AllShadowData.size());
+            }
+        }
     }
 
     // 【容量钳制（必修）】阴影 SSBO 的容量是 `MAX_SHADOWS` 条（`Pipeline/Material.h` 的
@@ -171,8 +196,14 @@ void ShadowSystem::Render(rhi::IRHICommandList* cmd){
 
     u32 offset=0;
     for(usize i=0;i<m_Techniques.size();++i){
-        m_Techniques[i]->Render(cmd,*m_CachedSnapshot,*m_CachedRegistry,m_AllShadowData,offset);
-        offset+=m_PerTechniqueCounts[i];
+        const u32 count = (i < m_PerTechniqueCounts.size()) ? m_PerTechniqueCounts[i] : 0u;
+        // 【T10 修复】本技术本帧没收集到光源 ⇒ **不渲染**。
+        //   原来无条件调用会让"0 光源"的技术拿 `sd[offset]` —— 那是别的技术的数据，
+        //   于是 CSM 用一份零矩阵渲染级联（实测级联 VP 全 0、剔除失效、阴影全错）。
+        if (count > 0u) {
+            m_Techniques[i]->Render(cmd,*m_CachedSnapshot,*m_CachedRegistry,m_AllShadowData,offset);
+        }
+        offset += count;
     }
 }
 

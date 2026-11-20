@@ -74,7 +74,12 @@ void main(uint3 tid : SV_GroupThreadID, uint3 gid : SV_GroupID) {
 
     InstanceObject instance = u_Instances[ref.instance];
     if (instance.indexCount == 0u) return;
-    float3 translation = instance.ltw3.xyz;
+    // 【T8】完整实例基（旋转 + 缩放 + 平移），不再只取平移
+    NaniteInstanceBasis instanceBasis;
+    instanceBasis.cx = instance.ltw0.xyz;
+    instanceBasis.cy = instance.ltw1.xyz;
+    instanceBasis.cz = instance.ltw2.xyz;
+    instanceBasis.t  = instance.ltw3.xyz;
 
     // ── 【任务 24】与第 1/2 趟**逐字相同**的页解析（缺页的簇没有深度键 ⇒ 本趟也必须跳过）──
     SoftRasterClusterView view = softRasterResolveCluster(ref.cluster);
@@ -91,7 +96,7 @@ void main(uint3 tid : SV_GroupThreadID, uint3 gid : SV_GroupID) {
 
     // ── ② 逐三角形：重跑光栅化 → 等值复检 → 原子最小候选号 ──
     for (uint triLocal = tid.x; triLocal < triangleCount; triLocal += 16u) {
-        SoftRasterTriangle tri = softRasterFetchTriangle(view, triLocal, translation);
+        SoftRasterTriangle tri = softRasterFetchTriangle(view, triLocal, instanceBasis);
         if (!tri.valid) continue;
 
         float2 lo = min(min(tri.p0, tri.p1), tri.p2);

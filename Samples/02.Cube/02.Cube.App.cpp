@@ -10,6 +10,7 @@
 #include "02.Cube.App.h"
 
 #include "Core/Core.h"
+#include "Core/CrashHandler.h"
 #include "Core/Engine.h"
 #include "Platform/IWindow.h"
 #include "Platform/IVfs.h"
@@ -329,6 +330,7 @@ bool App::IsReady() const { return m_Impl->ready; }
 
 #include <cstdio>
 #include "Core/Core.h"
+#include "Core/CrashHandler.h"
 #include "Core/CVar.h"
 #include "Core/Engine.h"
 #include "Platform/IWindow.h"
@@ -520,6 +522,10 @@ void RenderDocFrameEnd(int frame) {
 }
 
 int main() {
+    // 【为什么需要】02 原先没有装崩溃处理器：进程异常退出时既没有报告也没有栈
+    //   （实测关闭窗口后"静默消失"，退出码读不到、日志停在半帧），排障只能靠猜。
+    //   与 04/06/07 同一套处理器，日志落到 Content/Config 下。
+    he::InstallCrashHandler("Content/Config/02_Cube_crash.log", nullptr);
     // --- 1. 引擎启动 ---
     EngineConfig config;
     config.appName      = "HugEngine — PBR Forward Pipeline";

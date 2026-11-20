@@ -129,6 +129,27 @@ public:
 
     // ── 开档与档位（§14.4：唯一真值在本类，外部只拿 const 引用读）──
     [[nodiscard]] const NaniteSettings& GetSettings() const { return m_Settings; }
+
+    /// 【T8 纹理】材质打包成一张 Texture2DArray：layers[i] = 第 i 个材质记录用的层号。
+    void SetMaterialTextureArray(rhi::IRHITexture* array, rhi::IRHISampler* sampler,
+                                 std::vector<std::pair<u32, u32>> hashToLayer);
+
+    /// 【A3】金属度/粗糙度数组（与 baseColor 同层序，材质共用一个层号）
+    void SetMaterialMetalRoughArray(rhi::IRHITexture* array, rhi::IRHISampler* sampler);
+
+    /// 【A1】法线贴图数组（与 baseColor 同层序）
+    void SetMaterialNormalArray(rhi::IRHITexture* array, rhi::IRHISampler* sampler);
+
+    /// 【T8·A2】把"贴图哈希 → 数组层号"的映射应用到一份资产的材质段（注册/上传之前调用）。
+    /// 多资产（按材质拆分的资产）由样例逐份注册，必须在这里先映射好层号。
+    void ApplyMaterialTextureLayers(NanitePackedAsset& asset) const;
+
+    /// 【T8·A2】**只**设置"贴图哈希 → 数组层号"表（不绑定纹理）。
+    ///   多资产档里资产在 `SetMaterialTextureArray` **之前**就注册/上传了，
+    ///   没有这张表时 `ApplyMaterialTextureLayers` 会把材质位全清掉 ⇒ 整片白灰。
+    void SetMaterialTextureLayerTable(std::vector<std::pair<u32, u32>> hashToLayer) {
+        m_MatLayers = std::move(hashToLayer);
+    }
     void SetSettings(const NaniteSettings& settings) { m_Settings = settings; }
 
     /// 帧图接入点（在 `DeferredPipeline_FrameGraph.cpp` 的 GBuffer 段被调用）。
@@ -598,6 +619,15 @@ public:
     NaniteUpload m_Upload;
     NaniteCull   m_Cull;
     NaniteRaster m_Raster;
+
+    /// 【T8 纹理】材质数组纹理与"材质记录 -> 层号"表
+    rhi::IRHITexture*  m_MatArray = nullptr;
+    rhi::IRHITexture*  m_MatMrArray = nullptr;   // 【A3】
+    rhi::IRHITexture*  m_MatNormalArray = nullptr;   // 【A1】MR 数组
+    rhi::IRHISampler*  m_MatArraySamp = nullptr;
+    std::vector<std::pair<u32, u32>> m_MatLayers;   // (贴图 URI 的 FNV1a32, 数组层号)
+    /// 【T8 排查】上一帧从 CPU 可见簇里挑出的调试簇号（-1 = 无）
+    u32 m_DebugClusterCandidate = 0xFFFFFFFFu;
 };
 
 } // namespace he::render

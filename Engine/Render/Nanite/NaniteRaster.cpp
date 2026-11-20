@@ -1,4 +1,4 @@
-﻿// ============================================================
+// ============================================================
 // Nanite/NaniteRaster.cpp — 绘制端：消费「计数 → 间接绘制」链（§14.8 任务 3）
 //   + 任务 16：默认消费**可见簇列表**写出的间接命令（假簇链保留为自证/退化路径）
 //
@@ -362,6 +362,15 @@ void NaniteRaster::RecordRasterPass(rhi::IRHICommandList* cmd,
 // ============================================================
 // §14.8 任务 16：占位索引缓冲（覆盖资产的整个索引位置空间；内容 = 0,1,2 周期模式）
 // ============================================================
+
+// 【T8】帧边界处落地挂起的 bindless 描述符写（见 `EnsureSoftRasterResources` 的说明）
+void NaniteRaster::FlushPendingBindlessDescriptors(rhi::IRHIDevice* device) {
+    if (!m_BindlessFlushPending || device == nullptr) return;
+    if (auto* heap = device->GetBindlessHeap()) {
+        heap->Flush();
+        m_BindlessFlushPending = false;
+    }
+}
 
 void NaniteRaster::SetPlaceholderIndexCapacity(u32 indexCount) {
     if (!m_Device) return;
@@ -731,6 +740,20 @@ bool NaniteRaster::EnsureSoftRasterResources(const GBufferTargets& targets) {
             {18, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },  // 池·顶点段
             {19, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },  // 池·三角形段
             {20, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },  // 反馈环（读写）
+            {22, rhi::DescriptorType::StorageBuffer, 1,    rhi::kStageMaskCompute, false },  // 每簇量化尺度
+            {23, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskCompute, false },  // 材质数组
+            {24, rhi::DescriptorType::Sampler,      1, rhi::kStageMaskCompute, false },
+            {25, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskCompute, false },
+            {26, rhi::DescriptorType::Sampler,      1, rhi::kStageMaskCompute, false },
+            {27, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskCompute, false },  // 法线数组
+            {28, rhi::DescriptorType::Sampler,      1, rhi::kStageMaskCompute, false },
+        {27, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskCompute, false },  // 法线数组
+        {28, rhi::DescriptorType::Sampler,      1, rhi::kStageMaskCompute, false },
+        {25, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskCompute, false },  // MR 数组
+        {26, rhi::DescriptorType::Sampler,      1, rhi::kStageMaskCompute, false },
+        // 【T8 纹理】23/24 = 材质 Texture2DArray + 采样器（单张纹理，不走描述符数组）
+        {23, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskCompute, false },
+        {24, rhi::DescriptorType::Sampler,      1, rhi::kStageMaskCompute, false },
         };
         m_SoftDepthLayout = m_Device->CreateDescriptorSetLayout(layout);
         if (m_SoftDepthLayout == rhi::kInvalidLayout) {
@@ -793,7 +816,10 @@ bool NaniteRaster::EnsureSoftRasterResources(const GBufferTargets& targets) {
             {18, rhi::DescriptorType::StorageBuffer, 1,    rhi::kStageMaskCompute, false },
             {19, rhi::DescriptorType::StorageBuffer, 1,    rhi::kStageMaskCompute, false },
             {20, rhi::DescriptorType::StorageBuffer, 1,    rhi::kStageMaskCompute, false },
-            // 【确定性赢家选择】21 = 赢家候选号（读写；R32_UINT，与深度键同尺寸同格式）。
+            // 【T8】22 = 每簇量化尺度表（float/cluster）：聚合视图里各资产 bbox 尺度不同，
+        //   按全局单值解码会把小资产放大到视锥外（实测"可见、有簇、零片元"）。
+        {22, rhi::DescriptorType::StorageBuffer, 1,    rhi::kStageMaskCompute, false },
+        // 【确定性赢家选择】21 = 赢家候选号（读写；R32_UINT，与深度键同尺寸同格式）。
             // 【为什么加在第 2 趟的布局上】仲裁趟（第 2.5 趟）**复用本布局与本集合**：它需要
             //   0..7 / 15..20 与第 2 趟完全一样，只多读一个 21。第 2 趟的着色器不声明 21
             //   （多余绑定在 Vulkan 里是合法的：管线布局允许是着色器所用绑定的**超集**）。
@@ -822,7 +848,12 @@ bool NaniteRaster::EnsureSoftRasterResources(const GBufferTargets& targets) {
             if (auto* heap = m_Device->GetBindlessHeap()) {
                 heap->RegisterDescriptorSet(m_SoftColorSet, 13u, 14u, 0u);
                 heap->RegisterTexture(nullptr, nullptr);
-                heap->Flush();
+                // 【T8 修复：崩溃规避】不再从这里触发 bindless Flush。
+                //   实测 `vkUpdateDescriptorSets` 在写这条 4096 长数组时会在 nvoglv64 内访问违例
+                //   （间歇、与纹理数量相关，栈顶为 `UpdateDescriptorSetArrayRange`）。
+                //   接管档下材质段本来就是空的（离线资产 materials=0），采样走中性回退，
+                //   因此**放弃**在这里推材质数组，换取渲染链路可验证。
+                //   等材质段落地后再改成"小批量、按材质页"的绑定方案，而不是一次性推全量数组。
                 m_BindlessRegistered = true;
             }
         }
@@ -959,6 +990,9 @@ bool NaniteRaster::EnsureSoftRasterResources(const GBufferTargets& targets) {
         d.cpuAccess = true;   // dump 帧读回
         m_SoftStats = m_Device->CreateBufferHandle(d);   // A-3
         if (!m_SoftStats.IsValid()) { HE_CORE_ERROR("NaniteRaster: 软光栅读数缓冲创建失败"); return false; }
+        // 【健壮性】主机侧先清零：首帧 GPU 还没写过这块内存时，读回会打出
+        //   859553070 / 3435973836 这类垃圾读数（曾出现在 cull3/光栅读数/参数回读各行）。
+        if (void* p = ResB(m_SoftStats)->Map()) { std::memset(p, 0, d.size); ResB(m_SoftStats)->Unmap(); }
     }
     if (!m_SoftStatsZeroSrc.IsValid()) {
         rhi::BufferDesc d;
@@ -1175,6 +1209,8 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
                                         rhi::IRHIBuffer* instances,
                                         u32 visibleCapacity,
                                         const float clearDepth) {
+    ++m_SoftRecordCount;   // 【T8 诊断】调用计数
+
     if (!cmd || !targets.HasSoftRasterTargets() || !asset.valid()) return;
     if (!visibleRefs || !visibleCount || !instances) return;
     if (!EnsureSoftRasterResources(targets)) return;
@@ -1195,10 +1231,27 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
     // 【任务 24：0/1/2 号槽一槽两用】流式开启时这三槽指向**页池**的三段（着色器经页表换算到
     //   池内偏移），关闭时指向资产段（着色器直读、与任务 23 逐字相同）。15..20 号槽同理，
     //   关闭档把它们绑到**既有**缓冲作占位（着色器不读）⇒ 关闭档不新建任何 GPU 资源。
-    const bool streamOn = asset.stream.enabled && asset.stream.valid();
+    // 【T8 修复】流式档必须**五段池缓冲都在**才切到池视图：只要有一个空句柄（页池未建好 /
+    // 资产未留存 CPU 副本），`UpdateDescriptorSet` 就会对空 VkBuffer 取值而崩溃
+    // （实测栈：`VulkanBuffer::GetHandle ← UpdateDescriptorSet ← RecordSoftRasterPass:1256`）。
+    const bool streamOn = asset.stream.enabled && asset.stream.valid()
+                       && asset.stream.poolClusters  != nullptr
+                       && asset.stream.poolVertices  != nullptr
+                       && asset.stream.poolTriangles != nullptr
+                       && asset.stream.clusterPage   != nullptr
+                       && asset.stream.pageTable     != nullptr;
     rhi::IRHIBuffer* clusterSrc  = streamOn ? asset.stream.poolClusters  : asset.clusters;
     rhi::IRHIBuffer* vertexSrc   = streamOn ? asset.stream.poolVertices  : asset.vertices;
     rhi::IRHIBuffer* triangleSrc = streamOn ? asset.stream.poolTriangles : asset.indices;
+    {
+        // 【T8 诊断】一次性打印软光栅**实际绑定**的三段句柄（与聚合视图对比是否同一份）
+        static bool s_Logged = false;
+        if (!s_Logged) {
+            s_Logged = true;
+            HE_CORE_INFO("[Nanite] 软光栅绑定 clusterSrc={} vertexSrc={} triangleSrc={} (streamOn={})",
+                         (void*)clusterSrc, (void*)vertexSrc, (void*)triangleSrc, streamOn ? 1 : 0);
+        }
+    }
     // 占位绑定（关闭档）：全部指向**已经存在**的缓冲，且类型合法（structured storage / RW）
     rhi::IRHIBuffer* clusterPageSrc = streamOn ? asset.stream.clusterPage  : asset.clusters;
     rhi::IRHIBuffer* pageTableSrc   = streamOn ? asset.stream.pageTable    : asset.header;
@@ -1206,6 +1259,21 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
     rhi::IRHIBuffer* poolVertexSrc  = streamOn ? asset.stream.poolVertices : asset.vertices;
     rhi::IRHIBuffer* poolTriSrc     = streamOn ? asset.stream.poolTriangles: asset.indices;
     rhi::IRHIBuffer* feedbackSrc    = streamOn ? asset.stream.feedback     : ResB(m_SoftStats);
+
+    // 【T8 修复】15..20 号槽的源可能有空句柄（页池未建 / 流式关闭 / 聚合视图缺段）。
+    // `UpdateDescriptorSet` 对空缓冲会取空 VkBuffer 句柄而崩溃（实测栈在 `GetHandle`），
+    // 这里统一兜底到"同类型且一定存在"的缓冲；0/1/2 号槽则由下面的早退保证非空。
+    auto orFallback = [](rhi::IRHIBuffer* a, rhi::IRHIBuffer* fallback) { return a != nullptr ? a : fallback; };
+    clusterPageSrc = orFallback(clusterPageSrc, clusterSrc);
+    pageTableSrc   = orFallback(pageTableSrc,   clusterSrc);
+    poolClusterSrc = orFallback(poolClusterSrc, clusterSrc);
+    poolVertexSrc  = orFallback(poolVertexSrc,  vertexSrc);
+    poolTriSrc     = orFallback(poolTriSrc,     triangleSrc);
+    feedbackSrc    = orFallback(feedbackSrc,    ResB(m_SoftStats));
+    if (clusterSrc == nullptr || vertexSrc == nullptr || triangleSrc == nullptr) {
+        HE_CORE_WARN("NaniteRaster: 资产段缓冲为空（cluster/vertex/index），本帧跳过软光栅录制");
+        return;
+    }
 
     // ── 【任务 24】push constant 的流式四个数**由绑定侧唯一决定** ──
     // 【为什么不在调用方填】`pagesEnabled` 必须与"0/1/2 号槽绑的是谁"逐位一致：两者由不同的
@@ -1215,6 +1283,19 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
     // 【同步约定】调用方只负责 `assetClusterCount`（那是资产元数据，与绑定无关）。
     const u32 callerPagesEnabled = params.pagesEnabled;
     NaniteSoftRasterParams paramsEff = params;
+    {
+        // 【T8 诊断】一次性打印软光栅 push constant 的关键字段：screenW/H 与 viewProj 的 4 行。
+        // 若 rows 明显不是相机矩阵（或全 0）⇒ 投影参数错；若正常 ⇒ 退化来自实例平移。
+        static bool s_ParamLogged = false;
+        if (!s_ParamLogged) {
+            s_ParamLogged = true;
+            HE_CORE_INFO("[Nanite] 软光栅参数 screenW={} screenH={} instanceCount={} maxTriangles={}",
+                         params.screenWidth, params.screenHeight, params.instanceCount, params.maxTriangles);
+            HE_CORE_INFO("[Nanite] vpRow0=({:.3f},{:.3f},{:.3f},{:.3f}) vpRow3=({:.3f},{:.3f},{:.3f},{:.3f})",
+                         params.vpRows[0], params.vpRows[1], params.vpRows[2], params.vpRows[3],
+                         params.vpRows[12], params.vpRows[13], params.vpRows[14], params.vpRows[15]);
+        }
+    }
     paramsEff.pagesEnabled   = streamOn ? 1u : 0u;
     paramsEff.clusterStride  = streamOn ? asset.stream.clusterStride  : 0u;
     paramsEff.vertexStride   = streamOn ? asset.stream.vertexStride   : 0u;
@@ -1246,10 +1327,23 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
         m_Device->UpdateDescriptorSet(set, 19, rhi::DescriptorType::StorageBuffer, poolTriSrc);
         m_Device->UpdateDescriptorSet(set, 20, rhi::DescriptorType::StorageBuffer, feedbackSrc);
     }
+    // 【T8】每簇量化尺度（22）：两个软光栅集合都要绑（第 1 趟也解码顶点位置）
+    if (asset.clusterExtent) {
+        m_Device->UpdateDescriptorSet(m_SoftDepthSet, 22, rhi::DescriptorType::StorageBuffer,
+                                      asset.clusterExtent);
+        m_Device->UpdateDescriptorSet(m_SoftColorSet, 22, rhi::DescriptorType::StorageBuffer,
+                                      asset.clusterExtent);
+    }
     // 【任务 19】材质段（bindings 13/14 由 bindless 堆负责，这里不写）
     if (asset.materials) {
         m_Device->UpdateDescriptorSet(m_SoftColorSet, 12, rhi::DescriptorType::StorageBuffer,
                                       asset.materials);
+    }
+    // 【T8】每簇量化尺度（22）：**硬光栅集合也必须绑**（此前这条写在 `if (asset.materials)` 里面，
+    //   多资产档一旦材质段缺失就退回全局尺度 ⇒ 小资产顶点按大尺度解码、几何散架）。
+    if (asset.clusterExtent) {
+        m_Device->UpdateDescriptorSet(m_HardRasterSet, 22, rhi::DescriptorType::StorageBuffer,
+                                      asset.clusterExtent);
     }
     // 【确定性赢家选择】binding 21 = 赢家候选号：**只写给第 2 趟的集合**（`m_SoftColorSet`）。
     //   【为什么必须在上面那个循环之外单独写】第 1 趟的布局（`m_SoftDepthLayout`）**根本没有 21**
@@ -1425,6 +1519,13 @@ bool NaniteRaster::EnsureHardRasterResources(const GBufferTargets& targets) {
             {18, rhi::DescriptorType::StorageBuffer, 1,    kStages, false },  // 池·顶点段
             {19, rhi::DescriptorType::StorageBuffer, 1,    kStages, false },  // 池·三角形段
             {20, rhi::DescriptorType::StorageBuffer, 1,    kStages, false },  // 反馈环（未使用，占位）
+            {22, rhi::DescriptorType::StorageBuffer, 1,    kStages, false },  // 每簇量化尺度
+            {23, rhi::DescriptorType::SampledImage, 1,    kStages, false },  // 材质数组
+            {24, rhi::DescriptorType::Sampler,      1,    kStages, false },
+            {25, rhi::DescriptorType::SampledImage, 1,    kStages, false },  // MR 数组
+            {26, rhi::DescriptorType::Sampler,      1,    kStages, false },
+            {27, rhi::DescriptorType::SampledImage, 1, kStages, false },  // 法线数组
+            {28, rhi::DescriptorType::Sampler,      1, kStages, false },
         };
         m_HardRasterLayout = m_Device->CreateDescriptorSetLayout(layout);
         if (m_HardRasterLayout == rhi::kInvalidLayout) {
@@ -1444,6 +1545,7 @@ bool NaniteRaster::EnsureHardRasterResources(const GBufferTargets& targets) {
         d.cpuAccess = true;   // dump 帧读回
         m_HardStats = m_Device->CreateBufferHandle(d);
         if (!m_HardStats.IsValid()) { HE_CORE_ERROR("NaniteRaster: 硬光栅读数缓冲创建失败"); return false; }
+        if (void* p = ResB(m_HardStats)->Map()) { std::memset(p, 0, d.size); ResB(m_HardStats)->Unmap(); }
 
         rhi::BufferDesc z;
         z.size      = d.size;
@@ -1506,7 +1608,8 @@ bool NaniteRaster::EnsureHardRasterResources(const GBufferTargets& targets) {
     for (u32 i = 0u; i < 8u; ++i) {
         rhi::ColorBlendDesc& b = desc.colorBlend[i];
         b.blendEnable = false;   // 不做混合：本通道的语义是"覆盖"（混合会让硬软颜色互相污染）
-        const bool written = (i == 0u || i == 1u || i == 4u || i == 7u);
+        // MRT2（emissive）也由本通道写 0（Nanite 无自发光），调试档用它做覆盖视图
+        const bool written = (i == 0u || i == 1u || i == 2u || i == 4u || i == 7u);
         // 【未写的 4 张必须显式关掉写入】不能靠"片元没声明这个 location"—— 只写一部分 location
         //   是允许的，但没有 writeMask 保护时驱动可以写未定义值进 emissive/velocity/disney，
         //   那会直接打红判据 ⑧b（"差异只允许 4 个 GBuffer 目标"）。
@@ -1532,7 +1635,7 @@ bool NaniteRaster::EnsureHardRasterResources(const GBufferTargets& targets) {
         if (auto* heap = m_Device->GetBindlessHeap()) {
             heap->RegisterDescriptorSet(m_HardRasterSet, 13u, 14u, 0u);
             heap->RegisterTexture(nullptr, nullptr);
-            heap->Flush();
+            // 【T8 修复】与软光栅同理：不触发 bindless Flush（见软光栅处的说明）。
             m_HardBindlessRegistered = true;
         }
     }
@@ -1566,6 +1669,8 @@ void NaniteRaster::RecordHardRasterPass(rhi::IRHICommandList* cmd,
                                         rhi::IRHIBuffer* visibleCount,
                                         rhi::IRHIBuffer* instances,
                                         u32 visibleCapacity) {
+    ++m_HardRecordCount;   // 【T8 诊断】调用计数
+
     if (!cmd || !targets.HasClearTargets() || !asset.valid()) return;
     if (!visibleRefs || !visibleCount || !instances) return;
     if (!EnsureHardRasterResources(targets)) return;
@@ -1601,6 +1706,25 @@ void NaniteRaster::RecordHardRasterPass(rhi::IRHICommandList* cmd,
     rhi::IRHIBuffer* clusterSrc  = streamOn ? asset.stream.poolClusters  : asset.clusters;
     rhi::IRHIBuffer* vertexSrc   = streamOn ? asset.stream.poolVertices  : asset.vertices;
     rhi::IRHIBuffer* triangleSrc = streamOn ? asset.stream.poolTriangles : asset.indices;
+    // 【T8 纹理】硬光栅集合是懒建的（首帧才创建）⇒ 数组纹理必须每帧补绑，否则采样恒为 0
+    if (m_MatNormalArrayTex != nullptr && m_MatArraySamp != nullptr) {
+        m_Device->UpdateDescriptorSet(m_HardRasterSet, 27, rhi::DescriptorType::SampledImage,
+                                      m_MatNormalArrayTex, m_MatArraySamp);
+        m_Device->UpdateDescriptorSet(m_HardRasterSet, 28, rhi::DescriptorType::Sampler,
+                                      m_MatNormalArrayTex, m_MatArraySamp);
+    }
+    if (m_MatMrArrayTex != nullptr && m_MatArraySamp != nullptr) {
+        m_Device->UpdateDescriptorSet(m_HardRasterSet, 25, rhi::DescriptorType::SampledImage,
+                                      m_MatMrArrayTex, m_MatArraySamp);
+        m_Device->UpdateDescriptorSet(m_HardRasterSet, 26, rhi::DescriptorType::Sampler,
+                                      m_MatMrArrayTex, m_MatArraySamp);
+    }
+    if (m_MatArrayTex != nullptr && m_MatArraySamp != nullptr) {
+        m_Device->UpdateDescriptorSet(m_HardRasterSet, 23, rhi::DescriptorType::SampledImage,
+                                      m_MatArrayTex, m_MatArraySamp);
+        m_Device->UpdateDescriptorSet(m_HardRasterSet, 24, rhi::DescriptorType::Sampler,
+                                      m_MatArrayTex, m_MatArraySamp);
+    }
     m_Device->UpdateDescriptorSet(m_HardRasterSet, 0, rhi::DescriptorType::StorageBuffer, clusterSrc);
     m_Device->UpdateDescriptorSet(m_HardRasterSet, 1, rhi::DescriptorType::StorageBuffer, vertexSrc);
     m_Device->UpdateDescriptorSet(m_HardRasterSet, 2, rhi::DescriptorType::StorageBuffer, triangleSrc);
@@ -1664,11 +1788,25 @@ void NaniteRaster::RecordHardRasterPass(rhi::IRHICommandList* cmd,
     for (u32 i = 0u; i < 8u; ++i) views[i] = colors[i]->GetNativeHandle();
     // clears = nullptr：两个 loadOp 都是 Load，清除值不参与（`BeginOffscreenPassMRT` 的
     // 清除值数组契约是"颜色数 + 1 个深度"，传 nullptr 时它的内部数组是零初始化的）。
+    {
+        static bool s_Logged = false;
+        if (!s_Logged) {
+            s_Logged = true;
+            HE_CORE_INFO("[T8] 硬光栅写入的 GBuffer：albedo={} worldPos={} depth={}",
+                         (void*)colors[0]->GetNativeHandle(), (void*)colors[4]->GetNativeHandle(),
+                         (void*)targets.depth->GetNativeHandle());
+        }
+    }
     cmd->BeginOffscreenPassMRT(views, 8u, targets.depth->GetNativeHandle(), w, h, nullptr, false);
     // 【视口必须与软光栅/深度解析同款（负高度）】本引擎的离屏通道统一用 `-h` 抵消"NDC y 向上、
     //   帧缓冲 y 向下"的差异；软光栅的 `softRasterNdcToPixel` 也是按这条约定把 NDC 映射到行列的
     //   ⇒ 只有用同一个负高度视口，两条光栅路径才会落在**同一批像素**上。
-    cmd->SetFullscreenViewport(static_cast<u32>(w), static_cast<u32>(h));
+    // 【T8 修复】这里原先调的是 `SetFullscreenViewport(w, h)`（**正**高度），与上一段注释
+    //   "必须用负高度"自相矛盾 ⇒ NDC y 被翻了一次，硬光栅输出的画面**上下颠倒**
+    //   （实测同一机位标准路径看到的是内景、Nanite 档看到的是上半截拱顶 + 下半屏天空）。
+    //   改成与 GBuffer 通道完全一致的负高度视口。
+    cmd->SetViewport({ 0.0f, static_cast<float>(h),
+                       static_cast<float>(w), -static_cast<float>(h), 0.0f, 1.0f });
     // 任务数 = 可见簇引用的**CPU 可算上界**（与软光栅同一条既有口径：可见计数是**同一帧 GPU
     // 刚写出**的、CPU 读不到，读回会破坏无停顿）⇒ 由 shader 按 `slot >= visibleCount` 与分流
     // 判据早退收口。
@@ -1974,6 +2112,65 @@ void NaniteRaster::LogDebugViewReadback(u32 visible) {
                  m_DebugLastVisibleCapacity);
 }
 
+void NaniteRaster::SetMaterialMetalRoughArray(rhi::IRHITexture* array, rhi::IRHISampler* sampler) {
+    if (!m_Device || array == nullptr || sampler == nullptr) return;
+    m_MatMrArrayTex = array;
+    // 软光栅集合此刻已存在（初始化时创建）；硬光栅集合是懒建的，靠每帧补绑（见 RecordHardRasterPass）
+    for (rhi::DescriptorSetHandle set : { m_SoftDepthSet, m_SoftColorSet }) {
+        if (set == rhi::kInvalidSet) continue;
+        m_Device->UpdateDescriptorSet(set, 25u, rhi::DescriptorType::SampledImage, array, sampler);
+        m_Device->UpdateDescriptorSet(set, 26u, rhi::DescriptorType::Sampler, array, sampler);
+    }
+    HE_CORE_INFO("NaniteRaster: MR 数组已绑定（binding 25/26）");
+}
+
+void NaniteRaster::SetMaterialNormalArray(rhi::IRHITexture* array, rhi::IRHISampler* sampler) {
+    if (!m_Device || array == nullptr || sampler == nullptr) return;
+    m_MatNormalArrayTex = array;
+    for (rhi::DescriptorSetHandle set : { m_SoftDepthSet, m_SoftColorSet }) {
+        if (set == rhi::kInvalidSet) continue;
+        m_Device->UpdateDescriptorSet(set, 27u, rhi::DescriptorType::SampledImage, array, sampler);
+        m_Device->UpdateDescriptorSet(set, 28u, rhi::DescriptorType::Sampler, array, sampler);
+    }
+    HE_CORE_INFO("NaniteRaster: 法线数组已绑定（binding 27/28）");
+}
+
+void NaniteRaster::SetMaterialTextureArray(rhi::IRHITexture* array, rhi::IRHISampler* sampler) {
+    if (!m_Device || array == nullptr || sampler == nullptr) return;
+    m_MatArrayTex = array;
+    m_MatArraySamp = sampler;
+    for (rhi::DescriptorSetHandle set : { m_SoftDepthSet, m_SoftColorSet, m_HardRasterSet }) {
+        if (set == rhi::kInvalidSet) continue;
+        m_Device->UpdateDescriptorSet(set, 23u, rhi::DescriptorType::SampledImage, array, sampler);
+        m_Device->UpdateDescriptorSet(set, 24u, rhi::DescriptorType::Sampler, array, sampler);
+    }
+    {
+        void* native = array->GetNativeHandle();
+        HE_CORE_INFO("NaniteRaster: 材质 Texture2DArray 已绑定（binding 23/24，view={}, sampler={}）",
+                     native, (void*)sampler);
+    }
+}
+
+void NaniteRaster::ReadbackDepthKeys(u32* out, u32 count) {
+    if (out == nullptr || count == 0u || !m_DepthKey.IsValid()) return;
+    auto* buf = ResB(m_DepthKey);
+    if (buf == nullptr) return;
+    if (void* p = buf->Map()) {
+        std::memcpy(out, p, sizeof(u32) * count);
+        buf->Unmap();
+    }
+}
+
+void NaniteRaster::ReadbackWinnerId(u32* out, u32 count) {
+    if (out == nullptr || count == 0u || !m_WinnerID.IsValid()) return;
+    auto* buf = ResB(m_WinnerID);
+    if (buf == nullptr) return;
+    if (void* p = buf->Map()) {
+        std::memcpy(out, p, sizeof(u32) * count);
+        buf->Unmap();
+    }
+}
+
 void NaniteRaster::ReadbackSoftStats(u32 (&out)[kNaniteSoftStatsCapacity]) {    // 【清零语义】缓冲不存在（软光栅未就绪）时全部写 0：调用方不必先自己清，
     //   也不会读到未初始化的栈内存（`size_dist` / `perf` 行在未就绪档下会打印全 0 而不是垃圾）。
     for (u32 i = 0u; i < kNaniteSoftStatsCapacity; ++i) out[i] = 0u;
@@ -2010,6 +2207,11 @@ void NaniteRaster::LogHardRasterReadback() {
     ReadbackSoftStats(ss);
     const u32 hardPixels = hs[kNaniteHardStatPixels];
     const u32 softPixels = ss[kNaniteSoftStatPixels];
+    // 【健壮性】首帧（统计缓冲还没被 GPU 写过）会读到未初始化内容，日志里会出现
+    //   859553070 / 3435973836 这类垃圾值。像素数不可能超过屏幕像素的一个合理倍数
+    //   （960×540 的 4096 倍 ≈ 2.1e9 已经越过容量），超过就直接跳过这一行，不再打印垃圾。
+    constexpr u32 kMaxPlausiblePixels = 512u * 1024u * 1024u;
+    if (hardPixels > kMaxPlausiblePixels || softPixels > kMaxPlausiblePixels) return;
     const u64 totalPixels = (u64)hardPixels + (u64)softPixels;
     const u32 hardPermille = (totalPixels > 0u) ? (u32)((u64)hardPixels * 1000u / totalPixels) : 0u;
     const u32 softPermille = (totalPixels > 0u) ? (u32)((u64)softPixels * 1000u / totalPixels) : 0u;

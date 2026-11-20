@@ -25,6 +25,9 @@
 // 【§14.3 依赖禁令】只依赖 `NaniteTypes.slang` 与既有 GBuffer 契约。
 // ============================================================
 
+// 【A5 mip】本编译单元是**片元**：允许梯度采样 ⇒ 打开 mip 选择。
+//   compute 侧（软光栅）不定义此宏，继续按 mip0 取值。
+#define NANITE_USE_GRADIENTS 1
 #include "Nanite_SoftRasterCommon.slang"
 
 // objectIndex 分区：Nanite 段起点（与 C++ 的 `kNaniteObjectIndexBegin`、以及
@@ -47,6 +50,7 @@ struct HardRasterFragIn {
     float2 uv           : TEXCOORD2;
     nointerpolation uint materialID     : TEXCOORD3;
     nointerpolation uint instanceIndex  : TEXCOORD4;
+    nointerpolation uint clusterIndex   : TEXCOORD5;   // 【T8 排查】全局簇号
 };
 
 // ── 输出：只声明本模块真正写的 4 个 location（0 / 1 / 4 / 7）──
@@ -58,6 +62,7 @@ struct HardRasterFragOut {
     [[vk::location(0)]] float4 albedoMetallic  : SV_Target0;   // MRT0
     [[vk::location(1)]] float4 normalRoughness : SV_Target1;   // MRT1
     [[vk::location(4)]] float4 worldPosition   : SV_Target4;   // MRT4
+    [[vk::location(2)]] float4 emissiveAO      : SV_Target2;   // MRT2（Nanite 无自发光 ⇒ 写 0；调试档用它做覆盖视图）
     [[vk::location(7)]] float4 lightmapKey     : SV_Target7;   // MRT7
 };
 
@@ -81,12 +86,200 @@ HardRasterFragOut fragmentMain(HardRasterFragIn input) {
     // ── ② 法线：硬件插值后归一化（与软光栅 `normalize(softRasterAttribute(...))` 同一口径）──
     float3 normal = normalize(input.normal);
 
+    // ── 【A1】法线贴图扰动 ──
+    //   资产里没有切线属性（Nanite 顶点只存位置/法线/UV），因此用**屏幕空间导数**构造切线帧：
+    //     T = normalize(ddx(P) − N·(N·ddx(P)))、B = cross(N, T)
+    //   这是无切线的常见近似；中性贴图 (0.5,0.5,1) 解出的 nTex = (0,0,1) ⇒ 原样返回 N。
+    //   compute 路径（软光栅）没有 quad 语义，故这里只在片元里做。
+#if !defined(HE_SHADER_D3D11)
+    if (matArrayEnabled != 0u) {
+        const uint nLayer = u_Materials[min(input.materialID, materialCount - 1u)].bindlessTextureBase;
+        float3 nTex = u_MatNormalArray.SampleGrad(u_MatNormalArraySamp,
+                                                  float3(input.uv, (float)nLayer),
+                                                  ddx(input.uv), ddy(input.uv)).rgb * 2.0 - 1.0;
+        if (dot(nTex.xy, nTex.xy) > 1.0e-4f) {
+            const float3 dpdx = ddx(input.worldPos);
+            float3 T = dpdx - normal * dot(normal, dpdx);
+            const float tLen2 = dot(T, T);
+            if (tLen2 > 1.0e-12f) {
+                T *= rsqrt(tLen2);
+                const float3 B = cross(normal, T);
+                const float3 perturbed = T * nTex.x + B * nTex.y + normal * nTex.z;
+                const float pLen2 = dot(perturbed, perturbed);
+                if (pLen2 > 1.0e-12f) normal = perturbed * rsqrt(pLen2);
+            }
+        }
+    }
+#endif
+
+    // ── 【T8 排查】debugView == 1：品红平涂 ──
+    //   把 albedo 强制成纯黑（过光照后仍接近黑），画面里**任何明亮的区域**就是"没有几何"的孔洞
+    //   （孔洞）。这比看白模截图可靠：材质/光照/纹理的差异都不会再干扰判断。
+    if (debugView == 1u) {
+        matAlbedo  = float3(0.0, 0.0, 0.0);   // 纯黑：孔洞会露出明亮天空，最易辨认
+        matMetallic = 0.0;
+        matRoughness = 1.0;
+    }
+    // debugView == 2：纯黄 albedo + 世界坐标清零 —— 用来验证"本片元着色器确实在跑"：
+    //   世界坐标驱动 SSGI/DDGI，若画面明显变化，说明开关已生效。
+    if (debugView == 2u) {
+        matAlbedo  = float3(1.0, 1.0, 0.0);
+        matMetallic = 0.0;
+        matRoughness = 1.0;
+    }
+    // debugView == 6：只把 **0 号簇** 涂成红色、其余涂黑 —— 用来把"这一簇到底画在屏幕哪里"
+    //   与 CPU 侧同一个簇中心的投影结果对照（判定位移/缩放/镜像）。
+    if (debugView == 6u) {
+        matAlbedo   = (input.clusterIndex == debugCluster) ? float3(1.0, 0.0, 0.0)
+                                                              : float3(0.0, 0.0, 0.0);
+        matMetallic = 0.0;
+        matRoughness = 1.0;
+    }
+
+    // debugView == 5：**直接把数组纹理采样结果当 albedo**（不做任何材质/光照调制），
+    //   用来判定"采样到底有没有走、采到的是不是白色"。
+    if (debugView == 5u) {
+        uint layer = u_Materials[min(input.materialID, materialCount - 1u)].bindlessTextureBase;
+        matAlbedo   = u_MatArray.SampleLevel(u_MatArraySamp, float3(input.uv, (float)layer), 0.0).rgb;
+        matMetallic = 0.0;
+        matRoughness = 1.0;
+    }
+
+    // debugView == 3：按簇号着色（相邻簇颜色差别明显）——用来判断"孔洞区域是没有任何簇，
+    //   还是有簇但三角形/索引没覆盖到"。
+    if (debugView == 3u) {
+        uint c = input.clusterIndex;
+        float r = float((c * 37u) & 255u) / 255.0;
+        float g = float((c * 91u) & 255u) / 255.0;
+        float b = float((c * 151u) & 255u) / 255.0;
+        // 【压暗】调试色必须远低于 1，否则被光照/色调映射推到白，色相全丢
+        matAlbedo   = float3(0.02 + 0.30 * r, 0.02 + 0.30 * g, 0.02 + 0.30 * b);
+        matMetallic = 0.0;
+        matRoughness = 1.0;
+    }
+
     // ── ③ 写 4 张 GBuffer（字段与软光栅逐字段一致）──
-    output.albedoMetallic  = float4(matAlbedo, matMetallic);
-    output.normalRoughness = float4(normal, matRoughness);
-    output.worldPosition   = float4(input.worldPos, 1.0);
-    output.lightmapKey     = float4(input.uv,
-                                    (float)(kNaniteObjectIndexBegin + input.instanceIndex), 0.0);
+    // 【T8 排查】调试色统一写在最终赋值处（分支写法会被后续代码覆盖，实测无效）：
+    //   2 = 纯黄（几何覆盖）；6 = 指定簇红、其余黑（与 CPU 投影对照）；0 = 正常。
+    float4 dbgAlbedo = float4(matAlbedo, matMetallic);
+    if (albedoDebug == 2u) {
+        dbgAlbedo = float4(1.0, 1.0, 0.0, 0.0);
+    } else if (albedoDebug == 3u) {
+        // 按簇号哈希着色（压暗，避免被光照推白）：看"缺块区域是否根本没有簇"
+        uint c3 = input.clusterIndex;
+        dbgAlbedo = float4(0.02 + 0.30 * float((c3 * 37u) & 255u) / 255.0,
+                           0.02 + 0.30 * float((c3 * 91u) & 255u) / 255.0,
+                           0.02 + 0.30 * float((c3 * 151u) & 255u) / 255.0, 0.0);
+        matRoughness = 1.0;
+    } else if (albedoDebug == 6u) {
+        dbgAlbedo = (input.clusterIndex == debugCluster) ? float4(1.0, 0.0, 0.0, 0.0)
+                                                         : float4(0.0, 0.0, 0.0, 0.0);
+        // 把镜面也压掉：黑 albedo 仍会被环境镜面反射照白（实测画面仍是白色），
+        // 这里强制粗糙度 1、法线朝上，让"黑"真的黑下来，红色才看得清。
+        matRoughness = 1.0;
+        normal = float3(0.0, 0.0, 1.0);
+    }
+    // MRT2：Nanite 几何没有自发光 ⇒ 常规档写 0（避免残留别的 pass 写入的值）；
+    // albedoDebug = 2/6 时改写调试色，得到**与光照无关**的覆盖/定位视图。
+    // 【T8 修复】MRT2 的 alpha 是 **AO**（GBuffer 清屏值 = 1）。此前写 0 会把 AO 抹成 0，
+    //   光照端按 AO 调制的项因此整体失真。Nanite 几何没有 AO 贴图 ⇒ 写 1（不遮挡）。
+    float4 emissiveOut = float4(0.0, 0.0, 0.0, 1.0);
+    if (albedoDebug == 29u) {
+        // 【A2 排查】世界坐标 Y 编码：(y + 50) / 200，用于判断"同像素画的是不是同一个面"
+        float y = (input.worldPos.y + 50.0) / 200.0;
+        emissiveOut = float4(y, y, y, 1.0);
+        dbgAlbedo = float4(0.0, 0.0, 0.0, 0.0);
+    } else if (albedoDebug == 25u) {
+        // 【A5 排查】世界坐标直出（×0.05 压缩到可显示范围），与标准路径同像素对照
+        emissiveOut = float4(input.worldPos * 0.05, 1.0);
+        dbgAlbedo = float4(0.0, 0.0, 0.0, 0.0);
+    } else if (albedoDebug == 22u) {
+        // 【A2 排查】UV 直出（R=u、G=v）：与标准路径同像素对照，判定是否 UV 不一致
+        emissiveOut = float4(input.uv.x, input.uv.y, 0.0, 1.0);
+        dbgAlbedo = float4(0.0, 0.0, 0.0, 0.0);
+    } else if (albedoDebug == 19u) {
+        // 【A2 排查】用 **v 翻转** 的 UV 采样 baseColor 数组：若地板从"绿"变成"米色"，
+        //   说明资产里的 UV 与标准路径的 v 方向相反。
+        uint layer19 = u_Materials[min(input.materialID, materialCount - 1u)].bindlessTextureBase;
+        emissiveOut = float4(u_MatArray.SampleLevel(u_MatArraySamp,
+                                                   float3(input.uv.x, 1.0 - input.uv.y, (float)layer19), 0.0).rgb, 1.0);
+        dbgAlbedo = float4(0.0, 0.0, 0.0, 0.0);
+    } else if (albedoDebug == 18u) {
+        // 【A3 排查】把材质层号编码成颜色（layer/32），用于确认某个表面用的是哪一层贴图
+        uint layer18 = u_Materials[min(input.materialID, materialCount - 1u)].bindlessTextureBase;
+        // 编码：R = layer%32（/31）、G = layer/32（/4）⇒ 可无损表示 0..127
+        emissiveOut = float4((float)(layer18 % 32u) / 31.0, (float)(layer18 / 32u) / 4.0, 0.0, 1.0);
+        dbgAlbedo = float4(0.0, 0.0, 0.0, 0.0);
+    } else if (albedoDebug == 17u) {
+        // 【A2 排查】把材质段的 baseColorFactor 直接当颜色输出（判定因子是否真的读到 0.588）
+        NaniteMaterialRecord m17 = u_Materials[min(input.materialID, materialCount - 1u)];
+        emissiveOut = float4(m17.baseColorFactor.rgb, 1.0);
+        dbgAlbedo = float4(0.0, 0.0, 0.0, 0.0);
+    } else if (albedoDebug == 16u) {
+        // 【A2 排查】固定 UV=(0.5,0.5) 采样：整屏按材质层号出现纯色块，便于与源 PNG 中心像素对照
+        uint layer16 = u_Materials[min(input.materialID, materialCount - 1u)].bindlessTextureBase;
+        emissiveOut = float4(u_MatArray.SampleLevel(u_MatArraySamp, float3(0.5, 0.5, (float)layer16), 0.0).rgb, 1.0);
+        dbgAlbedo = float4(0.0, 0.0, 0.0, 0.0);
+    } else if (albedoDebug == 10u) {
+        // 【T8 排查】用 **uv × 8** 采样：若画面出现明显重复纹理 ⇒ UV 有效、贴图有细节；
+        //   若仍是纯白/纯色 ⇒ UV 退化或贴图本身是白的。
+        uint layer10 = u_Materials[min(input.materialID, materialCount - 1u)].bindlessTextureBase;
+        emissiveOut = float4(u_MatArray.SampleLevel(u_MatArraySamp,
+                                                   float3(input.uv, (float)layer10), 0.0).rgb, 1.0);
+        dbgAlbedo = float4(0.0, 0.0, 0.0, 0.0);
+    } else if (albedoDebug == 4u) {
+        // 法线可视化（绕过光照）：正确的法线应当随表面朝向呈现明显颜色分区
+        emissiveOut = float4(normal * 0.5 + 0.5, 1.0);
+        dbgAlbedo = float4(0.0, 0.0, 0.0, 0.0);
+    } else if (albedoDebug == 8u) {
+        // 【T8 自检】用片段自身的 worldPos 反算 NDC 并编码成颜色：
+        //   R = 0.5 + 0.5*ndc.x（左→右递增），G = 0.5 + 0.5*ndc.y（下→上递增）。
+        //   与"像素在屏幕上的实际位置"逐点对照，即可判定投影是否一致。
+        float4 hp = float4(input.worldPos, 1.0);
+        float cx = dot(float4(vpRow0), hp);
+        float cy = dot(float4(vpRow1), hp);
+        float cw = dot(float4(vpRow3), hp);
+        float2 ndc = float2(cx / max(cw, 1.0e-6), cy / max(cw, 1.0e-6));
+        emissiveOut = float4(0.5 + 0.5 * ndc.x, 0.5 + 0.5 * ndc.y, 0.0, 1.0);
+        dbgAlbedo = float4(0.0, 0.0, 0.0, 0.0);
+    } else if (albedoDebug == 9u) {
+        // 【T8 纹理自检】把材质数组的采样结果直接写进 emissive（绕过光照），
+        //   UV 与材质层号都走与正常渲染完全相同的代码路径。
+        // 【T8 自检】直接输出**最终材质 albedo**（= baseColorFactor × 贴图采样），绕过光照：
+        //   用来判断"发白"是 albedo 本身白，还是光照/曝光的问题。
+        emissiveOut = float4(matAlbedo, 1.0);
+        dbgAlbedo = float4(0.0, 0.0, 0.0, 0.0);
+    } else if (albedoDebug == 2u) {
+        emissiveOut = float4(0.0, 0.6, 0.0, 0.0);
+    } else if (albedoDebug == 6u) {
+        emissiveOut = (input.clusterIndex == debugCluster) ? float4(1.0, 0.0, 0.0, 0.0)
+                                                          : float4(0.0, 0.0, 0.0, 0.0);
+    }
+    output.emissiveAO = emissiveOut;
+    output.albedoMetallic  = dbgAlbedo;
+    // 【T8 修复】MRT1 的法线是 **[-1,1] 打包到 [0,1]**（GBuffer.frag 写 `N*0.5+0.5`，
+    //   光照端按 `*2-1` 解包）。这里直接写原始法线 ⇒ 光照读到错方向，表现为
+    //   强烈黑白硬阴影（实测）。必须与 GBuffer 同一约定。
+    // 【T8 实验】albedoDebug=13：用**屏幕空间导数**从 worldPos 反算几何法线，
+    //   绕过资产里的法线。若光照立刻变得有立体感 ⇒ 资产法线是错的。
+    float3 normalOut = normal;
+    if (albedoDebug == 13u) {
+        normalOut = normalize(cross(ddx(input.worldPos), ddy(input.worldPos)));
+        if (dot(normalOut, normal) < 0.0) normalOut = -normalOut;   // 与存储法线同向
+    }
+    output.normalRoughness = float4(normalOut * 0.5 + 0.5, matRoughness);
+    // 【不要动 worldPos】它驱动 SSGI/DDGI；清零会让光照整片变黑，反而掩盖了"几何是否覆盖"。
+    // 【T8 修复】MRT4 的 **alpha 是电介质 F0**（标准路径写 `obj.dielectricF0`，典型 0.04）。
+    //   此前这里写 1.0 ⇒ 光照把每个表面当成"反射率 100% 的镜面"，
+    //   直接光/阴影的漫反射项被彻底压掉，画面只剩环境反射、看起来"发白发平"
+    //   （实测：开/关阴影画面均值完全一致 145.9 / 146.0）。
+    //   Nanite 材质段目前不携带 F0 ⇒ 用非金属的默认值 0.04。
+    const float naniteDielectricF0 = 0.04;
+    output.worldPosition   = float4(input.worldPos, naniteDielectricF0);
+    // 【T8 实验】albedoDebug=12：把 lightmapKey 清零，验证它是否影响光照亮度
+    output.lightmapKey     = (albedoDebug == 12u) ? float4(0.0, 0.0, 0.0, 0.0)
+                                                  : float4(input.uv,
+                                                           (float)(kNaniteObjectIndexBegin + input.instanceIndex), 0.0);
 
     // ── ④ 读数：硬光栅的片元数 ──
     // 【语义】PSO 是 `depthWrite = true` 且没有 discard ⇒ 主流驱动都会做 early-Z，

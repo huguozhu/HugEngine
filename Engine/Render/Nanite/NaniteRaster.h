@@ -45,6 +45,8 @@ namespace he::render {
 
 class NaniteRaster {
 public:
+    /// T8：帧边界处把挂起的 bindless 描述符写真正落地（由渲染器每帧调一次）
+    void FlushPendingBindlessDescriptors(rhi::IRHIDevice* device);
     NaniteRaster() = default;
     ~NaniteRaster() = default;
 
@@ -187,6 +189,9 @@ public:
         /// 【任务 19】材质段（32B/条）。为 nullptr ⇒ 软光栅按 `materialCount = 0` 走中性兜底
         /// 并把像素计进 `fallback_pixels`（**不静默**）。
         rhi::IRHIBuffer* materials = nullptr;
+    /// 【T8】每簇量化尺度表（float/cluster，binding 22）。为 nullptr ⇒ 着色器回退到
+    ///   全局 `meshMaxExtent`（单资产档与"只有一份资产"的多资产档都能正确解码）。
+    rhi::IRHIBuffer* clusterExtent = nullptr;
 
         /// 【任务 24】流式视图（bindings 15..20）。
         /// 【为什么放在这里而不是另开一个参数】`RecordSoftRasterPass` / `RecordHardRasterPass`
@@ -228,6 +233,10 @@ public:
     ///      → 写 4 张 GBuffer（每个像素恰好一个确定性赢家）；
     ///   ⑤ 深度解析（全屏片元 `Nanite_DepthResolve.*`）：深度键 → `SV_Depth` 写既有深度附件。
     /// 顺序全部由函数内**显式**发出的屏障给出（帧图不跟踪模块自持资源，也排不动这些内部段）。
+    /// 【T8 诊断】软/硬光栅录制调用次数（主机侧计数，用来区分"没被调用"与"调用了没画出"）
+    [[nodiscard]] u64 GetSoftRecordCount() const { return m_SoftRecordCount; }
+    [[nodiscard]] u64 GetHardRecordCount() const { return m_HardRecordCount; }
+
     void RecordSoftRasterPass(rhi::IRHICommandList* cmd,
                               const GBufferTargets& targets,
                               const AssetViews& asset,
@@ -254,6 +263,20 @@ public:
     /// 【同步约定】与 `LogSoftRasterReadback` 相同：只 Map、不等待；调用方必须已 `WaitIdle()`。
     ///   缓冲不存在（软光栅未就绪）时把 `out` 清零后返回。
     void ReadbackSoftStats(u32 (&out)[kNaniteSoftStatsCapacity]);
+
+    /// 【T8 排查】读回赢家候选号缓冲的前 `count` 个像素（只 Map、不等待）。
+    /// 用途：判断第 2.5 趟仲裁是否真的写过 —— 全 `0xFFFFFFFF` 就是没写。
+    void ReadbackWinnerId(u32* out, u32 count);
+
+    /// 【T8 纹理】绑定材质 Texture2DArray（binding 23/24）——单张纹理，避免写描述符数组。
+    void SetMaterialTextureArray(rhi::IRHITexture* array, rhi::IRHISampler* sampler);
+    /// 【A3】绑定金属度/粗糙度数组（binding 25/26；与 baseColor 同层序、共用采样器）
+    void SetMaterialMetalRoughArray(rhi::IRHITexture* array, rhi::IRHISampler* sampler);
+    /// 【A1】绑定法线贴图数组（binding 27/28；与 baseColor 同层序、共用采样器）
+    void SetMaterialNormalArray(rhi::IRHITexture* array, rhi::IRHISampler* sampler);
+
+    /// 【T8 排查】读回深度键缓冲的前 count 个像素（全 `0xFFFFFFFF` ⇒ 第 1 趟没写过键）。
+    void ReadbackDepthKeys(u32* out, u32 count);
 
     /// 【§14.8 任务 23】最近一次软光栅录制用的阈值（push constant 的真值，来自 `NaniteSettings`）。
     /// `size_dist` / `perf` 读数行打印它 —— 与 `soft_raster` 行的 `max_triangles` 同源同值。
@@ -424,7 +447,10 @@ private:
     void RecordSoftStatsClear(rhi::IRHICommandList* cmd);
 
     /// 【任务 22】在命令缓冲内清**硬光栅**读数（模块自持的小缓冲；同一个 `CopyBuffer` 惯例）
+    /// 【诊断】硬光栅读数清零；**每帧**调用（pass 被跳过时也要清，否则读回是陈旧值）。
+public:
     void RecordHardStatsClear(rhi::IRHICommandList* cmd);
+private:
 
     /// 【任务 18】懒建清屏 compute 的 PSO + 描述符集布局（8 张颜色目标的 UAV）
     bool EnsureGBufferClearResources();
@@ -569,6 +595,11 @@ private:
     /// 【容量】与深度键**共用** `m_DepthKeyPixels`（两者永远同生共死、尺寸逐位相同），
     ///   不另开一个容量字段 —— 避免出现"两个容量字段互相不一致"这种可以避免的状态。
     rhi::RHIBufferHandle m_WinnerID{};   // A-3
+    /// 【T8 纹理】材质数组纹理（硬光栅集合是懒建的 ⇒ 每帧绑定一次）
+    rhi::IRHITexture* m_MatArrayTex = nullptr;
+    rhi::IRHITexture* m_MatMrArrayTex = nullptr;   // 【A3】MR 数组
+    rhi::IRHITexture* m_MatNormalArrayTex = nullptr; // 【A1】法线数组
+    rhi::IRHISampler* m_MatArraySamp = nullptr;
 
     /// 读数缓冲（扁平 u32，`kNaniteSoftStatsCapacity` 条）+ 每帧清零用的常驻 0 源
     rhi::RHIBufferHandle m_SoftStats{};   // A-3
@@ -586,6 +617,11 @@ private:
     u32 m_TexturedMaterials = 0u;   ///< 其中带 BaseColor 纹理的记录数
     /// 【任务 19】第 2 趟的描述符集是否已登记到 bindless 堆（只登记一次；登记后强制一次 Flush）
     bool m_BindlessRegistered = false;
+    /// T8：bindless 堆的 Flush 推迟到帧边界（见 `EnsureSoftRasterResources` 的说明）
+    bool m_BindlessFlushPending = false;
+    /// T8：软/硬光栅录制次数（只增计数，不做原子 —— 只在渲染线程写）
+    u64 m_SoftRecordCount = 0u;
+    u64 m_HardRecordCount = 0u;
 
     /// 【运行时格式能力】**GBuffer 深度格式能否做存储图像**（启动时查一次；
     ///   `IRHIDevice::SupportsStorageImage(Format::D32_FLOAT)`）。它决定"compute 写深度"这条

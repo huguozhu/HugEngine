@@ -190,6 +190,28 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
     // 次数：模块内部有"只做一次"的门闩，所以放在帧图里（每帧都会走到）也只上传一次。
     if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady()) {
         m_Nanite.EnsureAssetUploaded(m_MeshBatcher);
+        // ── T8：真实实例表 ──
+        // 有网格绑定了离线资产（`MeshComponent::SetNaniteAssetIndex`）时，用快照里的
+        // 真实实例（世界矩阵 + 世界 AABB）替换合成测试实例；没有绑定则保留合成档，
+        // 既有验收（GPU/CPU 剔除逐项对照）因此逐位不变。
+        {
+            static bool s_Logged = false;
+            if (!s_Logged) {
+                s_Logged = true;
+                HE_CORE_INFO("FrameGraph: Nanite 实例表使用 MeshRegistry@{}（Count={}，带资产 {}）",
+                             (const void*)&m_MeshRegistry, m_MeshRegistry.Count(),
+                             m_MeshRegistry.CountWithNaniteAsset());
+            }
+        }
+        const u32 realInstances = m_Nanite.GetCull().SetInstancesFromSnapshot(FrameSnap(), m_MeshRegistry);
+        if (realInstances > 0u) {
+            static bool s_RealInstanceLogged = false;
+            if (!s_RealInstanceLogged) {
+                s_RealInstanceLogged = true;
+                HE_CORE_INFO("Nanite: 真实实例表就绪（{} 条绑定离线资产的实例），合成测试实例停用",
+                             realInstances);
+            }
+        }
     }
 
     // GPU 剔除读回（上帧结果）+ 过滤可见物体
@@ -342,6 +364,14 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
     naniteGB.depth       = gbDepth;
     // 任务 4：albedo 的纹理对象本身（UAV 自证通道要绑存储图像 + 取真实分辨率；句柄只够排序）
     naniteGB.albedoTexture = m_GBuffer ? m_GBuffer->GetAlbedo() : nullptr;
+    // 【T8 排查】同一帧内打印两处取到的 GBuffer A 对象，确认 Nanite 写的与 Lighting 读的是否同一份
+    {
+        static u32 s_Frame = 0u;
+        if ((s_Frame++ % 60u) == 0u) {
+            HE_CORE_INFO("[T8] 帧图取句柄：m_GBuffer={} albedo={}",
+                         (void*)m_GBuffer.get(), (void*)naniteGB.albedoTexture);
+        }
+    }
     // 【任务 18】8 张颜色附件 + 深度的纹理对象：模块要按既有清除值清屏、用存储图像写其中 4 张、
     //   并把深度解析结果写进深度附件 —— 这些事只有 `IRHITexture*` 能做（帧图句柄只够排序）。
     if (m_GBuffer) {
@@ -1486,6 +1516,11 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
             // 委托 LightingPass 执行完整光照（M1.1：LightingInputs 打包输入）
             render::LightingInputs in{};
             in.gbA        = m_GBuffer->GetAlbedo();
+            static u32 s_LitFrame = 0u;
+            if ((s_LitFrame++ % 60u) == 0u) {
+                HE_CORE_INFO("[T8] Lighting 取句柄：m_GBuffer={} albedo={}",
+                             (void*)m_GBuffer.get(), (void*)in.gbA);
+            }
             in.gbB        = m_GBuffer->GetNormal();
             in.gbC        = m_GBuffer->GetEmissive();
             in.gbDepth    = m_GBuffer->GetDepth();

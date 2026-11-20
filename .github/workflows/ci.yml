@@ -65,5 +65,11 @@ jobs:
         if: matrix.config == 'Debug'
         run: cmake --build Build --config Debug --target AuditShaderBindings
 
+      # T14：离线工具冒烟 —— 用入库测试资产跑一遍 glTF → .nanite v2，
+      # `--verify` 会读回文件并与内存构建产物逐字节比对（工具可运行 + 格式往返 + 字节一致）。
+      # 构建器确定性由单测覆盖（同一输入两次构建字节相等）。
+      - name: Nanite 离线工具冒烟（入库测试资产）
+        run: .\Build\bin\${{ matrix.config }}\MeshPreprocess.exe Tests\Assets\MiniTriangle.gltf Build\ProcessedSmoke --stats --verify
+
       - name: Unit tests
         run: .\Build\bin\${{ matrix.config }}\HugEngineTests.exe

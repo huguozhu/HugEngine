@@ -134,6 +134,32 @@ struct NaniteConeAxisAngle {
     float  cosHalfAngle;
 };
 
+// ── 【T8】实例的世界变换基（3×3 的三列 + 平移）──
+// 【为什么需要】光栅端原先只把 `ltw3.xyz`（平移）加到解码后的位置上，`ltw0..ltw2`
+//   （旋转 + 缩放）从未参与 ⇒ 旋转与非均匀缩放在画面上完全无效，只有剔除端的包围球
+//   按最大轴放大用到了缩放。这里把四列收成一个显式的基，两条光栅路径**共用同一个**
+//   求值函数，避免"软/硬两版变换口径再次分叉"。
+struct NaniteInstanceBasis {
+    float3 cx;   // localToWorld 第 1 列（本地 X 轴在世界空间的像，含缩放）
+    float3 cy;   // localToWorld 第 2 列
+    float3 cz;   // localToWorld 第 3 列
+    float3 t;    // localToWorld 第 4 列（平移）
+};
+
+NaniteInstanceBasis naniteInstanceBasisIdentity() {
+    NaniteInstanceBasis b;
+    b.cx = float3(1.0, 0.0, 0.0);
+    b.cy = float3(0.0, 1.0, 0.0);
+    b.cz = float3(0.0, 0.0, 1.0);
+    b.t  = float3(0.0, 0.0, 0.0);
+    return b;
+}
+
+// 本地（解码后、网格空间）位置 → 世界位置：列主序的 3×3 乘加 + 平移
+float3 naniteApplyInstanceBasis(NaniteInstanceBasis b, float3 p) {
+    return p.x * b.cx + p.y * b.cy + p.z * b.cz + b.t;
+}
+
 // 簇记录（64B）：偏移 0 / 16 / 32 / 36 / 40 / 44 / 48 / 52 / 56 / 60
 struct NaniteCluster {
     float4 boundsCenterRadius;   // xyz = 包围球心（**也是位置量化的原点**）, w = 半径
@@ -385,14 +411,20 @@ float3 naniteDecodeNormal(uint packedNormal) {
 // ============================================================
 
 // [0,1] → unorm16；NaN 取 0、越界 clamp（unorm16 表示不了平铺/负 UV）
+// 【T8·UV 平铺】编码域 [-64,64]（与 C++ 侧 `kNaniteUVEncodeExtent` 逐位一致）
+static const float NANITE_UV_ENCODE_EXTENT = 64.0;
+static const float NANITE_UV_ENCODE_RANGE  = 128.0;
+
 uint naniteQuantizeUV(float value) {
     if (isnan(value)) return 0;
-    return (uint)round(clamp(value, 0.0, 1.0) * (float)NANITE_UV_QUANT_MAX);
+    float t = (value + NANITE_UV_ENCODE_EXTENT) / NANITE_UV_ENCODE_RANGE;
+    return (uint)round(clamp(t, 0.0, 1.0) * (float)NANITE_UV_QUANT_MAX);
 }
 
-// unorm16 → [0,1]
+// unorm16 → [-64,64]
 float naniteDecodeUVComponent(uint raw) {
-    return (float)(raw & NANITE_UV_QUANT_MAX) / (float)NANITE_UV_QUANT_MAX;
+    float t = (float)(raw & NANITE_UV_QUANT_MAX) / (float)NANITE_UV_QUANT_MAX;
+    return t * NANITE_UV_ENCODE_RANGE - NANITE_UV_ENCODE_EXTENT;
 }
 
 // packedUV → float2（u 低 16 位、v 高 16 位）

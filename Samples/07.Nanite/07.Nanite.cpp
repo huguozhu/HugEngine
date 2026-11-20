@@ -111,7 +111,12 @@ static int GetInt(const std::unordered_map<String, String>& m,
     return (it != m.end()) ? std::stoi(it->second) : def;
 }
 
-// ============================================================
+// T5：字符串型 cfg 值（离线资产路径）
+static String GetString(const std::unordered_map<String, String>& m,
+                        const String& key, const String& def = String{}) {
+    auto it = m.find(key);
+    return (it != m.end()) ? it->second : def;
+}
 // 创建形状实体（立方体/球）——Cornell Box 场景构件
 // ============================================================
 // 平面镜测试台的几何（任务 32）：判据要在 CPU 侧做解析计算，所以参数必须**从同一处**导出，
@@ -652,6 +657,13 @@ int main() {
             naniteSettings.pageUploadsPerFrame = (u32)std::max(1, std::min(
                 GetInt(cfgData, "nanite_page_uploads", (int)naniteSettings.pageUploadsPerFrame),
                 (int)render::kNanitePageUploadsPerFrameMax));
+            // ── T5：离线 `.nanite`（方案 §5.2）──
+            // `nanite_offline`（默认 1 = 优先离线）+ `nanite_offline_path`（相对 Content/ 的路径）。
+            // 路径为空时不做离线加载（保持旧行为），文件缺失/过期会自动回退运行时构建并告警。
+            naniteSettings.offline = GetInt(cfgData, "nanite_offline",
+                                             naniteSettings.offline ? 1 : 0) != 0;
+            const String offlinePath = GetString(cfgData, "nanite_offline_path", naniteSettings.offlinePath);
+            if (!offlinePath.empty()) naniteSettings.offlinePath = offlinePath;
             // ── 任务 25 的 **Material Bin**（默认 0 = 关闭）：cfg → 真值，写法与上面完全同构。
             // 1 ⇒ 上传期建一份"按材质分组的簇下标"只读数组，并在 dump 帧多打印**一行**读数
             // （`descriptor_switches` / `material_switches` / `material_switches_bin` /
@@ -2236,6 +2248,9 @@ int main() {
         //   缺这一行，档位会在下一次运行时被写回成默认值、四档互相污染（任务 18/22/24/25 踩过）。
         out["nanite_debug_view"] =
             std::to_string(deferredPipeline.GetNaniteSettings().debugView);
+        // T5：离线资产开关与路径（必须回写，否则下一次运行会丢配置）
+        out["nanite_offline"] = std::to_string(deferredPipeline.GetNaniteSettings().offline ? 1 : 0);
+        out["nanite_offline_path"] = deferredPipeline.GetNaniteSettings().offlinePath;
 
         // ── AutoExposure ──
         auto& ae = deferredPipeline.GetAutoExposure();

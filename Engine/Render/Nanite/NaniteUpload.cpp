@@ -448,10 +448,58 @@ bool BuildNaniteClusters(std::span<const float> positions,
 // 口径、终止条件、误差来源、哈希规范化都写在 `NaniteUpload.h` 的同名小节里，
 // 这里只留与代码逐句对应的短注释。
 // ============================================================
+namespace {
+
+/// 【T8·A2】按源网格区间分别聚类，再把各段的簇/顶点表/三角形表**拼接**成一份 L0 产物。
+///   `BuildNaniteClusters` 的 `vertexIndices` 记的是**全局网格顶点下标**（我们传同一份
+///   `positions`），所以拼接时只需按段基址平移 `vertexOffset` / `triangleOffset`。
+bool BuildLevel0ClustersByMesh(std::span<const float> positions,
+                               std::span<const u32>   indices,
+                               std::span<const NaniteSourceMeshRange> meshes,
+                               NaniteClusterBuild&    out) {
+    out = NaniteClusterBuild{};
+    for (const NaniteSourceMeshRange& range : meshes) {
+        const u64 firstIndex = (u64)range.firstTriangle * (u64)kNaniteIndicesPerTriangle;
+        const u64 indexCount = (u64)range.triangleCount * (u64)kNaniteIndicesPerTriangle;
+        if (indexCount == 0u) continue;
+        if (firstIndex + indexCount > (u64)indices.size()) return false;
+
+        NaniteClusterBuild part;
+        if (!BuildNaniteClusters(positions, indices.subspan((usize)firstIndex, (usize)indexCount), part)) {
+            return false;
+        }
+        if (part.Empty()) continue;
+
+        const u32 vertexBase   = (u32)out.vertexIndices.size();
+        const u32 triangleBase = (u32)out.triangles.size();
+        for (usize c = 0; c < part.clusters.size(); ++c) {
+            NaniteClusterRecord record = part.clusters[c];
+            record.vertexOffset   += vertexBase;
+            record.triangleOffset += triangleBase;
+            out.clusters.push_back(record);
+            out.clusterVertexCount.push_back(part.clusterVertexCount[c]);
+        }
+        out.vertexIndices.insert(out.vertexIndices.end(), part.vertexIndices.begin(), part.vertexIndices.end());
+        out.triangles.insert(out.triangles.end(), part.triangles.begin(), part.triangles.end());
+
+        out.stats.clusterCount           += part.stats.clusterCount;
+        out.stats.triangleCount          += part.stats.triangleCount;
+        out.stats.vertexCount            += part.stats.vertexCount;
+        out.stats.degenerateClusterCount += part.stats.degenerateClusterCount;
+        out.stats.noConeClusterCount     += part.stats.noConeClusterCount;
+        out.stats.maxClusterTriangles = std::max(out.stats.maxClusterTriangles, part.stats.maxClusterTriangles);
+        out.stats.maxClusterVertices  = std::max(out.stats.maxClusterVertices, part.stats.maxClusterVertices);
+    }
+    return !out.clusters.empty();
+}
+
+} // namespace
+
 bool BuildNaniteClusterDAG(std::span<const float> positions,
                            std::span<const float> normals,
                            std::span<const float> uvs,
                            std::span<const u32>   indices,
+                           std::span<const NaniteSourceMeshRange> meshes,
                            NaniteClusterDAG&      outResult) {
     // ── 输入校验：与任务 8 同口径；失败一律返回 false 且**不改写出参** ──
     if ((indices.size() % kIndicesPerTriangle) != 0u) return false;
@@ -494,7 +542,12 @@ bool BuildNaniteClusterDAG(std::span<const float> positions,
         const u32 level = (u32)result.levelClusterCount.size();
 
         NaniteClusterBuild levelBuild;
-        if (!BuildNaniteClusters(positions, levelIndices, levelBuild)) return false;
+        if (level == 0u && !meshes.empty()) {
+            // 【T8·A2】L0 按源网格分组切分 ⇒ L0 簇不跨材质
+            if (!BuildLevel0ClustersByMesh(positions, levelIndices, meshes, levelBuild)) return false;
+        } else if (!BuildNaniteClusters(positions, levelIndices, levelBuild)) {
+            return false;
+        }
         if (levelBuild.Empty()) return false;   // 非空输入却切不出簇 ⇒ 失败（任务 8 同口径）
 
         result.levelClusterOffset.push_back((u32)result.clusters.size());
@@ -627,7 +680,18 @@ bool BuildNaniteClusterDAG(std::span<const float> positions,
         const usize simplifiedCount = meshopt_simplify(
             simplified.data(), merged.data(), merged.size(),
             positions.data(), vertexCount, kPositionStrideBytes,
-            targetIndexCount, /*target_error=*/1.0f, /*options=*/0u, &relativeError);
+ // 【T8 修复】`target_error=1.0` 等于"允许 100% 误差"，meshopt 会把每级简化成
+            //   极端粗糙的代理，`relativeError` 因此很大 ⇒ 运行时 LOD 判据
+            //   `parentError × focal > threshold × distance` 恒成立 ⇒ 一律选**根簇**
+            //   （实测：8287 簇只画 38 个、巨大三角形、519 万像素过绘制、FPS 2）。
+            //   改成 10% 上限：每级只做"温和的一步"，误差随级平滑增长，LOD 割才落在细级。
+            // 【2% 上限】此前 1.0（=100%）允许 meshopt 提前停下并报出巨大相对误差
+            //   （Sponza 实测某级 ~988 单位）⇒ LOD 割瞬间跳到根、只画 200 多簇。
+            //   收到 2% 后每级只做"温和一步"，误差量级与几何尺度相符。
+            // 【0.2%】此前 2%（= 74 个单位）会让后几级的实测误差直接顶到上限，
+            //   误差链变成 0.5/1.9/6.2/74/74 ⇒ LOD 割停在第 3 级、只画 58 个簇（实测）。
+            //   收到 0.2% 后每级误差连续增长，割才会落到更细的级。
+            targetIndexCount, /*target_error=*/0.002f, /*options=*/0u, &relativeError);
 
         // ── 终止条件②：没能减少（或返回非法个数）⇒ 停，绝不空转 ──
         if (simplifiedCount == 0u || (simplifiedCount % kIndicesPerTriangle) != 0u ||
@@ -715,15 +779,40 @@ bool BuildNaniteClusterDAG(std::span<const float> positions,
     }
 
     // ── maxParentLODError：级 L → L+1 的简化绝对误差；报 0 时退几何兜底；根写 0 ──
+    std::vector<float> levelErrorMax(levelCount, 0.0f);   // 【单调】每级已达到的最大误差
     for (usize cluster = 0; cluster < totalClusters; ++cluster) {
         const u32 level = result.clusterLevel[cluster];
         float error = 0.0f;
         if ((usize)level + 1u < levelCount) {
-            error = (level < stepErrors.size()) ? stepErrors[level] : 0.0f;
-            if (!(error > 0.0f)) error = levelFallbackError[level];
+            // 【T8 第 7 轮】误差来源改回 **meshopt 实测误差**，并用几何兜底保证"沿级单调且非零"：
+            //   · 纯几何兜底（父簇中心到子簇球面距离）量级过大 ⇒ 割一直落到叶子、
+            //     可见簇只有 ~840/3465（实测），屏幕出现大片孔洞；
+            //   · 纯 meshopt 相对误差又常常为 0（按目标面数减半时几乎不报错）⇒ 割恒在根。
+            //   取两者里"非零且较小的一步"更接近真实 LOD 误差：优先 stepErrors，
+            //   再与上一级的误差取 max 保证单调（DAG 割的前提）。
+            float step = (level < stepErrors.size()) ? stepErrors[level] : 0.0f;
+            // 【不要用几何兜底】它是"父簇中心到子簇球面距离"的量级（sponza 实测 ~988），
+            //   比 meshopt 实测误差（0.5/1.9/6.2）大两个数量级 ⇒ 割瞬间跳到根、只画 215 簇。
+            //   meshopt 没报误差（常为 0）时按"上一级 × 2"递推，保持单调且量级连续。
+            if (!(step > 0.0f)) {
+                step = (level > 0u && levelErrorMax[level - 1u] > 0.0f)
+                           ? levelErrorMax[level - 1u] * 2.0f
+                           : 1.0e-2f;
+            }
+            error = step;
         }
-        result.clusters[cluster].maxParentLODError = error;
-        result.stats.maxLODError = std::max(result.stats.maxLODError, error);
+        // 【根写 0】最高一级没有父簇 ⇒ `maxParentLODError` 必须是 0（单测硬约束）。
+        //   单调化只对"还有父级"的层级生效，且不把上一级的值带进根。
+        if ((usize)level + 1u < levelCount) {
+            float& levelMax = levelErrorMax[level];
+            if (error > levelMax) levelMax = error;
+            // 【跨级单调】级 L 的误差不得小于级 L-1（否则割在两级之间不单调）
+            if (level > 0u && levelErrorMax[level - 1u] > levelMax) levelMax = levelErrorMax[level - 1u];
+            result.clusters[cluster].maxParentLODError = levelMax;
+            result.stats.maxLODError = std::max(result.stats.maxLODError, levelMax);
+        } else {
+            result.clusters[cluster].maxParentLODError = 0.0f;
+        }
     }
 
     // ── 每级引用到的不同唯一内容数（级视图的最后一个读数）──
@@ -766,7 +855,18 @@ bool BuildNaniteClusterDAG(std::span<const float> positions,
                            std::span<const u32>   indices,
                            NaniteClusterDAG&      outResult) {
     return BuildNaniteClusterDAG(positions, std::span<const float>{}, std::span<const float>{},
-                                 indices, outResult);
+                                 indices, std::span<const NaniteSourceMeshRange>{}, outResult);
+}
+
+/// 【T8·A2】五参数重载：不提供源网格区间 ⇒ L0 仍在整条合并索引上全局切分
+///   （保持既有调用方与单测的语义；只有多网格入口才传 `meshes`）。
+[[nodiscard]] bool BuildNaniteClusterDAG(std::span<const float> positions,
+                                         std::span<const float> normals,
+                                         std::span<const float> uvs,
+                                         std::span<const u32>   indices,
+                                         NaniteClusterDAG&      outResult) {
+    return BuildNaniteClusterDAG(positions, normals, uvs, indices,
+                                 std::span<const NaniteSourceMeshRange>{}, outResult);
 }
 
 // ============================================================
@@ -850,7 +950,8 @@ bool PackNaniteClusters(std::span<const float>                positions,
     // 位置误差上界 = 半个量化步 = (meshMaxExtent / 1022) / 2
     stats.positionErrorBound = stats.meshMaxExtent / (2.0f * (float)kNaniteVertexQuantFullScale);
     stats.normalAngleErrorBoundDegrees = kNaniteNormalAngleErrorBoundDegrees;
-    stats.uvErrorBound = 1.0f / (float)kNaniteUVQuantMax;
+    // 编码域是 [-64,64] ⇒ 一个量化步 = 128/65535（旧口径 [0,1] 时是 1/65535）
+    stats.uvErrorBound = kNaniteUVEncodeRange / (float)kNaniteUVQuantMax;
 
     // ── ② 每个唯一内容的"**首次出现**"（内容哈希保证同形；取最小出现下标 ⇒ 确定）──
     //     量化原点与该份的属性来源都取首次出现：
@@ -960,9 +1061,13 @@ bool PackNaniteClusters(std::span<const float>                positions,
             if (NaniteUVNeedsClamp(inputV)) ++stats.uvClampCount;
             vertex.packedUV = NanitePackUV(NaniteQuantizeUV(inputU), NaniteQuantizeUV(inputV));
 
-            // UV 误差实测：参考值取"clamp 到 [0,1] 后的输入"（在域内时它就是输入本身）
-            const float referenceU = inputU < 0.0f ? 0.0f : (inputU > 1.0f ? 1.0f : inputU);
-            const float referenceV = inputV < 0.0f ? 0.0f : (inputV > 1.0f ? 1.0f : inputV);
+            // UV 误差实测：参考值取"clamp 到编码域 [-64,64] 后的输入"（在域内时它就是输入本身）
+            const float referenceU = inputU < -kNaniteUVEncodeExtent
+                                         ? -kNaniteUVEncodeExtent
+                                         : (inputU > kNaniteUVEncodeExtent ? kNaniteUVEncodeExtent : inputU);
+            const float referenceV = inputV < -kNaniteUVEncodeExtent
+                                         ? -kNaniteUVEncodeExtent
+                                         : (inputV > kNaniteUVEncodeExtent ? kNaniteUVEncodeExtent : inputV);
             const float uvErrorU = std::fabs(NaniteDequantizeUV(NaniteUnpackUVU(vertex.packedUV)) - referenceU);
             const float uvErrorV = std::fabs(NaniteDequantizeUV(NaniteUnpackUVV(vertex.packedUV)) - referenceV);
             if (uvErrorU > stats.maxUVError) stats.maxUVError = uvErrorU;
@@ -1049,7 +1154,9 @@ bool PackNaniteClusters(std::span<const float>                positions,
     }
 
     // ── ⑨ 头部（计数/范围/误差/flags 全部有真值来源）──
-    NaniteFileHeader header{};   // magic / version 已是任务 7 的定稿值
+    NaniteFileHeader header{};   // magic / version 已是任务 7 定稿值（T2 起 = 2）
+    // T2：v2 头部写入构建器版本（算法变更即 +1）；哈希由离线工具在 T4 填入，运行时构建未知则写 0
+    NaniteHeaderSetBuildMetadata(header, kNaniteBuilderVersion, 0u, 0u);
     header.clusterCount  = (u32)result.clusters.size();
     header.vertexCount   = (u32)result.vertices.size();
     header.indexCount    = (u32)result.triangles.size() * kNaniteIndicesPerTriangle;
@@ -1405,7 +1512,8 @@ bool BuildNaniteAssetFromGeometry(std::span<const float>                  positi
     //    "每次出现 → 网格顶点"的映射才能落在与 `meshes[]` 相同的（原始合并）空间里；
     //    两步合起来与 6 参数重载逐字等价（那个重载内部就是这两次调用）。
     NaniteClusterDAG dag;
-    if (!BuildNaniteClusterDAG(positions, normals, uvs, indices, dag)) return false;
+    // 【T8·A2】把源网格区间交给 DAG ⇒ L0 簇按 primitive 分组切分（不再跨材质）
+    if (!BuildNaniteClusterDAG(positions, normals, uvs, indices, meshes, dag)) return false;
     NanitePackedAsset asset;
     if (!PackNaniteClusters(positions, normals, uvs, materials, dag, asset)) return false;
     if (meshes.empty() || asset.clusters.empty()) {
@@ -2015,4 +2123,277 @@ bool BuildNanitePagePlan(std::span<const NaniteClusterRecord> clusters,
     return true;
 }
 
+// ============================================================
+// T2：`.nanite` v2 读写
+// ============================================================
+
+void NaniteFillMaterialsFromDesc(NanitePackedAsset& asset,
+                                 const std::vector<NaniteMaterialDesc>& descs) {
+    if (!asset.materials.empty() || descs.empty()) return;
+    asset.materials.reserve(descs.size());
+    for (const NaniteMaterialDesc& d : descs) {
+        NaniteMaterialRecord r{};
+        r.baseColorFactor[0] = d.baseColorFactor[0];
+        r.baseColorFactor[1] = d.baseColorFactor[1];
+        r.baseColorFactor[2] = d.baseColorFactor[2];
+        r.baseColorFactor[3] = d.baseColorFactor[3];
+        r.metallicFactor      = d.metallicFactor;
+        r.roughnessFactor     = d.roughnessFactor;
+        r.textureMask         = 0u;   // 纹理绑定待材质系统（T25）接线
+        r.bindlessTextureBase = 0u;
+        asset.materials.push_back(r);
+    }
+}
+
+bool WriteNaniteFile(const NanitePackedAsset& asset, const NaniteFileWriteOptions& options,
+                     std::vector<u8>& outBytes) {
+    // 固定五段（头部 + 簇/顶点/索引/材质/LOD，均已 16B 对齐）的尾部
+    const usize baseBytes = asset.layout.lodOffset + asset.layout.lodBytes;
+    if (asset.bytes.size() < baseBytes) return false;
+
+    const u32 extCount = (u32)options.extSections.size();
+    if (extCount > kNaniteMaxExtSections) return false;
+
+    // 段表位置：紧跟固定五段，整体 16B 对齐
+    const usize extEntryBytes = (usize)NaniteAlignUpFile((u64)extCount * (u64)kNaniteExtSectionEntryBytes);
+    std::vector<NaniteExtSectionEntry> entries(extCount);
+
+    // 载荷依次排布，每段起点 16B 对齐（对齐填充写 0，读回时不参与比对）
+    usize cursor = baseBytes + extEntryBytes;
+    for (u32 s = 0; s < extCount; ++s) {
+        const NaniteExtSectionBlob& blob = options.extSections[s];
+        entries[s].type     = (u32)blob.type;
+        entries[s].offset   = (u32)cursor;
+        entries[s].size     = (u32)blob.payload.size();
+        entries[s].reserved = 0u;
+        cursor += (usize)NaniteAlignUpFile((u64)blob.payload.size());
+    }
+    const usize totalBytes = cursor;
+
+    // 头部：版本升到 v2，写入构建器版本与两个哈希，并记录扩展段数
+    NaniteFileHeader header = asset.header;
+    header.version = kNaniteFileVersion;
+    NaniteHeaderSetBuildMetadata(header, options.builderVersion, options.settingsHash,
+                                 options.sourceHash);
+    header._reserved[kNaniteReservedSlotExtSectionCount] = extCount;
+
+    std::vector<u8> bytes(totalBytes, 0u);
+    std::memcpy(bytes.data(), asset.bytes.data(), baseBytes);          // 五段原样搬运（含旧头部）
+    std::memcpy(bytes.data(), &header, sizeof(header));                // 头部覆盖为 v2
+    if (extCount > 0) {
+        std::memcpy(bytes.data() + baseBytes, entries.data(),
+                    (usize)extCount * kNaniteExtSectionEntryBytes);
+        for (u32 s = 0; s < extCount; ++s) {
+            const NaniteExtSectionBlob& blob = options.extSections[s];
+            if (!blob.payload.empty()) {
+                std::memcpy(bytes.data() + entries[s].offset, blob.payload.data(),
+                            blob.payload.size());
+            }
+        }
+    }
+
+    // 自校验：写出来的东西必须能被读取器接受（防止段表/载荷算错却静默落盘）
+    if (ValidateNaniteFile(bytes.data(), bytes.size(), nullptr) != NaniteFileError::None) {
+        return false;
+    }
+
+    outBytes = std::move(bytes);
+    return true;
+}
+
+NaniteFileError ReadNaniteFile(const void* data, usize size, NaniteFileImage& out) {
+    NaniteFileLayout layout{};
+    const NaniteFileError error = ValidateNaniteFile(data, size, &layout);
+    if (error != NaniteFileError::None) return error;
+
+    NaniteFileImage image;
+    image.layout = layout;
+    std::memcpy(&image.header, data, sizeof(NaniteFileHeader));
+
+    const u8* raw = static_cast<const u8*>(data);
+    image.bytes.assign(raw, raw + size);
+
+    // 扩展段表：v1 文件 extSectionCount = 0（数组为空），调用方据此知道"元数据缺失"
+    image.extEntries.resize(layout.extSectionCount);
+    if (layout.extSectionCount > 0) {
+        std::memcpy(image.extEntries.data(), image.bytes.data() + layout.extEntryOffset,
+                    (usize)layout.extSectionCount * kNaniteExtSectionEntryBytes);
+    }
+
+    out = std::move(image);
+    return NaniteFileError::None;
+}
+// ============================================================
+// T4：Fallback 低模（v2 `FallbackMesh` 扩展段）
+// ============================================================
+
+bool BuildNaniteFallbackMesh(std::span<const float> positions, std::span<const float> normals,
+                             std::span<const u32> indices, float ratio,
+                             NaniteFallbackMeshData& out) {
+    const usize vertexCount = positions.size() / 3u;
+    const usize indexCount  = indices.size();
+    if (vertexCount == 0u || indexCount < 3u) return false;
+    if ((indexCount % 3u) != 0u) return false;
+
+    // ratio 夹到 [0,1]；至少保留一个三角形，否则低模没有意义
+    float clamped = ratio;
+    if (!(clamped > 0.0f)) clamped = 0.0f;
+    if (clamped > 1.0f) clamped = 1.0f;
+    const usize targetIndexCount = std::max<usize>(3u, (usize)((double)indexCount * (double)clamped / 3.0 * 3.0));
+
+    // 简化：目标索引数不足原始数时才做；否则原样保留
+    std::vector<u32> simplified(indexCount);
+    usize simplifiedCount = indexCount;
+    if (targetIndexCount < indexCount) {
+        float resultError = 0.0f;
+        // 【不锁边界】`meshopt_SimplifyLockBorder` 在 v0.22 上对本工程的 Sponza 网格会让
+        simplifiedCount = meshopt_simplify(simplified.data(), indices.data(), indexCount,
+                                           positions.data(), vertexCount, sizeof(float) * 3u,
+                                           targetIndexCount, 1.0f, 0u,   // 0 = 不锁边界（见上）
+                                           &resultError);
+        if (simplifiedCount < 3u || (simplifiedCount % 3u) != 0u) {
+            simplifiedCount = indexCount;
+            simplified.assign(indices.begin(), indices.end());
+        }
+    } else {
+        simplified.assign(indices.begin(), indices.end());
+    }
+    simplified.resize(simplifiedCount);
+
+    // 【remap 的语义】`meshopt_optimizeVertexFetchRemap` 写的是 **old → new** 映射
+    // （`remap[oldVertex] = newVertex`），并且**不改写**索引缓冲；方向搞反会读到越界顶点
+    // （真机表现为 MSVC span 断言 / 堆损坏）。下面按正确方向重建顶点并把索引映射到新下标。
+    std::vector<u32> remap(vertexCount, 0u);
+    const usize uniqueVertexCount = meshopt_optimizeVertexFetchRemap(
+        remap.data(), simplified.data(), simplified.size(), vertexCount);
+    if (uniqueVertexCount == 0u || uniqueVertexCount > vertexCount) { HE_CORE_WARN("[FB] remap 异常 unique={} vertex={}", uniqueVertexCount, vertexCount); return false; }
+
+    // 防御：简化后的下标必须落在原顶点范围内（否则 remap 取值越界）
+    for (usize i = 0; i < simplified.size(); ++i) {
+        if (simplified[i] >= vertexCount) { HE_CORE_WARN("[FB] 索引越界 i={} idx={} vertex={}", i, simplified[i], vertexCount); return false; }
+    }
+
+    NaniteFallbackMeshData result;
+    result.header.vertexCount = (u32)uniqueVertexCount;
+    result.header.indexCount  = (u32)simplified.size();
+    result.header.indexStride = 4u;
+    result.positions.assign(uniqueVertexCount * 3u, 0.0f);
+    result.normals.assign(uniqueVertexCount * 3u, 0.0f);
+
+    // 顶点：按 old → new 落位（未被引用的顶点自然丢失）
+    const bool hasNormals = normals.size() >= vertexCount * 3u;
+    for (usize oldVertex = 0; oldVertex < vertexCount; ++oldVertex) {
+        const u32 newVertex = remap[oldVertex];
+        if (newVertex >= uniqueVertexCount) continue;
+        for (u32 c = 0; c < 3u; ++c) {
+            result.positions[(usize)newVertex * 3u + c] = positions[oldVertex * 3u + c];
+            if (hasNormals) result.normals[(usize)newVertex * 3u + c] = normals[oldVertex * 3u + c];
+        }
+    }
+
+    // 索引：同样映射到新下标
+    std::vector<u32> newIndices(simplified.size());
+    for (usize i = 0; i < simplified.size(); ++i) newIndices[i] = remap[simplified[i]];
+    result.indices = std::move(newIndices);
+
+    out = std::move(result);
+
+    return true;
+}
+
+void SerializeNaniteFallbackMesh(const NaniteFallbackMeshData& data, std::vector<u8>& outBytes) {
+    // 布局：头 16B | 位置 12B/顶点 | 法线 12B/顶点 | 索引 4B/三角形顶点数
+    // 索引起点补到 4B 对齐（顶点数据都是 12B 步长，天然对齐；这里仍显式补齐防将来改布局）
+    const usize positionBytes = data.positions.size() * sizeof(float);
+    const usize normalBytes   = data.normals.size() * sizeof(float);
+    const usize indexBytes    = data.indices.size() * sizeof(u32);
+    const usize indexOffset   = NaniteAlignUpFile((u64)(sizeof(NaniteFallbackMeshHeader) + positionBytes + normalBytes));
+
+    outBytes.assign(indexOffset + indexBytes, 0u);
+    std::memcpy(outBytes.data(), &data.header, sizeof(NaniteFallbackMeshHeader));
+    if (positionBytes > 0u) {
+        std::memcpy(outBytes.data() + sizeof(NaniteFallbackMeshHeader), data.positions.data(), positionBytes);
+    }
+    if (normalBytes > 0u) {
+        std::memcpy(outBytes.data() + sizeof(NaniteFallbackMeshHeader) + positionBytes,
+                    data.normals.data(), normalBytes);
+    }
+    if (indexBytes > 0u) {
+        std::memcpy(outBytes.data() + indexOffset, data.indices.data(), indexBytes);
+    }
+}
+// ============================================================
+// T5：`.nanite` 字节 → 强类型资产
+// ============================================================
+
+NaniteAssetLoadStatus ParseNaniteAsset(const void* data, usize size, u32 expectedBuilderVersion,
+                                       NanitePackedAsset& out, NaniteAssetLoadInfo* info) {
+    NaniteFileImage image;
+    const NaniteFileError error = ReadNaniteFile(data, size, image);
+    if (error != NaniteFileError::None) {
+        // 版本超范围单独区分：上层据此打"过期"而不是"损坏"
+        return error == NaniteFileError::BadVersion ? NaniteAssetLoadStatus::VersionMismatch
+                                                    : NaniteAssetLoadStatus::BadFile;
+    }
+
+    const u32 builderVersion = NaniteHeaderBuilderVersion(image.header);
+    if (expectedBuilderVersion != 0u && builderVersion != 0u &&
+        builderVersion != expectedBuilderVersion) {
+        return NaniteAssetLoadStatus::BuilderMismatch;
+    }
+
+    // 段表 → 强类型向量（按偏移 memcpy；文件已通过 16B 对齐与越界校验）
+    NanitePackedAsset asset;
+    asset.header = image.header;
+    asset.layout = image.layout;
+    asset.bytes  = std::move(image.bytes);
+
+    const u8* raw = asset.bytes.data();
+    auto copySection = [&](usize offset, usize bytes, auto& target) {
+        using Element = typename std::decay_t<decltype(target)>::value_type;
+        const usize count = bytes / sizeof(Element);
+        target.resize(count);
+        if (count > 0u) std::memcpy(target.data(), raw + offset, count * sizeof(Element));
+    };
+    copySection(asset.layout.clusterOffset,  asset.layout.clusterBytes,  asset.clusters);
+    copySection(asset.layout.vertexOffset,   asset.layout.vertexBytes,   asset.vertices);
+    copySection(asset.layout.indexOffset,    asset.layout.indexBytes,    asset.triangles);
+    copySection(asset.layout.materialOffset, asset.layout.materialBytes, asset.materials);
+    copySection(asset.layout.lodOffset,      asset.layout.lodBytes,      asset.lodOffsets);
+
+    // 段长按 16B 向上取整：末尾的填充字节不能被当成真实记录
+    asset.clusters.resize(asset.header.clusterCount);
+    asset.vertices.resize(asset.header.vertexCount);
+    asset.triangles.resize(asset.header.indexCount / kNaniteIndicesPerTriangle);
+    asset.materials.resize(asset.header.materialCount);
+    asset.lodOffsets.resize(asset.header.lodLevelCount);
+
+    // 扩展段：材质描述（其它类型由调用方按需解释）
+    if (info != nullptr) {
+        info->formatVersion   = image.header.version;
+        info->builderVersion  = builderVersion;
+        bool hashValid = false;
+        info->settingsHash    = NaniteHeaderSettingsHash(image.header, &hashValid);
+        info->sourceHash      = NaniteHeaderSourceHash(image.header, &hashValid);
+        info->hasHashes       = image.header.version >= 2u &&
+                                (info->settingsHash != 0u || info->sourceHash != 0u);
+        info->extSectionCount = image.layout.extSectionCount;
+        info->extEntries      = image.extEntries;
+        info->materialDescs.clear();
+
+        for (const NaniteExtSectionEntry& entry : image.extEntries) {
+            if (entry.type != (u32)NaniteExtSectionType::MaterialDesc) continue;
+            const usize count = entry.size / sizeof(NaniteMaterialDesc);
+            info->materialDescs.resize(count);
+            if (count > 0u) {
+                std::memcpy(info->materialDescs.data(), asset.bytes.data() + entry.offset,
+                            count * sizeof(NaniteMaterialDesc));
+            }
+            break;
+        }
+    }
+
+    out = std::move(asset);
+    return NaniteAssetLoadStatus::Ok;
+}
 } // namespace he::render

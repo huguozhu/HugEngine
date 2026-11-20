@@ -93,6 +93,10 @@ public:
         std::unique_ptr<rhi::IRHIBuffer> indices;     ///< 索引段（3×u16 进 u32[2]，8B/三角形）
         std::unique_ptr<rhi::IRHIBuffer> materials;   ///< 材质段（8B/条）
         std::unique_ptr<rhi::IRHIBuffer> lodOffsets;  ///< LOD 段（每级一个 u32）
+    /// 【T8】每簇的量化尺度（float/cluster）：每份资产的顶点是按**各自 bbox 最大轴**量化的，
+    ///   聚合视图里只有单一的 `meshMaxExtent` ⇒ 尺度差异大的资产会被按别人的尺度解码，
+    ///   表现为"可见、有簇、零片元"。这张表让着色器按簇取正确尺度。
+    std::unique_ptr<rhi::IRHIBuffer> clusterExtent;
 
         usize totalBytes    = 0;      ///< 已上传的镜像字节数（= `asset.bytes.size()`）
         usize mismatchBytes = 0;      ///< 读回逐字节比较的不一致字节数（0 = 完全一致）
@@ -107,9 +111,72 @@ public:
     /// 【失败】设备/镜像无效、任一缓冲创建失败 ⇒ 返回 false（不打印成功行；不一致时打印
     ///   实际的不一致字节数，不撒谎）。重复调用会先释放上一份。
     /// 【同步约定】函数内部自己 `Submit` + `WaitIdle`（一次性，不在每帧路径上）。
-    [[nodiscard]] bool UploadPackedAsset(const NanitePackedAsset& asset);
+    [[nodiscard]] bool UploadPackedAsset(const NanitePackedAsset& asset, bool waitForReadbackVerify = true);
+
+    /// T8：资产注册表条目（每资产一组 GPU 段 + 一份 CPU 段副本，不含字节镜像）
+    struct NaniteAssetEntry {
+        AssetBuffers      buffers;
+        NanitePackedAsset cpu;      ///< 只留簇/顶点/三角形/材质/LOD 段（`bytes` 清空）
+    };
+    /// "无资产"哨兵（`MeshRegistryEntry::naniteAssetIndex` 用它表示走运行时构建/回退）
+    static constexpr u32 kInvalidAssetIndex = 0xFFFFFFFFu;
+
+    /// T8：把一份资产追加进注册表，返回其下标（失败返回 `kInvalidAssetIndex`）。
+    /// 【与 `UploadPackedAsset` 的关系】后者是"单资产"兼容入口（等价于替换 slot 0）；
+    /// 本函数是"多资产"入口，多份资产各自持有独立的 6 段缓冲，互不覆盖。
+    // ── T8：聚合视图（**光栅端唯一消费的视图**）──
+    //
+    // 【为什么需要它】光栅按 `firstInstance = 簇号` 直接从"资产的簇/索引缓冲"取数据，
+    // 它并不知道资产号。多资产下最省事、且**不必改任何 shader**的做法是：把所有资产的五段
+    // 首尾相接成一份聚合缓冲，簇记录里的资产局部偏移在注册时改写为全局值
+    // （`triangleOffset / vertexOffset / materialID / childClusterOffset` 各加本资产基址）。
+    // 于是"全局簇号"在整个渲染链路里天然自洽 —— 剔除侧（第 5 步 ③）已经在写全局簇号。
+    //
+    // 【单资产等价性】只有一份资产时基址全 0，聚合视图与 `m_Asset` 逐字节相同。
+    /// 【T8 修复】聚合视图还没建好（或建失败）时，退回**槽位 0 的段组**而不是空的 `m_Asset`：
+    /// `UploadPackedAsset` 现在走 `RegisterAsset`，`m_Asset` 常年是空的；若这里返回它，
+    /// 光栅端会拿到 null 缓冲（实测崩溃栈：`VulkanBuffer::GetHandle ← UpdateDescriptorSet
+    /// ← NaniteRaster::RecordSoftRasterPass`，绑定点 17 = 流式簇池的占位）。
+    [[nodiscard]] const AssetBuffers& GetMergedAssetBuffers() const {
+        if (m_MergedValid) return m_Merged;
+        if (!m_Assets.empty()) return m_Assets.front().buffers;
+        return m_Asset;
+    }
+    [[nodiscard]] bool HasMergedAsset() const { return m_MergedValid; }
+    /// T8：把聚合五段（CPU 侧真值）一次性建成 GPU 缓冲。
+    /// 【为什么与 `RegisterAsset` 分开】注册期间反复重建会让**光栅端已缓存的描述符**
+    /// 引用已销毁的 VkBuffer（实测：第二份资产注册后 bindless Flush 直接访问违例）。
+    /// 正确顺序是"注册全部资产 → 建一次聚合缓冲 → 再进帧图"。
+    bool BuildMergedBuffers();
+    [[nodiscard]] u32 GetMergedClusterCount() const { return (u32)m_MergedClusters.size(); }
+
+    /// 【T8·排查】聚合后的 CPU 簇记录（与 GPU 读到的同一份，便于逐簇比对）
+    [[nodiscard]] const NaniteClusterRecord* GetMergedCluster(u32 index) const {
+        return index < m_MergedClusters.size() ? &m_MergedClusters[index] : nullptr;
+    }
+
+
+    [[nodiscard]] u32 RegisterAsset(const NanitePackedAsset& asset, bool waitForReadbackVerify = true);
+
+    /// T8：注册表读取（越界返回 nullptr）
+    [[nodiscard]] const NaniteAssetEntry* GetAssetEntry(u32 index) const {
+        return index < m_Assets.size() ? &m_Assets[index] : nullptr;
+    }
+    [[nodiscard]] u32 GetAssetCount() const { return (u32)m_Assets.size(); }
+    void ClearAssets() {
+        m_Assets.clear();
+        // 聚合段一并清空：不清会让"先 Upload 再 Register"的两条路径叠加出重复几何
+        m_MergedClusters.clear();
+        m_MergedVertices.clear();
+        m_MergedTriangles.clear();
+        m_MergedMaterials.clear();
+        m_MergedLodOffsets.clear();
+        m_Merged = AssetBuffers{};
+        m_MergedValid = false;
+    }
 
     /// 已上传的资产缓冲组（任务 13+ 绑定用；本任务只创建 + 校验）
+    /// 单资产（slot 0）的段组；**光栅端请用 `GetMergedAssetBuffers()`**（多资产时它才是全场景视图）
     [[nodiscard]] const AssetBuffers& GetAssetBuffers() const { return m_Asset; }
 
     // ============================================================
@@ -145,6 +212,27 @@ public:
     /// 留存的资产 CPU 副本（页池的数据源；未留存时为一份空资产）
     [[nodiscard]] const NanitePackedAsset& GetAssetCPUCopy() const { return m_AssetCPU; }
 
+    /// 【T12】释放留存的**几何段**（簇/顶点/三角形），只保留头部与材质段。
+    /// 【什么时候调】流式用**文件**做页数据源时：页划分完成后几何不再需要常驻，
+    ///   继续留着就等于用一整份资产的内存抵消流式收益（Sponza 实测 13.4 MB）。
+    /// 【安全性】必须只在"页池已就绪、且不再需要 m_Asset 指针"之后调用；
+    ///   调用后 `GetAssetCPUCopy().clusters/vertices/triangles` 为空。
+    /// 【T12】几何 CPU 副本当前占用（字节；用于释放前后对比日志）
+    [[nodiscard]] usize GeometryCPUBytes() const {
+        return m_AssetCPU.clusters.size() * sizeof(NaniteClusterRecord)
+             + m_AssetCPU.vertices.size() * sizeof(NaniteVertex)
+             + m_AssetCPU.triangles.size() * sizeof(NanitePackedTriangle);
+    }
+
+    void ReleaseAssetGeometry() {
+        m_AssetCPU.clusters.clear();
+        m_AssetCPU.clusters.shrink_to_fit();
+        m_AssetCPU.vertices.clear();
+        m_AssetCPU.vertices.shrink_to_fit();
+        m_AssetCPU.triangles.clear();
+        m_AssetCPU.triangles.shrink_to_fit();
+    }
+
     // ============================================================
     // 【§14.8 任务 25】材质 bin（只读辅助数组；不是资产的一部分）
     //
@@ -166,6 +254,14 @@ public:
     }
 
 private:
+    /// T8：把一份资产上传进调用方给的段组（`UploadPackedAsset` 与 `RegisterAsset` 共用）
+    /// @param waitForReadbackVerify
+    ///   true  ⇒ 上传后同步 `Submit + WaitIdle` 逐字节读回校验（工具 / 单测口径）；
+    ///   false ⇒ **跳过同步校验**：帧图构建期主命令表正在录制、队列可能被占用，
+    ///           `WaitIdle` 会死等（实测 04/07 都卡在这一步，日志停在"离线资产加载成功"）。
+    [[nodiscard]] bool UploadAssetInto(const NanitePackedAsset& asset, AssetBuffers& outAsset,
+                                       bool waitForReadbackVerify = true);
+
     rhi::IRHIDevice* m_Device = nullptr;
 
     /// 【T2.6】本帧的渲染线程上下文（可空；空时解析回退 `m_Device`）
@@ -209,6 +305,20 @@ public:
 
     /// 【§14.8 任务 12】资产缓冲组（GPU 资源宿主；`Shutdown` 时随 unique_ptr 一起释放）
     AssetBuffers m_Asset;
+
+    /// T8：多资产注册表（每资产独立段组 + CPU 段副本；空表示还没注册过任何资产）
+    std::vector<NaniteAssetEntry> m_Assets;
+    /// T8：聚合五段（CPU 侧真值；每次注册资产后整体重建 GPU 缓冲）
+    std::vector<NaniteClusterRecord>  m_MergedClusters;
+    std::vector<NaniteVertex>         m_MergedVertices;
+    std::vector<NanitePackedTriangle> m_MergedTriangles;
+    std::vector<NaniteMaterialRecord> m_MergedMaterials;
+    std::vector<u32>                  m_MergedLodOffsets;
+    /// 【T8】每簇量化尺度（与 `m_MergedClusters` 一一对应）
+    std::vector<float>                m_MergedClusterExtent;
+    AssetBuffers m_Merged;           ///< 聚合 GPU 段组（光栅端消费）
+    bool         m_MergedValid = false;
+
 
     /// 【§14.8 任务 24】留存的资产 CPU 副本（页池的数据源；`bytes` 镜像被丢弃）
     NanitePackedAsset m_AssetCPU;

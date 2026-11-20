@@ -78,3 +78,16 @@ if ($Log) {
     Write-Host '== 日志（Ctrl+C 结束）==' -ForegroundColor Cyan
     & $hdc shell hilog | Select-String -Pattern 'HugEngine|HugEngineNative|\bentry\b'
 }
+
+# T13：Nanite 离线产物（Content/Processed/*.nanite）
+# 【为什么也同步】鸿蒙端一旦开启 nanite_offline，资产要从 rawfile 解压到沙箱；
+# 没有这些文件就只能走运行时构建（日志会明确回退原因）。
+$processedSrc = Join-Path $repo 'Content\Processed'
+$processedDst = Join-Path $rawContent 'Processed'
+if (Test-Path $processedSrc) {
+    New-Item -ItemType Directory -Force -Path $processedDst | Out-Null
+    Copy-Item (Join-Path $processedSrc '*.nanite') $processedDst -Force -ErrorAction SilentlyContinue
+    Write-Host "已同步 Content/Processed/*.nanite"
+} else {
+    Write-Warning "缺少 Content/Processed（先跑 ProcessMeshes）；鸿蒙将回退运行时构建"
+}
