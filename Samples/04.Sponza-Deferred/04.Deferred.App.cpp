@@ -997,6 +997,10 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
                              naniteSettings.offlinePath);
             }
         }
+        // 【验收】相机动画开关（cfg `cam_anim`，默认保持 true）：关掉后相机固定在 cfg 位姿，
+        //   便于逐像素对照"glTF 原始资源 vs Nanite 离线资产"两种来源的画面。
+        g.animCameraMode = GetBool(cfg, "cam_anim", g.animCameraMode);
+
         if (g.skybox) g.skybox->enabled = g.skyboxOn;
 
         if (auto* dl = g.world.GetComponent<DirectionalLight>(g.mainLightEntity)) {
