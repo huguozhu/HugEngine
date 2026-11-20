@@ -62,6 +62,8 @@ private:
 
     rhi::ShaderBytecode m_ShadowVS,m_ShadowFS;
     rhi::RHIPipelineStateHandle m_ShadowPSO{};   // A-3：句柄持有
+    /// 【资源来源切换】阴影 IA PSO 被 T11 销毁后，切回 glTF 资源时要按这份布局重建
+    rhi::DescriptorSetLayoutHandle m_IaLayout = rhi::kInvalidLayout;
     /// 【退出崩溃】`Shutdown()` 之后置 false；`Render`/`RenderCascade` 直接返回。
     ///   实测 02 关闭窗口时，收尾阶段仍有在飞帧执行到 `BeginOffscreenPass`，
     ///   而阴影贴图已被销毁 ⇒ 在 nvoglv64 内访问违例。

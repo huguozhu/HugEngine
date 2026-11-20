@@ -203,6 +203,7 @@ public:
     /// 【为什么不禁用整个 GBufferRenderer】纹理/描述符/DGC 上下文仍要建；
     /// 只有"顶点着色器 + IA 的几何管线"这一项按 T11 移除。
     void SetSkipIaPipeline(bool skip) {
+        if (skip == m_SkipIaPipeline) return;   // 幂等：门面每帧调用也只有状态变化时才动 PSO
         m_SkipIaPipeline = skip;
         // 【T11】门面在**样例加载配置之后**才调到这里（晚于 Initialize），所以不能只靠
         //   "创建时跳过"：已经在的那条 IA 管线要真的销毁，否则等于没移除。
@@ -211,9 +212,19 @@ public:
             m_PSO = {};
             HE_CORE_INFO("GBufferRenderer: T11 —— 已销毁 GBuffer 的 IA PSO"
                          "（几何只走 Nanite 硬光栅；D3D11/无 MS 设备不会走到这里）");
+        } else if (!skip && !m_PSO.IsValid() && m_Device != nullptr) {
+            // 【资源来源切换】从 Nanite 离线资产切回 glTF 原始资源时，IA PSO 已被 T11 销毁
+            //   ⇒ 必须在这里重建（layout / 描述符集仍在，只重建 PSO）。
+            if (EnsureIaPipeline()) {
+                HE_CORE_INFO("GBufferRenderer: 已重建 GBuffer 的 IA PSO（资源来源 → glTF 原始资源）");
+            } else {
+                HE_CORE_WARN("GBufferRenderer: 重建 IA PSO 失败 ⇒ 本帧可能没有几何写入 GBuffer");
+            }
         }
     }
     [[nodiscard]] bool IsIaPipelineSkipped() const { return m_SkipIaPipeline; }
+    /// 【资源来源切换】按当前布局重建 IA PSO（layout/描述符集必须已存在）。
+    bool EnsureIaPipeline();
     /// 【P9】网格着色器版 GBuffer 管线（未开启 / 设备不支持时为空）
     rhi::IRHIPipelineState*       GetMeshPSO()       const { return ResP(m_MeshPSO); }
     rhi::DescriptorSetLayoutHandle GetLayout()       const { return m_Layout; }
@@ -222,6 +233,8 @@ public:
 private:
     void CreateTextures(rhi::IRHIDevice* device);
     void CreatePSO(rhi::IRHIDevice* device);
+    /// 只建 "GBuffer IA PSO"（不含 layout / 描述符集）——供运行时切回 glTF 资源时重建
+    bool CreateIaPso(rhi::IRHIDevice* device);
     void CreateDescriptorSet(rhi::IRHIDevice* device);
 
     // ── 纹理所有权 ──

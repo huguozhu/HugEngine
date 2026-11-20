@@ -117,6 +117,8 @@ bool CSMTechnique::Initialize(rhi::IRHIDevice* device){
 }
 
 void CSMTechnique::CreatePSO(rhi::DescriptorSetLayoutHandle layout){
+    // 【资源来源切换】记住布局：T11 销毁 IA PSO 后，切回 glTF 资源时靠它重建
+    m_IaLayout = layout;
     rhi::VertexInputLayout vl;
     vl.stride=sizeof(he::StaticVertex);
     vl.attributes={{0,0,rhi::VertexFormat::Float3,offsetof(he::StaticVertex,position)}};
@@ -139,7 +141,8 @@ void CSMTechnique::CreatePSO(rhi::DescriptorSetLayoutHandle layout){
 
     // ── 【T10】阴影的 mesh 管线：与 IA 版**同附件、同深度状态、同 push constant**，
     //   只把几何入口换成 mesh shader（顶点/索引走 SRV，见布局 binding 27/28）。
-    if (m_Device->GetCaps().supportsMeshShaders) {
+    // 【资源来源切换】mesh PSO 只建一次：重建 IA PSO 时不能把它再建一遍（会泄漏旧句柄）
+    if (m_Device->GetCaps().supportsMeshShaders && !m_ShadowMeshPSO.IsValid()) {
         rhi::ShaderBytecode mesh{};
         mesh.stage = rhi::ShaderStage::Mesh;
         mesh.spirv = k_Shadow_mesh_spv;
@@ -169,7 +172,16 @@ void CSMTechnique::SetMeshShadowEnabled(bool enable){
 }
 
 bool CSMTechnique::SetRemoveIaPipeline(bool remove){
-    if (!remove) return false;
+    if (!remove) {
+        // 【资源来源切换】从 Nanite 切回 glTF 原始资源：T11 销毁过的 IA 阴影 PSO 要重建，
+        //   否则阴影通道既没有 IA（已销毁）也不该再走 mesh（几何来源已不是 Nanite）。
+        if (!m_ShadowPSO.IsValid() && m_Device != nullptr && m_IaLayout != rhi::kInvalidLayout) {
+            CreatePSO(m_IaLayout);
+            HE_CORE_INFO("CSMTechnique: 已重建阴影 IA PSO（资源来源 → glTF 原始资源）");
+        }
+        m_UseMeshPath = false;
+        return false;
+    }
     const bool msOk = m_Device != nullptr && m_Device->GetCaps().supportsMeshShaders
                    && m_ShadowMeshPSO.IsValid();
     if (!msOk) {
