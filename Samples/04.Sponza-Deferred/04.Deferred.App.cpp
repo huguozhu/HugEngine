@@ -135,6 +135,43 @@ struct App::Impl {
     std::unique_ptr<rhi::IRHISampler> matArraySamp;
     std::vector<std::pair<u32, u32>> matLayers;
     std::vector<std::pair<u32, u32>> pendingMatLayers;   // 建 pipeline 前暂存（多资产档注册早于纹理绑定）   // (贴图 URI 的 FNV1a32, 数组层号)
+    // ---- 【资源来源】面板最上方的二选一：glTF 原始资源 / Nanite 离线预处理资产 ----
+    //   true  ⇒ `nanite_enable=1` 的语义：几何由 Nanite 硬光栅从 `.nanite` 资产绘制；
+    //   false ⇒ 回到标准 IA 管线，直接画 glTF 加载出的 `MeshComponent`。
+    //   两者共用同一个场景（glTF 网格始终在 ECS 里，阴影/回退都要用）。
+    bool assetSourceNanite = true;
+
+    /// 切换资源来源（面板单选 / 自动化钩子共用）。
+    /// 【注意】切回 glTF 时，T11 可能已经销毁 GBuffer 与阴影的 IA PSO —— 重建发生在
+    ///   `DeferredPipeline::SetNaniteSettings` → `SetSkipIaPipeline(false)` / `SetRemoveIaPipeline(false)`。
+    void ApplyAssetSource(bool useNanite) {
+        render::NaniteSettings s = pipeline->GetNaniteSettings();
+        if (s.enabled == useNanite) return;
+        s.enabled = useNanite;
+        if (useNanite) {
+            s.offline = true;      // "Nanite 预处理资产"⇒ 走离线 `.nanite`
+            if (s.offlinePath.empty()) s.offlinePath = "Processed/Sponza_0.nanite";
+        }
+        pipeline->SetNaniteSettings(s);
+        // 【切换时必须丢掉 DGC 上下文】DGC 执行集里存着**旧 PSO**（T11 销毁的那条 IA 管线）：
+        //   切回 glTF 后执行集仍指向已销毁的 PSO ⇒ 驱动内崩溃（实测 nvoglv64）。
+        //   清空后下一帧会按新 PSO 重建执行集（或走 DrawIndexedIndirectCount 回退）。
+        if (auto* gb = pipeline->GetGBuffer()) gb->ClearDGCContext();
+        // 单资产离线档按"第一个网格绑定资产槽位 0"的既有口径（与初始化一致）
+        if (useNanite && !s.multiAsset) {
+            bool bound = false;
+            world.ForEach<MeshComponent>([&](Entity, MeshComponent& mesh) {
+                if (bound) return;
+                mesh.SetNaniteAssetIndex(0u);
+                bound = true;
+            });
+        }
+        assetSourceNanite = useNanite;
+        HE_CORE_INFO("04.App: 资源来源切换 → {}（enabled={} offline={} path={}）",
+                     useNanite ? "Nanite 离线资产" : "glTF 原始资源",
+                     s.enabled ? 1 : 0, s.offline ? 1 : 0, s.offlinePath);
+    }
+
     bool transformOnly = false;   // T8：只画变换验收件（cfg `nanite_transform_only`）
     u32  multiAssetCount = 8;     // T8：多资产档注册份数（cfg `nanite_multi_asset_count`）
     bool transformTest   = false; // T8：生成三个变换验收件（cfg `nanite_transform_test`）
@@ -913,6 +950,15 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
             naniteSettings.fakeChain = GetBool(cfg, "nanite_fake_chain", naniteSettings.fakeChain);
             // 【T11】移除 GBuffer 的 IA 管线（几何只走 Nanite 硬光栅；无 MS 设备自动忽略）
             naniteSettings.removeIaPso = GetBool(cfg, "nanite_remove_ia_pso", naniteSettings.removeIaPso);
+            // 【资源来源切换】本样例面板最上方允许**运行时**在"glTF 原始资源 / Nanite 离线资产"
+            //   之间切换 ⇒ 不能销毁另一条路径的 IA PSO：T11 的销毁会连带 RenderPass 一起销毁，
+            //   而 GBuffer 的并行录制（次级命令缓冲继承 RenderPass）与 DGC 执行集都会指向旧对象，
+            //   切回来时重建 PSO 会在 `vkCmdBeginRenderPass` 内崩在驱动（实测）。
+            //   ⇒ 本样例强制保留 IA 管线；T11 的"销毁 IA"能力仍在 07.Nanite 等档位可用。
+            if (naniteSettings.removeIaPso) {
+                HE_CORE_INFO("04.App: 为支持面板运行时切换资源来源，保留 IA 管线（忽略 cfg nanite_remove_ia_pso=1）");
+                naniteSettings.removeIaPso = false;
+            }
             // 【T8】LOD 阈值（像素）：调大 ⇒ 细分到叶子（全细节，慢）
             // 【修复】阈值是**浮点**（像素）：此前用 GetInt 读取 ⇒ 0.1/0.25/0.02 全被截成 0，
             //   而 cull 侧"<=0 取默认 1.0" ⇒ cfg 里怎么改都没反应（踩过）。
@@ -942,6 +988,7 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
             }
 
             g.pipeline->SetNaniteSettings(naniteSettings);
+            g.assetSourceNanite = naniteSettings.enabled;   // 面板单选初始值 = cfg 决定
         // 【T10】阴影绘制路径（cfg `shadow_ms`，默认 IA）
         g.pipeline->SetShadowMeshEnabled(GetBool(cfg, "shadow_ms", false));
             if (naniteSettings.enabled) {
@@ -1033,6 +1080,21 @@ bool App::BeginFrame(f32 deltaTime, const InputState& input) {
         g.camInput.Reset();   // 切换时丢弃过期光标坐标，避免视角跳一帧
     }
     g.frameDt = deltaTime;
+
+    // ── 【T8 验收钩子】资源来源切换的自动化（`HE_ASSET_SOURCE_FLIP=1` 时启用）──
+    //   第 40 帧切到 glTF 原始资源、第 80 帧切回 Nanite 离线资产，
+    //   用于脚本验证"运行时双向切换不崩、IA PSO 能被重建"。默认关闭。
+    if (std::getenv("HE_ASSET_SOURCE_FLIP") != nullptr) {
+        static u32 s_FlipFrame = 0u;
+        ++s_FlipFrame;
+        if (s_FlipFrame == 40u) {
+            HE_CORE_INFO("04.App: [自动化] 第 40 帧 → 切到 glTF 原始资源");
+            g.ApplyAssetSource(false);
+        } else if (s_FlipFrame == 80u) {
+            HE_CORE_INFO("04.App: [自动化] 第 80 帧 → 切回 Nanite 离线资产");
+            g.ApplyAssetSource(true);
+        }
+    }
     return true;
 }
 
@@ -1090,6 +1152,25 @@ void App::RecordUIAndPresent() {
             ImGui::TextColored({0.3f, 1.0f, 0.3f, 1.0f}, "FPS: %.0f", fps);
             ImGui::SameLine(120);
             ImGui::TextColored({0.6f, 0.6f, 0.6f, 1.0f}, "(%.2f ms)", g.frameDt * 1000.0f);
+
+            // ── 【资源来源】面板最上方：glTF 原始资源 / Nanite 离线预处理资产 ──
+            ImGui::SeparatorText("资源来源");
+            {
+                const bool naniteSrc = g.assetSourceNanite;
+                if (ImGui::RadioButton("glTF 原始资源##assetsource", !naniteSrc)) {
+                    g.ApplyAssetSource(false);
+                }
+                ImGui::SameLine();
+                if (ImGui::RadioButton("Nanite 离线资产 (.nanite)##assetsource", naniteSrc)) {
+                    g.ApplyAssetSource(true);
+                }
+                ImGui::SameLine();
+                if (naniteSrc) {
+                    ImGui::TextColored({0.4f, 1.0f, 0.5f, 1.0f}, "→ Nanite 接管几何");
+                } else {
+                    ImGui::TextColored({0.7f, 0.8f, 1.0f, 1.0f}, "→ 标准 IA 管线");
+                }
+            }
 
             ImGui::SeparatorText("延迟渲染管线");
             ImGui::Text("GBuffer + Lighting Pass (全屏 PBR)");
