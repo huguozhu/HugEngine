@@ -97,17 +97,13 @@ HardRasterFragOut fragmentMain(HardRasterFragIn input) {
         float3 nTex = u_MatNormalArray.SampleGrad(u_MatNormalArraySamp,
                                                   float3(input.uv, (float)nLayer),
                                                   ddx(input.uv), ddy(input.uv)).rgb * 2.0 - 1.0;
+        // 【P1 #7 · 与标准路径对齐】**加法**扰动（`GBuffer.frag.slang` 第 71-75 行同式）：
+        //     N = normalize(N + texNormal * 0.5)
+        //   此前这里用"屏幕空间 TBN 完整变换"，与标准路径的加法扰动在斜面上差异明显
+        //   （固定机位实测：13.7% 像素差 >40、整体差 21.6/255），是剩余差异的主要来源。
+        //   验收标准是"与标准路径一致" ⇒ 公式必须与它逐句相同，而不是各自"更物理"。
         if (dot(nTex.xy, nTex.xy) > 1.0e-4f) {
-            const float3 dpdx = ddx(input.worldPos);
-            float3 T = dpdx - normal * dot(normal, dpdx);
-            const float tLen2 = dot(T, T);
-            if (tLen2 > 1.0e-12f) {
-                T *= rsqrt(tLen2);
-                const float3 B = cross(normal, T);
-                const float3 perturbed = T * nTex.x + B * nTex.y + normal * nTex.z;
-                const float pLen2 = dot(perturbed, perturbed);
-                if (pLen2 > 1.0e-12f) normal = perturbed * rsqrt(pLen2);
-            }
+            normal = normalize(normal + nTex * 0.5f);
         }
     }
 #endif

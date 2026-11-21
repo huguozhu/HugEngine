@@ -301,6 +301,10 @@ bool softRasterEvaluateMaterial(uint materialIndex, float2 uv,
         const float3 baseTexel = u_MatArray.SampleLevel(u_MatArraySamp,
                                                         float3(uv, (float)baseLayer), 0.0).rgb;
 #endif
+        // 【P1 #7 实验结论：**不做** sRGB→线性解码】（2026-11-21 复测）
+        //   给数组采样补一次 sRGB 解码后与 glTF 基准的平均差反而变大（18.68 → 19.81、
+        //   >40 像素占比 10.97% → 14.04%，整体亮度 152.9 → 138.1 vs 基准 151.7）
+        //   ⇒ 标准路径实际拿到的就是原始 texel（与 A2 的旧测量一致），保持"直接用 texel"。
         outAlbedo *= baseTexel;
         // 【A3】金属度/粗糙度来自**同层序**的 MR 数组（g=roughness、b=metallic），再乘材质因子。
         //   这与 GBuffer 路径的 `clamp(roughnessFactor * mr.g, 0.04, 1.0)` /
