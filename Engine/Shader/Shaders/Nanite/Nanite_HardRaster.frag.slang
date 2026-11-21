@@ -79,9 +79,15 @@ HardRasterFragOut fragmentMain(HardRasterFragIn input) {
     float3 matAlbedo;
     float  matMetallic;
     float  matRoughness;
+    float  matAlpha;
     const bool materialFromAsset =
         softRasterEvaluateMaterial(input.materialID, input.uv,
-                                   matAlbedo, matMetallic, matRoughness);
+                                   matAlbedo, matMetallic, matRoughness, matAlpha);
+    // 【P1 #7】alpha 裁剪：与标准路径 `if (alpha < obj.alphaCutoff) discard;` 对齐。
+    //   glTF 的 MASK 材质 cutoff 统一取 0.5（Sponza 的 3 个 MASK 材质实测都是 0.5；
+    //   OPAQUE 材质的 baseColor 贴图 alpha 恒 1 ⇒ 这里不会误裁）。
+    //   注：材质记录 32B 里没有 alphaCutoff 字段，若将来遇到非 0.5 的 MASK，需要扩记录格式。
+    if (matAlpha < 0.5) discard;
 
     // ── ② 法线：硬件插值后归一化（与软光栅 `normalize(softRasterAttribute(...))` 同一口径）──
     float3 normal = normalize(input.normal);

@@ -270,8 +270,15 @@ static uint softRasterSizeBucket(uint triangleCount) {
 // 【材质段越界】`materialIndex >= materialCount` ⇒ 返回 false（调用方用中性常数兜底并单独计数，
 //   不静默；正常路径下 `materialIndex` 由任务 19 的"三角形多数票"映射保证在界内）。
 bool softRasterEvaluateMaterial(uint materialIndex, float2 uv,
-                                out float3 outAlbedo, out float metallic, out float roughness) {
+                                out float3 outAlbedo, out float metallic, out float roughness
+                                // 【P1 #7】附加输出 alpha：供 alpha 裁剪（glTF MASK 材质）使用。
+                                //   标准 GBuffer 路径有 `if (alpha < obj.alphaCutoff) discard;`，
+                                //   而 Nanite 两条路径此前**完全没有 alpha 裁剪** ⇒ Sponza 的 3 个
+                                //   MASK 材质（植物/树叶 alpha 卡片）被整片当不透明矩形画出来，
+                                //   这就是画面里"植被/挂帘被撕成长条"的来源。
+                                , out float outAlpha) {
     outAlbedo = float3(0.8, 0.8, 0.8);
+    outAlpha  = 1.0;   // 默认不透明（无贴图/材质段缺失时不做裁剪）
     metallic  = 0.0;
     roughness = 0.5;
     if (materialIndex >= materialCount) return false;   // 兜底：越界不读缓冲（防越界读）
@@ -295,17 +302,22 @@ bool softRasterEvaluateMaterial(uint materialIndex, float2 uv,
         //   继续取 mip0（软光栅只处理少量小簇，视觉影响可忽略）。
         const uint baseLayer = material.bindlessTextureBase;
 #ifdef NANITE_USE_GRADIENTS
-        const float3 baseTexel = u_MatArray.SampleGrad(u_MatArraySamp, float3(uv, (float)baseLayer),
-                                                       ddx(uv), ddy(uv)).rgb;
+        const float4 baseTexel4 = u_MatArray.SampleGrad(u_MatArraySamp, float3(uv, (float)baseLayer),
+                                                        ddx(uv), ddy(uv));
+        const float3 baseTexel = baseTexel4.rgb;
+        const float  baseTexelAlpha = baseTexel4.a;
 #else
-        const float3 baseTexel = u_MatArray.SampleLevel(u_MatArraySamp,
-                                                        float3(uv, (float)baseLayer), 0.0).rgb;
+        const float4 baseTexel4 = u_MatArray.SampleLevel(u_MatArraySamp,
+                                                         float3(uv, (float)baseLayer), 0.0);
+        const float3 baseTexel = baseTexel4.rgb;
+        const float  baseTexelAlpha = baseTexel4.a;
 #endif
         // 【P1 #7 实验结论：**不做** sRGB→线性解码】（2026-11-21 复测）
         //   给数组采样补一次 sRGB 解码后与 glTF 基准的平均差反而变大（18.68 → 19.81、
         //   >40 像素占比 10.97% → 14.04%，整体亮度 152.9 → 138.1 vs 基准 151.7）
         //   ⇒ 标准路径实际拿到的就是原始 texel（与 A2 的旧测量一致），保持"直接用 texel"。
         outAlbedo *= baseTexel;
+        outAlpha   = material.baseColorFactor.a * baseTexelAlpha;
         // 【A3】金属度/粗糙度来自**同层序**的 MR 数组（g=roughness、b=metallic），再乘材质因子。
         //   这与 GBuffer 路径的 `clamp(roughnessFactor * mr.g, 0.04, 1.0)` /
         //   `metallicFactor * mr.b` 两条公式一致；MR 数组里没有贴图的层填中性值

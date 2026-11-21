@@ -162,9 +162,13 @@ void main(uint3 tid : SV_GroupThreadID, uint3 gid : SV_GroupID) {
                 float3 matAlbedo;
                 float  matMetallic;
                 float  matRoughness;
+                float  matAlpha;
                 const bool materialFromAsset =
                     softRasterEvaluateMaterial(cluster.materialID, uv,
-                                               matAlbedo, matMetallic, matRoughness);
+                                               matAlbedo, matMetallic, matRoughness, matAlpha);
+                // 【P1 #7】alpha 裁剪（与硬光栅/标准 GBuffer 同一阈值）：MASK 材质不写 GBuffer，
+                //   等价于 GBuffer 路径的 `discard`。compute 路径不能 discard ⇒ 直接跳过后面的写入。
+                if (matAlpha < 0.5) continue;
 
                 u_Albedo[uint2((uint)px, (uint)py)]      = float4(matAlbedo, matMetallic);
                 // 【T8 修复】与 GBuffer 同一约定：法线 [-1,1] 打包到 [0,1]
