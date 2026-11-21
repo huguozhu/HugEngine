@@ -628,6 +628,14 @@ public:
     // 【B1】簇级自投影：首帧把"每簇一条引用"的阴影投射表交给光栅端（只做一次；
     //   资产缓冲在之后不再变化，重复主机写会与在飞帧竞争）
     bool         m_ShadowCastersSetup = false;
+    /// 【B1 #2】阴影**只投 L0** 的簇数上限（= 资产 LOD0 的簇数；0 ⇒ 未就绪时退回全簇）。
+    ///   只投 L0：全簇投射会把各级 LOD 代理一起投进阴影图（多一倍三角形，且粗代理可能外扩出错误遮挡）。
+    u32          m_ShadowClusterCountL0 = 0u;
+    // ── 【P1 #1】MRT3 velocity：上一帧的 view-proj（行主序 16 个 float）──
+    //   硬光栅片元用它与本帧矩阵各投影一次世界坐标 ⇒ `currUV - prevUV`。
+    //   首帧没有"上一帧" ⇒ 用本帧矩阵（速度 = 0），与标准路径的初始化口径一致。
+    float        m_PrevVpRows[16]{};
+    bool         m_HasPrevVp = false;
 
     /// 【T8 纹理】材质数组纹理与"材质记录 -> 层号"表
     rhi::IRHITexture*  m_MatArray = nullptr;

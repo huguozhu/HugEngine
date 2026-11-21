@@ -484,7 +484,8 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
         bool materialMips = false;
         {
             const auto cfgMap = LoadConfigFile(ConfigPath());
-            materialMips = GetBool(cfgMap, "nanite_material_mips", false);
+            // 【P1 #3】默认**开启**：mip 链让远处贴图更稳（实测帧时间 210 ms，与关闭档持平）
+            materialMips = GetBool(cfgMap, "nanite_material_mips", true);
         }
         const u32  kBaseMips  = materialMips ? 10u : 1u;   // 512² → 10 级
         const u32  kLayerMips = materialMips ? 9u  : 1u;   // 256² → 9 级

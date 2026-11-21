@@ -258,6 +258,13 @@ static uint softRasterSizeBucket(uint triangleCount) {
     uint   matArrayEnabled;   // 偏移 116：1 = 从 Texture2DArray 采样材质（binding 23/24）
     uint   debugCluster;      // 偏移 120：albedoDebug=6 时涂红的簇号
     uint   albedoDebug;       // 偏移 124：albedo 调试档（0=关 2=黄 6=簇红）
+    // ── 【P1 #1】MRT3 velocity：上一帧 view-proj 的 4 个行（偏移 128，共 64B）──
+    //   硬光栅片元用"本帧 vpRows / 上一帧 prevVpRows"各投影一次世界坐标，
+    //   得到与标准 GBuffer 同口径的运动矢量 `currUV - prevUV`（TAA/GI 时间复用需要它）。
+    float4 prevVpRow0;        // 偏移 128
+    float4 prevVpRow1;        // 偏移 144
+    float4 prevVpRow2;        // 偏移 160
+    float4 prevVpRow3;        // 偏移 176
 };
 
 // ── 【任务 19】按**资产材质段** + bindless 纹理算一个像素的 albedo/metallic/roughness ──
@@ -374,6 +381,25 @@ bool softRasterEvaluateMaterial(uint materialIndex, float2 uv,
 float4 softRasterProjectWorld(float3 worldPos) {
     float4 hp = float4(worldPos, 1.0);
     return float4(dot(vpRow0, hp), dot(vpRow1, hp), dot(vpRow2, hp), dot(vpRow3, hp));
+}
+
+// 【P1 #1】世界坐标 → **上一帧**裁剪空间（MRT3 velocity 专用；与上一帧矩阵同一"行点积"口径）
+float4 softRasterProjectWorldPrev(float3 worldPos) {
+    float4 hp = float4(worldPos, 1.0);
+    return float4(dot(prevVpRow0, hp), dot(prevVpRow1, hp),
+                  dot(prevVpRow2, hp), dot(prevVpRow3, hp));
+}
+
+// 【P1 #1】与标准 GBuffer 逐句同口径的运动矢量：`currUV - prevUV`（UV = NDC.xy * 0.5 + 0.5）
+float2 softRasterMotionVector(float3 worldPos) {
+    float4 currClip = softRasterProjectWorld(worldPos);
+    float4 prevClip = softRasterProjectWorldPrev(worldPos);
+    // 防御：w 接近 0 的顶点（贴近平面的边角像素）不要让运动矢量爆掉
+    const float currW = (abs(currClip.w) > 1.0e-6f) ? currClip.w : 1.0e-6f;
+    const float prevW = (abs(prevClip.w) > 1.0e-6f) ? prevClip.w : 1.0e-6f;
+    const float2 currUV = (currClip.xy / currW) * 0.5 + 0.5;
+    const float2 prevUV = (prevClip.xy / prevW) * 0.5 + 0.5;
+    return currUV - prevUV;
 }
 
 // NDC → 帧缓冲像素坐标。

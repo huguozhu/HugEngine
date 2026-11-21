@@ -216,6 +216,16 @@ void NaniteRenderer::AddPasses(RenderGraph& rg, const NaniteGBufferHandles& gb,
             (realInstances > 0u) ? std::min(realInstances, NaniteCull::MaxBVHInstances())
                                  : std::min(m_Settings.instanceTestCount, NaniteCull::MaxBVHInstances());
         m_SoftParams.meshMaxExtent = m_MeshMaxExtent;
+        // ── 【P1 #1】MRT3 velocity：把**上一帧**的 view-proj 填进 push constant（首帧用本帧 ⇒ 速度 0），
+        //   然后把本帧记成"上一帧"。位置与 vpRows 的填充点在同一个函数里，保证同源同口径。
+        {
+            const bool hasPrev = m_HasPrevVp;
+            for (u32 i = 0u; i < 16u; ++i) {
+                m_SoftParams.prevVpRows[i] = hasPrev ? m_PrevVpRows[i] : m_SoftParams.vpRows[i];
+                m_PrevVpRows[i] = m_SoftParams.vpRows[i];
+            }
+            m_HasPrevVp = true;
+        }
     m_SoftParams.debugView     = m_Settings.debugView;
     m_SoftParams.albedoDebug   = m_Settings.albedoDebug;
     // 【T8 排查】打印 Nanite 用的相机位置与视图矩阵首行，供与标准路径对照
@@ -826,11 +836,13 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
             //   阴影 pass 在本帧的 GBuffer 几何**之前**执行，而它需要簇缓冲/每簇量化尺度等视图
             //   ⇒ 在第一次录制光栅时完成一次性 setup（之后资产缓冲不再变化）。
             if (!m_ShadowCastersSetup && m_Settings.shadowCaster) {
-                const u32 clusterCount = m_Scene.GetMergedClusterCount();
+                const u32 clusterCount = (m_ShadowClusterCountL0 > 0u)
+                                             ? m_ShadowClusterCountL0
+                                             : m_Scene.GetMergedClusterCount();
                 if (m_Raster.SetupShadowCasters(views, clusterCount, 0u,
                                                 m_Cull.GetInstanceBuffer(), m_SoftParams)) {
                     m_ShadowCastersSetup = true;
-                    HE_CORE_INFO("[B1] 簇级自投影已就绪（簇 {}，实例 0）", clusterCount);
+                    HE_CORE_INFO("[B1] 簇级自投影已就绪（L0 簇 {}，实例 0）", clusterCount);
                 }
             }
 
@@ -1057,6 +1069,14 @@ void NaniteRenderer::EnsureAssetUploaded(const MeshBatcher& batcher) {
                                  m_Settings.offlinePath, info.formatVersion, info.builderVersion,
                                  offlineAsset.clusters.size(), offlineAsset.triangles.size(),
                                  info.extSectionCount);
+
+        // 【B1 #2】记录 LOD0 的簇数（LOD 链的级 0 区间 = [0, lodOffsets[1])）：
+        //   阴影只投这一批（原始精度），既省一半三角形，也避免粗代理外扩出错误遮挡。
+        m_ShadowClusterCountL0 = (offlineAsset.lodOffsets.size() >= 2u)
+                                     ? offlineAsset.lodOffsets[1]
+                                     : (u32)offlineAsset.clusters.size();
+        HE_CORE_INFO("[B1] 阴影投射取 L0 簇 {} / 总簇 {}", m_ShadowClusterCountL0,
+                     (u32)offlineAsset.clusters.size());
 
                     // 【T8】把 `MaterialDesc` 扩展段翻译成光栅端的材质记录（公共辅助，单/多资产共用）
                     {

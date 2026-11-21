@@ -1797,8 +1797,10 @@ bool NaniteRaster::EnsureHardRasterResources(const GBufferTargets& targets) {
     for (u32 i = 0u; i < 8u; ++i) {
         rhi::ColorBlendDesc& b = desc.colorBlend[i];
         b.blendEnable = false;   // 不做混合：本通道的语义是"覆盖"（混合会让硬软颜色互相污染）
-        // MRT2（emissive）也由本通道写 0（Nanite 无自发光），调试档用它做覆盖视图
-        const bool written = (i == 0u || i == 1u || i == 2u || i == 4u || i == 7u);
+        // MRT2（emissive/AO）也由本通道写（emissive=0、AO=1，Nanite 无自发光/遮蔽贴图），调试档用它做覆盖视图
+        // 【P1 #1】MRT3（velocity）也由本通道写：与标准 GBuffer 同口径的 `currUV - prevUV`，
+        //   否则 Nanite 像素被 TAA/GI 当成静止（拖影 + GI 时间复用错）。
+        const bool written = (i == 0u || i == 1u || i == 2u || i == 3u || i == 4u || i == 7u);
         // 【未写的 4 张必须显式关掉写入】不能靠"片元没声明这个 location"—— 只写一部分 location
         //   是允许的，但没有 writeMask 保护时驱动可以写未定义值进 emissive/velocity/disney，
         //   那会直接打红判据 ⑧b（"差异只允许 4 个 GBuffer 目标"）。

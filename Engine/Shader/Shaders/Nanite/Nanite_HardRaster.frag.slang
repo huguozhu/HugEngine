@@ -61,7 +61,8 @@ struct HardRasterFragIn {
 struct HardRasterFragOut {
     [[vk::location(0)]] float4 albedoMetallic  : SV_Target0;   // MRT0
     [[vk::location(1)]] float4 normalRoughness : SV_Target1;   // MRT1
-    [[vk::location(4)]] float4 worldPosition   : SV_Target4;   // MRT4
+    [[vk::location(3)]] float2 velocityOut       : SV_Target3;   // MRT3（UV 空间运动矢量，P1 #1）
+[[vk::location(4)]] float4 worldPosition   : SV_Target4;   // MRT4
     [[vk::location(2)]] float4 emissiveAO      : SV_Target2;   // MRT2（Nanite 无自发光 ⇒ 写 0；调试档用它做覆盖视图）
     [[vk::location(7)]] float4 lightmapKey     : SV_Target7;   // MRT7
 };
@@ -277,6 +278,19 @@ HardRasterFragOut fragmentMain(HardRasterFragIn input) {
     //   （实测：开/关阴影画面均值完全一致 145.9 / 146.0）。
     //   Nanite 材质段目前不携带 F0 ⇒ 用非金属的默认值 0.04。
     const float naniteDielectricF0 = 0.04;
+    // 【P1 #1】MRT3 velocity：与标准 GBuffer 同口径（currUV - prevUV）。
+    //   此前硬光栅不写 MRT3（保持清屏 0）⇒ Nanite 像素被 TAA/GI 当成"静止"，
+    //   TAA 历史不重投影会拖影、GI 时间复用也会错。
+    output.velocityOut     = softRasterMotionVector(input.worldPos);
+    // 【P1 #1 验证据】albedoDebug=30：把运动矢量放大后写进 emissive（红=|dx|、绿=|dy|）。
+    //   静态机位应为全黑；相机移动时应出现红/绿条纹 ⇒ 直接确认 MRT3 真的写进去了。
+    if (albedoDebug == 30u) {
+        // 【P1 #1 验证据】二值化：|motion| > 2 像素当量（= 0.002 UV）⇒ 白，否则黑。
+        //   静态机位（仅有亚像素级 TAA 抖动）应为黑；相机移动时应出现白色区域/条纹。
+        const float mv = length(output.velocityOut);
+        const float on = (mv > 0.002f) ? 1.0f : 0.0f;
+        output.emissiveAO = float4(on, on, on, 1.0);
+    }
     output.worldPosition   = float4(input.worldPos, naniteDielectricF0);
     // 【T8 实验】albedoDebug=12：把 lightmapKey 清零，验证它是否影响光照亮度
     output.lightmapKey     = (albedoDebug == 12u) ? float4(0.0, 0.0, 0.0, 0.0)

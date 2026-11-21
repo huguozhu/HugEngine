@@ -2474,10 +2474,16 @@ struct NaniteSoftRasterParams {
     u32   matArrayEnabled;  ///< 偏移 116：1 = 材质从 Texture2DArray 采样（binding 23/24）
     u32   debugCluster;     ///< 偏移 120：【T8 排查】albedoDebug=6 时涂红的簇号
     u32   albedoDebug;      ///< 偏移 124：【T8 排查】albedo 调试档（0=关 2=黄 6=簇红）
+    // ── 【P1 #1】MRT3 velocity：上一帧 view-proj 的 4 个行（偏移 128，共 64B）──
+    //   硬光栅片元据此把世界坐标投影到**上一帧**的屏幕空间，得到与标准 GBuffer 同口径的
+    //   运动矢量 `currUV - prevUV`（TAA/GI 的时间复用得靠它，否则 Nanite 像素被当成静止）。
+    //   引擎的 push constant 上限是 256B（`kMaxPushConstantSize`），128 → 192 仍在范围内。
+    float prevVpRows[16];   ///< 偏移 128：上一帧 view-proj 的 4 个行（row-major，与 vpRows 同口径）
 };
 
-static_assert(sizeof(NaniteSoftRasterParams) == 128u,
-              "软光栅 push constant 必须 128B（4×float4 + 15×u32/float；T8 加 albedoDebug）");
+static_assert(sizeof(NaniteSoftRasterParams) == 192u,
+              "软光栅/硬光栅 push constant 必须 192B（128B 主体 + 上一帧 view-proj 64B）");
+static_assert(offsetof(NaniteSoftRasterParams, prevVpRows)    == 128, "prevVpRows 在偏移 128");
 static_assert(offsetof(NaniteSoftRasterParams, vpRows)        == 0,  "vpRows 在偏移 0");
 static_assert(offsetof(NaniteSoftRasterParams, screenWidth)   == 64, "screenWidth 在偏移 64");
 static_assert(offsetof(NaniteSoftRasterParams, screenHeight)  == 68, "screenHeight 在偏移 68");
