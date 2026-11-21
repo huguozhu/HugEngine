@@ -291,6 +291,19 @@ void NaniteRaster::Shutdown() {
     m_HardLastMaxTriangles     = 0u;
     m_HardLastVisibleCapacity  = 0u;
 
+    // ── 【B1】簇级自投影的懒建资源（未开启时它们是空的，这里自然是空操作）──
+    //   【为什么必须显式释放】它们是 VMA 分配：漏释放会在设备销毁时触发
+    //   `Unfreed dedicated allocations found!` 断言（实测：04 关闭窗口退出即崩）。
+    m_Device->DestroyPipelineStateHandle(m_ShadowDepthPSO); m_ShadowDepthPSO = {};
+    m_Device->DestroyBufferHandle(m_ShadowRefs);  m_ShadowRefs  = {};
+    m_Device->DestroyBufferHandle(m_ShadowCount); m_ShadowCount = {};
+    m_Device->DestroyBufferHandle(m_ShadowStats); m_ShadowStats = {};
+    m_ShadowClusterCount  = 0u;
+    m_ShadowInstanceIndex = 0u;
+    m_ShadowInstances     = nullptr;
+    m_ShadowReady         = false;
+    m_ShadowAsset         = AssetViews{};
+
     m_Device->DestroyTextureHandle(m_Target); m_Target = {};
     m_Device->DestroyBufferHandle(m_DummyVB); m_DummyVB = {};
     m_Device->DestroyBufferHandle(m_PlaceholderIB); m_PlaceholderIB = {};

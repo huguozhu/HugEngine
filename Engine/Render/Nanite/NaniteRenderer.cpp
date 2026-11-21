@@ -98,6 +98,10 @@ bool NaniteRenderer::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) 
     m_StreamSetupTried = false;
     m_FrameIndex = 0u;
     m_AssetClusterCount = 0u;
+    // 【B1】重建后需要重新交给光栅端：复位一次性 setup 门闩与上一帧矩阵缓存
+    m_ShadowCastersSetup    = false;
+    m_ShadowClusterCountL0  = 0u;
+    m_HasPrevVp             = false;
 
     // "骨架就绪"判据：设备有效且四段都建起来了。任务 3 起剔除/绘制段还要求
     // 自持缓冲与 PSO 真正建成（IsReady），否则开启档不会注册任何 pass。
