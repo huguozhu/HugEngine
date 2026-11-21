@@ -1754,6 +1754,14 @@ void App::Shutdown() {
         sphere.GetIndexBuffer().reset();
     });
     g.texCache.clear();
+    // 【退出崩溃修复】材质 Texture2DArray + 采样器是**样例自持、绑定给 Nanite** 的设备资源：
+    //   此前这里没有释放 ⇒ `g.device.reset()` 时它们仍活着，VMA 在 `vmaDestroyAllocator`
+    //   里断言 `Unfreed dedicated allocations found!` / `m_pMetadata->IsEmpty()`（04 关闭窗口即崩）。
+    //   必须在设备销毁**之前**显式释放（顺序：pipeline 已 Shutdown ⇒ 没人再引用它们）。
+    g.matArrayTex.reset();
+    g.matMrArrayTex.reset();
+    g.matNormalArrayTex.reset();
+    g.matArraySamp.reset();
     g.sceneGraph.reset();
     g.swapchain.reset();
     g.device.reset();
