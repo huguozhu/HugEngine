@@ -317,6 +317,59 @@ inline constexpr u32 kClusterCanonicalAttributeTag = 0x4E414154u;
     return merged;
 }
 
+/// 【分组 LOD】把一级里**指定材质**的簇合并回索引表。
+///   分组 LOD 的简化输入必须是"同材质"的几何 —— 否则粗级簇会把不同材质合并成代理，
+///   运行时按簇二选一写材质时就会出现"整片地板变成邻居材质"（实测：粗级簇跨材质）。
+[[nodiscard]] std::vector<u32> MergeLevelClustersOfMaterial(const NaniteClusterBuild& build,
+                                                           u32 material) {
+    std::vector<u32> merged;
+    for (usize c = 0; c < build.clusters.size(); ++c) {
+        const NaniteClusterRecord& record = build.clusters[c];
+        if (record.materialID != material) continue;
+        for (u32 t = 0; t < record.triangleCount; ++t) {
+            const NanitePackedTriangle& packed = build.triangles[record.triangleOffset + t];
+            merged.push_back(build.vertexIndices[record.vertexOffset + NaniteTriangleIndex0(packed)]);
+            merged.push_back(build.vertexIndices[record.vertexOffset + NaniteTriangleIndex1(packed)]);
+            merged.push_back(build.vertexIndices[record.vertexOffset + NaniteTriangleIndex2(packed)]);
+        }
+    }
+    return merged;
+}
+
+/// 【分组 LOD】收集本级出现过的材质下标（升序去重）⇒ 下一级"逐材质"简化的工作清单。
+[[nodiscard]] std::vector<u32> CollectLevelMaterials(const NaniteClusterBuild& build) {
+    std::vector<u32> materials;
+    materials.reserve(build.clusters.size());
+    for (const NaniteClusterRecord& record : build.clusters) materials.push_back(record.materialID);
+    std::sort(materials.begin(), materials.end());
+    materials.erase(std::unique(materials.begin(), materials.end()), materials.end());
+    return materials;
+}
+
+/// 把"分段构建"的簇/顶点表/三角形表按段基址拼接进 `out`（与 `BuildLevel0ClustersByMesh` 同一套平移口径）。
+void AppendClusterBuild(NaniteClusterBuild& out, NaniteClusterBuild& part) {
+    if (part.clusters.empty()) return;
+    const u32 vertexBase   = (u32)out.vertexIndices.size();
+    const u32 triangleBase = (u32)out.triangles.size();
+    for (usize c = 0; c < part.clusters.size(); ++c) {
+        NaniteClusterRecord record = part.clusters[c];
+        record.vertexOffset   += vertexBase;
+        record.triangleOffset += triangleBase;
+        out.clusters.push_back(record);
+        out.clusterVertexCount.push_back(part.clusterVertexCount[c]);
+    }
+    out.vertexIndices.insert(out.vertexIndices.end(), part.vertexIndices.begin(), part.vertexIndices.end());
+    out.triangles.insert(out.triangles.end(), part.triangles.begin(), part.triangles.end());
+
+    out.stats.clusterCount           += part.stats.clusterCount;
+    out.stats.triangleCount          += part.stats.triangleCount;
+    out.stats.vertexCount            += part.stats.vertexCount;
+    out.stats.degenerateClusterCount += part.stats.degenerateClusterCount;
+    out.stats.noConeClusterCount     += part.stats.noConeClusterCount;
+    out.stats.maxClusterTriangles = std::max(out.stats.maxClusterTriangles, part.stats.maxClusterTriangles);
+    out.stats.maxClusterVertices  = std::max(out.stats.maxClusterVertices,  part.stats.maxClusterVertices);
+}
+
 } // namespace
 
 bool BuildNaniteClusters(std::span<const float> positions,
@@ -532,21 +585,44 @@ bool BuildNaniteClusterDAG(std::span<const float> positions,
     std::vector<usize> uniqueCanonicalCount;  // 每唯一内容的规范键流长度
     std::vector<u32> uniqueCanonicalKeys;     // 全部唯一内容的规范键流（扁平存放）
 
-    // ── LOD 链：级 0 = 原始网格；每级结束前尝试"合并本级簇组 → meshopt_simplify 减半" ──
-    std::vector<u32>   levelIndices(indices.begin(), indices.end());
-    std::vector<float> stepErrors;            // stepErrors[L] = 级 L → L+1 的**绝对**简化误差
+    // ── LOD 链（分组 LOD）：级 0 = 原始网格（按源网格切分）；
+    //    每级结束前**逐材质**合并本级簇组 → meshopt_simplify 减半 → 下一级再逐材质聚类。
+    //    【为什么必须分组】粗级簇若跨材质，运行时按簇二选一写材质时会出现"整片地板变成
+    //    邻居材质"；分组后每个簇只含一种材质，粗级代理也只是该材质自身的简化。
+    //    几何多路复用仍然跨材质共享（去重表是全局的），只是**简化与聚类**不跨组。
+    std::vector<u32>   levelIndices(indices.begin(), indices.end());   // 仅 L0 使用（无 meshes 时）
+    std::vector<float> stepErrors;            // stepErrors[L] = 级 L → L+1 的**最大**绝对简化误差
     std::vector<u32>   words;                 // 复用缓冲：某簇的局部顶点位置词
     std::vector<u32>   keys;                  // 复用缓冲：某簇的规范键流
+
+    struct LevelGroup {
+        u32              material = 0u;
+        std::vector<u32> indices;
+    };
+    std::vector<LevelGroup> levelGroups;      // 当前级"逐材质索引表"（级 ≥ 1 的聚类输入）
 
     for (;;) {
         const u32 level = (u32)result.levelClusterCount.size();
 
         NaniteClusterBuild levelBuild;
-        if (level == 0u && !meshes.empty()) {
-            // 【T8·A2】L0 按源网格分组切分 ⇒ L0 簇不跨材质
-            if (!BuildLevel0ClustersByMesh(positions, levelIndices, meshes, levelBuild)) return false;
-        } else if (!BuildNaniteClusters(positions, levelIndices, levelBuild)) {
-            return false;
+        if (level == 0u) {
+            if (!meshes.empty()) {
+                // 【T8·A2】L0 按源网格分组切分 ⇒ L0 簇不跨材质
+                if (!BuildLevel0ClustersByMesh(positions, levelIndices, meshes, levelBuild)) return false;
+            } else if (!BuildNaniteClusters(positions, levelIndices, levelBuild)) {
+                return false;
+            }
+        } else {
+            // 级 ≥ 1：逐材质聚类，再把各段拼接（每段簇的 materialID 固定为该材质）
+            levelBuild = NaniteClusterBuild{};
+            for (const LevelGroup& group : levelGroups) {
+                if (group.indices.empty()) continue;
+                NaniteClusterBuild part;
+                if (!BuildNaniteClusters(positions, group.indices, part)) return false;
+                if (part.Empty()) continue;
+                for (NaniteClusterRecord& record : part.clusters) record.materialID = group.material;
+                AppendClusterBuild(levelBuild, part);
+            }
         }
         if (levelBuild.Empty()) return false;   // 非空输入却切不出簇 ⇒ 失败（任务 8 同口径）
 
@@ -564,10 +640,7 @@ bool BuildNaniteClusterDAG(std::span<const float> positions,
                 levelBuild.triangles.data() + levelRecord.triangleOffset;
 
             // ① 用**簇 AABB 中心 + 最大顶点距离**重算包围球，替换 meshopt 的最小包围球：
-            //    量化原点必须是**顶点顺序无关**的量 —— meshopt 的最小包围球中心随簇内顶点顺序漂移
-            //    （平移副本会算出不同的中心 ⇒ 位置词不同 ⇒ 明明相同的簇去重不了）。
-            //    AABB 的 min/max 与顺序无关，整数平移下逐位可交换，故平移副本给出**逐位相同**的位置词。
-            //    半径仍是"包含本簇全部顶点"的合法包围球（只是不再最小 ⇒ 剔除略保守，属可接受的代价）。
+            //    量化原点必须是**顶点顺序无关**的量（理由见头文件与任务 9 的注释）。
             const float* first = positions.data() + (usize)clusterVertexIndices[0] * 3u;
             float aabbMin[3] = { first[0], first[1], first[2] };
             float aabbMax[3] = { first[0], first[1], first[2] };
@@ -591,12 +664,12 @@ bool BuildNaniteClusterDAG(std::span<const float> positions,
                 if (distanceSquared > radiusSquared) radiusSquared = distanceSquared;
             }
 
-            NaniteClusterRecord record = levelRecord;   // cone / 计数从任务 8 的产物继承
+            NaniteClusterRecord record = levelRecord;
             record.boundsCenterRadius[0] = center[0];
             record.boundsCenterRadius[1] = center[1];
             record.boundsCenterRadius[2] = center[2];
             record.boundsCenterRadius[3] = std::sqrt(radiusSquared);
-            record.maxParentLODError  = 0.0f;           // 稍后按级填
+            record.maxParentLODError  = 0.0f;
             record.childClusterOffset = 0u;
             record.childCount         = 0u;
 
@@ -627,7 +700,6 @@ bool BuildNaniteClusterDAG(std::span<const float> positions,
             }
 
             if (!found) {
-                // 新内容：把这一份"簇内局部几何 + 拓扑"存进共享表（只此一份）
                 uniqueIndex = (u32)result.uniqueVertexCount.size();
                 result.uniqueVertexOffset.push_back((u32)result.uniqueVertexWords.size());
                 result.uniqueVertexCount.push_back(localVertexCount);
@@ -644,7 +716,6 @@ bool BuildNaniteClusterDAG(std::span<const float> positions,
                 uniqueCanonicalKeys.insert(uniqueCanonicalKeys.end(), keys.begin(), keys.end());
             }
 
-            // 出现记录：偏移改指共享内容（链接/误差字段稍后统一填）
             record.vertexOffset   = result.uniqueVertexOffset[uniqueIndex];
             record.triangleOffset = result.uniqueTriangleOffset[uniqueIndex];
 
@@ -657,55 +728,58 @@ bool BuildNaniteClusterDAG(std::span<const float> positions,
             result.clusterLevel.push_back(level);
             result.clusterUnique.push_back(uniqueIndex);
 
-            // 每簇上限 / 退化簇统计（与任务 8 同口径）
             result.stats.maxClusterTriangles = std::max(result.stats.maxClusterTriangles, localTriangleCount);
             result.stats.maxClusterVertices  = std::max(result.stats.maxClusterVertices, localVertexCount);
             if (localTriangleCount == 0u || localVertexCount == 0u) ++result.stats.degenerateClusterCount;
             if (record.cone.cosHalfAngle == kNaniteConeNoCullCos)   ++result.stats.noConeClusterCount;
         }
 
-        // ── 终止条件①/③：下一级目标不足一个满簇、或已达最大级数 ──
+        // ── 终止条件①/③：已达最大级数、或本级三角形已不足"两级满簇" ──
         const u32 levelTriangleCount = levelBuild.stats.triangleCount;
         if (result.levelClusterCount.size() >= (usize)kNaniteMaxLODLevels) break;
         if (levelTriangleCount < 2u * kNaniteMinLODTriangles) break;
 
-        // ── 合并本级簇组 → 索引表，再简化到"一半" ──
-        std::vector<u32> merged = MergeLevelClusters(levelBuild);
-        const u32   targetTriangles  = levelTriangleCount / 2u;
-        const usize targetIndexCount = (usize)targetTriangles * kIndicesPerTriangle;
+        // ── 下一级：**逐材质**合并 → meshopt_simplify 减半 ──
+        //   某材质若无法再简化（返回 0 / 未减少 / 非法），把它原样带入下一级，
+        //   而不是整体终止 —— 否则"只有一个材质的小物件"会拖停整条链。
+        std::vector<LevelGroup> nextGroups;
+        float levelStepError = 0.0f;
+        bool  anyReduced     = false;
+        for (const u32 material : CollectLevelMaterials(levelBuild)) {
+            std::vector<u32> merged = MergeLevelClustersOfMaterial(levelBuild, material);
+            if (merged.empty()) continue;
 
-        // 目标索引数必须 ≤ 输入索引数（meshopt 的 assert；targetTriangles 取整除法保证成立）
-        std::vector<u32> simplified(merged.size());   // 最坏情况要装下 index_count 个索引
-        float relativeError = 0.0f;
-        const usize simplifiedCount = meshopt_simplify(
-            simplified.data(), merged.data(), merged.size(),
-            positions.data(), vertexCount, kPositionStrideBytes,
- // 【T8 修复】`target_error=1.0` 等于"允许 100% 误差"，meshopt 会把每级简化成
-            //   极端粗糙的代理，`relativeError` 因此很大 ⇒ 运行时 LOD 判据
-            //   `parentError × focal > threshold × distance` 恒成立 ⇒ 一律选**根簇**
-            //   （实测：8287 簇只画 38 个、巨大三角形、519 万像素过绘制、FPS 2）。
-            //   改成 10% 上限：每级只做"温和的一步"，误差随级平滑增长，LOD 割才落在细级。
-            // 【2% 上限】此前 1.0（=100%）允许 meshopt 提前停下并报出巨大相对误差
-            //   （Sponza 实测某级 ~988 单位）⇒ LOD 割瞬间跳到根、只画 200 多簇。
-            //   收到 2% 后每级只做"温和一步"，误差量级与几何尺度相符。
-            // 【0.2%】此前 2%（= 74 个单位）会让后几级的实测误差直接顶到上限，
-            //   误差链变成 0.5/1.9/6.2/74/74 ⇒ LOD 割停在第 3 级、只画 58 个簇（实测）。
-            //   收到 0.2% 后每级误差连续增长，割才会落到更细的级。
-            targetIndexCount, /*target_error=*/0.002f, /*options=*/0u, &relativeError);
+            const u32 sourceTriangleCount = (u32)(merged.size() / kIndicesPerTriangle);
+            const u32 targetTriangles     = sourceTriangleCount / 2u;
+            if (targetTriangles == 0u || targetTriangles == sourceTriangleCount) {
+                nextGroups.push_back(LevelGroup{material, std::move(merged)});
+                continue;
+            }
 
-        // ── 终止条件②：没能减少（或返回非法个数）⇒ 停，绝不空转 ──
-        if (simplifiedCount == 0u || (simplifiedCount % kIndicesPerTriangle) != 0u ||
-            simplifiedCount >= merged.size()) {
-            break;
+            std::vector<u32> simplified(merged.size());
+            float relativeError = 0.0f;
+            const usize simplifiedCount = meshopt_simplify(
+                simplified.data(), merged.data(), merged.size(),
+                positions.data(), vertexCount, kPositionStrideBytes,
+                (usize)targetTriangles * kIndicesPerTriangle, /*target_error=*/0.002f,
+                /*options=*/0u, &relativeError);
+
+            if (simplifiedCount == 0u || (simplifiedCount % kIndicesPerTriangle) != 0u ||
+                simplifiedCount >= merged.size()) {
+                nextGroups.push_back(LevelGroup{material, std::move(merged)});
+                continue;
+            }
+            simplified.resize(simplifiedCount);
+
+            const float absoluteError =
+                relativeError * meshopt_simplifyScale(positions.data(), vertexCount, kPositionStrideBytes);
+            if (absoluteError > levelStepError) levelStepError = absoluteError;
+            anyReduced = true;
+            nextGroups.push_back(LevelGroup{material, std::move(simplified)});
         }
-        simplified.resize(simplifiedCount);
-
-        // 绝对误差 = 相对误差 × 网格范围缩放（头文件 :419-424 的换算）
-        const float absoluteError =
-            relativeError * meshopt_simplifyScale(positions.data(), vertexCount, kPositionStrideBytes);
-        stepErrors.push_back(absoluteError > 0.0f ? absoluteError : 0.0f);
-
-        levelIndices = std::move(simplified);
+        if (nextGroups.empty() || !anyReduced) break;
+        stepErrors.push_back(levelStepError > 0.0f ? levelStepError : 0.0f);
+        levelGroups = std::move(nextGroups);
     }
 
     const usize levelCount    = result.levelClusterCount.size();
@@ -735,12 +809,15 @@ bool BuildNaniteClusterDAG(std::span<const float> positions,
             if (bound > levelFallbackError[linkLevel]) levelFallbackError[linkLevel] = bound;
         };
 
+        // 【分组 LOD】认父只在**同材质**内进行：跨材质的父子链接会让运行时 LOD 割
+        //   从"细的本材质簇"跳到"粗的邻居材质簇"，画面表现为整块表面换成别人的材质。
         // ① 每个父簇先抢一个最近的、尚未认父的子簇（父簇数 ≤ 子簇数 ⇒ 一定抢得到）
         for (u32 parent = parentBegin; parent < parentEnd; ++parent) {
             u32   best = kNaniteNoParentCluster;
             float bestDistance = 0.0f;
             for (u32 child = childBegin; child < childEnd; ++child) {
                 if (hasParent[child] != 0u) continue;
+                if (result.clusters[child].materialID != result.clusters[parent].materialID) continue;
                 const float distance = SquaredCenterDistance(result.clusters[child],
                                                              result.clusters[parent]);
                 if (best == kNaniteNoParentCluster || distance < bestDistance) {
@@ -751,18 +828,33 @@ bool BuildNaniteClusterDAG(std::span<const float> positions,
             if (best != kNaniteNoParentCluster) assign(parent, best, level);
         }
 
-        // ② 剩下的子簇各自认最近的父簇（每个子簇恰有一个父）
+        // ② 剩下的子簇各自认最近的父簇（每个子簇恰有一个父；**优先同材质**）
         for (u32 child = childBegin; child < childEnd; ++child) {
             if (hasParent[child] != 0u) continue;
-            u32   best = parentBegin;
-            float bestDistance = SquaredCenterDistance(result.clusters[child],
-                                                       result.clusters[parentBegin]);
-            for (u32 parent = parentBegin + 1u; parent < parentEnd; ++parent) {
+            u32   best = kNaniteNoParentCluster;
+            float bestDistance = 0.0f;
+            for (u32 parent = parentBegin; parent < parentEnd; ++parent) {
+                if (result.clusters[parent].materialID != result.clusters[child].materialID) continue;
                 const float distance = SquaredCenterDistance(result.clusters[child],
                                                              result.clusters[parent]);
-                if (distance < bestDistance) {
+                if (best == kNaniteNoParentCluster || distance < bestDistance) {
                     best = parent;
                     bestDistance = distance;
+                }
+            }
+            if (best == kNaniteNoParentCluster) {
+                // 该级里没有同材质父簇（材质在粗级被合并掉等边界情况）⇒ 退回"最近父簇"，
+                // 保证"每个子簇恰有一个父"这条 DAG 不变式不被破坏。
+                best = parentBegin;
+                bestDistance = SquaredCenterDistance(result.clusters[child],
+                                                     result.clusters[parentBegin]);
+                for (u32 parent = parentBegin + 1u; parent < parentEnd; ++parent) {
+                    const float distance = SquaredCenterDistance(result.clusters[child],
+                                                                 result.clusters[parent]);
+                    if (distance < bestDistance) {
+                        best = parent;
+                        bestDistance = distance;
+                    }
                 }
             }
             assign(best, child, level);

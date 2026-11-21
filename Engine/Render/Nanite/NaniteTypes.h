@@ -436,7 +436,7 @@ inline constexpr u32 kNaniteMinReadableFileVersion = 3u;
 
 /// 构建器版本：**算法/实现变化但字节布局不变时也必须 +1**，否则旧缓存不会失效。
 /// 与 `kNaniteFileVersion` 的分工：后者管"字节布局"，前者管"同样输入会不会产出同样字节"。
-inline constexpr u32 kNaniteBuilderVersion = 1u;
+inline constexpr u32 kNaniteBuilderVersion = 2u;   // v2：LOD≥1 改为按材质分组的简化/聚类
 
 // ── v2：`_reserved[8]` 的槽位分配 ──
 // 【为什么复用保留区而不是加长头部】v1 已把头部定稿为 96B，改大小会让所有段偏移推导失效。
