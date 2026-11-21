@@ -771,6 +771,24 @@ void DeferredPipeline::Render(rhi::IRHICommandList* cmd, const FrameSceneSnapsho
     m_Assembler.Settings().objectOptions.excludeDecals = m_ExcludeDecalCards;
     m_Assembler.Settings().physicalUnitsEnabled = cvLightPhysicalUnits.Get();
     m_FrameSnapshot = &snapshot;
+
+    // ── 【B1】把 Nanite 的簇级阴影投射回调交给阴影系统 ──
+    //   阴影系统不反向依赖 Nanite 模块（§14.3）：只拿一个"能否接管本级联深度绘制"的函数。
+    //   回调每帧重新设置：就绪状态（资产上传完成后 Raster 才 HasShadowCasters）会变化，
+    //   并且切回 glTF 资源时必须清空它（否则阴影仍由 Nanite 几何投射）。
+    if (m_ShadowSystem) {
+        const NaniteSettings& ns = m_Nanite.GetSettings();
+        const bool naniteShadow = ns.enabled && ns.shadowCaster && ns.offline
+                               && m_Nanite.IsReady() && m_Nanite.HasShadowCasters();
+        if (naniteShadow) {
+            m_ShadowSystem->SetNaniteShadowCaster(
+                [this](rhi::IRHICommandList* c, u32 ci, const float4x4& lightViewProj) {
+                    return m_Nanite.RecordShadowDepthPass(c, ci, lightViewProj);
+                });
+        } else {
+            m_ShadowSystem->SetNaniteShadowCaster({});
+        }
+    }
     // ============================================================
     // AsyncCompute: RenderGraph 多阶段提交
     //

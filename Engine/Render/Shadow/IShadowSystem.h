@@ -4,6 +4,7 @@
 #include "RHI/RHI.h"
 #include "RHI/Buffer.h"
 #include "Core/Types.h"
+#include <functional>   // 【B1】Nanite 簇级阴影投射回调
 #include "Scene/Entity.h"
 
 namespace he::render {
@@ -28,6 +29,16 @@ public:
     /// 【T11】要求"移除阴影的 IA 管线"：有 MS 时强制走 mesh 并销毁 IA PSO；
     ///   无 MS 设备上本调用是**空操作**（回退路径必须保留）。默认空实现。
     virtual void SetRemoveIaPipeline(bool /*remove*/) {}
+
+    // ── 【B1】簇级自投影：由 Nanite 模块用**自身簇几何**投射阴影 ──
+    //
+    // 【为什么做成回调而不是让阴影系统认识 Nanite】阴影子系统不该反向依赖 Nanite 模块
+    //   （§14.3 的依赖禁令）。这里只暴露一个"给我画这一级联的深度"的函数签名：
+    //   参数 = (命令列表, 级联下标, 本级光视图矩阵)，返回 false 表示**没有接管**
+    //   ⇒ 阴影系统继续用原有的网格投射者（回退路径与改动前逐字一致）。
+    //   回调在**级联的 render pass 之内**被调用，录制方必须自己 SetPipeline（0 颜色附件 + D32）。
+    using NaniteShadowCaster = std::function<bool(rhi::IRHICommandList*, u32, const float4x4&)>;
+    virtual void SetNaniteShadowCaster(NaniteShadowCaster /*caster*/) {}
     ~IShadowSystem() override = default;
 
     // ---- 阴影模式 ----

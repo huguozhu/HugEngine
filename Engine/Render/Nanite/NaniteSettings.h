@@ -301,6 +301,13 @@ struct NaniteSettings {
     //   D3D11 / 无 MS 的移动端自动继续走 IA，不受影响。
     bool removeIaPso = true;
 
+    // ── 【B1】簇级自投影（cfg 键 `nanite_shadow_caster`，默认 1）──
+    //   1 ⇒ 阴影投射面改用 **Nanite 簇几何**（深度-only mesh pass，见
+    //   `NaniteRaster::RecordShadowDepthPass`）：接收面与投射面同源，消除
+    //   "粗级 LOD 接收面 vs 精细阴影"错位造成的自阴影噪点（实测近景差 105.5 → 15.9）；
+    //   0 ⇒ 回退到原有的 `Shadow.mesh` + MeshRegistry 网格投射者（行为与改动前一致）。
+    bool shadowCaster = true;
+
     // ── LOD 阈值（像素；cfg 键 `nanite_lod_threshold`）──
     // 判据：`ownError × focal > threshold × distance` ⇒ 保留父簇（粗）。
     // 调大 ⇒ 更倾向一直细分到叶子（全细节，慢但正确）；默认 1 像素。

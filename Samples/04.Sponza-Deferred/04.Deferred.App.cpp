@@ -974,6 +974,8 @@ bool App::Initialize(Engine& engine, rhi::Backend backend, const Options& opt) {
             naniteSettings.instanceTestCount = (u32)GetInt(cfg, "nanite_instance_test_count", (int)naniteSettings.instanceTestCount);
             // 【T8】Hi-Z 遮挡剔除（Phase 2 后半）：关掉会让过绘制飙升
             naniteSettings.hiz = GetBool(cfg, "nanite_hiz", naniteSettings.hiz);
+            // 【B1】簇级自投影：阴影投射面改用 Nanite 自身簇几何（默认开；关掉即回退网格投射者）
+            naniteSettings.shadowCaster = GetBool(cfg, "nanite_shadow_caster", naniteSettings.shadowCaster);
             if (const String nanitePath = GetString(cfg, "nanite_offline_path", naniteSettings.offlinePath);
                 !nanitePath.empty()) {
                 naniteSettings.offlinePath = nanitePath;

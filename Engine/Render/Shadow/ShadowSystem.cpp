@@ -65,6 +65,16 @@ void ShadowSystem::SetMeshShadowEnabled(bool enable){
     }
 }
 
+void ShadowSystem::SetNaniteShadowCaster(NaniteShadowCaster caster){
+    // 【B1】只转发给 CSM（其它技术不支持簇级投射，也无需知道这件事）
+    m_NaniteShadowCaster = std::move(caster);
+    for (auto& t : m_Techniques) {
+        if (auto* csm = dynamic_cast<CSMTechnique*>(t.get())) {
+            csm->SetNaniteShadowCaster(m_NaniteShadowCaster);
+        }
+    }
+}
+
 void ShadowSystem::SetRemoveIaPipeline(bool remove){
     for(auto& t:m_Techniques){
         if(auto* csm=dynamic_cast<CSMTechnique*>(t.get())) csm->SetRemoveIaPipeline(remove);

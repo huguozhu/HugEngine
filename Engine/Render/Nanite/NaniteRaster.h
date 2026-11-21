@@ -315,6 +315,23 @@ public:
     //        这正是硬光栅必须默认关闭的原因（见 `NaniteSettings::hardRaster`）。
     // ============================================================
 
+    // ── 【B1】簇级自投影：用 **Nanite 自身几何**投影阴影（深度-only mesh pass）──
+    //
+    // 【为什么需要】阴影投射面此前一直来自 glTF 精细几何（`Shadow.mesh` + MeshRegistry），
+    //   而 Nanite 的接收面是简化后的簇几何 —— 两者在近景错位 ⇒ 自阴影噪点/地面发黑
+    //   （实测：近景机位与 glTF 基准平均差 105.5，把 LOD 压到最细后 15.9）。
+    //   用**同一份簇几何**投射阴影，接收面与投射面一致，这类 acne 从根上消失。
+    //
+    /// 绑定"阴影投射用"的簇列表与资产视图（每簇一条 {instance, cluster} 引用、instance 固定）；
+    /// 资产上传完成后调用一次。返回 false 表示资源未就绪（调用方继续用网格投射者）。
+    bool SetupShadowCasters(const AssetViews& asset, u32 clusterCount, u32 instanceIndex,
+                            rhi::IRHIBuffer* instances, const NaniteSoftRasterParams& params);
+    /// 录制某一级联的阴影深度（必须在 CSM 级联的 render pass **之内**调用）；
+    /// 未就绪/流式档返回 false（调用方回退到网格投射者，行为与改动前一致）。
+    bool RecordShadowDepthPass(rhi::IRHICommandList* cmd, const float4x4& lightViewProj);
+    /// 阴影投射是否已就绪（renderer 的每帧门控）
+    [[nodiscard]] bool HasShadowCasters() const { return m_ShadowReady; }
+
     /// 硬光栅是否可用（设备支持 mesh shader **且** `DeviceCaps` 的四个上限容得下本通道的声明）
     [[nodiscard]] bool IsHardRasterSupported() const { return m_HardRasterCapable; }
 
@@ -656,6 +673,22 @@ private:
     /// 上一次录制时记下的硬光栅参数（dump 帧日志用：真实 GPU 读回 + CPU 侧真值对照）
     u32 m_HardLastMaxTriangles = 0u;
     u32 m_HardLastVisibleCapacity = 0u;
+    // ── 【B1】簇级自投影（与硬光栅共用描述符集与布局；只替换 3/4/7 三处绑定）──
+    rhi::RHIPipelineStateHandle m_ShadowDepthPSO{};   // 深度-only mesh PSO（0 颜色附件 + D32）
+    rhi::RHIBufferHandle m_ShadowRefs{};              // 每簇一条 ClusterRef
+    rhi::RHIBufferHandle m_ShadowCount{};             // 可见簇计数（= 簇总数）
+    rhi::RHIBufferHandle m_ShadowStats{};             // 读数占位（shader 会写诊断槽，避免污染硬光栅读数）
+    AssetViews             m_ShadowAsset{};
+    NaniteSoftRasterParams m_ShadowParams{};
+    rhi::IRHIBuffer*       m_ShadowInstances = nullptr;
+    u32                    m_ShadowClusterCount = 0u;
+    u32                    m_ShadowInstanceIndex = 0u;
+    bool                   m_ShadowReady = false;
+    /// 硬光栅的描述符集布局（硬光栅与阴影两条通道共用；抽出来是为了阴影通道能在
+    /// 硬光栅资源尚未懒建时先建布局）
+    bool EnsureHardRasterLayout();
+    /// 懒建阴影深度 PSO 与三个缓冲（不依赖 GBuffer 目标）
+    bool EnsureShadowDepthResources();
     /// 【§14.8 任务 26 / §14.34 第 10 行】上一次**实际推给 mesh 阶段**的那组 push constant 的
     /// CPU 侧真值（= `paramsEff`，包含由绑定侧唯一决定的 `pagesEnabled`）。
     /// 【为什么必须存"推下去的那一份"而不是调用方的入参】回读的用途是核对"CPU 送下去的值 ==

@@ -347,6 +347,22 @@ void CSMTechnique::RenderCascade(rhi::IRHICommandList* cmd,u32 ci,const FrameSce
     cmd->BeginOffscreenPass(nullptr,dv,m_ShadowMapSize,m_ShadowMapSize,&cv);
     cmd->SetFullscreenViewport(static_cast<u32>(m_ShadowMapSize), static_cast<u32>(m_ShadowMapSize));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame,m_ExternalDescSet);
+
+    // ── 【B1】优先交给 Nanite 的簇级投射者：接收面与投射面同源（消除粗级 LOD 的自阴影噪点）──
+    //   · 回调在**本级 render pass 之内**执行，负责自己 SetPipeline（0 颜色 + D32）；
+    //   · 返回 true ⇒ 本级的网格投射者集合**整段跳过**（不重复画一遍，也不浪费剔除）；
+    //   · 返回 false（未启用/未就绪/流式档）⇒ 继续走原有网格路径，行为与改动前一致。
+    if (m_NaniteShadowCaster) {
+        const bool naniteCasted = m_NaniteShadowCaster(cmd, ci, sd.lightViewProj[ci]);
+        if (naniteCasted) {
+            static u32 s_NaniteCascades = 0u;
+            if (s_NaniteCascades++ < 3u) {
+                HE_CORE_INFO("[B1] 级联 {} 由 Nanite 簇几何投射阴影（本帧前 3 次打印）", ci);
+            }
+            cmd->EndOffscreenPass();
+            return;
+        }
+    }
  auto*objData=static_cast<GPUObjectData*>(m_ExternalObjectBuffer->Map());
     u32 oi=0;
     static u32 s_MeshObjects = 0u;

@@ -4,6 +4,7 @@
 
 #include "Shadow/IShadowTechnique.h"
 #include "RHI/Shader.h"
+#include <functional>   // 【B1】Nanite 簇级阴影投射回调
 #include <memory>
 
 namespace he::render {
@@ -19,6 +20,10 @@ constexpr u32 kDefaultCSMShadowSize = 2048;
 // ============================================================================
 class CSMTechnique : public IShadowTechnique {
 public:
+    /// 【B1】Nanite 簇级阴影投射回调类型（为空 ⇒ 继续用网格投射者）。
+    /// 形状与 `IShadowSystem::NaniteShadowCaster` 一致；这里不 include 该头（避免阴影技术反向依赖子系统）。
+    using NaniteShadowCaster = std::function<bool(rhi::IRHICommandList*, u32, const float4x4&)>;
+
     CSMTechnique()=default;
     ~CSMTechnique()override=default;
 
@@ -70,6 +75,8 @@ private:
     bool m_Active = true;
     /// 【T10】阴影的 mesh 管线（设备支持 MS 时才建）；`m_UseMeshPath` 决定 Render 走哪条
     rhi::RHIPipelineStateHandle m_ShadowMeshPSO{};   // A-3：句柄持有
+    /// 【B1】为空 ⇒ 网格投射者；非空 ⇒ 每级联先问它"能否接管深度绘制"
+    NaniteShadowCaster m_NaniteShadowCaster{};
     bool                        m_UseMeshPath = false;
 public:
     /// T10：切换阴影绘制路径（false ⇒ 既有的 IA 路径）。设备不支持 MS 时忽略。
@@ -77,6 +84,12 @@ public:
     /// 【T11】移除 IA 阴影管线：有 mesh 管线时强制走 mesh 并销毁 `m_ShadowPSO`。
     /// @return 是否真的移除了（false ⇒ 该设备不支持 MS，IA 保留）
     bool SetRemoveIaPipeline(bool remove);
+    /// 【B1】簇级自投影回调（为空 ⇒ 继续用网格投射者）。
+    /// 签名与 `IShadowSystem::NaniteShadowCaster` 一致；这里不 include 该头（避免阴影技术反向依赖
+    /// 子系统接口），只复用同一个函数类型形状。
+    void SetNaniteShadowCaster(NaniteShadowCaster caster) {
+        m_NaniteShadowCaster = std::move(caster);
+    }
     [[nodiscard]] bool IsMeshPathActive() const { return m_UseMeshPath; }
 private:
     // 【为什么是二维数组】级联贴图每帧"清空→重画"且同帧被采样，而 GPU 最多落后 CPU 三个飞行帧：

@@ -822,6 +822,18 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
             //   不会再出现两种口径同时生效。
             views.stream = m_Stream.Views();
 
+            // ── 【B1】簇级自投影：首帧把"每簇一条引用"的投射表交给光栅端 ──
+            //   阴影 pass 在本帧的 GBuffer 几何**之前**执行，而它需要簇缓冲/每簇量化尺度等视图
+            //   ⇒ 在第一次录制光栅时完成一次性 setup（之后资产缓冲不再变化）。
+            if (!m_ShadowCastersSetup && m_Settings.shadowCaster) {
+                const u32 clusterCount = m_Scene.GetMergedClusterCount();
+                if (m_Raster.SetupShadowCasters(views, clusterCount, 0u,
+                                                m_Cull.GetInstanceBuffer(), m_SoftParams)) {
+                    m_ShadowCastersSetup = true;
+                    HE_CORE_INFO("[B1] 簇级自投影已就绪（簇 {}，实例 0）", clusterCount);
+                }
+            }
+
             // 【诊断修复】硬光栅统计缓冲：pass **被跳过**时必须由这里清（否则读回是上一次的陈旧值，
             //   曾把"可见簇 1450 / 只画 671"的排查带偏）。pass 真跑时它自己会在派发前清，
             //   所以这里**只在跳过时**清 —— 无条件清会因"拷贝命令没有屏障到 mesh 派发"而被
@@ -1592,6 +1604,17 @@ void NaniteRenderer::LogStreamReadback() {
                  m_Stream.RequestsTotal(), m_Stream.PagesRequestedTotal(),
                  m_Stream.MaxRequestsPerFrame(), m_Stream.RequestOverflowTotal(),
                  m_Stream.FeedbackLatency(), m_Stream.UploadsPerFrameLimit());
+}
+
+bool NaniteRenderer::RecordShadowDepthPass(rhi::IRHICommandList* cmd, u32 cascadeIndex,
+                                         const float4x4& lightViewProj) {
+    // 【B1】用 Nanite 自身簇几何投射阴影：接收面与投射面同源 ⇒ 消除"粗级 LOD 接收面 vs
+    //   精细阴影"错位造成的自阴影噪点。门控与光栅一致（开关 + 就绪 + 非流式）。
+    if (!m_Settings.enabled || !m_Settings.shadowCaster) return false;
+    if (!m_Ready || !m_Raster.HasShadowCasters()) return false;
+    if (m_Settings.softRaster == false && m_Settings.hardRaster == false) return false;
+    (void)cascadeIndex;   // 级联之间只差光视图矩阵；调用方已把本级矩阵传进来
+    return m_Raster.RecordShadowDepthPass(cmd, lightViewProj);
 }
 
 void NaniteRenderer::RecordGBufferClearPass(rhi::IRHICommandList* cmd, const NaniteGBufferHandles& gb) {

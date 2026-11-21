@@ -150,6 +150,12 @@ public:
     void SetMaterialTextureLayerTable(std::vector<std::pair<u32, u32>> hashToLayer) {
         m_MatLayers = std::move(hashToLayer);
     }
+    /// 【B1】用 Nanite 簇几何投射某一级联的阴影深度（在 CSM 级联 render pass 内调用）。
+    /// 返回 false ⇒ 调用方回退到网格投射者（未启用/未就绪/流式档）。
+    bool RecordShadowDepthPass(rhi::IRHICommandList* cmd, u32 cascadeIndex, const float4x4& lightViewProj);
+    /// 【B1】簇级阴影投射是否已就绪（管线每帧据此决定是否把回调交给阴影系统）
+    [[nodiscard]] bool HasShadowCasters() const { return m_Raster.HasShadowCasters(); }
+
     void SetSettings(const NaniteSettings& settings) { m_Settings = settings; }
 
     /// 帧图接入点（在 `DeferredPipeline_FrameGraph.cpp` 的 GBuffer 段被调用）。
@@ -619,6 +625,9 @@ public:
     NaniteUpload m_Upload;
     NaniteCull   m_Cull;
     NaniteRaster m_Raster;
+    // 【B1】簇级自投影：首帧把"每簇一条引用"的阴影投射表交给光栅端（只做一次；
+    //   资产缓冲在之后不再变化，重复主机写会与在飞帧竞争）
+    bool         m_ShadowCastersSetup = false;
 
     /// 【T8 纹理】材质数组纹理与"材质记录 -> 层号"表
     rhi::IRHITexture*  m_MatArray = nullptr;

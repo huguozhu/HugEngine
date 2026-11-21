@@ -49,6 +49,8 @@ public:
     /// 【T10】切换 CSM 的阴影绘制路径（mesh / IA）。设备不支持 MS 时内部自动保持 IA。
     void SetMeshShadowEnabled(bool enable);
     void SetRemoveIaPipeline(bool remove) override;
+    /// 【B1】把 Nanite 的簇级阴影投射回调转发给 CSM 技术
+    void SetNaniteShadowCaster(NaniteShadowCaster caster) override;
     u32 GetShadowMapCount()const override;
     rhi::IRHITexture* GetShadowMap(u32 i)const override;
     rhi::IRHITexture* GetShadowMapAt(u32 slot,u32 i)const override;
@@ -67,6 +69,7 @@ public:
     float4x4 GetLightViewProj(u32 cascade)const override;
 
 private:
+    NaniteShadowCaster m_NaniteShadowCaster{};   // 【B1】为空 ⇒ 阴影仍由网格投射者绘制
     std::vector<std::unique_ptr<IShadowTechnique>> m_Techniques;
 
     // ============================================================

@@ -1478,23 +1478,13 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
 //      GBuffer 目标变化，而深度变化会牵动 prov1_* / rsm_* / ssr / ibl_irr 等下游转储）。
 // ============================================================
 
-bool NaniteRaster::EnsureHardRasterResources(const GBufferTargets& targets) {
-    if (m_HardRasterPSO.IsValid()) return true;
-    if (!m_Device || !m_HardRasterCapable) return false;
-    // 【为什么要求 HasClearTargets（8 张颜色 + 深度）而不是只要 4 张】本通道是**渲染通道**：
-    //   PSO 的附件数必须与实际帧缓冲一致（8 张颜色 + 深度），未被写入的 4 张靠
-    //   per-MRT `writeMask=None` 保护。少一张就没法建出合法的帧缓冲/渲染通道。
-    if (!targets.HasClearTargets()) return false;
+bool NaniteRaster::EnsureHardRasterLayout() {
+    // 【硬光栅与阴影共用】阴影通道要在 GBuffer 资源懒建之前就能绑定描述符（阴影 pass 排在
+    //   GBuffer 几何之前），所以布局创建必须与"GBuffer 目标"解耦。
+    if (m_HardRasterLayout != rhi::kInvalidLayout) return true;
+    if (!m_Device) return false;
 
-    // ── 1. 描述符集布局：与软光栅**同槽位同语义**（bindings 0..7 + 12/13/14）──
-    // 【为什么要同槽位】本通道的两个着色器 include 的是同一份 `Nanite_SoftRasterCommon.slang`
-    //   （材质求值 `softRasterEvaluateMaterial` 与几何解码都从那里来，不另写一份公式），
-    //   那个文件把绑定写死在 0..7/12/13/14 上 ⇒ 布局必须逐条对上。
-    // 【binding 7 指向另一个缓冲】软光栅的 7 是那 16 槽读数缓冲；本通道指模块自持的 4 槽
-    //   硬光栅读数缓冲（`kNaniteHardStat*`）。shader 源码里的 `u_Stats[...]` 是同一行，
-    //   "写到哪里"完全由描述符指向谁决定 —— 这正是把两者的槽位语义隔开的最小手法。
-    // 【binding 6（深度键）本通道不用】仍声明并绑定它：Slang 若把它从 SPIR-V 里削掉，
-    //   多声明的绑定是合法的；若没削掉，绑定了也不会读到未定义描述符。两边都安全。
+    // ── 布局：与软光栅**同槽位同语义**（bindings 0..7 + 12/13/14）──
     {
         // 阶段掩码：0..5 是 mesh 阶段读、7/12/13/14 是片元阶段用；这里统一写成
         // `Mesh|Fragment` 的并集 —— 布局的 stageFlags 是"允许访问的阶段"，宽声明永远合法。
@@ -1533,7 +1523,206 @@ bool NaniteRaster::EnsureHardRasterResources(const GBufferTargets& targets) {
             return false;
         }
         m_HardRasterSet = m_Device->AllocateDescriptorSet(m_HardRasterLayout);
+
+        m_HardRasterSet = m_Device->AllocateDescriptorSet(m_HardRasterLayout);
+        if (m_HardRasterSet == rhi::kInvalidSet) {
+            HE_CORE_ERROR("NaniteRaster: 硬光栅描述符集分配失败");
+            return false;
+        }
     }
+    return true;
+}
+
+bool NaniteRaster::EnsureShadowDepthResources() {
+    if (m_ShadowDepthPSO.IsValid()) return true;
+    if (!m_Device || !m_HardRasterCapable) return false;
+    if (m_ShadowClusterCount == 0u) return false;
+    if (!EnsureHardRasterLayout()) return false;
+
+    // ── 三个小缓冲：每簇一条引用 / 计数 / 读数占位 ──
+    auto createBuffer = [this](rhi::RHIBufferHandle& handle, usize bytes, bool cpuAccess,
+                               const char* name) {
+        rhi::BufferDesc d;
+        d.size      = bytes;
+        d.usage     = rhi::BufferUsage::Storage;
+        d.cpuAccess = cpuAccess;
+        d.debugName = name;
+        handle = m_Device->CreateBufferHandle(d);
+        return handle.IsValid();
+    };
+    if (!m_ShadowRefs.IsValid()) {
+        if (!createBuffer(m_ShadowRefs, sizeof(NaniteVisibleClusterRef) * m_ShadowClusterCount,
+                          true, "NaniteShadowRefs")) {
+            HE_CORE_ERROR("NaniteRaster: 阴影簇引用缓冲创建失败");
+            return false;
+        }
+        if (void* mapped = ResB(m_ShadowRefs)->Map()) {
+            auto* refs = static_cast<NaniteVisibleClusterRef*>(mapped);
+            for (u32 i = 0u; i < m_ShadowClusterCount; ++i) {
+                refs[i].instance = m_ShadowInstanceIndex;
+                refs[i].cluster  = i;
+            }
+            ResB(m_ShadowRefs)->Unmap();
+        }
+    }
+    if (!m_ShadowCount.IsValid()) {
+        if (!createBuffer(m_ShadowCount, sizeof(u32), true, "NaniteShadowCount")) {
+            HE_CORE_ERROR("NaniteRaster: 阴影可见计数缓冲创建失败");
+            return false;
+        }
+        if (void* mapped = ResB(m_ShadowCount)->Map()) {
+            *static_cast<u32*>(mapped) = m_ShadowClusterCount;
+            ResB(m_ShadowCount)->Unmap();
+        }
+    }
+    if (!m_ShadowStats.IsValid()) {
+        if (!createBuffer(m_ShadowStats, sizeof(u32) * kNaniteHardStatsCapacity, true,
+                          "NaniteShadowStats")) {
+            HE_CORE_ERROR("NaniteRaster: 阴影读数占位缓冲创建失败");
+            return false;
+        }
+        if (void* mapped = ResB(m_ShadowStats)->Map()) {
+            std::memset(mapped, 0, sizeof(u32) * kNaniteHardStatsCapacity);
+            ResB(m_ShadowStats)->Unmap();
+        }
+    }
+
+    // ── mesh PSO：与硬光栅同一份 mesh shader，但**没有片元着色器、没有颜色附件** ──
+    //   只靠 `SV_POSITION` 写深度 ⇒ 这是"用同一份簇几何投射阴影"的最小实现。
+    rhi::ShaderBytecode ms{};
+    ms.stage      = rhi::ShaderStage::Mesh;
+    ms.spirv      = k_Nanite_HardRaster_mesh_spv;
+    ms.dxil.assign(std::begin(k_Nanite_HardRaster_mesh_dxil), std::end(k_Nanite_HardRaster_mesh_dxil));
+    ms.entryPoint = "main";
+
+    rhi::PushConstantRange pc;
+    pc.stageMask = rhi::kStageMaskMesh;
+    pc.size      = sizeof(NaniteSoftRasterParams);
+
+    rhi::PipelineStateDesc desc;
+    desc.meshShader           = &ms;
+    desc.pixelShader          = nullptr;                    // 深度-only
+    desc.topology             = rhi::PrimitiveTopology::TriangleList;
+    desc.cullMode             = rhi::CullMode::None;        // 双面（与硬光栅同口径）
+    desc.depthTest            = true;
+    desc.depthWrite           = true;
+    desc.depthCompare         = rhi::CompareFunc::LessEqual;
+    desc.depthFormat          = rhi::Format::D32_FLOAT;
+    desc.depthLoadOp          = rhi::LoadOp::Load;
+    desc.colorAttachmentCount = 0u;
+    desc.pushConstantRanges   = { pc };
+    desc.descriptorSetLayouts = { m_HardRasterLayout };
+    desc.debugName            = "NaniteShadowDepth";
+    m_ShadowDepthPSO = m_Device->CreatePipelineStateHandle(desc);
+    if (!m_ShadowDepthPSO.IsValid()) {
+        HE_CORE_ERROR("NaniteRaster: 阴影深度 mesh PSO 创建失败（0 颜色 + D32）");
+        return false;
+    }
+    HE_CORE_INFO("NaniteRaster: 簇级自投影就绪（深度-only mesh PSO，簇数 {}）", m_ShadowClusterCount);
+    return true;
+}
+
+bool NaniteRaster::SetupShadowCasters(const AssetViews& asset, u32 clusterCount, u32 instanceIndex,
+                                     rhi::IRHIBuffer* instances, const NaniteSoftRasterParams& params) {
+    if (clusterCount == 0u || instances == nullptr || !asset.valid()) return false;
+    // 流式档暂不支持（页解析在阴影 pass 里没有页表绑定；回退网格投射者即可，不影响正确性）
+    if (asset.stream.enabled && asset.stream.valid()) return false;
+    // 资产变了（簇数不同）⇒ 重建引用缓冲
+    if (clusterCount != m_ShadowClusterCount) {
+        m_Device->DestroyBufferHandle(m_ShadowRefs); m_ShadowRefs = {};
+        m_Device->DestroyBufferHandle(m_ShadowCount); m_ShadowCount = {};
+        m_ShadowClusterCount = clusterCount;
+        if (m_ShadowDepthPSO.IsValid() && m_Device) m_Device->DestroyPipelineStateHandle(m_ShadowDepthPSO);
+        m_ShadowDepthPSO = {};
+    }
+    m_ShadowAsset         = asset;
+    m_ShadowParams        = params;
+    m_ShadowInstances     = instances;
+    m_ShadowInstanceIndex = instanceIndex;
+    m_ShadowReady = EnsureShadowDepthResources();
+    return m_ShadowReady;
+}
+
+bool NaniteRaster::RecordShadowDepthPass(rhi::IRHICommandList* cmd, const float4x4& lightViewProj) {
+    if (!cmd || !m_ShadowReady || !m_ShadowDepthPSO.IsValid()) return false;
+    if (!m_ShadowAsset.valid() || m_ShadowClusterCount == 0u || m_ShadowInstances == nullptr) return false;
+    if (m_HardRasterSet == rhi::kInvalidSet) return false;
+
+    // push constant：用**光视图**替换相机视图；`maxTriangles = 0` ⇒ 只有 triangleCount == 0 的簇被跳过
+    //   （硬光栅的分流判据是 `triangleCount <= maxTriangles` ⇒ 0 表示"全部簇都归本通道"）。
+    NaniteSoftRasterParams p = m_ShadowParams;
+    {
+        const float* m = &lightViewProj[0][0];
+        for (u32 row = 0u; row < 4u; ++row) {
+            for (u32 col = 0u; col < 4u; ++col) {
+                p.vpRows[row * 4u + col] = m[col * 4u + row];
+            }
+        }
+    }
+    p.maxTriangles   = 0u;
+    p.pagesEnabled   = 0u;
+    p.instanceCount  = 1u;
+    p.matArrayEnabled = 0u;
+    p.debugView      = 0u;
+    p.albedoDebug    = 0u;
+
+    // ── 绑定：复用硬光栅描述符集，只把 3/4/7 换成阴影专用缓冲（硬光栅 pass 每帧都会重绑回自己的）
+    m_Device->UpdateDescriptorSet(m_HardRasterSet, 0, rhi::DescriptorType::StorageBuffer,
+                                  m_ShadowAsset.clusters);
+    m_Device->UpdateDescriptorSet(m_HardRasterSet, 1, rhi::DescriptorType::StorageBuffer,
+                                  m_ShadowAsset.vertices);
+    m_Device->UpdateDescriptorSet(m_HardRasterSet, 2, rhi::DescriptorType::StorageBuffer,
+                                  m_ShadowAsset.indices);
+    m_Device->UpdateDescriptorSet(m_HardRasterSet, 3, rhi::DescriptorType::StorageBuffer,
+                                  ResB(m_ShadowRefs));
+    m_Device->UpdateDescriptorSet(m_HardRasterSet, 4, rhi::DescriptorType::StorageBuffer,
+                                  ResB(m_ShadowCount));
+    m_Device->UpdateDescriptorSet(m_HardRasterSet, 5, rhi::DescriptorType::StorageBuffer,
+                                  m_ShadowInstances);
+    m_Device->UpdateDescriptorSet(m_HardRasterSet, 7, rhi::DescriptorType::StorageBuffer,
+                                  ResB(m_ShadowStats));
+    if (m_ShadowAsset.materials) {
+        m_Device->UpdateDescriptorSet(m_HardRasterSet, 12, rhi::DescriptorType::StorageBuffer,
+                                      m_ShadowAsset.materials);
+    }
+    // 流式槽占位（pagesEnabled = 0 时不会读到，但布局声明了它们）
+    m_Device->UpdateDescriptorSet(m_HardRasterSet, 15, rhi::DescriptorType::StorageBuffer,
+                                  m_ShadowAsset.clusters);
+    m_Device->UpdateDescriptorSet(m_HardRasterSet, 16, rhi::DescriptorType::StorageBuffer,
+                                  m_ShadowAsset.header);
+    m_Device->UpdateDescriptorSet(m_HardRasterSet, 17, rhi::DescriptorType::StorageBuffer,
+                                  m_ShadowAsset.clusters);
+    m_Device->UpdateDescriptorSet(m_HardRasterSet, 18, rhi::DescriptorType::StorageBuffer,
+                                  m_ShadowAsset.vertices);
+    m_Device->UpdateDescriptorSet(m_HardRasterSet, 19, rhi::DescriptorType::StorageBuffer,
+                                  m_ShadowAsset.indices);
+    m_Device->UpdateDescriptorSet(m_HardRasterSet, 20, rhi::DescriptorType::StorageBuffer,
+                                  ResB(m_ShadowStats));
+    if (m_ShadowAsset.clusterExtent != nullptr) {
+        m_Device->UpdateDescriptorSet(m_HardRasterSet, 22, rhi::DescriptorType::StorageBuffer,
+                                      m_ShadowAsset.clusterExtent);
+    }
+
+    cmd->SetPipeline(ResP(m_ShadowDepthPSO));
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_HardRasterSet);
+    cmd->SetPushConstants(0, (u32)sizeof(NaniteSoftRasterParams), &p);
+    // 任务数：一工作组 = 一簇（`slot = gid.x + gid.y * 1024`，与硬光栅同一展开公式）
+    const u32 groupsX = std::min(m_ShadowClusterCount, 1024u);
+    const u32 groupsY = (m_ShadowClusterCount + 1023u) / 1024u;
+    cmd->DrawMeshTasks(groupsX, groupsY, 1u);
+    return true;
+}
+
+bool NaniteRaster::EnsureHardRasterResources(const GBufferTargets& targets) {
+    if (m_HardRasterPSO.IsValid()) return true;
+    if (!m_Device || !m_HardRasterCapable) return false;
+    // 【为什么要求 HasClearTargets（8 张颜色 + 深度）而不是只要 4 张】本通道是**渲染通道**：
+    //   PSO 的附件数必须与实际帧缓冲一致（8 张颜色 + 深度），未被写入的 4 张靠
+    //   per-MRT `writeMask=None` 保护。少一张就没法建出合法的帧缓冲/渲染通道。
+    if (!targets.HasClearTargets()) return false;
+
+    // ── 1. 描述符集布局：与软光栅**同槽位同语义**（bindings 0..7 + 12/13/14）──
+    if (!EnsureHardRasterLayout()) return false;
 
     // ── 2. 读数缓冲（4 槽）+ 常驻 0 源（每帧在命令缓冲内清）──
     // 【为什么不用主机写】任务 13 的教训：录制期的主机写会与 GPU 派发竞争（CPU 领先 GPU 时
